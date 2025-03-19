@@ -20,6 +20,35 @@ class ConfigLoader:
     them to ROS nodes with proper parameter declaration.
     """
     
+    def __init__(self, config_filename=None):
+        """
+        Initialize a ConfigLoader, optionally with a specific config file.
+        
+        Args:
+            config_filename: Optional name of config file (for backward compatibility)
+        """
+        self.config_filename = config_filename
+    
+    def load_config(self):
+        """
+        Load the configuration specified in constructor.
+        For backward compatibility with existing code.
+        
+        Returns:
+            Dictionary containing the configuration parameters
+        
+        Raises:
+            FileNotFoundError: If configuration file doesn't exist
+        """
+        if not self.config_filename:
+            raise ValueError("No config filename provided")
+            
+        config_dir = os.environ.get('BALL_CHASE_CONFIG_DIR', 
+                      os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config'))
+        
+        config_path = os.path.join(config_dir, self.config_filename)
+        return self.load_yaml(config_path)
+    
     @staticmethod
     def load_yaml(file_path: str) -> Dict[str, Any]:
         """

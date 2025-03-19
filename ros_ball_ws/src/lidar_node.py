@@ -50,10 +50,19 @@ from geometry_msgs.msg import PointStamped
 from geometry_msgs.msg import TransformStamped  
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import String
-from tf2_ros import TransformBroadcaster  
+from tf2_ros import TransformBroadcaster
+from config.config_loader import ConfigLoader  # Add ConfigLoader import
+import os
+import threading
+from ball_tracking.resource_monitor import ResourceMonitor
 
-# Configuration constants
-TENNIS_BALL_CONFIG = {
+# Load configuration from YAML file
+config_loader = ConfigLoader()
+config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'lidar_config.yaml')
+lidar_config = config_loader.load_yaml(config_path)
+
+# Tennis ball configuration from config file
+TENNIS_BALL_CONFIG = lidar_config.get('tennis_ball', {
     "radius": 0.033,         # Tennis ball radius in meters
     "height": -0.20,         # Expected height of ball center relative to LIDAR
     "max_distance": 0.1,     # Maximum distance for clustering points
@@ -64,10 +73,10 @@ TENNIS_BALL_CONFIG = {
         "high": 0.9
     },
     "detection_samples": 30  # Number of random starting points for clustering
-}
+})
 
-# Topic configuration (ensures consistency with other nodes)
-TOPICS = {
+# Topic configuration from config file
+TOPICS = lidar_config.get('topics', {
     "input": {
         "lidar_scan": "/scan_raw",
         "yolo_detection": "/tennis_ball/yolo/position",
@@ -78,7 +87,31 @@ TOPICS = {
         "visualization": "/tennis_ball/lidar/visualization",
         "diagnostics": "/tennis_ball/lidar/diagnostics"
     }
-}
+})
+
+# Get default queue size from config
+DEFAULT_QUEUE_SIZE = lidar_config.get('topics', {}).get('queue_size', 10)
+
+# Get visualization settings
+VIZ_CONFIG = lidar_config.get('visualization', {
+    'marker_lifetime': 1.0,
+    'text_height_offset': 0.1,
+    'text_size': 0.05,
+    'colors': {
+        'yolo': {'r': 0.0, 'g': 1.0, 'b': 0.3, 'base_alpha': 0.5},
+        'hsv': {'r': 1.0, 'g': 0.6, 'b': 0.0, 'base_alpha': 0.5},
+        'text': {'r': 1.0, 'g': 1.0, 'b': 1.0, 'a': 1.0}
+    }
+})
+
+# Get diagnostic settings
+DIAG_CONFIG = lidar_config.get('diagnostics', {
+    'publish_interval': 3.0,
+    'debug_level': 1,
+    'log_scan_interval': 20,
+    'max_detection_times': 100,
+    'error_history_size': 10  # Keep track of last 10 errors
+})
 
 
 class TennisBallLidarDetector(Node):
@@ -104,6 +137,32 @@ class TennisBallLidarDetector(Node):
         """Initialize the tennis ball LIDAR detector node."""
         super().__init__('tennis_ball_lidar_detector')
         
+        # Add resource monitoring for Raspberry Pi 5
+        self.resource_monitor = ResourceMonitor(
+            node=self,
+            publish_interval=20.0,  # Less frequent updates to reduce overhead
+            enable_temperature=True
+        )
+        self.resource_monitor.add_alert_callback(self._handle_resource_alert)
+        self.resource_monitor.start()
+        
+        # Use PyTorch/NumPy optimized for Raspberry Pi if available
+        try:
+            # Try to set number of threads for better Pi 5 performance
+            import torch
+            if hasattr(torch, 'set_num_threads'):
+                # Leave one core free for system processes
+                torch.set_num_threads(3)
+                self.get_logger().info(f"Set PyTorch to use 3 threads on Pi 5")
+        except ImportError:
+            pass
+            
+        try:
+            # Configure NumPy for better performance
+            np.set_printoptions(precision=4, suppress=True)
+        except:
+            pass
+        
         # Load physical parameters of the tennis ball
         self.ball_radius = TENNIS_BALL_CONFIG["radius"]
         self.ball_height = TENNIS_BALL_CONFIG["height"]
@@ -116,8 +175,8 @@ class TennisBallLidarDetector(Node):
         self.scan_frame_id = None
         self.points_array = None
         
-        # Initialize performance metrics
-        self._init_performance_tracking()
+        # Initialize state tracking (replaces _init_performance_tracking)
+        self._init_state_tracking()
         
         # Set up subscribers
         self._setup_subscribers()
@@ -126,28 +185,52 @@ class TennisBallLidarDetector(Node):
         self._setup_publishers()
         
         # Timer for publishing status
-        self.status_timer = self.create_timer(3.0, self.publish_status)
+        self.status_timer = self.create_timer(
+            lidar_config.get('diagnostics', {}).get('publish_interval', 3.0), 
+            self.publish_status
+        )
         
         # Initialize the TF Broadcaster for publishing coordinate transforms
         self.tf_broadcaster = TransformBroadcaster(self)
         self.last_transform_log = 0.0  # Track when we last logged transform info
         
         # Set up a timer for publishing the transform regularly
-        # Publishing at 10Hz ensures the transform is always available
-        self.transform_timer = self.create_timer(0.1, self.publish_transform)
+        # Publishing frequency from config
+        self.transform_timer = self.create_timer(
+            1.0 / lidar_config.get('transform', {}).get('publish_frequency', 10.0), 
+            self.publish_transform
+        )
+        
+        # Load transform parameters from config
+        transform_config = lidar_config.get('transform', {})
+        self.transform_parent_frame = transform_config.get('parent_frame', 'camera_frame')
+        self.transform_child_frame = transform_config.get('child_frame', 'lidar_frame')
+        self.transform_translation = transform_config.get('translation', {
+            'x': -0.326256, 'y': 0.210052, 'z': 0.504021
+        })
+        self.transform_rotation = transform_config.get('rotation', {
+            'x': -0.091584, 'y': 0.663308, 'z': 0.725666, 'w': 0.158248
+        })
         
         # Log that we're publishing the calibrated transform
-        self.get_logger().info("Publishing calibrated LIDAR-to-camera transform (from calibration)")
-        self.get_logger().info("Transform: [-0.326256, 0.210052, 0.504021], Quaternion: [-0.091584, 0.663308, 0.725666, 0.158248]")
+        self.get_logger().info(f"Publishing calibrated LIDAR-to-camera transform (from calibration)")
+        self.get_logger().info(
+            f"Transform: [{self.transform_translation['x']}, {self.transform_translation['y']}, "
+            f"{self.transform_translation['z']}], Quaternion: [{self.transform_rotation['x']}, "
+            f"{self.transform_rotation['y']}, {self.transform_rotation['z']}, {self.transform_rotation['w']}]"
+        )
 
         self.get_logger().info("LIDAR: Tennis ball detector initialized and ready")
         self.get_logger().info(f"LIDAR: Listening for LaserScan on {TOPICS['input']['lidar_scan']}")
         self.get_logger().info(f"LIDAR: Listening for YOLO detections on {TOPICS['input']['yolo_detection']}")
         self.get_logger().info(f"LIDAR: Listening for HSV detections on {TOPICS['input']['hsv_detection']}")
+        
+        # Configure detection algorithm based on hardware
+        self._configure_detection_algorithm()
     
-    def _init_performance_tracking(self):
-        """Initialize tracking variables for performance monitoring."""
-        # Runtime statistics
+    def _init_state_tracking(self):
+        """Initialize state tracking for all system components."""
+        # Performance tracking from _init_performance_tracking will be moved here
         self.start_time = time.time()
         self.processed_scans = 0
         self.successful_detections = 0
@@ -156,6 +239,16 @@ class TennisBallLidarDetector(Node):
         # Detection source statistics
         self.yolo_detections = 0
         self.hsv_detections = 0
+        
+        # Error tracking (for diagnostics)
+        self.errors = []
+        self.error_history_size = DIAG_CONFIG.get('error_history_size', 10)
+        self.last_error_time = 0
+        
+        # System health indicators
+        self.lidar_health = 1.0  # 0.0 to 1.0 scale
+        self.detection_health = 1.0
+        self.detection_latency = 0.0
     
     def _setup_subscribers(self):
         """Set up all subscribers for this node."""
@@ -164,7 +257,7 @@ class TennisBallLidarDetector(Node):
             LaserScan,
             TOPICS["input"]["lidar_scan"],
             self.scan_callback,
-            10
+            DEFAULT_QUEUE_SIZE
         )
         
         # Subscribe to YOLO detections
@@ -172,7 +265,7 @@ class TennisBallLidarDetector(Node):
             PointStamped,
             TOPICS["input"]["yolo_detection"],
             self.yolo_callback,
-            10
+            DEFAULT_QUEUE_SIZE
         )
         
         # Subscribe to HSV detections
@@ -180,7 +273,7 @@ class TennisBallLidarDetector(Node):
             PointStamped,
             TOPICS["input"]["hsv_detection"],
             self.hsv_callback,
-            10
+            DEFAULT_QUEUE_SIZE
         )
     
     def _setup_publishers(self):
@@ -189,21 +282,21 @@ class TennisBallLidarDetector(Node):
         self.position_publisher = self.create_publisher(
             PointStamped,
             TOPICS["output"]["ball_position"],
-            10
+            DEFAULT_QUEUE_SIZE
         )
         
         # Publisher for visualization markers (for RViz)
         self.marker_publisher = self.create_publisher(
             MarkerArray,
             TOPICS["output"]["visualization"],
-            10
+            DEFAULT_QUEUE_SIZE
         )
         
-        # Publisher for diagnostics information
+        # Update diagnostics publisher to match the expected topic from the diagnostics node
         self.diagnostics_publisher = self.create_publisher(
             String,
-            TOPICS["output"]["diagnostics"],
-            10
+            "/tennis_ball/lidar/diagnostics",
+            DEFAULT_QUEUE_SIZE
         )
     
     def yolo_callback(self, msg):
@@ -261,6 +354,8 @@ class TennisBallLidarDetector(Node):
             
             # Convert polar coordinates to Cartesian coordinates
             angles = angle_min + angle_increment * np.arange(len(ranges))[valid_indices]
+            
+            # Vectorized computation is much faster
             x = valid_ranges * np.cos(angles)  # x = r * cos(θ)
             y = valid_ranges * np.sin(angles)  # y = r * sin(θ)
             
@@ -274,14 +369,20 @@ class TennisBallLidarDetector(Node):
             self.processed_scans += 1
             
             # Log scan information (debug level to avoid flooding logs)
-            if self.processed_scans % 20 == 0:  # Log every 20th scan
+            log_scan_interval = DIAG_CONFIG['log_scan_interval']
+            if self.processed_scans % log_scan_interval == 0:  # Log every Nth scan
                 self.get_logger().debug(
                     f"LIDAR: Processed scan #{self.processed_scans} with "
                     f"{len(self.points_array)} valid points"
                 )
             
+            # Gradually recover health if we're successfully processing scans
+            if hasattr(self, 'lidar_health'):
+                self.lidar_health = min(1.0, self.lidar_health + 0.01)
+            
         except Exception as e:
-            self.get_logger().error(f"LIDAR: Error processing scan: {str(e)}")
+            error_msg = f"Error processing scan: {str(e)}"
+            self.log_error(error_msg)
             self.points_array = None
     
     def camera_detection_callback(self, msg, source):
@@ -318,7 +419,7 @@ class TennisBallLidarDetector(Node):
             ball_results = self.find_tennis_balls(source)
             
             # Process the best detected ball (if any)
-            if ball_results:
+            if (ball_results):
                 # Get the best match (first in the list, already sorted by quality)
                 best_match = ball_results[0]
                 center, cluster_size, circle_quality = best_match
@@ -330,15 +431,20 @@ class TennisBallLidarDetector(Node):
                 self.get_logger().info(f"LIDAR: No matching ball found for {source} detection")
             
         except Exception as e:
-            self.get_logger().error(f"LIDAR: Error processing {source} detection: {str(e)}")
+            error_msg = f"Error processing {source} detection: {str(e)}"
+            self.log_error(error_msg)
         
         # Log processing time for this detection
         processing_time = (time.time() - detection_start_time) * 1000  # in ms
         self.detection_times.append(processing_time)
-        # Keep only the last 100 detection times
-        if len(self.detection_times) > 100:
+        # Keep only the last N detection times
+        max_detection_times = DIAG_CONFIG['max_detection_times']
+        if len(self.detection_times) > max_detection_times:
             self.detection_times.pop(0)
-            
+        
+        # Update detection latency metric
+        self.detection_latency = processing_time
+        
         self.get_logger().debug(f"LIDAR: {source} processing took {processing_time:.2f}ms")
     
     def find_tennis_balls(self, trigger_source):
@@ -368,8 +474,11 @@ class TennisBallLidarDetector(Node):
         points = self.points_array
         balls_found = []
         
+        # Use optimized number of starting points for the hardware
+        detection_samples = int(self.detection_samples)
+        
         # Try multiple random starting points
-        for _ in range(TENNIS_BALL_CONFIG["detection_samples"]):
+        for _ in range(detection_samples):
             # Pick a random point as a starting point
             seed_idx = np.random.randint(0, len(points))
             seed_point = points[seed_idx]
@@ -386,11 +495,10 @@ class TennisBallLidarDetector(Node):
             if len(cluster) < self.min_points:
                 continue
                 
-            # Calculate the center of the cluster (centroid)
+            # Calculate the center of the cluster (centroid) using vectorized operations
             center = np.mean(cluster, axis=0)
             
-            # Check if the cluster is approximately circular
-            # by measuring distances from each point to the center
+            # Use vectorized operations for circle quality check
             center_distances = np.sqrt(
                 (cluster[:, 0] - center[0])**2 + 
                 (cluster[:, 1] - center[1])**2
@@ -408,13 +516,14 @@ class TennisBallLidarDetector(Node):
             if circle_quality > quality_threshold:
                 # Check if this ball is too close to any we've already found
                 is_new_ball = True
+                same_ball_threshold = TENNIS_BALL_CONFIG.get("same_ball_threshold", 2.0)
                 for existing_center, _, _ in balls_found:
                     dist = np.sqrt(
                         (center[0] - existing_center[0])**2 + 
                         (center[1] - existing_center[1])**2
                     )
-                    # If centers are less than 2 radii apart, consider it the same ball
-                    if dist < self.ball_radius * 2:
+                    # If centers are less than N radii apart, consider it the same ball
+                    if dist < self.ball_radius * same_ball_threshold:
                         is_new_ball = False
                         break
                 
@@ -511,25 +620,26 @@ class TennisBallLidarDetector(Node):
         transform = TransformStamped()
         # Use current time for the transform to ensure it's considered valid
         transform.header.stamp = self.get_clock().now().to_msg()
-        transform.header.frame_id = "camera_frame"  # Parent frame
-        transform.child_frame_id = "lidar_frame"    # Child frame
+        transform.header.frame_id = self.transform_parent_frame  # Parent frame from config
+        transform.child_frame_id = self.transform_child_frame    # Child frame from config
         
-        # Translation from LIDAR to camera (from calibration)
-        transform.transform.translation.x = -0.326256
-        transform.transform.translation.y = 0.210052
-        transform.transform.translation.z = 0.504021
+        # Translation from LIDAR to camera (from config)
+        transform.transform.translation.x = self.transform_translation['x']
+        transform.transform.translation.y = self.transform_translation['y']
+        transform.transform.translation.z = self.transform_translation['z']
         
-        # Rotation from LIDAR to camera as quaternion (from calibration)
-        transform.transform.rotation.x = -0.091584
-        transform.transform.rotation.y = 0.663308
-        transform.transform.rotation.z = 0.725666
-        transform.transform.rotation.w = 0.158248
+        # Rotation from LIDAR to camera as quaternion (from config)
+        transform.transform.rotation.x = self.transform_rotation['x']
+        transform.transform.rotation.y = self.transform_rotation['y']
+        transform.transform.rotation.z = self.transform_rotation['z']
+        transform.transform.rotation.w = self.transform_rotation['w']
         
         self.tf_broadcaster.sendTransform(transform)
         
         # Log the transform occasionally to verify it's being published
         current_time = time.time()
-        if not hasattr(self, 'last_transform_log') or current_time - self.last_transform_log > 60:
+        transform_log_interval = lidar_config.get('transform', {}).get('log_interval', 60.0)
+        if not hasattr(self, 'last_transform_log') or current_time - self.last_transform_log > transform_log_interval:
             self.get_logger().info("Publishing LIDAR-to-camera transform from calibration")
             self.last_transform_log = current_time
 
@@ -565,27 +675,28 @@ class TennisBallLidarDetector(Node):
         ball_marker.pose.orientation.w = 1.0  # No rotation
         
         # Set color based on quality and source
-        if trigger_source == "YOLO":
-            # Green-ish for YOLO
-            ball_marker.color.r = 0.0
-            ball_marker.color.g = 1.0
-            ball_marker.color.b = 0.3
+        color_config = None
+        if trigger_source.lower() == "yolo":
+            color_config = VIZ_CONFIG['colors']['yolo']
         else:  # HSV
-            # Orange-ish for HSV
-            ball_marker.color.r = 1.0
-            ball_marker.color.g = 0.6
-            ball_marker.color.b = 0.0
+            color_config = VIZ_CONFIG['colors']['hsv']
+        
+        ball_marker.color.r = color_config['r']
+        ball_marker.color.g = color_config['g']
+        ball_marker.color.b = color_config['b']
         
         # Adjust transparency based on confidence
-        ball_marker.color.a = min(0.5 + circle_quality * 0.5, 1.0)  # Higher quality = more opaque
+        base_alpha = color_config.get('base_alpha', 0.5)
+        ball_marker.color.a = min(base_alpha + circle_quality * 0.5, 1.0)  # Higher quality = more opaque
         
         # Set size (tennis ball diameter)
         ball_marker.scale.x = self.ball_radius * 2.0
         ball_marker.scale.y = self.ball_radius * 2.0
         ball_marker.scale.z = self.ball_radius * 2.0
         
-        # Set how long to display (1 second)
-        ball_marker.lifetime.sec = 1
+        # Set how long to display (from config)
+        ball_marker.lifetime.sec = int(VIZ_CONFIG['marker_lifetime'])
+        ball_marker.lifetime.nanosec = int((VIZ_CONFIG['marker_lifetime'] % 1) * 1e9)
         
         markers.markers.append(ball_marker)
         
@@ -598,23 +709,25 @@ class TennisBallLidarDetector(Node):
         text_marker.type = Marker.TEXT_VIEW_FACING
         text_marker.action = Marker.ADD
         
-        # Position text above the ball
+        # Position text above the ball (height from config)
         text_marker.pose.position.x = center[0]
         text_marker.pose.position.y = center[1]
-        text_marker.pose.position.z = center[2] + 0.1  # 10cm above the ball
+        text_marker.pose.position.z = center[2] + VIZ_CONFIG['text_height_offset']
         text_marker.pose.orientation.w = 1.0
         
         # Set text content
         quality_pct = int(circle_quality * 100)
         text_marker.text = f"{trigger_source}: {quality_pct}%"
         
-        # Set text appearance
-        text_marker.scale.z = 0.05  # Text size
-        text_marker.color.r = 1.0
-        text_marker.color.g = 1.0
-        text_marker.color.b = 1.0
-        text_marker.color.a = 1.0
-        text_marker.lifetime.sec = 1
+        # Set text appearance (from config)
+        text_marker.scale.z = VIZ_CONFIG['text_size']
+        text_color = VIZ_CONFIG['colors']['text']
+        text_marker.color.r = text_color['r']
+        text_marker.color.g = text_color['g']
+        text_marker.color.b = text_color['b']
+        text_marker.color.a = text_color['a']
+        text_marker.lifetime.sec = int(VIZ_CONFIG['marker_lifetime'])
+        text_marker.lifetime.nanosec = int((VIZ_CONFIG['marker_lifetime'] % 1) * 1e9)
         
         markers.markers.append(text_marker)
         
@@ -625,62 +738,163 @@ class TennisBallLidarDetector(Node):
         """
         Publish diagnostic information about the node's performance.
         
-        Calculates and publishes metrics including:
-        - Scan processing rate
-        - Detection success rate
-        - Processing time statistics
-        - Detection counts by source
+        Format is compatible with the central diagnostics node.
         """
         try:
             # Calculate running time
-            elapsed = time.time() - self.start_time
+            current_time = time.time()
+            elapsed = current_time - self.start_time
             
             # Skip if we just started
             if elapsed < 0.1:
                 return
                 
             # Calculate performance statistics
-            scan_rate = self.processed_scans / elapsed
-            detection_rate = self.successful_detections / elapsed
+            scan_rate = self.processed_scans / elapsed if elapsed > 0 else 0
+            detection_rate = self.successful_detections / elapsed if elapsed > 0 else 0
             
             # Calculate average processing time
             avg_time = 0
             if self.detection_times:
                 avg_time = sum(self.detection_times) / len(self.detection_times)
             
-            # Create status message with all metrics
-            status = {
-                "timestamp": time.time(),
+            # Health recovery over time (errors become less relevant)
+            time_since_last_error = current_time - self.last_error_time
+            if time_since_last_error > 30.0:  # After 30 seconds with no errors
+                self.lidar_health = min(1.0, self.lidar_health + 0.05)  # Gradually recover
+            
+            # Calculate detection health (based on detection rate)
+            expected_rate = 1.0  # expected detections/sec
+            self.detection_health = min(1.0, detection_rate / expected_rate) if expected_rate > 0 else 0.5
+            
+            # Extract recent errors for diagnostics
+            recent_errors = []
+            for error in self.errors:
+                if current_time - error["timestamp"] < 300:  # errors from last 5 minutes
+                    recent_errors.append(error["message"])
+            
+            # Create comprehensive diagnostics message in expected format
+            diagnostics = {
+                "timestamp": current_time,
+                "node": "lidar",
                 "uptime_seconds": elapsed,
-                "processed_scans": self.processed_scans,
-                "successful_detections": self.successful_detections,
-                "detection_sources": {
-                    "yolo_detections": self.yolo_detections,
-                    "hsv_detections": self.hsv_detections
+                "status": "active",
+                "health": {
+                    "lidar_health": self.lidar_health,
+                    "detection_health": self.detection_health,
+                    "overall": (self.lidar_health * 0.7 + self.detection_health * 0.3)  # weighted average
                 },
-                "performance": {
+                "metrics": {
+                    "processed_scans": self.processed_scans,
+                    "successful_detections": self.successful_detections,
                     "scan_rate": scan_rate,
                     "detection_rate": detection_rate,
-                    "avg_processing_time_ms": avg_time * 1000
+                    "avg_processing_time_ms": avg_time * 1000,
+                    "detection_latency_ms": self.detection_latency,
+                    "sources": {
+                        "yolo_detections": self.yolo_detections,
+                        "hsv_detections": self.hsv_detections,
+                    }
+                },
+                "resources": {
+                    "cpu_usage": getattr(self.resource_monitor, 'cpu_percent', 0),
+                    "memory_usage": getattr(self.resource_monitor, 'mem_percent', 0),
+                    "temperature": getattr(self.resource_monitor, 'temperature', 0)
+                },
+                "errors": recent_errors,
+                "config": {
+                    "ball_radius": self.ball_radius,
+                    "max_distance": self.max_distance,
+                    "min_points": self.min_points,
+                    "detection_samples": self.detection_samples
                 }
             }
             
-            # Publish status as JSON string
+            # Publish diagnostics as JSON string
             msg = String()
-            msg.data = json.dumps(status)
+            msg.data = json.dumps(diagnostics)
             self.diagnostics_publisher.publish(msg)
             
-            # Log summary of performance metrics
+            # Log basic summary (not the full diagnostics)
             self.get_logger().info(
                 f"LIDAR: Status: {scan_rate:.1f} scans/sec, "
                 f"{detection_rate:.1f} detections/sec, "
                 f"YOLO: {self.yolo_detections}, HSV: {self.hsv_detections}, "
-                f"avg processing: {avg_time*1000:.1f}ms"
+                f"Health: {diagnostics['health']['overall']:.2f}, "
+                f"Errors: {len(recent_errors)}"
             )
             
         except Exception as e:
-            self.get_logger().error(f"LIDAR: Error publishing status: {str(e)}")
-
+            self.log_error(f"Error publishing diagnostics: {str(e)}")
+    
+    def _configure_detection_algorithm(self):
+        """Configure the detection algorithm based on hardware capabilities."""
+        # Detection parameters
+        # On Pi 5 with 16GB RAM, we can use more detection samples 
+        # and keep full point resolution
+        self.detection_samples = TENNIS_BALL_CONFIG["detection_samples"]
+        
+        # If we have lots of RAM, we can use more samples for better results
+        if self._get_available_memory() > 8000:  # More than 8GB free
+            # Use more samples for better detection quality
+            self.detection_samples = min(50, self.detection_samples * 1.5)
+            self.get_logger().info(f"Using {self.detection_samples} detection samples (high memory mode)")
+        
+        # Set up point cloud processing parameters
+        # No need to downsample on Pi 5 with 16GB
+        self.downsample_points = False
+        self.downsample_factor = 1
+    
+    def _get_available_memory(self):
+        """Get available memory in MB."""
+        try:
+            import psutil
+            return psutil.virtual_memory().available / (1024 * 1024)
+        except:
+            return 2000  # Default to 2GB if we can't determine
+    
+    def _handle_resource_alert(self, resource_type, value):
+        """Handle resource alerts by adjusting detector behavior."""
+        self.get_logger().warn(f"Resource alert: {resource_type.UPPER()} at {value:.1f}% - may affect performance")
+        
+        # Add to error list if critical
+        if value > 95.0:
+            self.log_error(f"Critical {resource_type} usage: {value:.1f}%")
+        
+        if resource_type == 'cpu' and value > 90.0:
+            # Reduce detection samples temporarily to ease CPU load
+            original_samples = self.detection_samples
+            self.detection_samples = max(10, int(self.detection_samples * 0.7))
+            self.get_logger().warn(
+                f"Temporarily reducing LIDAR detection samples from {original_samples} to {self.detection_samples}"
+            )
+    
+    def log_error(self, error_message):
+        """Log an error and add it to error history for diagnostics."""
+        self.get_logger().error(f"LIDAR: {error_message}")
+        
+        # Add to error list for diagnostics
+        self.errors.append({
+            "timestamp": time.time(),
+            "message": error_message
+        })
+        
+        # Keep error list at appropriate size
+        if len(self.errors) > self.error_history_size:
+            self.errors.pop(0)
+            
+        # Update health based on error frequency
+        self.last_error_time = time.time()
+        
+        # Reduce LIDAR health score temporarily after an error
+        self.lidar_health = max(0.3, self.lidar_health - 0.2)
+    
+    def destroy_node(self):
+        """Clean up resources when node is shutting down."""
+        # Stop the resource monitor
+        if hasattr(self, 'resource_monitor'):
+            self.resource_monitor.stop()
+        super().destroy_node()
 
 def main(args=None):
     """Main function to initialize and run the LIDAR detector node."""
@@ -704,6 +918,13 @@ def main(args=None):
     print("=================================================")
     
     try:
+        # Set thread priority for better real-time performance on Linux (Pi)
+        try:
+            import os
+            os.nice(10)  # Lower priority slightly to favor critical nodes
+        except:
+            pass
+            
         # Keep the node running
         rclpy.spin(detector)
     except KeyboardInterrupt:

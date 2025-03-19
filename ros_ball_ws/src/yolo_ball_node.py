@@ -52,14 +52,24 @@ import MNN.cv as mnn_cv2
 import MNN.numpy as mnn_np
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PointStamped
+from std_msgs.msg import String  # Add String message type
 from cv_bridge import CvBridge
 import cv2 as std_cv2
 import numpy as np
 import time
 import os
+from config.config_loader import ConfigLoader  # Import ConfigLoader
+from ball_tracking.resource_monitor import ResourceMonitor  # Add resource monitoring import
+from collections import deque  # Add import for deque
+import json
 
-# Model and inference configuration
-MODEL_CONFIG = {
+# Load configuration
+config_loader = ConfigLoader()
+config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'yolo_config.yaml')
+config = config_loader.load_yaml(config_path)
+
+# Model configuration from config file
+MODEL_CONFIG = config.get('model', {
     "path": "yolo12n_320.mnn",    # Path to our YOLO model file
     "input_width": 320,           # Width our model expects
     "input_height": 320,          # Height our model expects
@@ -67,11 +77,26 @@ MODEL_CONFIG = {
     "backend": "CPU",             # Using CPU for inference
     "thread_count": 4,            # Number of CPU threads to use
     "confidence_threshold": 0.25  # Only keep detections above this confidence
-}
+})
 
 # COCO dataset class ID for "sports ball" - this includes tennis balls
-TENNIS_BALL_CLASS_ID = 32
+TENNIS_BALL_CLASS_ID = config.get('model', {}).get('tennis_ball_class_id', 32)
 
+# Topic configuration from config file
+TOPICS = config.get('topics', {
+    "input": {
+        "camera": "/ascamera/camera_publisher/rgb0/image"
+    },
+    "output": {
+        "position": "/tennis_ball/yolo/position"
+    }
+})
+
+# Diagnostic configuration
+DIAG_CONFIG = config.get('diagnostics', {
+    "log_interval": 15,
+    "performance_log_interval": 30
+})
 
 class TennisBallDetector(Node):
     """
@@ -96,10 +121,28 @@ class TennisBallDetector(Node):
         # Initialize our ROS node
         super().__init__('tennis_ball_detector')
         
+        # Add Raspberry Pi resource monitoring
+        self.resource_monitor = ResourceMonitor(
+            node=self,
+            publish_interval=15.0,  # Less frequent to reduce overhead
+            enable_temperature=True
+        )
+        self.resource_monitor.add_alert_callback(self._handle_resource_alert)
+        
+        # Use higher thresholds since YOLO is compute-intensive
+        self.resource_monitor.set_threshold('cpu', 90.0)
+        self.resource_monitor.set_threshold('memory', 90.0)
+        self.resource_monitor.start()
+        
+        # Enable low power mode for Raspberry Pi if available in config
+        self.low_power_mode = config.get('raspberry_pi', {}).get('low_power_mode', False)
+        if self.low_power_mode:
+            self.get_logger().info("YOLO detector running in low power mode for Raspberry Pi")
+        
         # Subscribe to the camera feed
         self.subscription = self.create_subscription(
             Image, 
-            '/ascamera/camera_publisher/rgb0/image', 
+            TOPICS["input"]["camera"], 
             self.image_callback, 
             10
         )  
@@ -108,9 +151,19 @@ class TennisBallDetector(Node):
         # Using PointStamped to include timestamp and frame information
         self.ball_publisher = self.create_publisher(
             PointStamped, 
-            '/tennis_ball/yolo/position', 
+            TOPICS["output"]["position"], 
             10
         )  
+
+        # Create a publisher for system diagnostics
+        self.system_diagnostics_publisher = self.create_publisher(
+            String,
+            "/tennis_ball/yolo/diagnostics",  # Changed from "/system/diagnostics/yolo"
+            10
+        )
+        
+        # Timer for publishing diagnostics
+        self.diagnostics_timer = self.create_timer(3.0, self.publish_system_diagnostics)
 
         # Bridge to convert between ROS images and OpenCV images
         self.bridge = CvBridge()
@@ -130,8 +183,28 @@ class TennisBallDetector(Node):
         # Performance tracking variables
         self.start_time = time.time()
         self.image_count = 0
+        
+        # Initialize diagnostic metrics
+        self._init_diagnostic_metrics()
+        
         self.get_logger().info("Initialization complete, waiting for camera images")
         
+    def _init_diagnostic_metrics(self):
+        """Initialize metrics for diagnostic monitoring"""
+        self.diagnostic_metrics = {
+            'fps_history': deque(maxlen=10),
+            'processing_time_history': deque(maxlen=10),
+            'inference_time_history': deque(maxlen=10),
+            'detection_rate_history': deque(maxlen=10),
+            'confidence_history': deque(maxlen=20),
+            'last_detection_position': None,
+            'last_detection_time': 0.0,
+            'total_frames': 0,
+            'detected_frames': 0,
+            'errors': [],
+            'warnings': []
+        }
+
     def load_model(self, config):
         """
         Load the YOLO model for tennis ball detection.
@@ -295,8 +368,21 @@ class TennisBallDetector(Node):
         Args:
             msg (sensor_msgs.msg.Image): The incoming camera image from ROS
         """
+        # Skip frames in low power mode to reduce CPU usage
+        if hasattr(self, 'frame_counter'):
+            self.frame_counter += 1
+        else:
+            self.frame_counter = 0
+            
+        if self.low_power_mode and self.frame_counter % 2 != 0:
+            # Process only every other frame in low power mode
+            return
+
         inference_start = time.time()
         self.image_count += 1
+        
+        # Update total frames in diagnostic metrics
+        self.diagnostic_metrics['total_frames'] = self.image_count
         
         try:
             # Convert ROS image to OpenCV format
@@ -309,6 +395,9 @@ class TennisBallDetector(Node):
             infer_start = time.time()
             output_var = self.net.forward(input_tensor)
             infer_time = (time.time() - infer_start) * 1000  # milliseconds
+            
+            # Track inference time for diagnostics
+            self.diagnostic_metrics['inference_time_history'].append(infer_time)
             
             # Process the model output to find tennis balls
             best_box, confidence = self.process_detections(output_var)
@@ -323,8 +412,18 @@ class TennisBallDetector(Node):
                 width = x1 - x0
                 height = y1 - y0
                 
+                # Update diagnostic metrics for detection
+                self.diagnostic_metrics['detected_frames'] += 1
+                self.diagnostic_metrics['last_detection_position'] = (center_x, center_y)
+                self.diagnostic_metrics['last_detection_time'] = time.time()
+                self.diagnostic_metrics['confidence_history'].append(confidence)
+                
+                # Calculate detection rate
+                detection_rate = self.diagnostic_metrics['detected_frames'] / self.image_count
+                self.diagnostic_metrics['detection_rate_history'].append(detection_rate)
+                
                 # Log significant detections to avoid console flooding
-                if self.image_count % 15 == 0 or confidence > 0.6:
+                if self.image_count % DIAG_CONFIG["log_interval"] == 0 or confidence > 0.6:
                     self.get_logger().info(
                         f"YOLO detected ball: ({center_x:.1f}, {center_y:.1f}), "
                         f"Size: {width:.1f}x{height:.1f}, Confidence: {confidence:.2f}"
@@ -359,9 +458,13 @@ class TennisBallDetector(Node):
             total_time = (time.time() - inference_start) * 1000  # milliseconds
             elapsed_time = time.time() - self.start_time
             fps = self.image_count / elapsed_time if elapsed_time > 0 else 0
+            
+            # Update metrics for diagnostics
+            self.diagnostic_metrics['fps_history'].append(fps)
+            self.diagnostic_metrics['processing_time_history'].append(total_time)
 
             # Log performance periodically to avoid flooding the console
-            if self.image_count % 30 == 0:
+            if self.image_count % DIAG_CONFIG["performance_log_interval"] == 0:
                 self.get_logger().info(
                     f"Performance: {fps:.1f} FPS, "
                     f"Processing: {total_time:.1f}ms, "
@@ -370,7 +473,134 @@ class TennisBallDetector(Node):
 
         except Exception as e:
             self.get_logger().error(f"Error processing image: {str(e)}")
+            # Track errors for diagnostics
+            self.diagnostic_metrics['errors'].append(str(e))
 
+    def publish_system_diagnostics(self):
+        """Publish comprehensive system diagnostics for the diagnostics node."""
+        current_time = time.time()
+        elapsed_time = current_time - self.start_time
+        
+        # Calculate average metrics
+        avg_fps = np.mean(list(self.diagnostic_metrics['fps_history'])) if self.diagnostic_metrics['fps_history'] else 0.0
+        avg_processing_time = np.mean(list(self.diagnostic_metrics['processing_time_history'])) if self.diagnostic_metrics['processing_time_history'] else 0.0
+        avg_inference_time = np.mean(list(self.diagnostic_metrics['inference_time_history'])) if self.diagnostic_metrics['inference_time_history'] else 0.0
+        avg_detection_rate = np.mean(list(self.diagnostic_metrics['detection_rate_history'])) if self.diagnostic_metrics['detection_rate_history'] else 0.0
+        avg_confidence = np.mean(list(self.diagnostic_metrics['confidence_history'])) if self.diagnostic_metrics['confidence_history'] else 0.0
+        
+        # Time since last detection
+        time_since_detection = current_time - self.diagnostic_metrics['last_detection_time'] if self.diagnostic_metrics['last_detection_time'] > 0 else float('inf')
+        
+        # Build warnings list
+        warnings = []
+        errors = []
+        
+        # Check for performance issues
+        if avg_fps < 5.0 and elapsed_time > 20.0:
+            warnings.append(f"Low FPS: {avg_fps:.1f}")
+            
+        if avg_processing_time > 150.0:  # YOLO is more resource-intensive, so higher threshold
+            warnings.append(f"High processing time: {avg_processing_time:.1f}ms")
+            
+        # Check for detection issues
+        if time_since_detection > 10.0 and elapsed_time > 20.0:
+            warnings.append(f"No ball detected for {time_since_detection:.1f}s")
+            
+        if avg_detection_rate < 0.05 and elapsed_time > 20.0:  # Less than 5% detection rate
+            errors.append(f"Very low detection rate: {avg_detection_rate*100:.1f}%")
+        
+        # System resources
+        system_resources = {}
+        try:
+            import psutil
+            system_resources = {
+                'cpu_percent': psutil.cpu_percent(interval=None),
+                'memory_percent': psutil.virtual_memory().percent,
+                'threads': MODEL_CONFIG["thread_count"]
+            }
+            
+            # Check for high resource usage
+            if system_resources['cpu_percent'] > 90.0:
+                warnings.append(f"Critical CPU usage: {system_resources['cpu_percent']:.1f}%")
+                
+            # Add temperature if available
+            if hasattr(psutil, 'sensors_temperatures'):
+                temps = psutil.sensors_temperatures()
+                if temps and 'cpu_thermal' in temps:
+                    system_resources['temperature'] = temps['cpu_thermal'][0].current
+                    if system_resources['temperature'] > 80.0:  # Temperature in Celsius
+                        warnings.append(f"High CPU temperature: {system_resources['temperature']:.1f}°C")
+        except ImportError:
+            pass
+        
+        # Build diagnostics data structure
+        diag_data = {
+            "node": "yolo",  # Changed from "node_name": "yolo_ball_node"
+            "timestamp": current_time,
+            "uptime_seconds": elapsed_time,
+            "status": "error" if errors else ("warning" if warnings else "active"),  # Changed "ok" to "active"
+            "health": {
+                # Add proper health metrics for consistency
+                "model_health": avg_confidence * 0.8 if avg_confidence > 0 else 0.5,
+                "detection_health": avg_detection_rate if avg_detection_rate > 0 else 0.5,
+                "processing_health": 1.0 - (avg_processing_time / 200.0) if avg_processing_time < 200.0 else 0.0,
+                "overall": 1.0 - (len(errors) * 0.3) - (len(warnings) * 0.1)
+            },
+            "metrics": {  # Changed from "performance"
+                "fps": avg_fps,
+                "processing_time_ms": avg_processing_time,
+                "inference_time_ms": avg_inference_time,
+                "total_frames": self.diagnostic_metrics['total_frames'],
+                "detected_frames": self.diagnostic_metrics['detected_frames'],
+                "detection_rate": avg_detection_rate
+            },
+            "detection": {
+                "latest_position": self.diagnostic_metrics['last_detection_position'],
+                "time_since_last_detection_s": time_since_detection,
+                "currently_tracking": time_since_detection < 2.0,
+                "average_confidence": avg_confidence
+            },
+            "configuration": {
+                "model": MODEL_CONFIG["path"],
+                "precision": MODEL_CONFIG["precision"],
+                "backend": MODEL_CONFIG["backend"],
+                "confidence_threshold": MODEL_CONFIG["confidence_threshold"],
+                "low_power_mode": self.low_power_mode
+            },
+            "resources": system_resources,  # Changed from "system_resources"
+            "errors": errors,
+            "warnings": warnings
+        }
+        
+        # Publish as JSON
+        msg = String()
+        msg.data = json.dumps(diag_data)
+        self.system_diagnostics_publisher.publish(msg)
+        
+        # Also log to console
+        self.get_logger().info(
+            f"YOLO diagnostics: {avg_fps:.1f} FPS, {avg_detection_rate*100:.1f}% detection rate, "
+            f"Avg inference: {avg_inference_time:.1f}ms, Status: {diag_data['status']}"
+        )
+
+    def _handle_resource_alert(self, resource_type, value):
+        """Handle high resource usage by adjusting detector behavior."""
+        self.get_logger().warn(f"Resource alert: {resource_type} at {value:.1f}% - may affect performance")
+        
+        # Track warnings for diagnostics
+        if not resource_type in [w for w in self.diagnostic_metrics['warnings']]:
+            self.diagnostic_metrics['warnings'].append(f"High {resource_type}: {value:.1f}%")
+        
+        # Automatically enable low power mode if CPU is critically high
+        if resource_type == 'cpu' and value > 95.0 and not self.low_power_mode:
+            self.get_logger().warn("Enabling low power mode due to high CPU usage")
+            self.low_power_mode = True
+
+    def destroy_node(self):
+        """Clean up resources when the node is shutting down."""
+        if hasattr(self, 'resource_monitor'):
+            self.resource_monitor.stop()
+        super().destroy_node()
 
 def main(args=None):
     """Main function to initialize and run the tennis ball detector."""

@@ -1,0 +1,24 @@
+# Configuration for YOLO tennis ball detection node
+
+# Model and inference configuration
+model:
+  path: "yolo12n_320.mnn"    # Path to YOLO model file
+  input_width: 320           # Width model expects
+  input_height: 320          # Height model expects
+  precision: "lowBF"         # Lower precision for faster inference
+  backend: "CPU"             # Using CPU for inference
+  thread_count: 4            # Number of CPU threads to use
+  confidence_threshold: 0.25 # Only keep detections above this confidence
+  tennis_ball_class_id: 32   # COCO dataset class ID for "sports ball"
+
+# Topic configuration
+topics:
+  input:
+    camera: "/ascamera/camera_publisher/rgb0/image"
+  output:
+    position: "/tennis_ball/yolo/position"
+
+# Performance and diagnostics
+diagnostics:
+  log_interval: 15          # Log detection details every N frames
+  performance_log_interval: 30  # Log performance stats every N frames

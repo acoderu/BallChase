@@ -56,9 +56,17 @@ from sensor_msgs.msg import Image, CameraInfo
 import numpy as np
 import time
 from cv_bridge import CvBridge
+import os
+from config.config_loader import ConfigLoader  # Import ConfigLoader
+import json
 
-# Configuration constants
-DEPTH_CONFIG = {
+# Load configuration from file
+config_loader = ConfigLoader()
+config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'depth_config.yaml')
+config = config_loader.load_yaml(config_path)
+
+# Configuration from config file
+DEPTH_CONFIG = config.get('depth', {
     "scale": 0.001,           # Depth scale factor (converts raw depth to meters)
     "min_depth": 0.1,         # Minimum valid depth in meters
     "max_depth": 8.0,         # Maximum valid depth in meters
@@ -67,10 +75,10 @@ DEPTH_CONFIG = {
         "width": 320,
         "height": 320
     }
-}
+})
 
-# Topic configuration (ensures consistency with other nodes)
-TOPICS = {
+# Topic configuration from config file
+TOPICS = config.get('topics', {
     "input": {
         "camera_info": "/ascamera/camera_publisher/depth0/camera_info",
         "depth_image": "/ascamera/camera_publisher/depth0/image_raw",
@@ -82,8 +90,23 @@ TOPICS = {
         "hsv_3d": "/tennis_ball/hsv/position_3d",
         "combined": "/tennis_ball/detected_position"  # Legacy/combined topic
     }
-}
+})
 
+# Diagnostic configuration
+DIAG_CONFIG = config.get('diagnostics', {
+    "log_interval": 5.0,      # How often to log performance stats (seconds)
+    "debug_level": 1,         # 0=minimal, 1=normal, 2=verbose
+    "threads": 6,             # Number of threads for parallel processing
+    "error_history_size": 10  # Keep track of last 10 errors
+})
+
+# Add optimized thread count for Raspberry Pi 5
+# The Pi 5 has 4 cores, so we adjust threads accordingly
+if os.environ.get('RASPBERRY_PI') == '1':
+    DIAG_CONFIG['threads'] = 3  # Leave one core for system processes
+    
+# Add resource monitoring import
+from ball_tracking.resource_monitor import ResourceMonitor
 
 class TennisBall3DPositionEstimator(Node):
     """
@@ -110,6 +133,15 @@ class TennisBall3DPositionEstimator(Node):
         """Initialize the 3D position estimator node with all required components."""
         super().__init__('tennis_ball_3d_position_estimator')
         
+        # Add Raspberry Pi resource monitoring
+        self.resource_monitor = ResourceMonitor(
+            node=self,
+            publish_interval=10.0,
+            enable_temperature=True
+        )
+        self.resource_monitor.add_alert_callback(self._handle_resource_alert)
+        self.resource_monitor.start()
+        
         # Set up callback group for efficient multi-threading
         self._setup_callback_group()
         
@@ -127,6 +159,11 @@ class TennisBall3DPositionEstimator(Node):
         
         # Performance tracking variables
         self._init_performance_tracking()
+        
+        # Add downsampling flag for Raspberry Pi
+        self.enable_downsampling = True
+        if self.enable_downsampling:
+            self.get_logger().info("Depth processing downsampling enabled for Raspberry Pi optimization")
         
         self.get_logger().info("Tennis Ball 3D Position Estimator initialized")
         self.get_logger().info(f"Using coordinate scaling: detection ({DEPTH_CONFIG['detection_resolution']['width']}x"
@@ -250,6 +287,16 @@ class TennisBall3DPositionEstimator(Node):
             TOPICS["output"]["combined"],
             10
         )
+        
+        # Update diagnostics publisher to match the format expected by system diagnostics node
+        self.system_diagnostics_publisher = self.create_publisher(
+            String,
+            "/tennis_ball/depth_camera/diagnostics",  # Updated topic to match diagnostics node expectations
+            10
+        )
+        
+        # Add timer for publishing diagnostics
+        self.diagnostics_timer = self.create_timer(2.0, self.publish_system_diagnostics)
     
     def _init_performance_tracking(self):
         """Initialize performance tracking variables."""
@@ -259,6 +306,44 @@ class TennisBall3DPositionEstimator(Node):
         self.successful_conversions = 0
         self.last_fps_log_time = time.time()
         self.processing_times = []
+        
+        # Add error tracking
+        self.errors = []
+        self.warnings = []
+        self.error_history_size = DIAG_CONFIG.get('error_history_size', 10)
+        self.last_error_time = 0
+        
+        # Add health metrics
+        self.depth_camera_health = 1.0  # 0.0 to 1.0 scale
+        self.processing_health = 1.0
+        self.detection_health = 1.0
+    
+    def log_error(self, error_message, is_warning=False):
+        """Log an error and add it to error history for diagnostics."""
+        if is_warning:
+            self.get_logger().warning(f"DEPTH: {error_message}")
+            # Add to warning list for diagnostics
+            self.warnings.append({
+                "timestamp": time.time(),
+                "message": error_message
+            })
+        else:
+            self.get_logger().error(f"DEPTH: {error_message}")
+            # Add to error list for diagnostics
+            self.errors.append({
+                "timestamp": time.time(),
+                "message": error_message
+            })
+            
+            # Keep error list at appropriate size
+            if len(self.errors) > self.error_history_size:
+                self.errors.pop(0)
+                
+            # Update health based on error frequency
+            self.last_error_time = time.time()
+            
+            # Reduce health score temporarily after an error
+            self.depth_camera_health = max(0.3, self.depth_camera_health - 0.2)
     
     def camera_info_callback(self, msg):
         """
@@ -292,13 +377,14 @@ class TennisBall3DPositionEstimator(Node):
         
         # Log camera info once (first time received)
         if not hasattr(self, 'camera_info_logged'):
-            self.get_logger().info(f"Received camera calibration with:")
-            self.get_logger().info(f"  - Resolution: {self.depth_width}x{self.depth_height}")
-            self.get_logger().info(f"  - Focal length: fx={self.fx:.1f}, fy={self.fy:.1f}")
-            self.get_logger().info(f"  - Optical center: cx={self.cx:.1f}, cy={self.cy:.1f}")
-            self.get_logger().info(f"  - Scaling factors: x={self.x_scale:.3f}, y={self.y_scale:.3f}")
+            self.get_logger().info(f"Camera info received: {self.depth_width}x{self.depth_height}, "
+                                  f"fx={self.fx:.1f}, fy={self.fy:.1f}, cx={self.cx:.1f}, cy={self.cy:.1f}")
             self.camera_info_logged = True
-    
+        
+        # Update camera health if calibration is received
+        if hasattr(self, 'depth_camera_health'):
+            self.depth_camera_health = 1.0  # Camera is working well
+
     def depth_callback(self, msg):
         """
         Store the latest depth image data.
@@ -308,6 +394,10 @@ class TennisBall3DPositionEstimator(Node):
         """
         self.depth_image = msg
         self.depth_header = msg.header
+        
+        # Update camera health if depth data is being received
+        if hasattr(self, 'depth_camera_health'):
+            self.depth_camera_health = min(1.0, self.depth_camera_health + 0.1)  # Gradually improve health
     
     def yolo_callback(self, msg):
         """
@@ -344,14 +434,9 @@ class TennisBall3DPositionEstimator(Node):
             self._update_processing_stats(process_time)
     
     def _update_processing_stats(self, process_time):
-        """
-        Update processing time statistics.
-        
-        Args:
-            process_time (float): Processing time in milliseconds
-        """
-        self.processing_times.append(process_time)
-        if len(self.processing_times) > 50:  # Keep a reasonable history
+        """Update processing statistics for performance tracking."""
+        self.processing_times.append(process_time * 1000)  # Convert to milliseconds
+        if len(self.processing_times) > 100:
             self.processing_times.pop(0)
     
     def get_3d_position(self, detection_msg, source):
@@ -362,6 +447,9 @@ class TennisBall3DPositionEstimator(Node):
         """
         # Skip processing if we're missing required data
         if self.camera_info is None or self.depth_image is None or self.fx == 0:
+            if not hasattr(self, '_missing_data_logged'):
+                self.log_error("Missing camera info or depth image - cannot convert to 3D", True)
+                self._missing_data_logged = True
             return False
         
         try:
@@ -384,10 +472,22 @@ class TennisBall3DPositionEstimator(Node):
             depth_array = self.cv_bridge.imgmsg_to_cv2(self.depth_image)
             
             # Step 4: Extract a small region around the detection point
-            min_y = pixel_y - self.radius
-            max_y = pixel_y + self.radius + 1
-            min_x = pixel_x - self.radius
-            max_x = pixel_x + self.radius + 1
+            # Use a smaller radius on Raspberry Pi 5 if downsampling is enabled
+            radius = self.radius
+            if self.enable_downsampling:
+                # For every other frame, use an even smaller radius
+                if hasattr(self, 'frame_counter'):
+                    self.frame_counter += 1
+                else:
+                    self.frame_counter = 0
+                
+                if self.frame_counter % 2 == 0:
+                    radius = max(1, radius - 1)  # Use a smaller radius
+            
+            min_y = max(0, pixel_y - radius)
+            max_y = min(self.depth_height, pixel_y + radius + 1)
+            min_x = max(0, pixel_x - radius)
+            max_x = min(self.depth_width, pixel_x + radius + 1)
             
             depth_region = depth_array[min_y:max_y, min_x:max_x].astype(np.float32)
             
@@ -452,12 +552,21 @@ class TennisBall3DPositionEstimator(Node):
             # Log performance periodically
             self._log_performance(x, y, z, source)
             
+            # Update detection health on successful conversion
+            if hasattr(self, 'detection_health'):
+                self.detection_health = min(1.0, self.detection_health + 0.05)
+            
             return True
             
         except Exception as e:
-            # Only log occasional errors to reduce overhead
+            # Log error with reduced frequency
             if np.random.random() < 0.05:  # Log ~5% of errors
-                self.get_logger().warn(f"Error in 3D conversion: {str(e)}")
+                self.log_error(f"Error in 3D conversion: {str(e)}")
+            
+            # Reduce detection health on errors
+            if hasattr(self, 'detection_health'):
+                self.detection_health = max(0.3, self.detection_health - 0.1)
+                
             return False
     
     def _log_performance(self, x, y, z, source):
@@ -468,34 +577,204 @@ class TennisBall3DPositionEstimator(Node):
             x, y, z (float): 3D position coordinates
             source (str): Detection source ("YOLO" or "HSV")
         """
-        # Log performance less frequently to reduce CPU overhead
+        # ...existing code...
+        
+        # Store this detection data for diagnostics
+        if not hasattr(self, 'detection_history'):
+            self.detection_history = {
+                'YOLO': {'count': 0, 'latest_position': None, 'last_time': 0},
+                'HSV': {'count': 0, 'latest_position': None, 'last_time': 0}
+            }
+        
+        # Update detection history
+        self.detection_history[source]['count'] += 1
+        self.detection_history[source]['latest_position'] = (x, y, z)
+        self.detection_history[source]['last_time'] = time.time()
+    
+    def publish_system_diagnostics(self):
+        """Publish comprehensive system diagnostics for the diagnostics node."""
         current_time = time.time()
-        if current_time - self.last_fps_log_time >= 5.0:  # Every 5 seconds
-            elapsed = current_time - self.start_time
-            total_fps = self.successful_conversions / elapsed
-            yolo_fps = self.yolo_count / elapsed
-            hsv_fps = self.hsv_count / elapsed
-            avg_processing = np.mean(self.processing_times) if self.processing_times else 0
+        elapsed = current_time - self.start_time
+        
+        # Performance metrics
+        total_fps = self.successful_conversions / elapsed if elapsed > 0 else 0
+        yolo_fps = self.yolo_count / elapsed if elapsed > 0 else 0
+        hsv_fps = self.hsv_count / elapsed if elapsed > 0 else 0
+        avg_processing = np.mean(self.processing_times) if self.processing_times else 0
+        
+        # Check camera info and depth availability
+        has_camera_info = self.camera_info is not None
+        has_depth_image = self.depth_image is not None
+        
+        # Calculate time since last detection from each source
+        detection_status = {}
+        
+        if hasattr(self, 'detection_history'):
+            for source, data in self.detection_history.items():
+                time_since_last = current_time - data['last_time'] if data['last_time'] > 0 else float('inf')
+                detection_status[source] = {
+                    'count': data['count'],
+                    'time_since_last_s': time_since_last,
+                    'latest_position': data['latest_position'],
+                    'active': time_since_last < 2.0  # Consider active if seen in last 2 seconds
+                }
+        
+        # Collect errors and warnings
+        error_messages = []
+        warning_messages = []
+        
+        # Check for missing camera info
+        if not has_camera_info:
+            warning_messages.append("Missing camera intrinsics - waiting for camera_info")
+        
+        # Check for missing depth images
+        if not has_depth_image:
+            warning_messages.append("No depth image received yet")
+        
+        # If we've run for a while but have no successful conversions, that's concerning
+        if elapsed > 10.0 and self.successful_conversions == 0:
+            error_messages.append("No successful 3D conversions despite running for >10s")
+        
+        # Check for processing time issues
+        if avg_processing > 50.0:  # If processing takes >50ms, it's slow
+            warning_messages.append(f"High processing time: {avg_processing:.1f}ms")
+        
+        # Add tracked errors and warnings
+        for error in self.errors:
+            if current_time - error["timestamp"] < 300:  # Only include recent errors (last 5 minutes)
+                error_messages.append(error["message"])
+        
+        # System resources
+        system_metrics = {}
+        try:
+            import psutil
+            system_metrics = {
+                'cpu_percent': psutil.cpu_percent(interval=None),
+                'ram_percent': psutil.virtual_memory().percent
+            }
             
-            self.get_logger().info(
-                f"PERFORMANCE: Total: {total_fps:.1f}fps, YOLO: {yolo_fps:.1f}fps, "
-                f"HSV: {hsv_fps:.1f}fps, Processing time: {avg_processing:.1f}ms"
-            )
+            # Add temperature info if on Raspberry Pi
+            temps = {}
+            if hasattr(psutil, 'sensors_temperatures'):
+                temps = psutil.sensors_temperatures()
+                if temps and 'cpu_thermal' in temps:
+                    system_metrics['temperature'] = temps['cpu_thermal'][0].current
+        except ImportError:
+            pass
+        
+        # Health recovery over time (errors become less relevant)
+        time_since_last_error = current_time - self.last_error_time
+        if time_since_last_error > 30.0:  # After 30 seconds with no errors
+            self.depth_camera_health = min(1.0, self.depth_camera_health + 0.05)  # Gradually recover
+        
+        # Calculate overall health (weighted average)
+        overall_health = (
+            self.depth_camera_health * 0.4 + 
+            self.processing_health * 0.3 + 
+            self.detection_health * 0.3
+        )
+        
+        # Determine status based on errors/warnings
+        status = "active"
+        if error_messages:
+            status = "error"
+        elif warning_messages:
+            status = "warning"
+        
+        # Create diagnostics data structure formatted for the diagnostics node
+        diag_data = {
+            "timestamp": current_time,
+            "node": "depth_camera",
+            "uptime_seconds": elapsed,
+            "status": status,
+            "health": {
+                "camera_health": self.depth_camera_health,
+                "processing_health": self.processing_health,
+                "detection_health": self.detection_health,
+                "overall": overall_health
+            },
+            "metrics": {
+                "successful_conversions": self.successful_conversions,
+                "conversion_rate": total_fps,
+                "yolo_conversions": self.yolo_count,
+                "yolo_rate": yolo_fps,
+                "hsv_conversions": self.hsv_count,
+                "hsv_rate": hsv_fps,
+                "avg_processing_time_ms": avg_processing
+            },
+            "camera_status": {
+                "has_camera_info": has_camera_info,
+                "has_depth_image": has_depth_image,
+                "camera_resolution": f"{self.depth_width}x{self.depth_height}" if has_camera_info else "unknown"
+            },
+            "detections": detection_status,
+            "resources": system_metrics,
+            "errors": error_messages,
+            "warnings": warning_messages,
+            "config": {
+                "detection_resolution": {
+                    "width": DEPTH_CONFIG["detection_resolution"]["width"],
+                    "height": DEPTH_CONFIG["detection_resolution"]["height"]
+                },
+                "depth_scale": DEPTH_CONFIG["scale"],
+                "sampling_radius": self.radius
+            }
+        }
+        
+        # Publish as JSON
+        msg = String()
+        msg.data = json.dumps(diag_data)
+        self.system_diagnostics_publisher.publish(msg)
+        
+        # Also log summary to console
+        self.get_logger().info(
+            f"Depth camera: {total_fps:.1f} FPS, "
+            f"Processing: {avg_processing:.1f}ms, "
+            f"Health: {overall_health:.2f}, "
+            f"Status: {status}"
+        )
+    
+    def _handle_resource_alert(self, resource_type, value):
+        """Handle resource alerts by adjusting processing parameters."""
+        self.get_logger().warn(f"Resource alert: {resource_type} at {value:.1f}%")
+        
+        if resource_type == 'cpu' and value > 90.0:
+            # Log this as a warning for diagnostics
+            self.log_error(f"High CPU usage ({value:.1f}%) - reducing processing load", True)
             
-            self.get_logger().info(
-                f"Published 3D position from {source}: ({x:.3f}, {y:.3f}, {z:.3f}) meters"
-            )
+            # Increase downsampling to reduce CPU load
+            self.radius = max(1, self.radius - 1)
+            self.get_logger().warn(f"Reducing sampling radius to {self.radius} to conserve CPU")
             
-            self.last_fps_log_time = current_time
-
+            # Record adaptation for diagnostics
+            if not hasattr(self, 'resource_adaptations'):
+                self.resource_adaptations = []
+            
+            self.resource_adaptations.append({
+                "timestamp": time.time(),
+                "resource_type": resource_type,
+                "value": value,
+                "action": f"Reduced sampling radius to {self.radius}"
+            })
+    
+    def destroy_node(self):
+        """Clean shutdown of the node."""
+        if hasattr(self, 'resource_monitor'):
+            self.resource_monitor.stop()
+        super().destroy_node()
 
 def main(args=None):
     """Main function to initialize and run the 3D position estimator node."""
     rclpy.init(args=args)
+    
+    # Set Raspberry Pi environment variable for other components
+    os.environ['RASPBERRY_PI'] = '1'
+    
     node = TennisBall3DPositionEstimator()
     
-    # Use multiple threads for better performance with parallel processing
-    executor = MultiThreadedExecutor(num_threads=6)
+    # Use multiple threads but leave one core for system processes on Raspberry Pi 5
+    thread_count = DIAG_CONFIG["threads"]
+    executor = MultiThreadedExecutor(num_threads=thread_count)
     executor.add_node(node)
     
     print("=================================================")

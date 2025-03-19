@@ -11,6 +11,7 @@ tennis_ball:
     medium: 0.7
     high: 0.9
   detection_samples: 30  # Number of random starting points for clustering
+  same_ball_threshold: 2.0  # Multiple of radius to determine if it's the same ball
 
 # Calibrated transformation from LIDAR to camera
 transform:
@@ -26,6 +27,18 @@ transform:
     z: 0.725666
     w: 0.158248
   publish_frequency: 10.0  # How often to publish the transform (Hz)
+  log_interval: 60.0       # How often to log transform info (seconds)
+
+# LIDAR sensor transform configuration
+sensor_transform:
+  position:
+    x: 0.5  # X offset from base_link
+    y: 0.0  # Y offset from base_link
+    z: 0.2  # Z offset from base_link
+  orientation:
+    roll: 0.0  # Roll in radians
+    pitch: 0.0  # Pitch in radians
+    yaw: 0.0  # Yaw in radians
 
 # Topic configuration
 topics:
@@ -37,8 +50,33 @@ topics:
     ball_position: "/tennis_ball/lidar/position"
     visualization: "/tennis_ball/lidar/visualization"
     diagnostics: "/tennis_ball/lidar/diagnostics"
+  queue_size: 10  # Default ROS2 queue size for all topics
+
+# Visualization settings
+visualization:
+  marker_lifetime: 1.0  # Seconds to display markers
+  text_height_offset: 0.1  # Height above ball for text (meters)
+  text_size: 0.05  # Size of text markers
+  colors:
+    yolo:
+      r: 0.0
+      g: 1.0
+      b: 0.3
+      base_alpha: 0.5  # Base transparency (quality adds to this)
+    hsv:
+      r: 1.0
+      g: 0.6
+      b: 0.0
+      base_alpha: 0.5  # Base transparency (quality adds to this)
+    text:
+      r: 1.0
+      g: 1.0
+      b: 1.0
+      a: 1.0
 
 # Performance and diagnostics
 diagnostics:
   publish_interval: 3.0  # How often to publish diagnostics (seconds)
   debug_level: 1         # 0=minimal, 1=normal, 2=verbose
+  log_scan_interval: 20  # Log scan info every N scans
+  max_detection_times: 100  # Number of detection times to keep for averaging

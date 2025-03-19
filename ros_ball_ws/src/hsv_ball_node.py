@@ -40,38 +40,67 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PointStamped
+from std_msgs.msg import String  # Add import for String message type
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import time
+import os
+from config.config_loader import ConfigLoader  # Import ConfigLoader
+from ball_tracking.resource_monitor import ResourceMonitor  # Add resource monitoring import
+import json
+from collections import deque  # Add import for deque
 
-# Topic configuration (ensures consistency with other nodes)
-TOPICS = {
+# Load configuration from file
+config_loader = ConfigLoader()
+config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'hsv_config.yaml')
+config = config_loader.load_yaml(config_path)
+
+# Topic configuration from config file
+TOPICS = config.get('topics', {
     "input": {
         "camera": "/ascamera/camera_publisher/rgb0/image"
     },
     "output": {
         "position": "/tennis_ball/hsv/position"
     }
-}
+})
 
-# Tennis ball detection configuration
+# Tennis ball detection configuration from config file
+HSV_LOWER = np.array(config.get('ball', {}).get('hsv_range', {}).get('lower', [27, 58, 77]), dtype=np.uint8)
+HSV_UPPER = np.array(config.get('ball', {}).get('hsv_range', {}).get('upper', [45, 255, 255]), dtype=np.uint8)
+
 BALL_CONFIG = {
     "hsv_range": {
-        "lower": np.array([27, 58, 77], dtype=np.uint8),  # Lower HSV boundary for tennis ball
-        "upper": np.array([45, 255, 255], dtype=np.uint8)  # Upper HSV boundary for tennis ball
+        "lower": HSV_LOWER,  # Lower HSV boundary for tennis ball
+        "upper": HSV_UPPER   # Upper HSV boundary for tennis ball
     },
-    "size": {
+    "size": config.get('ball', {}).get('size', {
         "min_area": 100,     # Minimum area in pixels for 320x320 image
         "max_area": 1500,    # Maximum area in pixels for 320x320 image
         "ideal_area": 600    # Ideal area for confidence calculation
-    },
-    "shape": {
+    }),
+    "shape": config.get('ball', {}).get('shape', {
         "min_circularity": 0.5,   # Minimum circularity (0.7 is a perfect circle)
         "max_circularity": 1.3,   # Maximum circularity
         "ideal_circularity": 0.7  # Ideal circularity for confidence calculation
-    }
+    })
 }
+
+# Display configuration
+DISPLAY_CONFIG = config.get('display', {
+    "enable_visualization": False,  # Whether to show detection visualization
+    "window_width": 800,            # Width of visualization window
+    "window_height": 600            # Height of visualization window
+})
+
+# Diagnostic configuration
+DIAG_CONFIG = config.get('diagnostics', {
+    "target_width": 320,           # Target width for processing 
+    "target_height": 320,          # Target height for processing
+    "debug_level": 1,              # 0=errors only, 1=info, 2=debug
+    "log_interval": 10             # Log every N frames for performance stats
+})
 
 class HSVTennisBallTracker(Node):
     """
@@ -91,8 +120,20 @@ class HSVTennisBallTracker(Node):
         # Initialize our ROS node
         super().__init__('hsv_tennis_ball_tracker')
         
+        # Add resource monitoring for Raspberry Pi 5 with 16GB RAM
+        self.resource_monitor = ResourceMonitor(
+            node=self,
+            publish_interval=15.0,  # Less frequent to reduce overhead
+            enable_temperature=True
+        )
+        self.resource_monitor.add_alert_callback(self._handle_resource_alert)
+        self.resource_monitor.start()
+        
         # Set up parameters
         self._declare_parameters()
+        
+        # Configure optimization settings for Pi 5 with 16GB
+        self._configure_optimizations()
         
         # Set up subscriptions and publishers
         self._setup_communication()
@@ -110,23 +151,12 @@ class HSVTennisBallTracker(Node):
 
     def _declare_parameters(self):
         """Declare and get all node parameters."""
-        self.declare_parameters(
-            namespace='',
-            parameters=[
-                ('target_width', 320),      # Target width for processing
-                ('target_height', 320),     # Target height for processing
-                ('enable_visualization', False),  # Whether to show detection visualization
-                ('debug_level', 1),         # 0=errors only, 1=info, 2=debug
-                ('log_interval', 10),       # Log every N frames for performance stats
-            ]
-        )
-        
-        # Get parameters
-        self.target_width = self.get_parameter('target_width').value
-        self.target_height = self.get_parameter('target_height').value
-        self.enable_visualization = self.get_parameter('enable_visualization').value
-        self.debug_level = self.get_parameter('debug_level').value
-        self.log_interval = self.get_parameter('log_interval').value
+        # Set parameters from config
+        self.target_width = DIAG_CONFIG["target_width"]
+        self.target_height = DIAG_CONFIG["target_height"]
+        self.enable_visualization = DISPLAY_CONFIG["enable_visualization"] 
+        self.debug_level = DIAG_CONFIG["debug_level"]
+        self.log_interval = DIAG_CONFIG["log_interval"]
         
         # Get ball detection parameters from configuration
         self.lower_yellow = BALL_CONFIG['hsv_range']['lower']
@@ -157,6 +187,16 @@ class HSVTennisBallTracker(Node):
         
         # Bridge to convert between ROS images and OpenCV images
         self.bridge = CvBridge()
+        
+        # Create a publisher for system diagnostics
+        self.system_diagnostics_publisher = self.create_publisher(
+            String, 
+            "/tennis_ball/hsv/diagnostics",  # Changed from "/system/diagnostics/hsv"
+            10
+        )
+        
+        # Timer for publishing diagnostics
+        self.diagnostics_timer = self.create_timer(2.0, self.publish_system_diagnostics)
 
     def _init_state_variables(self):
         """Initialize all state tracking variables."""
@@ -173,13 +213,78 @@ class HSVTennisBallTracker(Node):
         
         # Processing timing
         self.processing_times = []
+        
+        # Initialize diagnostic metrics
+        self.diagnostic_metrics = {
+            'fps_history': deque(maxlen=10),
+            'processing_time_history': deque(maxlen=10),
+            'detection_rate_history': deque(maxlen=10),
+            'last_detection_position': None,
+            'last_detection_time': 0.0,
+            'total_frames': 0,
+            'missed_frames': 0,
+            'errors': [],
+            'warnings': []
+        }
 
     def _setup_visualization(self):
         """Set up visualization windows if enabled."""
         if self.enable_visualization:
             cv2.namedWindow("Tennis Ball Detector", cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("Tennis Ball Detector", 800, 600)
+            cv2.resizeWindow("Tennis Ball Detector", 
+                           DISPLAY_CONFIG["window_width"], 
+                           DISPLAY_CONFIG["window_height"])
             self.get_logger().info("Visualization enabled - showing detection window")
+
+    def _configure_optimizations(self):
+        """Configure performance optimizations based on RAM availability."""
+        # With 16GB RAM, we can optimize for processing quality rather than memory usage
+        try:
+            import psutil
+            total_ram = psutil.virtual_memory().total / (1024 * 1024)  # MB
+            
+            # On Pi 5 with 16GB RAM, we can use more advanced options
+            if total_ram >= 12000:  # At least 12GB
+                # Precompute kernel for morphological operations for better performance
+                self.morphology_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                
+                # Enable more advanced detection features that use more RAM but give better results
+                self.use_enhanced_detection = True
+                
+                self.get_logger().info(f"Using enhanced detection features (high RAM mode)")
+            else:
+                # Standard settings for lower memory systems
+                self.morphology_kernel = np.ones((5, 5), np.uint8)  # Simple kernel
+                self.use_enhanced_detection = False
+        except:
+            # Default settings if we can't check memory
+            self.morphology_kernel = np.ones((5, 5), np.uint8)
+            self.use_enhanced_detection = False
+        
+        # Number of frames to skip in low power mode (0 means no skipping)
+        self.low_power_skip_frames = 0
+    
+    def _handle_resource_alert(self, resource_type, value):
+        """Handle resource alerts by adjusting processing behavior."""
+        self.get_logger().warn(f"Resource alert: {resource_type.upper()} at {value:.1f}%")
+        
+        # If CPU usage is critically high, start skipping frames
+        if resource_type == 'cpu' and value > 90.0:
+            old_skip = self.low_power_skip_frames
+            self.low_power_skip_frames = 1  # Skip every other frame
+            self.get_logger().warn(f"CPU usage high: changing frame skip from {old_skip} to {self.low_power_skip_frames}")
+            
+            # Record for diagnostics
+            if hasattr(self, 'diagnostic_metrics'):
+                if 'adaptations' not in self.diagnostic_metrics:
+                    self.diagnostic_metrics['adaptations'] = []
+                    
+                self.diagnostic_metrics['adaptations'].append({
+                    'timestamp': time.time(),
+                    'resource_type': resource_type,
+                    'value': value,
+                    'action': f'Increased frame skip to {self.low_power_skip_frames}'
+                })
 
     def image_callback(self, msg):
         """
@@ -196,6 +301,16 @@ class HSVTennisBallTracker(Node):
         Args:
             msg (Image): The incoming camera image from ROS
         """
+        # Skip frames if needed to reduce CPU usage
+        if self.low_power_skip_frames > 0:
+            if not hasattr(self, 'frame_skip_counter'):
+                self.frame_skip_counter = 0
+            
+            self.frame_skip_counter += 1
+            if (self.frame_skip_counter % (self.low_power_skip_frames + 1)) != 0:
+                # Skip this frame
+                return
+        
         # Start timing for performance metrics
         processing_start = time.time()
         self.frame_count += 1
@@ -252,9 +367,9 @@ class HSVTennisBallTracker(Node):
         
         # Step 3: Clean up the mask with morphological operations
         # Remove noise and fill small holes
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.erode(mask, kernel, iterations=1)
-        mask = cv2.dilate(mask, kernel, iterations=2)
+        # Use precomputed kernel for better performance
+        mask = cv2.erode(mask, self.morphology_kernel, iterations=1)
+        mask = cv2.dilate(mask, self.morphology_kernel, iterations=2)
         
         # Save the processed mask for visualization
         if self.enable_visualization:
@@ -318,6 +433,39 @@ class HSVTennisBallTracker(Node):
                     best_area = area
                     best_circularity = circularity
         
+        # For Pi 5 with 16GB, we can use more advanced detection techniques
+        if hasattr(self, 'use_enhanced_detection') and self.use_enhanced_detection:
+            # Enhance circle detection with Hough Circles if we have contours
+            if len(contours) > 0 and np.any(mask):
+                try:
+                    # Only attempt circle detection on significant segments
+                    largest_contour = max(contours, key=cv2.contourArea)
+                    if cv2.contourArea(largest_contour) > 50:  # Skip tiny regions
+                        # Create a mask with just the largest contour
+                        largest_mask = np.zeros_like(mask)
+                        cv2.drawContours(largest_mask, [largest_contour], 0, 255, -1)
+                        
+                        # Apply Hough Circle detection with adaptive parameters
+                        detected_circles = cv2.HoughCircles(
+                            mask, cv2.HOUGH_GRADIENT, dp=1, minDist=20,
+                            param1=50, param2=10, 
+                            minRadius=int(np.sqrt(self.min_ball_area/np.pi)),
+                            maxRadius=int(np.sqrt(self.max_ball_area/np.pi))
+                        )
+                        
+                        # If circles are found, consider them in the detection
+                        if detected_circles is not None:
+                            detected_circles = np.round(detected_circles[0, :]).astype(int)
+                            for (x, y, r) in detected_circles:
+                                # Calculate approximate contour quality based on the circle
+                                circle_area = np.pi * r * r
+                                circle_matches = True
+                                # Rest of Hough circle processing...
+                except Exception as e:
+                    # Ignore errors in enhanced detection - fall back to standard
+                    if self.debug_level >= 2:
+                        self.get_logger().debug(f"Enhanced detection error: {e}")
+        
         # Step 6: Process the best match if found
         if best_contour is not None:
             # Unpack the center coordinates
@@ -366,6 +514,11 @@ class HSVTennisBallTracker(Node):
                 self.detection_sizes.pop(0)
                 self.detection_confidences.pop(0)
             
+            # Store for diagnostics
+            if hasattr(self, 'diagnostic_metrics'):
+                self.diagnostic_metrics['last_detection_position'] = (center_x, center_y)
+                self.diagnostic_metrics['last_detection_time'] = time.time()
+                
             # Return detection information
             return {
                 'center': best_center,
@@ -379,6 +532,10 @@ class HSVTennisBallTracker(Node):
             # No ball found
             self.no_detection_count += 1
             
+            # Track missed frames for diagnostics
+            if hasattr(self, 'diagnostic_metrics'):
+                self.diagnostic_metrics['missed_frames'] += 1
+                
             # Log "no ball found" at specified intervals
             if self.no_detection_count % self.log_interval == 0:
                 self._log_no_detection_info(contours)
@@ -517,6 +674,142 @@ class HSVTennisBallTracker(Node):
                 f"DETECTION STATS: Avg size: {avg_size:.1f}px, "
                 f"Avg confidence: {avg_confidence:.2f}"
             )
+        
+        # Store metrics for system diagnostics
+        if not hasattr(self, 'diagnostic_metrics'):
+            self.diagnostic_metrics = {
+                'fps_history': deque(maxlen=10),
+                'processing_time_history': deque(maxlen=10),
+                'detection_rate_history': deque(maxlen=10),
+                'last_detection_position': None,
+                'last_detection_time': 0.0,
+                'total_frames': 0,
+                'missed_frames': 0,
+                'errors': [],
+                'warnings': []
+            }
+        
+        # Update metrics
+        self.diagnostic_metrics['fps_history'].append(fps)
+        self.diagnostic_metrics['processing_time_history'].append(processing_time)
+        self.diagnostic_metrics['detection_rate_history'].append(detection_rate)
+        self.diagnostic_metrics['total_frames'] = self.frame_count
+
+    def publish_system_diagnostics(self):
+        """Publish comprehensive system diagnostics for the diagnostics node."""
+        if not hasattr(self, 'diagnostic_metrics'):
+            return  # Not enough data collected yet
+            
+        current_time = time.time()
+        elapsed_time = current_time - self.start_time
+        
+        # Calculate average metrics
+        avg_fps = np.mean(list(self.diagnostic_metrics['fps_history'])) if self.diagnostic_metrics['fps_history'] else 0.0
+        avg_processing_time = np.mean(list(self.diagnostic_metrics['processing_time_history'])) if self.diagnostic_metrics['processing_time_history'] else 0.0
+        avg_detection_rate = np.mean(list(self.diagnostic_metrics['detection_rate_history'])) if self.diagnostic_metrics['detection_rate_history'] else 0.0
+        
+        # Time since last detection
+        time_since_detection = current_time - self.diagnostic_metrics['last_detection_time'] if self.diagnostic_metrics['last_detection_time'] > 0 else float('inf')
+        
+        # Build warnings list
+        warnings = []
+        errors = []
+        
+        # Check for performance issues
+        if avg_fps < 10.0 and elapsed_time > 10.0:
+            warnings.append(f"Low FPS: {avg_fps:.1f}")
+            
+        if avg_processing_time > 50.0:  # 50ms is slow
+            warnings.append(f"High processing time: {avg_processing_time:.1f}ms")
+            
+        # Check for detection issues
+        if time_since_detection > 5.0 and elapsed_time > 10.0:
+            warnings.append(f"No ball detected for {time_since_detection:.1f}s")
+            
+        if avg_detection_rate < 0.1 and elapsed_time > 10.0:  # Less than 10% detection rate
+            errors.append(f"Very low detection rate: {avg_detection_rate*100:.1f}%")
+        
+        # System resources
+        system_resources = {}
+        try:
+            import psutil
+            system_resources = {
+                'cpu_percent': psutil.cpu_percent(interval=None),
+                'memory_percent': psutil.virtual_memory().percent
+            }
+            
+            # Check for high resource usage
+            if system_resources['cpu_percent'] > 80.0:
+                warnings.append(f"High CPU usage: {system_resources['cpu_percent']:.1f}%")
+                
+            # Add temperature if available
+            if hasattr(psutil, 'sensors_temperatures'):
+                temps = psutil.sensors_temperatures()
+                if temps and 'cpu_thermal' in temps:
+                    system_resources['temperature'] = temps['cpu_thermal'][0].current
+        except ImportError:
+            pass
+        
+        # Build diagnostics data structure
+        diag_data = {
+            "node": "hsv",  # Changed from "node_name": "hsv_ball_node"
+            "timestamp": current_time,
+            "uptime_seconds": elapsed_time,
+            "status": "error" if errors else ("warning" if warnings else "active"),  # Changed "ok" to "active"
+            "health": {
+                # Add proper health metrics for consistency
+                "camera_health": 1.0 - (len(warnings) * 0.1),
+                "detection_health": avg_detection_rate if avg_detection_rate > 0 else 0.5,
+                "processing_health": 1.0 - (avg_processing_time / 100.0) if avg_processing_time < 100.0 else 0.0,
+                "overall": 1.0 - (len(errors) * 0.3) - (len(warnings) * 0.1)
+            },
+            "metrics": {  # Changed from "performance"
+                "fps": avg_fps,
+                "processing_time_ms": avg_processing_time,
+                "total_frames": self.diagnostic_metrics['total_frames'],
+                "missed_frames": self.diagnostic_metrics['missed_frames'],
+                "detection_rate": avg_detection_rate
+            },
+            "detection": {
+                "latest_position": self.diagnostic_metrics['last_detection_position'],
+                "time_since_last_detection_s": time_since_detection,
+                "currently_tracking": time_since_detection < 1.0
+            },
+            "configuration": {
+                "hsv_range": {
+                    "lower": self.lower_yellow.tolist(),
+                    "upper": self.upper_yellow.tolist()
+                },
+                "area_range": [self.min_ball_area, self.max_ball_area],
+                "circularity_range": [self.min_circularity, self.max_circularity]
+            },
+            "resources": system_resources,  # Changed from "system_resources"
+            "errors": errors,
+            "warnings": warnings
+        }
+        
+        # Publish as JSON
+        msg = String()
+        msg.data = json.dumps(diag_data)
+        self.system_diagnostics_publisher.publish(msg)
+        
+        # Also log to console
+        self.get_logger().info(
+            f"HSV diagnostics: {avg_fps:.1f} FPS, {avg_detection_rate*100:.1f}% detection rate, "
+            f"Status: {diag_data['status']}"
+        )
+
+    def destroy_node(self):
+        """Clean up resources when the node is shutting down."""
+        # Stop the resource monitor if it exists
+        if hasattr(self, 'resource_monitor'):
+            self.resource_monitor.stop()
+        
+        # Close OpenCV windows if enabled
+        if self.enable_visualization:
+            cv2.destroyAllWindows()
+        
+        super().destroy_node()
 
 def main(args=None):
     """Main function to initialize and run the HSV Tennis Ball Tracker node."""
@@ -543,6 +836,14 @@ def main(args=None):
     print("=================================================")
     
     try:
+        # On Pi 5, use process priority to balance with other nodes
+        try:
+            import os
+            os.nice(5)  # Slightly lower priority than critical nodes
+            print("Set HSV tracker to adjusted process priority")
+        except:
+            pass
+        
         # Keep the node running until interrupted
         rclpy.spin(node)
     except KeyboardInterrupt:

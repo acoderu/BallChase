@@ -99,6 +99,19 @@ class SystemDiagnosticsNode(Node):
             String, "/tennis_ball/lidar/diagnostics",
             lambda msg: self.diagnostic_callback(msg, "lidar"), 10)
         
+        # Add subscriptions for other nodes
+        self.create_subscription(
+            String, "/tennis_ball/hsv/diagnostics",
+            lambda msg: self.diagnostic_callback(msg, "hsv"), 10)
+        
+        self.create_subscription(
+            String, "/tennis_ball/yolo/diagnostics",
+            lambda msg: self.diagnostic_callback(msg, "yolo"), 10)
+        
+        self.create_subscription(
+            String, "/tennis_ball/depth_camera/diagnostics",
+            lambda msg: self.diagnostic_callback(msg, "depth_camera"), 10)
+    
         # Other important system topics
         self.create_subscription(
             Bool, "/tennis_ball/fused/tracking_status",
@@ -113,67 +126,106 @@ class SystemDiagnosticsNode(Node):
             self.velocity_callback, 10)
     
     def _setup_publishers(self):
-        """Set up publishers for system status and visualization."""
-        self.system_status_pub = self.create_publisher(
-            String, "/system/status", 10)
-            
-        self.system_viz_pub = self.create_publisher(
-            String, "/system/visualization_data", 10)
+        """Set up publishers for this node."""
+        # System status publisher
+        self.status_publisher = self.create_publisher(
+            String, 
+            "/tennis_ball/system/status", 
+            10
+        )
+        
+        # Health metrics publisher
+        self.health_publisher = self.create_publisher(
+            Float64MultiArray, 
+            "/tennis_ball/system/health", 
+            10
+        )
+        
+        # Visualization publisher for RViz
+        self.visualization_publisher = self.create_publisher(
+            MarkerArray, 
+            "/tennis_ball/system/visualization", 
+            10
+        )
     
     def _open_log_file(self):
-        """Open a log file for system diagnostics."""
+        """Open log file for diagnostic data."""
+        # Create log directory if it doesn't exist
+        if not os.path.exists(LOG_FILE_DIR):
+            os.makedirs(LOG_FILE_DIR)
+        
+        # Create a log file with timestamp in filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filepath = os.path.join(LOG_FILE_DIR, f"diagnostics_{timestamp}.log")
+        
         try:
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            self.log_filename = os.path.join(LOG_FILE_DIR, f"system_diagnostics_{timestamp}.log")
-            self.log_file = open(self.log_filename, 'w')
-            self.log_file.write("timestamp,event_type,node,details\n")
-            self.log_file.flush()
-            self.get_logger().info(f"Logging diagnostics to: {self.log_filename}")
+            self.log_file = open(log_filepath, 'w')
+            self.get_logger().info(f"Logging diagnostics to {log_filepath}")
         except Exception as e:
             self.get_logger().error(f"Failed to open log file: {str(e)}")
             self.log_file = None
     
     def log_event(self, event_type: str, node: str, details: str):
-        """Log an event to the diagnostics file and ROS log."""
+        """Log an event to both ROS log and the diagnostics log file."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        log_entry = f"{timestamp} [{event_type}] {node}: {details}"
         
         # Log to ROS
         if event_type == "ERROR":
-            self.get_logger().error(f"[{node}] {details}")
+            self.get_logger().error(log_entry)
         elif event_type == "WARNING":
-            self.get_logger().warning(f"[{node}] {details}")
+            self.get_logger().warning(log_entry)
         else:
-            self.get_logger().info(f"[{node}] {details}")
+            self.get_logger().info(log_entry)
         
         # Log to file
-        if self.log_file:
+        if hasattr(self, 'log_file') and self.log_file:
             try:
-                self.log_file.write(f"{timestamp},{event_type},{node},{details}\n")
+                self.log_file.write(log_entry + "\n")
                 self.log_file.flush()
             except Exception as e:
                 self.get_logger().error(f"Failed to write to log file: {str(e)}")
     
     def diagnostic_callback(self, msg: String, node: str):
-        """Process diagnostic messages from system nodes."""
+        """Process diagnostics data from a node."""
         try:
-            # Update last seen time
+            # Parse JSON data
+            diag_data = json.loads(msg.data)
+            
+            # Store the latest diagnostics
+            self.latest_diagnostics[node] = diag_data
+            
+            # Update timestamp for when we last heard from this node
             self.last_seen[node] = time.time()
+            
+            # Update node status
             self.node_active[node] = True
             
-            # Parse diagnostic data
-            data = json.loads(msg.data)
-            self.latest_diagnostics[node] = data
-            
-            # Check for errors in diagnostic data
-            if "errors" in data and data["errors"]:
-                self.error_counts[node] += len(data["errors"])
-                for error in data["errors"]:
+            # Log errors and warnings from the node
+            if "errors" in diag_data and diag_data["errors"]:
+                for error in diag_data["errors"]:
                     self.log_event("ERROR", node, error)
-                
+                    self.error_counts[node] += 1
+            
+            if "warnings" in diag_data and diag_data["warnings"]:
+                for warning in diag_data["warnings"]:
+                    self.log_event("WARNING", node, warning)
+            
+            # Log significant health changes
+            if "health" in diag_data and "overall" in diag_data["health"]:
+                health_score = float(diag_data["health"]["overall"])
+                if health_score < 0.5:
+                    self.log_event("WARNING", node, f"Health is critical: {health_score:.2f}")
+            
+            # Log diagnostic summary at debug level
+            self.get_logger().debug(f"Received diagnostics from {node}: status={diag_data.get('status', 'unknown')}")
+            
         except json.JSONDecodeError:
-            self.get_logger().error(f"Invalid JSON from {node} diagnostics")
+            self.get_logger().error(f"Failed to parse diagnostics JSON from {node}")
+            self.error_counts[node] += 1
         except Exception as e:
-            self.get_logger().error(f"Error processing {node} diagnostics: {str(e)}")
+            self.get_logger().error(f"Error processing diagnostics from {node}: {str(e)}")
+            self.error_counts[node] += 1
     
     def tracking_status_callback(self, msg: Bool):
         """Process tracking status updates."""

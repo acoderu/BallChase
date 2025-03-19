@@ -67,18 +67,35 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PointStamped, TwistStamped
-from std_msgs.msg import String, Float32, Bool
+from std_msgs.msg import String, Float32, Bool, Float64MultiArray
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 import math
 from collections import deque
 import time
 import json
+import os  # Add os import
 
 # New imports for synchronization
 from ball_tracking.sensor_sync_buffer import SimpleSensorBuffer
 
+# Import ConfigLoader
+from config.config_loader import ConfigLoader
+
+# Load configuration
+config_loader = ConfigLoader()
+config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'fusion_config.yaml')
+fusion_config = config_loader.load_yaml(config_path)
+
+# Add startup configuration for transform waiting
+STARTUP_CONFIG = fusion_config.get('startup', {
+    'wait_for_transform': True,
+    'transform_retry_count': 20,
+    'transform_retry_delay': 1.0,  # seconds
+    'required_transforms': ['lidar_frame', 'camera_frame']
+})
+
 # Topic configuration (ensures consistency with other nodes)
-TOPICS = {
+TOPICS = fusion_config.get('topics', {
     "input": {
         "yolo_2d": "/tennis_ball/yolo/position",
         "hsv_2d": "/tennis_ball/hsv/position",
@@ -89,11 +106,14 @@ TOPICS = {
     "output": {
         "position": "/tennis_ball/fused/position",
         "velocity": "/tennis_ball/fused/velocity",
-        "diagnostics": "/tennis_ball/fused/diagnostics",
+        "diagnostics": "/tennis_ball/fusion/diagnostics",  # Updated to match diagnostics node expectations
         "uncertainty": "/tennis_ball/fused/position_uncertainty",
         "tracking_status": "/tennis_ball/fused/tracking_status"
     }
-}
+})
+
+# Add resource monitoring import
+from ball_tracking.resource_monitor import ResourceMonitor
 
 class KalmanFilterFusion(Node):
     """
@@ -117,11 +137,26 @@ class KalmanFilterFusion(Node):
         """Initialize the Kalman filter fusion node with all required components."""
         super().__init__('kalman_filter_fusion')
         
+        # Add resource monitoring for Raspberry Pi
+        self.resource_monitor = ResourceMonitor(
+            node=self,
+            publish_interval=10.0,  # Less frequent updates to reduce overhead
+            enable_temperature=True
+        )
+        self.resource_monitor.add_alert_callback(self._handle_resource_alert)
+        self.resource_monitor.set_threshold('cpu', 85.0)  # Adjust thresholds for Raspberry Pi
+        self.resource_monitor.set_threshold('memory', 90.0)
+        self.resource_monitor.start()
+        
         # Set up filter parameters
         self._declare_parameters()
         
         # Add a ROS tf2 listener to transform coordinates between frames
         self._setup_transform_listener()
+        
+        # Wait for required transforms to become available to avoid race conditions
+        if STARTUP_CONFIG['wait_for_transform']:
+            self._wait_for_transforms()
         
         # Create the synchronization buffer
         self.sync_buffer = SimpleSensorBuffer(
@@ -152,6 +187,60 @@ class KalmanFilterFusion(Node):
         # Log topic connections for debugging
         self._log_topic_connections()
 
+    def _wait_for_transforms(self):
+        """
+        Wait for required transforms to become available.
+        
+        This avoids race conditions on startup where transforms might not be
+        immediately available from other nodes like the LIDAR node.
+        """
+        required_transforms = STARTUP_CONFIG['required_transforms']
+        retry_count = STARTUP_CONFIG['transform_retry_count']
+        retry_delay = STARTUP_CONFIG['transform_retry_delay']
+        
+        # Get the first frame as parent, second as child
+        if len(required_transforms) >= 2:
+            parent_frame = required_transforms[0]
+            child_frame = required_transforms[1]
+            
+            self.get_logger().info(f"Waiting for transform from '{parent_frame}' to '{child_frame}'...")
+            
+            # Try multiple times to get the transform
+            transform_available = False
+            
+            for attempt in range(retry_count):
+                try:
+                    when = rclpy.time.Time()
+                    transform_available = self.tf_buffer.can_transform(
+                        parent_frame,
+                        child_frame,
+                        when,
+                        timeout=rclpy.duration.Duration(seconds=0.1)
+                    )
+                    
+                    if transform_available:
+                        self.get_logger().info(f"Transform from '{parent_frame}' to '{child_frame}' is now available (attempt {attempt+1}/{retry_count})")
+                        break
+                    else:
+                        self.get_logger().warn(f"Transform not yet available, waiting... ({attempt+1}/{retry_count})")
+                        
+                except Exception as e:
+                    self.get_logger().warn(f"Error checking transform: {str(e)}")
+                
+                # Sleep before retrying
+                time.sleep(retry_delay)
+            
+            # Final status
+            if transform_available:
+                self.get_logger().info("All required transforms are available. Proceeding with initialization.")
+            else:
+                self.get_logger().warn(
+                    "Could not verify transform availability after multiple attempts. "
+                    "Will proceed anyway, but transforms might fail until all nodes are fully initialized."
+                )
+        else:
+            self.get_logger().warn("No transform frames specified in config. Skipping transform check.")
+    
     def _setup_transform_listener(self):
         """Set up tf2 listener for coordinate transformations between sensors."""
         # Import tf2 modules here to avoid circular imports
@@ -168,29 +257,29 @@ class KalmanFilterFusion(Node):
             namespace='',
             parameters=[
                 # Process noise: how much uncertainty to add during prediction steps
-                ('process_noise_pos', 0.1),        # Position uncertainty per second squared
-                ('process_noise_vel', 1.0),        # Velocity uncertainty per second
+                ('process_noise_pos', fusion_config.get('process_noise', {}).get('position', 0.1)),
+                ('process_noise_vel', fusion_config.get('process_noise', {}).get('velocity', 1.0)),
                 
                 # Measurement noise: how much to trust each sensor type
-                ('measurement_noise_hsv_2d', 50.0),   # Pixels - high because 2D only
-                ('measurement_noise_yolo_2d', 30.0),  # Pixels - lower because more accurate
-                ('measurement_noise_hsv_3d', 0.05),  # Meters - from depth camera with HSV
-                ('measurement_noise_yolo_3d', 0.04), # Meters - from depth camera with YOLO
-                ('measurement_noise_lidar', 0.03),   # Meters - most accurate for 3D
+                ('measurement_noise_hsv_2d', fusion_config.get('measurement_noise', {}).get('hsv_2d', 50.0)),
+                ('measurement_noise_yolo_2d', fusion_config.get('measurement_noise', {}).get('yolo_2d', 30.0)),
+                ('measurement_noise_hsv_3d', fusion_config.get('measurement_noise', {}).get('hsv_3d', 0.05)),
+                ('measurement_noise_yolo_3d', fusion_config.get('measurement_noise', {}).get('yolo_3d', 0.04)),
+                ('measurement_noise_lidar', fusion_config.get('measurement_noise', {}).get('lidar', 0.03)),
                 
                 # Filter tuning parameters
-                ('max_time_diff', 0.2),           # Maximum time difference for fusion (seconds)
-                ('min_confidence_threshold', 0.5), # Minimum confidence threshold for detections
-                ('detection_timeout', 0.5),        # Time after which a detection is considered stale
+                ('max_time_diff', fusion_config.get('filter', {}).get('max_time_diff', 0.2)),
+                ('min_confidence_threshold', fusion_config.get('filter', {}).get('min_confidence_threshold', 0.5)),
+                ('detection_timeout', fusion_config.get('filter', {}).get('detection_timeout', 0.5)),
                 
                 # Tracking reliability thresholds
-                ('position_uncertainty_threshold', 0.5),  # Position uncertainty threshold for reliable tracking
-                ('velocity_uncertainty_threshold', 1.0),  # Velocity uncertainty threshold for reliable tracking
+                ('position_uncertainty_threshold', fusion_config.get('tracking', {}).get('position_uncertainty_threshold', 0.5)),
+                ('velocity_uncertainty_threshold', fusion_config.get('tracking', {}).get('velocity_uncertainty_threshold', 1.0)),
                 
                 # Debugging and diagnostics
-                ('history_length', 100),           # Number of states to keep in history
-                ('debug_level', 1),                # Debug level (0=minimal, 1=normal, 2=verbose)
-                ('log_to_file', False)             # Whether to log detailed data to file
+                ('history_length', fusion_config.get('diagnostics', {}).get('history_length', 100)),
+                ('debug_level', fusion_config.get('diagnostics', {}).get('debug_level', 1)),
+                ('log_to_file', fusion_config.get('diagnostics', {}).get('log_to_file', False))
             ]
         )
         
@@ -288,6 +377,13 @@ class KalmanFilterFusion(Node):
             TOPICS["output"]["tracking_status"],
             10
         )
+        
+        # Add a more comprehensive system diagnostics publisher for the central diagnostics node
+        self.system_diagnostics_publisher = self.create_publisher(
+            String,
+            TOPICS["output"]["diagnostics"],  # Use the configured diagnostics topic
+            10
+        )
 
     def _init_kalman_filter(self):
         """Initialize the Kalman filter state and variables."""
@@ -332,6 +428,17 @@ class KalmanFilterFusion(Node):
         # Start time for performance tracking
         self.start_time = time.time()
         self.updates_processed = 0
+
+        # Add error tracking for diagnostics
+        self.errors = []
+        self.warnings = []
+        self.error_history_size = fusion_config.get('diagnostics', {}).get('error_history_size', 10)
+        self.last_error_time = 0
+        
+        # Add health metrics
+        self.filter_health = 1.0  # 0.0 to 1.0 scale
+        self.tracking_health = 1.0
+        self.sensor_health = 1.0
 
     def _setup_timers(self):
         """Set up timer callbacks for periodic tasks."""
@@ -440,6 +547,9 @@ class KalmanFilterFusion(Node):
         to get measurements from multiple sensors that were taken at approximately
         the same time.
         """
+        # For Raspberry Pi optimization: Track execution time
+        update_start = time.time()
+        
         if not self.initialized and not self._try_initialize():
             return
 
@@ -563,9 +673,30 @@ class KalmanFilterFusion(Node):
         # Update stats
         self.updates_processed += 1
         
-        # Log to file if enabled
-        if self.log_to_file and self.log_file:
-            self.log_to_file_csv(avg_time, '+'.join(available_sensors))
+        # Measure execution time for performance monitoring
+        execution_time = (time.time() - update_start) * 1000  # milliseconds
+        self.processing_times.append(execution_time)
+        
+        # Automatically adjust filter frequency based on execution time
+        # This prevents overloading the Raspberry Pi CPU
+        avg_execution = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
+        
+        # If average execution time is more than 80% of our update interval,
+        # we might want to slow down to prevent CPU overload
+        current_period = getattr(self.filter_timer, 'timer_period_ns', 50000000) / 1e9  # Convert ns to seconds
+        if avg_execution > (current_period * 1000 * 0.8):  # Convert period to ms and check if >80%
+            # Log this event but don't adjust automatically
+            self.get_logger().warn(
+                f"Filter updates taking {avg_execution:.1f}ms on average, "
+                f"which is {avg_execution/(current_period*1000)*100:.1f}% of the update period"
+            )
+            
+            # Only increase period if critically high
+            if avg_execution > (current_period * 1000 * 0.95):
+                new_period = current_period * 1.2  # 20% slower
+                self.filter_timer.cancel()
+                self.filter_timer = self.create_timer(new_period, self.filter_update)
+                self.get_logger().warn(f"Performance critical: Reduced update rate to {1.0/new_period:.1f} Hz")
 
     def _try_initialize(self):
         """
@@ -635,7 +766,7 @@ class KalmanFilterFusion(Node):
             dt (float): Time elapsed since last update in seconds
         """
         if dt <= 0 or dt > 1.0:
-            self.get_logger().warning(f"Invalid dt in predict step: {dt}. Using default.")
+            self.log_error(f"Invalid dt in predict step: {dt}. Using default.", True)
             dt = 0.033  # Fallback to ~30Hz
         
         # State transition matrix (constant velocity model)
@@ -663,6 +794,10 @@ class KalmanFilterFusion(Node):
         
         # Update uncertainty metrics
         self.update_tracking_reliability()
+        
+        # Gradually improve filter health during successful predictions
+        if hasattr(self, 'filter_health'):
+            self.filter_health = min(1.0, self.filter_health + 0.01)
         
         if self.debug_level >= 2:
             self.get_logger().debug(
@@ -723,9 +858,10 @@ class KalmanFilterFusion(Node):
             
             # Skip updates that are too far from prediction (outliers)
             if innovation_magnitude > 10.0:
-                self.get_logger().warning(
+                self.log_error(
                     f"Rejecting {source} update - too far from prediction "
-                    f"({innovation_magnitude:.2f} sigma)"
+                    f"({innovation_magnitude:.2f} sigma)",
+                    True  # This is a warning, not a critical error
                 )
                 return
         except np.linalg.LinAlgError:
@@ -745,6 +881,10 @@ class KalmanFilterFusion(Node):
         # Update tracking reliability
         self.consecutive_updates += 1
         self.update_tracking_reliability()
+        
+        # Update tracking health after successful update
+        if hasattr(self, 'tracking_health'):
+            self.tracking_health = min(1.0, self.tracking_health + 0.02)
         
         if self.debug_level >= 2:
             self.get_logger().debug(
@@ -803,9 +943,10 @@ class KalmanFilterFusion(Node):
             
             # Skip updates that are too far from prediction (outliers)
             if innovation_magnitude > 5.0:
-                self.get_logger().warning(
+                self.log_error(
                     f"Rejecting {source} 3D update - too far from prediction: "
-                    f"{innovation_magnitude:.2f} sigma"
+                    f"{innovation_magnitude:.2f} sigma",
+                    True
                 )
                 return
         except np.linalg.LinAlgError:
@@ -825,6 +966,10 @@ class KalmanFilterFusion(Node):
         # Update tracking reliability
         self.consecutive_updates += 1
         self.update_tracking_reliability()
+        
+        # Update tracking health after successful update
+        if hasattr(self, 'tracking_health'):
+            self.tracking_health = min(1.0, self.tracking_health + 0.02)
         
         if self.debug_level >= 1:
             self.get_logger().debug(
@@ -859,7 +1004,23 @@ class KalmanFilterFusion(Node):
         for sensor, last_seen in self.sensor_last_seen.items():
             if current_time - last_seen < self.detection_timeout:
                 fresh_sensors += 1
+        
+        # Update sensor health based on fresh sensors
+        if hasattr(self, 'sensor_health'):
+            target_health = 0.3  # Base health
+            if fresh_sensors >= 3:
+                target_health = 1.0  # Excellent health with 3+ sensors
+            elif fresh_sensors == 2:
+                target_health = 0.8  # Good health with 2 sensors
+            elif fresh_sensors == 1:
+                target_health = 0.5  # Mediocre health with 1 sensor
                 
+            # Move sensor_health toward target gradually
+            if self.sensor_health < target_health:
+                self.sensor_health = min(target_health, self.sensor_health + 0.05)
+            else:
+                self.sensor_health = max(target_health, self.sensor_health - 0.05)
+        
         # Determine if tracking is reliable based on multiple criteria
         self.tracking_reliable = (
             # Position uncertainty is below threshold
@@ -1021,6 +1182,153 @@ class KalmanFilterFusion(Node):
         diag_msg = String()
         diag_msg.data = json.dumps(diag_data)
         self.diagnostics_publisher.publish(diag_msg)
+        
+        # Publish enhanced system-wide diagnostics
+        self.publish_system_diagnostics(diag_data, sensor_ages, recent_sensors)
+
+    def publish_system_diagnostics(self, diag_data, sensor_ages, recent_sensors):
+        """Publish enhanced diagnostics for the system-wide diagnostics node"""
+        # Get system resource information
+        try:
+            import psutil
+            cpu_percent = psutil.cpu_percent(interval=None)
+            mem_percent = psutil.virtual_memory().percent
+            
+            # Get temperature if available (especially on Raspberry Pi)
+            temp = None
+            if hasattr(psutil, "sensors_temperatures") and callable(getattr(psutil, "sensors_temperatures")):
+                temps = psutil.sensors_temperatures()
+                if temps and 'cpu_thermal' in temps:
+                    temp = temps['cpu_thermal'][0].current
+                elif temps and 'coretemp' in temps:
+                    temp = temps['coretemp'][0].current
+        except ImportError:
+            cpu_percent = None
+            mem_percent = None
+            temp = None
+            
+        # Identify any errors or warnings
+        errors = []
+        warnings = []
+        
+        # Check for sensor issues
+        if recent_sensors < 2:
+            warnings.append(f"Only {recent_sensors} sensor(s) with recent data - tracking may be unreliable")
+        
+        # Check for high uncertainties
+        if self.position_uncertainty > self.position_uncertainty_threshold * 2:
+            warnings.append(f"Very high position uncertainty: {self.position_uncertainty:.3f}m")
+        
+        # Check for sensor timeouts
+        for sensor, age in sensor_ages.items():
+            if age > self.detection_timeout * 2:
+                warnings.append(f"Sensor {sensor} not seen for {age:.1f}s")
+        
+        # Calculate innovation statistics if available
+        innovation_stats = {}
+        if hasattr(self, 'innovation_history') and self.innovation_history:
+            innovations = list(self.innovation_history)
+            innovation_stats = {
+                "mean": float(np.mean(innovations)),
+                "max": float(np.max(innovations)),
+                "latest": float(innovations[-1]) if innovations else 0.0
+            }
+            
+            # Check for consistently high innovations (could indicate model problems)
+            if innovation_stats["mean"] > 2.0:
+                warnings.append(f"High average innovation: {innovation_stats['mean']:.2f} sigma")
+
+        # Add any tracked errors and warnings
+        current_time = time.time()
+        for error in self.errors:
+            if current_time - error["timestamp"] < 300:  # Last 5 minutes
+                errors.append(error["message"])
+                
+        for warning in self.warnings:
+            if current_time - warning["timestamp"] < 300:  # Last 5 minutes
+                warnings.append(warning["message"])
+        
+        # Health recovery over time (errors become less relevant)
+        time_since_last_error = current_time - self.last_error_time
+        if time_since_last_error > 30.0:  # After 30 seconds with no errors
+            self.filter_health = min(1.0, self.filter_health + 0.05)  # Gradually recover
+        
+        # Calculate overall health (weighted average)
+        overall_health = (
+            self.filter_health * 0.4 +
+            self.tracking_health * 0.4 +
+            self.sensor_health * 0.2
+        )
+        
+        # Determine status based on overall health and tracking
+        status = "active" if self.tracking_reliable else "searching"
+        if errors:
+            status = "error"
+        elif warnings:
+            status = "warning"
+        
+        # Format diagnostics message to match expected structure
+        system_diag_data = {
+            "timestamp": time.time(),
+            "node": "fusion",
+            "uptime_seconds": time.time() - self.start_time,
+            "status": status,
+            "health": {
+                "filter_health": float(self.filter_health),
+                "tracking_health": float(self.tracking_health),
+                "sensor_health": float(self.sensor_health),
+                "overall": float(overall_health)
+            },
+            "tracking": {
+                "reliable": bool(self.tracking_reliable),
+                "consecutive_updates": int(self.consecutive_updates),
+                "position": {
+                    "x": float(self.state[0]),
+                    "y": float(self.state[1]),
+                    "z": float(self.state[2]),
+                    "uncertainty": float(self.position_uncertainty)
+                },
+                "velocity": {
+                    "x": float(self.state[3]),
+                    "y": float(self.state[4]),
+                    "z": float(self.state[5]),
+                    "uncertainty": float(self.velocity_uncertainty),
+                    "magnitude": float(np.linalg.norm(self.state[3:6]))
+                }
+            },
+            "sensors": {
+                sensor: {
+                    "online": age < self.detection_timeout,
+                    "count": int(self.sensor_counts[sensor]),
+                    "age_seconds": float(age)
+                } for sensor, age in sensor_ages.items()
+            },
+            "metrics": {
+                "update_rate_hz": float(diag_data["performance"]["update_rate"]),
+                "processing_time_ms": float(diag_data["performance"]["avg_processing_time_ms"]),
+                "recent_sensors": int(recent_sensors),
+                "innovation": innovation_stats
+            },
+            "resources": {
+                "cpu_percent": getattr(self.resource_monitor, 'cpu_percent', 0),
+                "memory_percent": getattr(self.resource_monitor, 'mem_percent', 0),
+                "temperature": getattr(self.resource_monitor, 'temperature', 0)
+            },
+            "errors": errors,
+            "warnings": warnings
+        }
+        
+        # Publish to system-wide diagnostics
+        system_diag_msg = String()
+        system_diag_msg.data = json.dumps(system_diag_data)
+        self.system_diagnostics_publisher.publish(system_diag_msg)
+        
+        # Log a summary to console
+        self.get_logger().info(
+            f"Fusion status: {status}, Health: {overall_health:.2f}, "
+            f"Tracking: {self.tracking_reliable}, "
+            f"Sensors: {recent_sensors}/5"
+        )
 
     def log_filter_state(self):
         """
@@ -1090,13 +1398,14 @@ class KalmanFilterFusion(Node):
             return point_msg  # Already in the right frame
             
         try:
-            # Wait for transform to be available
+            # Wait for transform to be available with shorter timeout now that we've
+            # already waited during initialization
             when = rclpy.time.Time()
             self.tf_buffer.can_transform(
                 target_frame,
                 point_msg.header.frame_id,
                 when,
-                timeout=rclpy.duration.Duration(seconds=0.1)
+                timeout=rclpy.duration.Duration(seconds=0.05)  # Shorter timeout for runtime checks
             )
             
             # Transform the point
@@ -1118,6 +1427,65 @@ class KalmanFilterFusion(Node):
             )
             return None
 
+    def _handle_resource_alert(self, resource_type, value):
+        """Handle resource alerts by logging warnings and potentially reducing workload."""
+        self.log_error(f"Resource alert: {resource_type.upper()} at {value:.1f}% - performance may be affected", True)
+        
+        # If CPU usage is critically high, try to reduce workload
+        if resource_type == 'cpu' and value > 95.0:
+            self.log_error("Critical CPU usage detected - reducing update frequency", True)
+            # Adjust filter update frequency if CPU usage is too high
+            if hasattr(self, 'filter_timer') and self.filter_timer:
+                # Get current period and increase it to reduce CPU load
+                current_period = 1.0 / 20.0  # Default 20Hz
+                new_period = current_period * 1.5  # Reduce rate by 33%
+                self.filter_timer.cancel()
+                self.filter_timer = self.create_timer(new_period, self.filter_update)
+                self.get_logger().warn(f"Reduced update rate to {1.0/new_period:.1f} Hz")
+                
+                # Also report this in next system diagnostics
+                if not hasattr(self, 'resource_warnings'):
+                    self.resource_warnings = []
+                self.resource_warnings.append({
+                    "timestamp": time.time(),
+                    "type": resource_type,
+                    "value": value,
+                    "action": f"Reduced update rate to {1.0/new_period:.1f} Hz"
+                })
+
+    def destroy_node(self):
+        """Clean shutdown of the node, stopping all resources."""
+        if hasattr(self, 'resource_monitor'):
+            self.resource_monitor.stop()
+        super().destroy_node()
+
+    def log_error(self, error_message, is_warning=False):
+        """Log an error or warning and add it to history for diagnostics."""
+        if is_warning:
+            self.get_logger().warning(f"FUSION: {error_message}")
+            # Add to warnings list
+            self.warnings.append({
+                "timestamp": time.time(),
+                "message": error_message
+            })
+            # Keep warnings list at reasonable size
+            if len(self.warnings) > self.error_history_size:
+                self.warnings.pop(0)
+        else:
+            self.get_logger().error(f"FUSION: {error_message}")  # Fixed double dot here
+            # Add to errors list
+            self.errors.append({
+                "timestamp": time.time(),
+                "message": error_message
+            })
+            # Keep errors list at reasonable size
+            if len(self.errors) > self.error_history_size:
+                self.errors.pop(0)
+            
+            # Update health based on error frequency
+            self.last_error_time = time.time()
+            # Reduce filter health temporarily after an error
+            self.filter_health = max(0.3, self.filter_health - 0.2)
 
 def main(args=None):
     """Main function to initialize and run the fusion node."""
@@ -1145,7 +1513,17 @@ def main(args=None):
     print("=================================================")
     
     try:
-        # Keep the node running until interrupted
+        import psutil  # For process priority
+        
+        # On Linux (Raspberry Pi), try to set higher process priority
+        try:
+            process = psutil.Process(os.getpid())
+            process.nice(-10)  # Higher priority (needs appropriate permissions)
+            print("Set fusion node to higher process priority")
+        except:
+            print("Could not increase process priority - requires root permissions")
+            
+        # Run the node
         rclpy.spin(node)
     except KeyboardInterrupt:
         print("Stopping Kalman Filter Fusion Node (Ctrl+C pressed)")
