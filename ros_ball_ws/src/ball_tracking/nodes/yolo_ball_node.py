@@ -202,8 +202,8 @@ class TennisBallDetector(Node):
             'inference_time_history': deque(maxlen=10),
             
             # These are unbounded lists - Potential memory leaks
-            'errors': [],
-            'warnings': []
+            'errors': deque(maxlen=50),  # Bounded collection
+            'warnings': deque(maxlen=50)
         }
 
     def load_model(self, config):
