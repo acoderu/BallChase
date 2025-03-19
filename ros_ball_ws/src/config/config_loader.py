@@ -20,14 +20,20 @@ class ConfigLoader:
     them to ROS nodes with proper parameter declaration.
     """
     
-    def __init__(self, config_filename=None):
-        """
-        Initialize a ConfigLoader, optionally with a specific config file.
+    def __init__(self):
+        # Store the directory where config files are located
+        self.config_dir = os.path.dirname(os.path.abspath(__file__))
         
-        Args:
-            config_filename: Optional name of config file (for backward compatibility)
-        """
-        self.config_filename = config_filename
+    def load_yaml(self, filename):
+        # Construct the full path automatically
+        file_path = os.path.join(self.config_dir, filename)
+        
+        if not os.path.exists(file_path):
+            print(f"ERROR: Configuration file not found: {file_path}")
+            raise FileNotFoundError(f"Configuration file not found: {file_path}")
+            
+        with open(file_path, 'r') as file:
+            return yaml.safe_load(file)
     
     def load_config(self):
         """
@@ -49,32 +55,6 @@ class ConfigLoader:
         config_path = os.path.join(config_dir, self.config_filename)
         return self.load_yaml(config_path)
     
-    @staticmethod
-    def load_yaml(file_path: str) -> Dict[str, Any]:
-        """
-        Load a YAML configuration file.
-        
-        Args:
-            file_path: Path to the YAML configuration file
-            
-        Returns:
-            Dictionary containing the configuration parameters
-            
-        Raises:
-            FileNotFoundError: If the configuration file doesn't exist
-            yaml.YAMLError: If the YAML file is malformed
-        """
-        try:
-            with open(file_path, 'r') as file:
-                return yaml.safe_load(file)
-        except FileNotFoundError:
-            print(f"ERROR: Configuration file not found: {file_path}")
-            raise
-        except yaml.YAMLError as e:
-            print(f"ERROR: Invalid YAML in configuration file: {file_path}")
-            print(f"Details: {str(e)}")
-            raise
-
     @staticmethod
     def declare_parameters_from_config(node: rclpy.node.Node, config: Dict[str, Any], namespace: str = "") -> None:
         """

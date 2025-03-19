@@ -39,6 +39,15 @@ This LIDAR node adds depth information to the tennis ball tracking by:
 - Providing visualization markers for debugging in RViz
 """
 
+
+import sys
+import os
+# Add the parent directory of 'config' to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+# Add the 'src' directory to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 import rclpy
 from rclpy.node import Node
 import time
@@ -51,17 +60,21 @@ from geometry_msgs.msg import TransformStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
-from config.config_loader import ConfigLoader  # Add ConfigLoader import
+import psutil  # Move psutil import here with other imports
 import os
 import threading
 from collections import deque  # Add import for deque
-from ball_tracking.resource_monitor import ResourceMonitor
-from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
+from utilities.resource_monitor import ResourceMonitor
+from utilities.time_utils import TimeUtils  # Add TimeUtils import
+from config.config_loader import ConfigLoader  # Import ConfigLoader
 
-# Load configuration from YAML file
+
+
+# Load configuration from file
 config_loader = ConfigLoader()
-config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'lidar_config.yaml')
-lidar_config = config_loader.load_yaml(config_path)
+lidar_config = config_loader.load_yaml('lidar_config.yaml')
+
+
 
 # Tennis ball configuration from config file
 TENNIS_BALL_CONFIG = lidar_config.get('tennis_ball', {
@@ -139,6 +152,13 @@ class TennisBallLidarDetector(Node):
         """Initialize the tennis ball LIDAR detector node."""
         super().__init__('tennis_ball_lidar_detector')
         
+        # Initialize state tracking (replaces _init_performance_tracking)
+        # MOVE THIS UP before resource monitor initialization
+        self._init_state_tracking()
+        
+        # Initialize detection parameters early
+        self.detection_samples = TENNIS_BALL_CONFIG["detection_samples"]
+        
         # Add resource monitoring for Raspberry Pi 5
         self.resource_monitor = ResourceMonitor(
             node=self,
@@ -176,9 +196,6 @@ class TennisBallLidarDetector(Node):
         self.scan_timestamp = None
         self.scan_frame_id = None
         self.points_array = None
-        
-        # Initialize state tracking (replaces _init_performance_tracking)
-        self._init_state_tracking()
         
         # Set up subscribers
         self._setup_subscribers()
@@ -234,6 +251,21 @@ class TennisBallLidarDetector(Node):
         self._points_buffer = None  # Will be allocated based on first point cloud
         self._filtered_buffer = None
         self._cluster_buffer = None
+
+        # Configure logging levels from config
+        log_config = lidar_config.get('logging', {
+            'console_level': 'info',   # Options: debug, info, warn, error
+            'file_level': 'debug',     # Options: debug, info, warn, error
+            'log_file': 'lidar_node.log',
+            'max_file_size_mb': 10
+        })
+
+        # Set logger level programmatically
+        self._configure_logging(log_config)
+
+        # Debug data collection (only enabled in debug mode)
+        self.debug_mode = DIAG_CONFIG.get('debug_level', 0) > 1
+        self.last_point_clouds = deque(maxlen=5) if self.debug_mode else None
     
     def _init_state_tracking(self):
         """Initialize state tracking for all system components."""
@@ -394,6 +426,16 @@ class TennisBallLidarDetector(Node):
             if hasattr(self, 'lidar_health'):
                 self.lidar_health = min(1.0, self.lidar_health + 0.01)
             
+            if self.debug_mode and self.points_array is not None:
+                # Store a sample of points for debugging
+                sample_size = min(100, len(self.points_array))
+                indices = np.random.choice(len(self.points_array), sample_size, replace=False)
+                self.last_point_clouds.append({
+                    "timestamp": self.scan_timestamp.sec + self.scan_timestamp.nanosec/1e9,
+                    "points_sample": self.points_array[indices].tolist(),
+                    "total_points": len(self.points_array)
+                })
+            
         except Exception as e:
             error_msg = f"Error processing scan: {str(e)}"
             self.log_error(error_msg)
@@ -477,6 +519,10 @@ class TennisBallLidarDetector(Node):
         Returns:
             list: List of tuples (center, cluster_size, circle_quality) for each detected ball
         """
+        # Start timing
+        operation_start = TimeUtils.now_as_float()
+        trace_points = {}
+        
         if self.points_array is None or len(self.points_array) == 0:
             self.get_logger().warn("LIDAR: No points available for analysis")
             return []
@@ -544,6 +590,9 @@ class TennisBallLidarDetector(Node):
                 if is_new_ball:
                     balls_found.append((center, len(cluster), circle_quality))
         
+        # Timing checkpoints
+        trace_points["cluster_search_ms"] = (TimeUtils.now_as_float() - operation_start) * 1000
+        
         # Log results of the detection attempt
         if balls_found:
             self.get_logger().debug(
@@ -560,6 +609,12 @@ class TennisBallLidarDetector(Node):
             self.get_logger().debug("LIDAR: No potential tennis balls found")
         
         # Sort balls by quality (best first) and return
+        trace_points["total_ms"] = (TimeUtils.now_as_float() - operation_start) * 1000
+    
+        # Only log traces in debug mode to avoid overwhelming logs
+        if self.get_logger().get_effective_level() <= rclpy.logging.LoggingSeverity.DEBUG:
+            self.get_logger().debug(f"TRACE: find_tennis_balls timing: {trace_points}")
+        
         return sorted(balls_found, key=lambda x: x[2], reverse=True)
     
     def publish_ball_position(self, center, cluster_size, circle_quality, trigger_source, original_timestamp=None):
@@ -591,11 +646,13 @@ class TennisBallLidarDetector(Node):
         # Always use our consistent frame ID for proper transformation
         point_msg.header.frame_id = "lidar_frame"
         
-        # Add sequence number for better synchronization
+        # ROS2 doesn't use sequence numbers in headers
+        # Track sequence internally if needed (but don't set it on the header)
         if not hasattr(self, 'seq_counter'):
             self.seq_counter = 0
         self.seq_counter += 1
-        point_msg.header.seq = self.seq_counter
+        # Remove this line that causes the error:
+        # point_msg.header.seq = self.seq_counter
         
         point_msg.point.x = float(center[0])
         point_msg.point.y = float(center[1])
@@ -826,6 +883,23 @@ class TennisBallLidarDetector(Node):
                 }
             }
             
+            # Calculate additional health metrics
+            scan_frequency_health = min(1.0, scan_rate / lidar_config.get('expected_scan_rate', 10.0))
+            detection_latency_health = 1.0 - min(1.0, self.detection_latency / 100.0)
+
+            diagnostics["health"]["scan_frequency_health"] = scan_frequency_health
+            diagnostics["health"]["detection_latency_health"] = detection_latency_health 
+            diagnostics["health"]["resource_health"] = 1.0 - (getattr(self.resource_monitor, 'cpu_percent', 0) / 100.0)
+
+            # Overall health is weighted average of all components
+            diagnostics["health"]["overall"] = (
+                self.lidar_health * 0.3 + 
+                self.detection_health * 0.3 + 
+                scan_frequency_health * 0.2 +
+                detection_latency_health * 0.1 +
+                diagnostics["health"]["resource_health"] * 0.1
+            )
+            
             # Publish diagnostics as JSON string
             msg = String()
             msg.data = json.dumps(diagnostics)
@@ -864,37 +938,43 @@ class TennisBallLidarDetector(Node):
     def _get_available_memory(self):
         """Get available memory in MB."""
         try:
-            import psutil
             return psutil.virtual_memory().available / (1024 * 1024)
-        except:
+        except Exception as e:
+            self.get_logger().warn(f"Error getting memory info: {str(e)}")
             return 2000  # Default to 2GB if we can't determine
     
     def _handle_resource_alert(self, resource_type, value):
         """Handle resource alerts by adjusting detector behavior."""
-        self.get_logger().warn(f"Resource alert: {resource_type.UPPER()} at {value:.1f}% - may affect performance")
+        # Fix the case method - use upper() instead of UPPER()
+        self.get_logger().warn(f"Resource alert: {resource_type.upper()} at {value:.1f}% - may affect performance")
         
         # Add to error list if critical
         if value > 95.0:
-            self.log_error(f"Critical {resource_type} usage: {value:.1f}%")
+            if hasattr(self, 'errors'):  # Check if errors attribute exists
+                self.log_error(f"Critical {resource_type} usage: {value:.1f}%")
+            else:
+                self.get_logger().error(f"Critical {resource_type} usage: {value:.1f}%")
         
         if resource_type == 'cpu' and value > 90.0:
-            # Reduce detection samples temporarily to ease CPU load
-            original_samples = self.detection_samples
-            self.detection_samples = max(10, int(self.detection_samples * 0.7))
-            self.get_logger().warn(
-                f"Temporarily reducing LIDAR detection samples from {original_samples} to {self.detection_samples}"
-            )
-            
-            # Add resource adaptations tracking with deque
-            if not hasattr(self, 'resource_adaptations'):
-                self.resource_adaptations = deque(maxlen=20)  # Keep only last 20 adaptations
-            
-            self.resource_adaptations.append({
-                "timestamp": TimeUtils.now_as_float(),
-                "type": resource_type,
-                "value": value,
-                "action": f"Reduced detection samples to {self.detection_samples}"
-            })
+            # Check if detection_samples attribute exists
+            if hasattr(self, 'detection_samples'):
+                # Reduce detection samples temporarily to ease CPU load
+                original_samples = self.detection_samples
+                self.detection_samples = max(10, int(self.detection_samples * 0.7))
+                self.get_logger().warn(
+                    f"Temporarily reducing LIDAR detection samples from {original_samples} to {self.detection_samples}"
+                )
+                
+                # Add resource adaptations tracking with deque
+                if not hasattr(self, 'resource_adaptations'):
+                    self.resource_adaptations = deque(maxlen=20)  # Keep only last 20 adaptations
+                
+                self.resource_adaptations.append({
+                    "timestamp": TimeUtils.now_as_float(),
+                    "type": resource_type,
+                    "value": value,
+                    "action": f"Reduced detection samples to {self.detection_samples}"
+                })
     
     def log_error(self, error_message):
         """Log an error and add it to error history for diagnostics."""
@@ -953,6 +1033,44 @@ class TennisBallLidarDetector(Node):
             self.resource_monitor.stop()
         
         super().destroy_node()
+
+    def _configure_logging(self, log_config):
+        """Configure logger levels based on config."""
+        level_map = {
+            'debug': rclpy.logging.LoggingSeverity.DEBUG,
+            'info': rclpy.logging.LoggingSeverity.INFO,
+            'warn': rclpy.logging.LoggingSeverity.WARN,
+            'error': rclpy.logging.LoggingSeverity.ERROR
+        }
+        
+        console_level = level_map.get(log_config.get('console_level', 'info').lower(), 
+                                      rclpy.logging.LoggingSeverity.INFO)
+        
+        # Set logger level
+        self.get_logger().set_level(console_level)
+        self.get_logger().info(f"Logging level set to: {log_config.get('console_level', 'info').upper()}")
+
+    # Create a helper method for consistent log formatting:
+
+    def _log(self, level, component, message, extra_data=None):
+        """Unified logging with component tags and optional data."""
+        tagged_msg = f"[{component}] {message}"
+        
+        if extra_data and isinstance(extra_data, dict) and self.debug_mode:
+            # Add data as JSON if in debug mode
+            data_str = json.dumps(extra_data)
+            if len(data_str) > 100:  # Truncate long data
+                data_str = data_str[:97] + "..."
+            tagged_msg += f" | {data_str}"
+        
+        if level == 'debug':
+            self.get_logger().debug(tagged_msg)
+        elif level == 'info':
+            self.get_logger().info(tagged_msg)
+        elif level == 'warn':
+            self.get_logger().warn(tagged_msg)
+        elif level == 'error':
+            self.get_logger().error(tagged_msg)
 
 def main(args=None):
     """Main function to initialize and run the LIDAR detector node."""

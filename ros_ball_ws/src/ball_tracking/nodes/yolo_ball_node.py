@@ -45,6 +45,14 @@ Dependencies:
 - Numpy
 """
 
+import sys
+import os
+# Add the parent directory of 'config' to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+# Add the 'src' directory to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 import rclpy
 from rclpy.node import Node
 import MNN
@@ -57,17 +65,17 @@ from cv_bridge import CvBridge
 import cv2 as std_cv2
 import numpy as np
 import time
-import os
-from config.config_loader import ConfigLoader  # Import ConfigLoader
-from ball_tracking.resource_monitor import ResourceMonitor  # Add resource monitoring import
-from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
-from collections import deque  # Add import for deque
+import psutil  # Move this import to the top with others
 import json
+from collections import deque  # Add import for deque
+
+from config.config_loader import ConfigLoader  # Import ConfigLoader
+from utilities.resource_monitor import ResourceMonitor  # Add resource monitoring import
+from utilities.time_utils import TimeUtils  # Add TimeUtils import
 
 # Load configuration
 config_loader = ConfigLoader()
-config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'yolo_config.yaml')
-config = config_loader.load_yaml(config_path)
+config = config_loader.load_yaml('yolo_config.yaml')
 
 # Model configuration from config file
 MODEL_CONFIG = config.get('model', {
@@ -193,18 +201,90 @@ class TennisBallDetector(Node):
         # Preallocate tensor for reuse
         self._input_tensor = None
 
+        # Configure logging based on config
+        log_config = config.get('logging', {
+            'console_level': 'info',
+            'publish_level': 'debug',
+            'detection_log_rate': 10,
+            'max_errors': 50,
+            'performance_log_interval': 30
+        })
+        
+        # Set log level
+        self._configure_logging(log_config)
+        
+        # Initialize log file if configured
+        self._init_log_file()
+
+    def _configure_logging(self, log_config):
+        """Configure logger levels and parameters."""
+        # Map string log levels to rclpy.logging.LoggingSeverity values
+        level_map = {
+            'debug': rclpy.logging.LoggingSeverity.DEBUG,
+            'info': rclpy.logging.LoggingSeverity.INFO,
+            'warn': rclpy.logging.LoggingSeverity.WARN,
+            'error': rclpy.logging.LoggingSeverity.ERROR
+        }
+        
+        # Set logger level 
+        log_level = level_map.get(log_config.get('console_level', 'info').lower(), 
+                                  rclpy.logging.LoggingSeverity.INFO)
+        self.get_logger().set_level(log_level)
+        
+        # Store log config
+        self.log_config = log_config
+        
+        # Log what we're doing
+        self.get_logger().info(f"Logger configured with level: {log_config.get('console_level').upper()}")
+
     def _init_diagnostic_metrics(self):
         """Initialize metrics for diagnostic monitoring"""
         self.diagnostic_metrics = {
-            # These use deque with maxlen - Good practice
+            # Initialize all metrics that will be used later
             'fps_history': deque(maxlen=10),
             'processing_time_history': deque(maxlen=10),
             'inference_time_history': deque(maxlen=10),
+            'detection_rate_history': deque(maxlen=10),
+            'confidence_history': deque(maxlen=10),
             
-            # These are unbounded lists - Potential memory leaks
-            'errors': deque(maxlen=50),  # Bounded collection
+            # Initialize counters
+            'total_frames': 0,
+            'detected_frames': 0,
+            'missed_frames': 0,
+            
+            # Initialize detection data
+            'last_detection_position': (0.0, 0.0),
+            'last_detection_time': 0.0,
+            
+            # Error tracking
+            'errors': deque(maxlen=50),
             'warnings': deque(maxlen=50)
         }
+
+    def _init_log_file(self):
+        """Initialize log file if configured."""
+        log_file = self.log_config.get('log_file')
+        if not log_file:
+            return
+            
+        import logging
+        file_handler = logging.FileHandler(log_file, mode='a')
+        formatter = logging.Formatter(
+            '%(asctime)s - [%(levelname)s] - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(formatter)
+        
+        # Get the logger used by rclpy
+        logger_name = self.get_name()
+        logger = logging.getLogger(logger_name)
+        logger.addHandler(file_handler)
+        
+        # Set file logging level
+        file_level = self.log_config.get('file_level', 'debug').upper()
+        file_handler.setLevel(getattr(logging, file_level))
+        
+        self.get_logger().info(f"Log file initialized: {log_file} at level {file_level}")
 
     def load_model(self, config):
         """
@@ -214,14 +294,27 @@ class TennisBallDetector(Node):
             config (dict): Configuration parameters for the MNN runtime
         """
         try:
-            self.get_logger().info(f"Loading model from {MODEL_CONFIG['path']}...")
+            # Get model filename from the path in config
+            model_filename = os.path.basename(MODEL_CONFIG["path"])
+            
+            # Build absolute path to the model file
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            model_dir = os.path.join(script_dir, '..', 'models')
+            model_path = os.path.join(model_dir, model_filename)
+            
+            self.get_logger().info(f"Loading model from {model_path}...")
+            
+            # Check if model exists
+            if not os.path.exists(model_path):
+                self.get_logger().error(f"Model not found at {model_path}")
+                raise FileNotFoundError(f"Model file not found: {model_path}")
             
             # Initialize MNN runtime manager with our configuration
             self.runtime_manager = MNN.nn.create_runtime_manager((config,))
             
-            # Load the YOLO model from file
+            # Load the YOLO model from file using the absolute path
             self.net = MNN.nn.load_module_from_file(
-                MODEL_CONFIG["path"], [], [], runtime_manager=self.runtime_manager
+                model_path, [], [], runtime_manager=self.runtime_manager
             )
             
             # Create a test image to warm up the model
@@ -362,6 +455,24 @@ class TennisBallDetector(Node):
         best_box = [x0_val, y0_val, x1_val, y1_val]
         return best_box, final_confidence
 
+    def _trace_start(self, operation):
+        """Start timing an operation."""
+        if not hasattr(self, 'trace_points'):
+            self.trace_points = {}
+        self.trace_points[operation] = TimeUtils.now_as_float()
+
+    def _trace_end(self, operation):
+        """End timing an operation and return elapsed time in ms."""
+        if hasattr(self, 'trace_points') and operation in self.trace_points:
+            elapsed = (TimeUtils.now_as_float() - self.trace_points[operation]) * 1000
+            if not hasattr(self, 'trace_history'):
+                self.trace_history = {}
+            if operation not in self.trace_history:
+                self.trace_history[operation] = deque(maxlen=50)
+            self.trace_history[operation].append(elapsed)
+            return elapsed
+        return 0.0
+
     def image_callback(self, msg):
         """
         Process each incoming camera image to detect tennis balls.
@@ -369,6 +480,7 @@ class TennisBallDetector(Node):
         Args:
             msg (sensor_msgs.msg.Image): The incoming camera image from ROS
         """
+        self._trace_start('overall')
         # Skip frames in low power mode to reduce CPU usage
         if hasattr(self, 'frame_counter'):
             self.frame_counter += 1
@@ -390,18 +502,23 @@ class TennisBallDetector(Node):
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             
             # Preprocess the image for model input
+            self._trace_start('preprocess')
             input_tensor = self.preprocess_image(cv_image)
+            preprocess_time = self._trace_end('preprocess')
             
+            self._trace_start('inference')
             # Run the neural network to detect objects
-            infer_start = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
+            infer_start = TimeUtils.now_as_float()
             output_var = self.net.forward(input_tensor)
-            infer_time = (TimeUtils.now_as_float() - infer_start) * 1000  # milliseconds
+            infer_time = self._trace_end('inference')
             
             # Track inference time for diagnostics
             self.diagnostic_metrics['inference_time_history'].append(infer_time)
             
+            self._trace_start('postprocess')
             # Process the model output to find tennis balls
             best_box, confidence = self.process_detections(output_var)
+            postprocess_time = self._trace_end('postprocess')
             
             # If a tennis ball was detected, publish its position
             if best_box is not None:
@@ -414,14 +531,26 @@ class TennisBallDetector(Node):
                 height = y1 - y0
                 
                 # Update diagnostic metrics for detection
-                self.diagnostic_metrics['detected_frames'] += 1
+                if 'detected_frames' in self.diagnostic_metrics:
+                    self.diagnostic_metrics['detected_frames'] += 1
+                else:
+                    self.diagnostic_metrics['detected_frames'] = 1
+                    
                 self.diagnostic_metrics['last_detection_position'] = (center_x, center_y)
-                self.diagnostic_metrics['last_detection_time'] = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
+                self.diagnostic_metrics['last_detection_time'] = TimeUtils.now_as_float()
+                
+                # Safely append to collections
                 self.diagnostic_metrics['confidence_history'].append(confidence)
                 
                 # Calculate detection rate
                 detection_rate = self.diagnostic_metrics['detected_frames'] / self.image_count
-                self.diagnostic_metrics['detection_rate_history'].append(detection_rate)
+                
+                # Safely append to detection rate history
+                if 'detection_rate_history' in self.diagnostic_metrics:
+                    self.diagnostic_metrics['detection_rate_history'].append(detection_rate)
+                else:
+                    self.diagnostic_metrics['detection_rate_history'] = deque(maxlen=10)
+                    self.diagnostic_metrics['detection_rate_history'].append(detection_rate)
                 
                 # Log significant detections to avoid console flooding
                 if self.image_count % DIAG_CONFIG["log_interval"] == 0 or confidence > 0.6:
@@ -444,11 +573,11 @@ class TennisBallDetector(Node):
                 
                 position_msg.header.frame_id = "camera_frame"  # Use consistent frame ID
                 
-                # Add sequence number for better synchronization
+                # Track sequence internally (ROS2 doesn't use header.seq)
                 if not hasattr(self, 'seq_counter'):
                     self.seq_counter = 0
                 self.seq_counter += 1
-                position_msg.header.seq = self.seq_counter
+                # No need to set position_msg.header.seq in ROS2
                 
                 self.get_logger().debug(f"Publishing YOLO detection with original timestamp for synchronization")
                 
@@ -456,6 +585,20 @@ class TennisBallDetector(Node):
                 position_msg.point.y = float(center_y)
                 position_msg.point.z = float(confidence)  # Using z for confidence
                 self.ball_publisher.publish(position_msg)
+
+                # Store detailed data for high-confidence detections
+                if confidence > 0.5:
+                    if not hasattr(self, 'recent_detections'):
+                        self.recent_detections = deque(maxlen=10)
+                    
+                    self.recent_detections.append({
+                        "timestamp": TimeUtils.now_as_float(),
+                        "position": (center_x, center_y),
+                        "size": (width, height),
+                        "confidence": confidence,
+                        "aspect_ratio": width/height if height > 0 else 1.0,
+                        "frame_id": self.seq_counter
+                    })
             else:
                 # Only log "no detection" occasionally to avoid flooding logs
                 if self.image_count % 30 == 0:
@@ -477,6 +620,18 @@ class TennisBallDetector(Node):
                     f"Processing: {total_time:.1f}ms, "
                     f"Inference: {infer_time:.1f}ms"
                 )
+
+            overall_time = self._trace_end('overall')
+            
+            # Log detailed timing occasionally
+            if self.image_count % self.log_config.get('trace_log_interval', 100) == 0:
+                detail = {
+                    "preprocess_ms": preprocess_time,
+                    "inference_ms": infer_time,  # Change from inference_time to infer_time
+                    "postprocess_ms": postprocess_time,
+                    "overhead_ms": overall_time - (preprocess_time + infer_time + postprocess_time)  # Also change here
+                }
+                self._log('debug', 'TRACE', f"YOLO timing breakdown", detail)
 
         except Exception as e:
             self.get_logger().error(f"Error processing image: {str(e)}")
@@ -519,29 +674,24 @@ class TennisBallDetector(Node):
         if avg_detection_rate < 0.05 and elapsed_time > 20.0:  # Less than 5% detection rate
             errors.append(f"Very low detection rate: {avg_detection_rate*100:.1f}%")
         
-        # System resources
-        system_resources = {}
-        try:
-            import psutil
-            system_resources = {
-                'cpu_percent': psutil.cpu_percent(interval=None),
-                'memory_percent': psutil.virtual_memory().percent,
-                'threads': MODEL_CONFIG["thread_count"]
-            }
+        # System resources - no try/except needed now
+        system_resources = {
+            'cpu_percent': psutil.cpu_percent(interval=None),
+            'memory_percent': psutil.virtual_memory().percent,
+            'threads': MODEL_CONFIG["thread_count"]
+        }
+        
+        # Check for high resource usage
+        if system_resources['cpu_percent'] > 90.0:
+            warnings.append(f"Critical CPU usage: {system_resources['cpu_percent']:.1f}%")
             
-            # Check for high resource usage
-            if system_resources['cpu_percent'] > 90.0:
-                warnings.append(f"Critical CPU usage: {system_resources['cpu_percent']:.1f}%")
-                
-            # Add temperature if available
-            if hasattr(psutil, 'sensors_temperatures'):
-                temps = psutil.sensors_temperatures()
-                if temps and 'cpu_thermal' in temps:
-                    system_resources['temperature'] = temps['cpu_thermal'][0].current
-                    if system_resources['temperature'] > 80.0:  # Temperature in Celsius
-                        warnings.append(f"High CPU temperature: {system_resources['temperature']:.1f}°C")
-        except ImportError:
-            pass
+        # Add temperature if available
+        if hasattr(psutil, 'sensors_temperatures'):
+            temps = psutil.sensors_temperatures()
+            if temps and 'cpu_thermal' in temps:
+                system_resources['temperature'] = temps['cpu_thermal'][0].current
+                if system_resources['temperature'] > 80.0:  # Temperature in Celsius
+                    warnings.append(f"High CPU temperature: {system_resources['temperature']:.1f}°C")
         
         # Build diagnostics data structure
         diag_data = {
@@ -581,7 +731,18 @@ class TennisBallDetector(Node):
             "errors": errors,
             "warnings": warnings
         }
+
+        if hasattr(self, 'recent_detections') and len(self.recent_detections) > 0:
+            diag_data["detection"]["recent_detections"] = list(self.recent_detections)
         
+        # Run health check
+        health_issues = self.perform_health_check()
+        if health_issues:
+            for issue in health_issues:
+                self._log('warn', 'HEALTH', issue)
+            # Add to warnings
+            warnings.extend(health_issues)
+
         # Publish as JSON
         msg = String()
         msg.data = json.dumps(diag_data)
@@ -592,6 +753,27 @@ class TennisBallDetector(Node):
             f"YOLO diagnostics: {avg_fps:.1f} FPS, {avg_detection_rate*100:.1f}% detection rate, "
             f"Avg inference: {avg_inference_time:.1f}ms, Status: {diag_data['status']}"
         )
+
+    def perform_health_check(self):
+        """Run periodic health checks and self-diagnostics."""
+        health_issues = []
+        
+        # Check model state
+        if not hasattr(self, 'net') or self.net is None:
+            health_issues.append("YOLO model not loaded")
+        
+        # Check for excessive processing time
+        if (hasattr(self, 'diagnostic_metrics') and 
+            len(self.diagnostic_metrics['processing_time_history']) > 0):
+            avg_time = np.mean(list(self.diagnostic_metrics['processing_time_history']))
+            if avg_time > 500:  # More than 500ms is concerning
+                health_issues.append(f"Excessive processing time: {avg_time:.1f}ms")
+        
+        # Check memory state
+        if psutil.virtual_memory().percent > 95:
+            health_issues.append(f"Critical memory usage: {psutil.virtual_memory().percent}%")
+        
+        return health_issues
 
     def _handle_resource_alert(self, resource_type, value):
         """Handle high resource usage by adjusting detector behavior."""
@@ -605,6 +787,43 @@ class TennisBallDetector(Node):
         if resource_type == 'cpu' and value > 95.0 and not self.low_power_mode:
             self.get_logger().warn("Enabling low power mode due to high CPU usage")
             self.low_power_mode = True
+
+    def _log(self, level, component, message, data=None):
+        """Unified logging with component tags and optional JSON data."""
+        # Format the log message with component
+        formatted_msg = f"[{component}] {message}"
+        
+        # Add data as JSON if provided and in debug mode
+        if data and self.get_logger().get_effective_level() <= rclpy.logging.LoggingSeverity.DEBUG:
+            # Truncate data for console but keep full data for diagnostic publishing
+            data_str = json.dumps(data)[:100] 
+            if len(data_str) == 100:
+                data_str += "..."
+            formatted_msg += f" | {data_str}"
+        
+        # Log with appropriate level
+        if level == 'debug':
+            self.get_logger().debug(formatted_msg)
+        elif level == 'info':
+            self.get_logger().info(formatted_msg)
+        elif level == 'warn':
+            self.get_logger().warn(formatted_msg)
+        elif level == 'error':
+            self.get_logger().error(formatted_msg)
+            
+        # Store in error/warning history if needed
+        if level == 'error' and hasattr(self, 'diagnostic_metrics'):
+            self.diagnostic_metrics['errors'].append({
+                "time": TimeUtils.now_as_float(),
+                "message": message,
+                "data": data
+            })
+        elif level == 'warn' and hasattr(self, 'diagnostic_metrics'):
+            self.diagnostic_metrics['warnings'].append({
+                "time": TimeUtils.now_as_float(),
+                "message": message,
+                "data": data
+            })
 
     def destroy_node(self):
         """Clean up YOLO model resources."""

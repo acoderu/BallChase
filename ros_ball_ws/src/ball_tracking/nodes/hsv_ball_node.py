@@ -36,6 +36,14 @@ Data Pipeline:
    - PID controller for motor control
 """
 
+import sys
+import os
+# Add the parent directory of 'config' to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+# Add the 'src' directory to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -45,17 +53,19 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import time
-import os
-from config.config_loader import ConfigLoader  # Import ConfigLoader
-from ball_tracking.resource_monitor import ResourceMonitor  # Add resource monitoring import
-from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
+import psutil  # Move this import to the top with other imports
 import json
 from collections import deque  # Add import for deque
 
+from utilities.resource_monitor import ResourceMonitor  # Add resource monitoring import
+from utilities.time_utils import TimeUtils  # Add TimeUtils import
+
+# Now you can import ConfigLoader
+from config.config_loader import ConfigLoader  # Import ConfigLoader
+
 # Load configuration from file
 config_loader = ConfigLoader()
-config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'hsv_config.yaml')
-config = config_loader.load_yaml(config_path)
+config = config_loader.load_yaml('hsv_config.yaml')
 
 # Topic configuration from config file
 TOPICS = config.get('topics', {
@@ -249,7 +259,6 @@ class HSVTennisBallTracker(Node):
         """Configure performance optimizations based on RAM availability."""
         # With 16GB RAM, we can optimize for processing quality rather than memory usage
         try:
-            import psutil
             total_ram = psutil.virtual_memory().total / (1024 * 1024)  # MB
             
             # On Pi 5 with 16GB RAM, we can use more advanced options
@@ -265,14 +274,15 @@ class HSVTennisBallTracker(Node):
                 # Standard settings for lower memory systems
                 self.morphology_kernel = np.ones((5, 5), np.uint8)  # Simple kernel
                 self.use_enhanced_detection = False
-        except:
+        except Exception as e:
             # Default settings if we can't check memory
             self.morphology_kernel = np.ones((5, 5), np.uint8)
             self.use_enhanced_detection = False
+            self.get_logger().warn(f"Could not determine system memory. Using default settings: {e}")
         
         # Number of frames to skip in low power mode (0 means no skipping)
         self.low_power_skip_frames = 0
-    
+
     def _handle_resource_alert(self, resource_type, value):
         """Handle resource alerts by adjusting processing behavior."""
         self.get_logger().warn(f"Resource alert: {resource_type.upper()} at {value:.1f}%")
@@ -294,6 +304,124 @@ class HSVTennisBallTracker(Node):
                     'value': value,
                     'action': f'Increased frame skip to {self.low_power_skip_frames}'
                 })
+
+    def _configure_logging(self, log_config):
+        """Configure logging levels and behaviors."""
+        # Map string log levels to rclpy.logging.LoggingSeverity values
+        level_map = {
+            'debug': rclpy.logging.LoggingSeverity.DEBUG,
+            'info': rclpy.logging.LoggingSeverity.INFO,
+            'warn': rclpy.logging.LoggingSeverity.WARN,
+            'error': rclpy.logging.LoggingSeverity.ERROR
+        }
+        
+        # Get console log level from config or use default
+        console_level = log_config.get('console_level', 'info').lower()
+        log_level = level_map.get(console_level, rclpy.logging.LoggingSeverity.INFO)
+        
+        # Set the logger level
+        self.get_logger().set_level(log_level)
+        
+        # Store config values
+        self.log_interval = log_config.get('log_interval', 10)
+        self.debug_level = log_config.get('debug_level', 1)
+        
+        self.get_logger().info(f"Logger configured with level: {console_level.upper()}")
+
+    def _log(self, level, context, message, data=None):
+        """
+        Unified logging with consistent formatting and context.
+        
+        Args:
+            level (str): 'debug', 'info', 'warn', or 'error'
+            context (str): Component or subsystem generating the log
+            message (str): Main log message
+            data (dict, optional): Additional structured data
+        """
+        # Format with context
+        formatted_message = f"[{context}] {message}"
+        
+        # Log at appropriate level
+        if level == 'debug':
+            self.get_logger().debug(formatted_message)
+        elif level == 'info':
+            self.get_logger().info(formatted_message)
+        elif level == 'warn':
+            self.get_logger().warn(formatted_message)
+        elif level == 'error':
+            self.get_logger().error(formatted_message)
+            # Add to error history
+            if hasattr(self, 'errors'):
+                self.errors.append({
+                    'timestamp': TimeUtils.now_as_float(),
+                    'context': context,
+                    'message': message,
+                    'data': data
+                })
+        
+        # Store structured data for diagnostics if provided
+        if data and hasattr(self, 'diagnostic_metrics'):
+            if f'{level}_data' not in self.diagnostic_metrics:
+                self.diagnostic_metrics[f'{level}_data'] = deque(maxlen=20)
+            self.diagnostic_metrics[f'{level}_data'].append({
+                'timestamp': TimeUtils.now_as_float(),
+                'context': context,
+                'message': message,
+                'data': data
+            })
+
+    def _generate_trace_id(self):
+        """Generate a unique trace ID for correlating log events."""
+        if not hasattr(self, '_trace_counter'):
+            self._trace_counter = 0
+        self._trace_counter += 1
+        return f"hsv-{self._trace_counter}"
+
+    def _init_log_file(self):
+        """Initialize file-based logging if configured."""
+        # Check if file logging is configured
+        log_file = config.get('logging', {}).get('log_file')
+        if not log_file:
+            return
+            
+        try:
+            import logging
+            
+            # Create log directory if needed
+            log_dir = os.path.dirname(log_file)
+            if log_dir and not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+                
+            # Set up file handler with rotation
+            max_bytes = config.get('logging', {}).get('max_file_size_mb', 10) * 1024 * 1024
+            backup_count = config.get('logging', {}).get('backup_count', 3)
+            
+            from logging.handlers import RotatingFileHandler
+            handler = RotatingFileHandler(
+                log_file, maxBytes=max_bytes, backupCount=backup_count
+            )
+            
+            # Set formatter
+            formatter = logging.Formatter(
+                '%(asctime)s - [%(name)s] [%(levelname)s] %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            handler.setFormatter(formatter)
+            
+            # Get the underlying logger used by rclpy
+            logger_name = self.get_name()
+            logger = logging.getLogger(logger_name)
+            logger.addHandler(handler)
+            
+            # Set file logging level
+            file_level_name = config.get('logging', {}).get('file_level', 'DEBUG')
+            file_level = getattr(logging, file_level_name)
+            handler.setLevel(file_level)
+            
+            self.get_logger().info(f"Log file initialized: {log_file}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to initialize log file: {str(e)}")
 
     def image_callback(self, msg):
         """
@@ -324,13 +452,12 @@ class HSVTennisBallTracker(Node):
         processing_start = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.frame_count += 1
         
+        trace_id = self._generate_trace_id()
+        self._log('debug', 'FRAME', f"Processing frame {self.frame_count}", {'trace_id': trace_id})
+
         try:
-            # Pre-allocate or reuse frame buffer
-            if not hasattr(self, '_frame_buffer') or self._frame_buffer is None:
-                self._frame_buffer = np.zeros((msg.height, msg.width, 3), dtype=np.uint8)
-            
-            # Step 1: Convert ROS image to OpenCV format
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8', dst=self._frame_buffer)
+            # Step 1: Convert ROS image to OpenCV format - remove dst parameter
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             
             # Step 2: Resize to target resolution (320x320 to match YOLO)
             original_height, original_width = frame.shape[:2]
@@ -341,7 +468,8 @@ class HSVTennisBallTracker(Node):
                 display_frame = frame.copy()
             
             # Step 3: Apply HSV color filtering to detect the tennis ball
-            detected_ball = self._detect_ball_in_frame(frame, msg.header)
+            # Pass the trace_id to the _detect_ball_in_frame method
+            detected_ball = self._detect_ball_in_frame(frame, msg.header, trace_id)
             
             # Step 4: Update visualization if enabled
             if self.enable_visualization:
@@ -356,13 +484,14 @@ class HSVTennisBallTracker(Node):
             import traceback
             self.get_logger().error(traceback.format_exc())
 
-    def _detect_ball_in_frame(self, frame, header):
+    def _detect_ball_in_frame(self, frame, header, trace_id=None):
         """
         Apply HSV color filtering to detect a tennis ball in the frame.
         
         Args:
             frame (numpy.ndarray): OpenCV image in BGR format
             header (Header): ROS message header from the original image
+            trace_id (str, optional): Trace ID for correlation in logs
             
         Returns:
             dict: Detection information or None if no ball found
@@ -510,12 +639,6 @@ class HSVTennisBallTracker(Node):
             position_msg.point.y = float(center_y)
             position_msg.point.z = float(best_confidence)  # Use z for confidence
             
-            # Add sequence number to header for better synchronization
-            if not hasattr(self, 'seq_counter'):
-                self.seq_counter = 0
-            self.seq_counter += 1
-            position_msg.header.seq = self.seq_counter
-            
             self.get_logger().debug(f"Publishing 2D position with timestamp for synchronization")
             
             # Publish the ball position
@@ -534,8 +657,15 @@ class HSVTennisBallTracker(Node):
             # Store for diagnostics
             if hasattr(self, 'diagnostic_metrics'):
                 self.diagnostic_metrics['last_detection_position'] = (center_x, center_y)
-                self.diagnostic_metrics['last_detection_time'] = TimeUtils.now_as_float()  # Use TimeUtils
+                self.diagnostic_metrics['last_detection_time'] = TimeUtils.now_as_float()
                 
+            # Use the trace_id if provided, otherwise use 'unknown'
+            trace_info = {'confidence': best_confidence}
+            if trace_id is not None:
+                trace_info['trace_id'] = trace_id
+                
+            self._log('info', 'DETECTION', f"Ball detected at ({center_x:.1f}, {center_y:.1f})", trace_info)
+
             # Return detection information
             return {
                 'center': best_center,
@@ -667,8 +797,6 @@ class HSVTennisBallTracker(Node):
         # Calculate timing metrics
         processing_time = (TimeUtils.now_as_float() - processing_start) * 1000  # Use TimeUtils
         self.processing_times.append(processing_time)
-        if len(self.processing_times) > 50:
-            self.processing_times.pop(0)
             
         avg_processing_time = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
         
@@ -750,10 +878,9 @@ class HSVTennisBallTracker(Node):
         if avg_detection_rate < 0.1 and elapsed_time > 10.0:  # Less than 10% detection rate
             errors.append(f"Very low detection rate: {avg_detection_rate*100:.1f}%")
         
-        # System resources
+        # System resources - no try/except for import needed now
         system_resources = {}
         try:
-            import psutil
             system_resources = {
                 'cpu_percent': psutil.cpu_percent(interval=None),
                 'memory_percent': psutil.virtual_memory().percent
@@ -768,8 +895,9 @@ class HSVTennisBallTracker(Node):
                 temps = psutil.sensors_temperatures()
                 if temps and 'cpu_thermal' in temps:
                     system_resources['temperature'] = temps['cpu_thermal'][0].current
-        except ImportError:
-            pass
+        except Exception as e:
+            # Handle any errors accessing system metrics
+            self.get_logger().warn(f"Error getting system resources: {e}")
         
         # Build diagnostics data structure
         diag_data = {
@@ -820,6 +948,37 @@ class HSVTennisBallTracker(Node):
             f"Status: {diag_data['status']}"
         )
 
+    def _check_health_metrics(self):
+        """Evaluate system health and make adjustments if needed."""
+        # Calculate health metrics
+        if hasattr(self, 'diagnostic_metrics'):
+            # Calculate detection health
+            frames = self.diagnostic_metrics['total_frames']
+            missed = self.diagnostic_metrics['missed_frames']
+            detection_rate = (frames - missed) / frames if frames > 0 else 0
+            
+            # Calculate processing health based on time
+            if len(self.diagnostic_metrics['processing_time_history']) > 0:
+                avg_time = np.mean(list(self.diagnostic_metrics['processing_time_history']))
+                processing_health = 1.0 - min(avg_time / 100.0, 1.0)  # 0-1 scale
+            else:
+                processing_health = 1.0
+                
+            # Calculate overall health
+            overall_health = 0.6 * detection_rate + 0.4 * processing_health
+            
+            # Take action based on health
+            if overall_health < 0.3:  # Critical health
+                self._log('warn', 'HEALTH', f"Critical health detected ({overall_health:.2f})")
+                # Adjust parameters for recovery
+                self.low_power_skip_frames = 2  # Skip more frames
+            elif overall_health < 0.6:  # Poor health
+                self._log('info', 'HEALTH', f"Suboptimal health detected ({overall_health:.2f})")
+                self.low_power_skip_frames = 1  # Skip some frames
+            elif overall_health > 0.8 and self.low_power_skip_frames > 0:  # Good health
+                self._log('info', 'HEALTH', f"Health recovered ({overall_health:.2f})")
+                self.low_power_skip_frames = 0  # Return to normal
+
     def destroy_node(self):
         """Ensure proper cleanup of resources."""
         # Release any capture objects
@@ -833,15 +992,66 @@ class HSVTennisBallTracker(Node):
             except Exception as e:
                 self.get_logger().warn(f"Error closing OpenCV windows: {str(e)}")
         
-        # Clear large image buffers
-        if hasattr(self, '_frame_buffer'):
-            self._frame_buffer = None
-        
         # Stop any threads
         if hasattr(self, 'resource_monitor') and self.resource_monitor:
             self.resource_monitor.stop()
         
         super().destroy_node()
+
+    def _collect_debug_data(self, frame, mask, contours, detection):
+        """Collect detailed debug data if in debug mode."""
+        if self.debug_level < 2:
+            return None  # Skip if not in debug mode
+            
+        # Create debug data structure
+        debug_data = {
+            'frame_time': TimeUtils.now_as_float(),
+            'frame_count': self.frame_count,
+            'detection_present': detection is not None
+        }
+        
+        # Add HSV histogram data (sampled)
+        if frame is not None:
+            try:
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                h_hist = cv2.calcHist([hsv], [0], None, [18], [0, 180])
+                s_hist = cv2.calcHist([hsv], [1], None, [10], [0, 256])
+                v_hist = cv2.calcHist([hsv], [2], None, [10], [0, 256])
+                debug_data['hsv_hist'] = {
+                    'h': h_hist.flatten().tolist(),
+                    's': s_hist.flatten().tolist(),
+                    'v': v_hist.flatten().tolist()
+                }
+            except Exception as e:
+                debug_data['hsv_hist_error'] = str(e)
+        
+        # Add contour statistics
+        if contours:
+            contour_stats = []
+            for i, cnt in enumerate(contours[:5]):  # First 5 contours only
+                area = cv2.contourArea(cnt)
+                if area < 10:  # Skip tiny contours
+                    continue
+                    
+                (cx, cy), radius = cv2.minEnclosingCircle(cnt)
+                circle_area = np.pi * (radius ** 2) if radius > 0 else 1
+                circularity = area / circle_area
+                
+                contour_stats.append({
+                    'id': i,
+                    'area': float(area),
+                    'center': (float(cx), float(cy)),
+                    'radius': float(radius),
+                    'circularity': float(circularity)
+                })
+            debug_data['contours'] = contour_stats
+        
+        # Store debug data
+        if not hasattr(self, 'debug_history'):
+            self.debug_history = deque(maxlen=10)
+        self.debug_history.append(debug_data)
+        
+        return debug_data
 
 def main(args=None):
     """Main function to initialize and run the HSV Tennis Ball Tracker node."""
