@@ -207,13 +207,13 @@ class HSVTennisBallTracker(Node):
         self.no_detection_count = 0
         self.last_detection_time = None
         
-        # Detection statistics
+        # Detection statistics - replace unbounded lists with deque
         self.detection_count = 0
-        self.detection_sizes = []  # List of detected ball sizes
-        self.detection_confidences = []  # List of detection confidences
+        self.detection_sizes = deque(maxlen=50)  # Limit to last 50 detections
+        self.detection_confidences = deque(maxlen=50)  # Limit to last 50 detections
         
         # Processing timing
-        self.processing_times = []
+        self.processing_times = deque(maxlen=50)  # Limit to last 50 times
         
         # Initialize diagnostic metrics
         self.diagnostic_metrics = {
@@ -224,8 +224,8 @@ class HSVTennisBallTracker(Node):
             'last_detection_time': 0.0,
             'total_frames': 0,
             'missed_frames': 0,
-            'errors': [],
-            'warnings': []
+            'errors': deque(maxlen=10),  # Limit error history
+            'warnings': deque(maxlen=10)  # Limit warning history
         }
 
     def _setup_visualization(self):
@@ -514,12 +514,10 @@ class HSVTennisBallTracker(Node):
             self.detection_count += 1
             self.last_detection_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
             
-            # Store for statistics (keep last 50)
+            # Store for statistics (keep last 50) - REPLACE THIS SECTION
             self.detection_sizes.append(best_area)
             self.detection_confidences.append(best_confidence)
-            if len(self.detection_sizes) > 50:
-                self.detection_sizes.pop(0)
-                self.detection_confidences.pop(0)
+            # No need for manual size checking as deque handles it automatically
             
             # Store for diagnostics
             if hasattr(self, 'diagnostic_metrics'):

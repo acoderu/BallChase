@@ -54,6 +54,7 @@ from tf2_ros import TransformBroadcaster
 from config.config_loader import ConfigLoader  # Add ConfigLoader import
 import os
 import threading
+from collections import deque  # Add import for deque
 from ball_tracking.resource_monitor import ResourceMonitor
 from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
 
@@ -235,21 +236,28 @@ class TennisBallLidarDetector(Node):
         self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.processed_scans = 0
         self.successful_detections = 0
-        self.detection_times = []
+        
+        # Use deque with maxlen for detection times instead of unbounded list
+        max_detection_times = DIAG_CONFIG['max_detection_times']
+        self.detection_times = deque(maxlen=max_detection_times)
         
         # Detection source statistics
         self.yolo_detections = 0
         self.hsv_detections = 0
         
-        # Error tracking (for diagnostics)
-        self.errors = []
-        self.error_history_size = DIAG_CONFIG.get('error_history_size', 10)
+        # Error tracking (for diagnostics) - use deque with maxlen
+        error_history_size = DIAG_CONFIG.get('error_history_size', 10)
+        self.errors = deque(maxlen=error_history_size)
+        self.warnings = deque(maxlen=error_history_size) # Add warnings collection too
         self.last_error_time = 0
         
         # System health indicators
         self.lidar_health = 1.0  # 0.0 to 1.0 scale
         self.detection_health = 1.0
         self.detection_latency = 0.0
+        
+        # Add point data history with bounded size
+        self.point_history = deque(maxlen=100)  # Keep last 100 sets of points
     
     def _setup_subscribers(self):
         """Set up all subscribers for this node."""
@@ -442,10 +450,6 @@ class TennisBallLidarDetector(Node):
         # Log processing time for this detection
         processing_time = (TimeUtils.now_as_float() - detection_start_time) * 1000  # in ms
         self.detection_times.append(processing_time)
-        # Keep only the last N detection times
-        max_detection_times = DIAG_CONFIG['max_detection_times']
-        if len(self.detection_times) > max_detection_times:
-            self.detection_times.pop(0)
         
         # Update detection latency metric
         self.detection_latency = processing_time
@@ -775,8 +779,9 @@ class TennisBallLidarDetector(Node):
             
             # Extract recent errors for diagnostics
             recent_errors = []
+            cutoff_time = current_time - 300  # Last 5 minutes
             for error in self.errors:
-                if current_time - error["timestamp"] < 300:  # errors from last 5 minutes
+                if error["timestamp"] > cutoff_time:
                     recent_errors.append(error["message"])
             
             # Create comprehensive diagnostics message in expected format
@@ -874,26 +879,59 @@ class TennisBallLidarDetector(Node):
             self.get_logger().warn(
                 f"Temporarily reducing LIDAR detection samples from {original_samples} to {self.detection_samples}"
             )
+            
+            # Add resource adaptations tracking with deque
+            if not hasattr(self, 'resource_adaptations'):
+                self.resource_adaptations = deque(maxlen=20)  # Keep only last 20 adaptations
+            
+            self.resource_adaptations.append({
+                "timestamp": TimeUtils.now_as_float(),
+                "type": resource_type,
+                "value": value,
+                "action": f"Reduced detection samples to {self.detection_samples}"
+            })
     
     def log_error(self, error_message):
         """Log an error and add it to error history for diagnostics."""
-        self.get_logger().error(f"LIDAR: {error_message}")
+        current_time = TimeUtils.now_as_float()
         
-        # Add to error list for diagnostics
-        self.errors.append({
-            "timestamp": TimeUtils.now_as_float(),
-            "message": error_message
-        })
+        # Track error frequency by type
+        if not hasattr(self, 'error_counts'):
+            self.error_counts = {}
+            self.error_last_logged = {}
         
-        # Keep error list at appropriate size
-        if len(self.errors) > self.error_history_size:
-            self.errors.pop(0)
+        if error_message not in self.error_counts:
+            self.error_counts[error_message] = 1
+            self.error_last_logged[error_message] = 0  # Never logged before
+        else:
+            self.error_counts[error_message] += 1
+        
+        # Determine if we should log this error (always log first occurrence and then rate-limit)
+        should_log = False
+        time_since_last_log = current_time - self.error_last_logged.get(error_message, 0)
+        
+        # Always log the first occurrence or if it's been a while since we logged this error
+        if self.error_counts[error_message] == 1 or time_since_last_log > 10.0:
+            should_log = True
+            self.error_last_logged[error_message] = current_time
             
-        # Update health based on error frequency
-        self.last_error_time = TimeUtils.now_as_float()
+            # For repeated errors, include the count
+            if self.error_counts[error_message] > 1:
+                error_message = f"{error_message} (occurred {self.error_counts[error_message]} times)"
         
-        # Reduce LIDAR health score temporarily after an error
-        self.lidar_health = max(0.3, self.lidar_health - 0.2)
+        if should_log:
+            self.get_logger().error(f"LIDAR: {error_message}")
+            # Add to error list for diagnostics
+            self.errors.append({
+                "timestamp": current_time,
+                "message": error_message
+            })
+            
+            # Update health based on error frequency
+            self.last_error_time = current_time
+            
+            # Reduce health score temporarily after an error
+            self.lidar_health = max(0.3, self.lidar_health - 0.2)
     
     def destroy_node(self):
         """Clean up resources when node is shutting down."""

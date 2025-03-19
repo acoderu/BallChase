@@ -430,10 +430,10 @@ class KalmanFilterFusion(Node):
         self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.updates_processed = 0
 
-        # Add error tracking for diagnostics
-        self.errors = []
-        self.warnings = []
-        self.error_history_size = fusion_config.get('diagnostics', {}).get('error_history_size', 10)
+        # Add error tracking for diagnostics - ensure all are bounded
+        self.error_history_size = DIAG_CONFIG.get('error_history_size', 10)
+        self.errors = deque(maxlen=self.error_history_size)
+        self.warnings = deque(maxlen=self.error_history_size)
         self.last_error_time = 0
         
         # Add health metrics
@@ -1389,9 +1389,9 @@ class KalmanFilterFusion(Node):
                 
                 # Also report this in next system diagnostics
                 if not hasattr(self, 'resource_warnings'):
-                    self.resource_warnings = []
+                    self.resource_warnings = deque(maxlen=20)  # Keep only last 20 warnings
                 self.resource_warnings.append({
-                    "timestamp": time.time(),
+                    "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time() 
                     "type": resource_type,
                     "value": value,
                     "action": f"Reduced update rate to {1.0/new_period:.1f} Hz"
@@ -1409,21 +1409,17 @@ class KalmanFilterFusion(Node):
             self.get_logger().warning(f"FUSION: {error_message}")
             # Add to warning list for diagnostics
             self.warnings.append({
-                "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time()
+                "timestamp": TimeUtils.now_as_float(),
                 "message": error_message
             })
         else:
             self.get_logger().error(f"FUSION: {error_message}")
             # Add to error list for diagnostics
             self.errors.append({
-                "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time()
+                "timestamp": TimeUtils.now_as_float(),
                 "message": error_message
             })
             
-            # Keep error list at appropriate size
-            if len(self.errors) > self.error_history_size:
-                self.errors.pop(0)
-                
             # Update health based on error frequency
             self.last_error_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
             

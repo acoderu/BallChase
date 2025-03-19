@@ -193,15 +193,12 @@ class TennisBallDetector(Node):
     def _init_diagnostic_metrics(self):
         """Initialize metrics for diagnostic monitoring"""
         self.diagnostic_metrics = {
+            # These use deque with maxlen - Good practice
             'fps_history': deque(maxlen=10),
             'processing_time_history': deque(maxlen=10),
             'inference_time_history': deque(maxlen=10),
-            'detection_rate_history': deque(maxlen=10),
-            'confidence_history': deque(maxlen=20),
-            'last_detection_position': None,
-            'last_detection_time': 0.0,
-            'total_frames': 0,
-            'detected_frames': 0,
+            
+            # These are unbounded lists - Potential memory leaks
             'errors': [],
             'warnings': []
         }

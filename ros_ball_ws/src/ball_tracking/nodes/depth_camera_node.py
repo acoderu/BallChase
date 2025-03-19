@@ -61,6 +61,7 @@ from config.config_loader import ConfigLoader  # Import ConfigLoader
 import json
 from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
 from std_msgs.msg import String
+from collections import deque  # Add import for deque
 
 # Load configuration from file
 config_loader = ConfigLoader()
@@ -73,6 +74,9 @@ DEPTH_CONFIG = config.get('depth', {
     "min_depth": 0.1,         # Minimum valid depth in meters
     "max_depth": 8.0,         # Maximum valid depth in meters
     "radius": 3,              # Radius around detection point to sample depth values
+    "min_valid_points": 5,    # Minimum number of valid depth points required for reliable estimation
+    "adaptive_radius": True,  # Whether to try larger radius if not enough valid points
+    "max_radius": 7,          # Maximum radius to try when using adaptive sampling
     "detection_resolution": {  # Resolution of detection images (YOLO/HSV)
         "width": 320,
         "height": 320
@@ -109,6 +113,12 @@ if os.environ.get('RASPBERRY_PI') == '1':
     
 # Add resource monitoring import
 from ball_tracking.resource_monitor import ResourceMonitor
+
+# Define the common reference frame for the robot
+COMMON_REFERENCE_FRAME = config.get('frames', {
+    "reference_frame": "base_link",  # Common reference frame for all sensors
+    "transform_timeout": 0.1          # Timeout for transform lookups in seconds
+})
 
 class TennisBall3DPositionEstimator(Node):
     """
@@ -228,7 +238,11 @@ class TennisBall3DPositionEstimator(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         
-        self.get_logger().info("Transform listener initialized for cross-sensor coordination")
+        # Add common reference frame
+        self.reference_frame = COMMON_REFERENCE_FRAME["reference_frame"]
+        self.transform_timeout = COMMON_REFERENCE_FRAME["transform_timeout"]
+        
+        self.get_logger().info(f"Transform listener initialized - using '{self.reference_frame}' as reference frame")
     
     def _setup_subscriptions(self):
         """Set up all subscriptions for this node."""
@@ -307,13 +321,20 @@ class TennisBall3DPositionEstimator(Node):
         self.hsv_count = 0
         self.successful_conversions = 0
         self.last_fps_log_time = TimeUtils.now_as_float()  # Use TimeUtils
-        self.processing_times = []
+        
+        # Use deque with maxlen instead of lists for bounded buffer sizes
+        max_history = DIAG_CONFIG.get('history_length', 100)
+        self.processing_times = deque(maxlen=max_history)
         
         # Add error tracking
-        self.errors = []
-        self.warnings = []
+        self.errors = deque(maxlen=self.error_history_size)
+        self.warnings = deque(maxlen=self.error_history_size)
         self.error_history_size = DIAG_CONFIG.get('error_history_size', 10)
         self.last_error_time = 0
+        
+        # Error tracking by type to detect repeated errors
+        self.error_counts = {}
+        self.error_last_logged = {}
         
         # Add health metrics
         self.depth_camera_health = 1.0  # 0.0 to 1.0 scale
@@ -322,30 +343,49 @@ class TennisBall3DPositionEstimator(Node):
     
     def log_error(self, error_message, is_warning=False):
         """Log an error and add it to error history for diagnostics."""
-        if is_warning:
-            self.get_logger().warning(f"DEPTH: {error_message}")
-            # Add to warning list for diagnostics
-            self.warnings.append({
-                "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils
-                "message": error_message
-            })
+        current_time = TimeUtils.now_as_float()
+        
+        # Track error frequency by type
+        if error_message not in self.error_counts:
+            self.error_counts[error_message] = 1
+            self.error_last_logged[error_message] = 0  # Never logged before
         else:
-            self.get_logger().error(f"DEPTH: {error_message}")
-            # Add to error list for diagnostics
-            self.errors.append({
-                "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils
-                "message": error_message
-            })
+            self.error_counts[error_message] += 1
+        
+        # Determine if we should log this error (always log first occurrence and then rate-limit)
+        should_log = False
+        time_since_last_log = current_time - self.error_last_logged.get(error_message, 0)
+        
+        # Always log the first occurrence or if it's been a while since we logged this error
+        if self.error_counts[error_message] == 1 or time_since_last_log > 10.0:
+            should_log = True
+            self.error_last_logged[error_message] = current_time
             
-            # Keep error list at appropriate size
-            if len(self.errors) > self.error_history_size:
-                self.errors.pop(0)
+            # For repeated errors, include the count
+            if self.error_counts[error_message] > 1:
+                error_message = f"{error_message} (occurred {self.error_counts[error_message]} times)"
+        
+        if should_log:
+            if is_warning:
+                self.get_logger().warning(f"DEPTH: {error_message}")
+                # Add to warning list for diagnostics
+                self.warnings.append({
+                    "timestamp": current_time,
+                    "message": error_message
+                })
+            else:
+                self.get_logger().error(f"DEPTH: {error_message}")
+                # Add to error list for diagnostics
+                self.errors.append({
+                    "timestamp": current_time,
+                    "message": error_message
+                })
                 
-            # Update health based on error frequency
-            self.last_error_time = TimeUtils.now_as_float()  # Use TimeUtils
-            
-            # Reduce health score temporarily after an error
-            self.depth_camera_health = max(0.3, self.depth_camera_health - 0.2)
+                # Update health based on error frequency
+                self.last_error_time = current_time
+                
+                # Reduce health score temporarily after an error
+                self.depth_camera_health = max(0.3, self.depth_camera_health - 0.2)
     
     def camera_info_callback(self, msg):
         """
@@ -438,8 +478,7 @@ class TennisBall3DPositionEstimator(Node):
     def _update_processing_stats(self, process_time):
         """Update processing statistics for performance tracking."""
         self.processing_times.append(process_time)
-        if len(self.processing_times) > 100:
-            self.processing_times.pop(0)
+        # No need to check size and pop - deque handles this automatically
     
     def get_3d_position(self, detection_msg, source):
         """
@@ -465,47 +504,24 @@ class TennisBall3DPositionEstimator(Node):
             pixel_y = int(round(orig_y * self.y_scale))
             
             # Step 2: Check if coordinates are within valid bounds
-            # (leaving room for radius sampling around the point)
-            if (pixel_x < self.radius or pixel_x >= self.depth_width - self.radius or 
-                pixel_y < self.radius or pixel_y >= self.depth_height - self.radius):
+            # Ensure enough margin for adaptive radius sampling
+            max_possible_radius = DEPTH_CONFIG.get("max_radius", 7)
+            if (pixel_x < max_possible_radius or pixel_x >= self.depth_width - max_possible_radius or 
+                pixel_y < max_possible_radius or pixel_y >= self.depth_height - max_possible_radius):
                 return False
             
             # Step 3: Convert depth image to a numpy array
             depth_array = self.cv_bridge.imgmsg_to_cv2(self.depth_image)
             
-            # Step 4: Extract a small region around the detection point
-            # Use a smaller radius on Raspberry Pi 5 if downsampling is enabled
-            radius = self.radius
-            if self.enable_downsampling:
-                # For every other frame, use an even smaller radius
-                if hasattr(self, 'frame_counter'):
-                    self.frame_counter += 1
-                else:
-                    self.frame_counter = 0
-                
-                if self.frame_counter % 2 == 0:
-                    radius = max(1, radius - 1)  # Use a smaller radius
+            # Step 4: Extract depth using adaptive radius if needed
+            median_depth, depth_reliability, valid_points = self._get_reliable_depth(
+                depth_array, pixel_x, pixel_y)
             
-            min_y = max(0, pixel_y - radius)
-            max_y = min(self.depth_height, pixel_y + radius + 1)
-            min_x = max(0, pixel_x - radius)
-            max_x = min(self.depth_width, pixel_x + radius + 1)
-            
-            depth_region = depth_array[min_y:max_y, min_x:max_x].astype(np.float32)
-            
-            # Step 5: Convert raw depth values to meters
-            depth_region *= DEPTH_CONFIG["scale"]
-            
-            # Step 6: Filter out invalid depths
-            valid_mask = (depth_region > DEPTH_CONFIG["min_depth"]) & (depth_region < DEPTH_CONFIG["max_depth"])
-            if not np.any(valid_mask):
+            # If no reliable depth was found, return False
+            if median_depth is None:
                 return False
             
-            # Step 7: Calculate median of valid depths
-            # (median is more robust to outliers than mean)
-            median_depth = float(np.median(depth_region[valid_mask]))
-            
-            # Step 8: Use the pinhole camera model to convert to 3D
+            # Step 5: Use the pinhole camera model to convert to 3D
             # These equations convert from pixel coordinates to 3D coordinates:
             # X = (u - cx) * Z / fx
             # Y = (v - cy) * Z / fy
@@ -514,66 +530,152 @@ class TennisBall3DPositionEstimator(Node):
             y = (pixel_y - self.cy) * median_depth / self.fy
             z = median_depth
             
-            # Step 9: Create and publish 3D position message
-            position_msg = PointStamped()
+            # Step 9: Create the 3D position message but don't publish yet
+            camera_position_msg = PointStamped()
             
             # IMPORTANT: Use the timestamp from original detection
             # Validate timestamp before using it
             if TimeUtils.is_timestamp_valid(detection_msg.header.stamp):
-                position_msg.header.stamp = detection_msg.header.stamp
+                camera_position_msg.header.stamp = detection_msg.header.stamp
                 self.get_logger().debug(f"Using original timestamp from {source} for synchronization")
             else:
-                position_msg.header.stamp = TimeUtils.now_as_ros_time()
+                camera_position_msg.header.stamp = TimeUtils.now_as_ros_time()
                 self.get_logger().debug(f"Using current time as timestamp (invalid original timestamp)")
             
-            # Set the correct frame ID for consistent coordinate system
-            position_msg.header.frame_id = "camera_frame"
+            # Set the frame ID to the actual camera frame
+            camera_position_msg.header.frame_id = "camera_frame"
             
             # Add sequence number for better synchronization
             if not hasattr(self, 'seq_counter'):
                 self.seq_counter = 0
             self.seq_counter += 1
-            position_msg.header.seq = self.seq_counter
+            camera_position_msg.header.seq = self.seq_counter
             
-            # Log that we're preserving the timestamp for synchronization
-            self.get_logger().debug(
-                f"Publishing 3D position with preserved timestamp from {source} for synchronization"
-            )
+            camera_position_msg.point.x = x
+            camera_position_msg.point.y = y
+            camera_position_msg.point.z = z
             
-            position_msg.point.x = x
-            position_msg.point.y = y
-            position_msg.point.z = z
-            
-            # Publish to source-specific topic
-            if source == "YOLO":
-                self.yolo_3d_publisher.publish(position_msg)
-            else:  # HSV
-                self.hsv_3d_publisher.publish(position_msg)
-            
-            # Also publish to combined topic for backward compatibility
-            self.position_publisher.publish(position_msg)
-            
-            self.successful_conversions += 1
-            
-            # Log performance periodically
-            self._log_performance(x, y, z, source)
-            
-            # Update detection health on successful conversion
-            if hasattr(self, 'detection_health'):
-                self.detection_health = min(1.0, self.detection_health + 0.05)
-            
-            return True
+            # Step 10: Transform position to common reference frame before publishing
+            transformed_msg = self._transform_to_reference_frame(camera_position_msg)
+            if transformed_msg:
+                # Publish to source-specific topic
+                if source == "YOLO":
+                    self.yolo_3d_publisher.publish(transformed_msg)
+                else:  # HSV
+                    self.hsv_3d_publisher.publish(transformed_msg)
+                
+                # Also publish to combined topic for backward compatibility
+                self.position_publisher.publish(transformed_msg)
+                
+                self.successful_conversions += 1
+                
+                # Log performance periodically (use transformed coordinates)
+                self._log_performance(
+                    transformed_msg.point.x,
+                    transformed_msg.point.y, 
+                    transformed_msg.point.z,
+                    source
+                )
+                
+                # Update detection health on successful conversion
+                if hasattr(self, 'detection_health'):
+                    self.detection_health = min(1.0, self.detection_health + 0.05)
+                
+                # Add depth reliability to point metadata (store in a class variable)
+                if not hasattr(self, 'depth_reliability'):
+                    self.depth_reliability = {}
+                self.depth_reliability[source] = {
+                    'value': depth_reliability,
+                    'valid_points': valid_points,
+                    'timestamp': TimeUtils.now_as_float()
+                }
+                
+                # Include reliability in logging
+                self.get_logger().debug(
+                    f"Depth reliability: {depth_reliability:.2f} ({valid_points} valid points)"
+                )
+                
+                return True
+            else:
+                # If transformation failed, log the error and return False
+                if not hasattr(self, '_transform_error_logged'):
+                    self.log_error(f"Failed to transform position from camera_frame to {self.reference_frame}", True)
+                    self._transform_error_logged = True
+                    # Reset after a while to allow future logging
+                    self.create_timer(10.0, lambda: setattr(self, '_transform_error_logged', False))
+                return False
             
         except Exception as e:
-            # Log error with reduced frequency
-            if np.random.random() < 0.05:  # Log ~5% of errors
-                self.log_error(f"Error in 3D conversion: {str(e)}")
+            # Log all errors - no random filtering
+            self.log_error(f"Error in 3D conversion: {str(e)}")
             
             # Reduce detection health on errors
             if hasattr(self, 'detection_health'):
                 self.detection_health = max(0.3, self.detection_health - 0.1)
                 
             return False
+    
+    def _transform_to_reference_frame(self, point_msg):
+        """
+        Transform a PointStamped message from camera_frame to reference_frame.
+        
+        Args:
+            point_msg (PointStamped): Point in camera_frame
+            
+        Returns:
+            PointStamped: Transformed point or None if transformation failed
+        """
+        try:
+            # Look up the transformation
+            from rclpy.time import Time
+            
+            # Use the timestamp from the original message for the transform
+            transform_time = point_msg.header.stamp
+            
+            # If the transform isn't available yet, try with a small delay
+            try:
+                self.tf_buffer.can_transform(
+                    self.reference_frame,
+                    point_msg.header.frame_id,
+                    transform_time,
+                    rclpy.duration.Duration(seconds=self.transform_timeout)
+                )
+            except Exception:
+                # If we failed with the message timestamp, try with current time
+                self.get_logger().debug(
+                    f"Transform not available at timestamp {transform_time}, trying with current time"
+                )
+                transform_time = TimeUtils.now_as_ros_time()
+            
+            # Do the actual transformation
+            transformed_point = self.tf_buffer.transform(
+                point_msg,
+                self.reference_frame,
+                rclpy.duration.Duration(seconds=self.transform_timeout)
+            )
+            
+            # Log the transformation occasionally, but track it more systematically
+            if not hasattr(self, 'transform_log_counter'):
+                self.transform_log_counter = 0
+            
+            self.transform_log_counter += 1
+            if self.transform_log_counter % 100 == 0:  # Log every 100th transform
+                self.get_logger().debug(
+                    f"Transformed point from {point_msg.header.frame_id} to {self.reference_frame}: "
+                    f"({point_msg.point.x:.2f}, {point_msg.point.y:.2f}, {point_msg.point.z:.2f}) -> "
+                    f"({transformed_point.point.x:.2f}, {transformed_point.point.y:.2f}, {transformed_point.point.z:.2f})"
+                )
+            
+            return transformed_point
+            
+        except Exception as e:
+            # Log all transform errors properly
+            if not hasattr(self, '_transform_exception_logged'):
+                self.log_error(f"Transform exception: {str(e)}", True)
+                self._transform_exception_logged = True
+                # Reset after a while to allow future logging
+                self.create_timer(10.0, lambda: setattr(self, '_transform_exception_logged', False))
+            return None
     
     def _log_performance(self, x, y, z, source):
         """
@@ -702,6 +804,19 @@ class TennisBall3DPositionEstimator(Node):
         elif warning_messages:
             status = "warning"
         
+        # Add depth sampling reliability metrics to diagnostics
+        depth_reliability_metrics = {}
+        if hasattr(self, 'depth_reliability'):
+            current_time = TimeUtils.now_as_float()
+            for source, data in self.depth_reliability.items():
+                # Only include recent data (last 5 seconds)
+                if current_time - data['timestamp'] < 5.0:
+                    depth_reliability_metrics[source] = {
+                        'reliability': data['value'],
+                        'valid_points': data['valid_points'],
+                        'age_seconds': current_time - data['timestamp']
+                    }
+        
         # Create diagnostics data structure formatted for the diagnostics node
         diag_data = {
             "timestamp": current_time,
@@ -739,6 +854,12 @@ class TennisBall3DPositionEstimator(Node):
                 },
                 "depth_scale": DEPTH_CONFIG["scale"],
                 "sampling_radius": self.radius
+            },
+            "depth_sampling": {
+                "reliability": depth_reliability_metrics,
+                "min_valid_points": DEPTH_CONFIG.get("min_valid_points", 5),
+                "adaptive_radius": DEPTH_CONFIG.get("adaptive_radius", True),
+                "current_radius": self.radius
             }
         }
         
@@ -769,7 +890,7 @@ class TennisBall3DPositionEstimator(Node):
             
             # Record adaptation for diagnostics
             if not hasattr(self, 'resource_adaptations'):
-                self.resource_adaptations = []
+                self.resource_adaptations = deque(maxlen=20)  # Keep last 20 adaptations
             
             self.resource_adaptations.append({
                 "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils
@@ -783,6 +904,86 @@ class TennisBall3DPositionEstimator(Node):
         if hasattr(self, 'resource_monitor'):
             self.resource_monitor.stop()
         super().destroy_node()
+
+    def _get_reliable_depth(self, depth_array, pixel_x, pixel_y):
+        """
+        Get reliable depth value with adaptive radius sampling if needed.
+        
+        Args:
+            depth_array: The depth image array
+            pixel_x, pixel_y: The pixel coordinates to sample around
+            
+        Returns:
+            tuple: (median_depth, reliability, valid_points_count) or (None, 0, 0) if no reliable depth found
+        """
+        # Start with configured radius
+        radius = self.radius
+        min_valid_points = DEPTH_CONFIG.get("min_valid_points", 5)
+        adaptive_radius = DEPTH_CONFIG.get("adaptive_radius", True)
+        max_radius = DEPTH_CONFIG.get("max_radius", 7)
+        
+        # Try with progressively larger radius if adaptive sampling is enabled
+        for attempt in range(3):  # Try up to 3 times with increasing radius
+            # Extract depth region
+            min_y = max(0, pixel_y - radius)
+            max_y = min(self.depth_height, pixel_y + radius + 1)
+            min_x = max(0, pixel_x - radius)
+            max_x = min(self.depth_width, pixel_x + radius + 1)
+            
+            depth_region = depth_array[min_y:max_y, min_x:max_x].astype(np.float32)
+            
+            # Convert raw depth values to meters
+            depth_region *= DEPTH_CONFIG["scale"]
+            
+            # Filter out invalid depths
+            valid_mask = (depth_region > DEPTH_CONFIG["min_depth"]) & (depth_region < DEPTH_CONFIG["max_depth"])
+            valid_points_count = np.sum(valid_mask)
+            
+            # Check if we have enough valid points
+            if valid_points_count >= min_valid_points:
+                # Calculate median of valid depths
+                median_depth = float(np.median(depth_region[valid_mask]))
+                
+                # Calculate reliability metric based on number of valid points and depth consistency
+                max_expected_points = (2*radius + 1)**2  # Maximum possible points in the region
+                quantity_factor = min(1.0, valid_points_count / (min_valid_points * 2))
+                
+                # Also consider depth consistency (lower std deviation = more reliable)
+                if valid_points_count > 1:
+                    depth_values = depth_region[valid_mask]
+                    depth_std = np.std(depth_values)
+                    consistency_factor = np.clip(1.0 - (depth_std / median_depth), 0.5, 1.0)
+                else:
+                    consistency_factor = 0.5  # Just one point, so consistency is questionable
+                
+                # Combine factors (weighted average)
+                reliability = 0.7 * quantity_factor + 0.3 * consistency_factor
+                
+                # Log adaptive radius info if we had to increase radius
+                if attempt > 0:
+                    self.get_logger().debug(
+                        f"Used adaptive radius {radius} (attempt {attempt+1}) - "
+                        f"found {valid_points_count} valid points"
+                    )
+                
+                return median_depth, reliability, valid_points_count
+            
+            # If we don't have enough points and adaptive radius is enabled
+            if adaptive_radius and radius < max_radius:
+                # Increase radius and try again
+                radius += 2
+            else:
+                # Can't increase radius further
+                break
+        
+        # If we get here, we couldn't find a reliable depth
+        # Log all occurrences but use the error tracking system to prevent flooding
+        self.log_error(
+            f"Insufficient valid depth points: {valid_points_count}/{min_valid_points} required",
+            True
+        )
+        
+        return None, 0.0, valid_points_count
 
 def main(args=None):
     """Main function to initialize and run the 3D position estimator node."""

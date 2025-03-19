@@ -20,6 +20,7 @@ import os
 import subprocess
 from typing import Dict, List, Any, Optional
 from datetime import datetime
+from collections import deque  # Add deque import
 
 # System-wide configuration
 SYSTEM_NODES = ["fusion", "lidar", "hsv", "yolo", "depth_camera"]
@@ -72,21 +73,35 @@ class SystemDiagnosticsNode(Node):
         # Whether each node is currently considered active/healthy
         self.node_active = {node: False for node in SYSTEM_NODES}
         
-        # Track restart attempts
+        # Track restart attempts with bounded history
         self.restart_attempts = {node: 0 for node in SYSTEM_NODES}
         self.last_restart = {node: 0.0 for node in SYSTEM_NODES}
+        
+        # Track restart history with deque
+        self.restart_history = {node: deque(maxlen=10) for node in SYSTEM_NODES}
         
         # Sensor statuses
         self.tracking_status = False
         self.ball_position = None
         self.ball_velocity = None
         
+        # Position and velocity history
+        self.position_history = deque(maxlen=100)  # Last 100 positions
+        self.velocity_history = deque(maxlen=100)  # Last 100 velocity readings
+        
         # System resources
         self.cpu_usage = 0.0
         self.memory_usage = 0.0
+        self.resource_history = deque(maxlen=120)  # Store 10 minutes of resource data (at 5s intervals)
         
         # Error counts
         self.error_counts = {node: 0 for node in SYSTEM_NODES}
+        
+        # Error history with deque
+        self.error_history = deque(maxlen=100)  # Last 100 errors
+        
+        # Event log with deque
+        self.event_log = deque(maxlen=1000)  # Last 1000 events
 
     def _setup_subscribers(self):
         """Set up subscribers for all diagnostic topics."""
@@ -178,6 +193,14 @@ class SystemDiagnosticsNode(Node):
         else:
             self.get_logger().info(log_entry)
         
+        # Add to event log deque
+        self.event_log.append({
+            'timestamp': timestamp,
+            'type': event_type,
+            'node': node,
+            'details': details
+        })
+        
         # Log to file
         if hasattr(self, 'log_file') and self.log_file:
             try:
@@ -206,6 +229,12 @@ class SystemDiagnosticsNode(Node):
                 for error in diag_data["errors"]:
                     self.log_event("ERROR", node, error)
                     self.error_counts[node] += 1
+                    # Add to error history
+                    self.error_history.append({
+                        'timestamp': time.time(),
+                        'node': node,
+                        'message': error
+                    })
             
             if "warnings" in diag_data and diag_data["warnings"]:
                 for warning in diag_data["warnings"]:
@@ -233,21 +262,27 @@ class SystemDiagnosticsNode(Node):
     
     def position_callback(self, msg: PointStamped):
         """Process ball position updates."""
-        self.ball_position = {
+        position_data = {
             "x": msg.point.x,
             "y": msg.point.y,
             "z": msg.point.z,
             "timestamp": time.time()
         }
+        self.ball_position = position_data
+        # Add to position history
+        self.position_history.append(position_data)
     
     def velocity_callback(self, msg: TwistStamped):
         """Process ball velocity updates."""
-        self.ball_velocity = {
+        velocity_data = {
             "x": msg.twist.linear.x,
             "y": msg.twist.linear.y,
             "z": msg.twist.linear.z,
             "timestamp": time.time()
         }
+        self.ball_velocity = velocity_data
+        # Add to velocity history
+        self.velocity_history.append(velocity_data)
     
     def check_system_health(self):
         """Check the health of all system nodes."""
@@ -270,33 +305,40 @@ class SystemDiagnosticsNode(Node):
         self.restart_attempts[node] += 1
         self.last_restart[node] = time.time()
         
+        # Add to restart history
+        self.restart_history[node].append({
+            'timestamp': time.time(),
+            'attempt': self.restart_attempts[node]
+        })
+        
         self.log_event("WARNING", node, 
             f"Attempting to restart node (attempt #{self.restart_attempts[node]})")
         
         # In a real system, this would use ros2 lifecycle or some other restart mechanism
         # For now, we'll just log that we would restart it
         self.get_logger().warning(f"Would restart {node} node here (simulation only)")
-        
-        # In a real implementation:
-        # try:
-        #     # This is just an example - actual implementation would depend on your system
-        #     subprocess.run(["ros2", "run", "ball_tracking", f"{node}_node"], 
-        #                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5.0)
-        #     self.log_event("INFO", node, "Restart command issued")
-        # except Exception as e:
-        #     self.log_event("ERROR", node, f"Failed to restart: {str(e)}")
     
     def monitor_resources(self):
         """Monitor system resources (CPU, memory)."""
         try:
-            self.cpu_usage = psutil.cpu_percent(interval=None)
-            self.memory_usage = psutil.virtual_memory().percent
+            cpu_usage = psutil.cpu_percent(interval=None)
+            memory_usage = psutil.virtual_memory().percent
+            
+            # Store in resource history
+            self.resource_history.append({
+                'timestamp': time.time(),
+                'cpu': cpu_usage,
+                'memory': memory_usage
+            })
+            
+            self.cpu_usage = cpu_usage
+            self.memory_usage = memory_usage
             
             # Log if resources are constrained
-            if self.cpu_usage > 90.0:
-                self.log_event("WARNING", "system", f"High CPU usage: {self.cpu_usage:.1f}%")
-            if self.memory_usage > 90.0:
-                self.log_event("WARNING", "system", f"High memory usage: {self.memory_usage:.1f}%")
+            if cpu_usage > 90.0:
+                self.log_event("WARNING", "system", f"High CPU usage: {cpu_usage:.1f}%")
+            if memory_usage > 90.0:
+                self.log_event("WARNING", "system", f"High memory usage: {memory_usage:.1f}%")
                 
             # Adaptive behavior could be triggered here
             self.check_for_resource_constraints()

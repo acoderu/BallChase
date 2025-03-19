@@ -14,6 +14,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 import json
 import time
 from typing import Dict, List, Any, Optional
+from collections import deque  # Add deque import
 
 class DiagnosticsVisualizerNode(Node):
     """
@@ -70,6 +71,15 @@ class DiagnosticsVisualizerNode(Node):
         # Track last update time for each node
         self.last_update = {}
         
+        # Store marker history with bounded deque
+        self.marker_history = deque(maxlen=50)  # Store last 50 sets of markers
+        
+        # Store system status history with bounded deque
+        self.status_history = deque(maxlen=100)  # Store last 100 status updates
+        
+        # Store error history with bounded deque
+        self.error_history = deque(maxlen=50)   # Store last 50 errors
+        
         # Visualization configuration
         self.viz_config = {
             'text_size': 0.15,
@@ -98,6 +108,25 @@ class DiagnosticsVisualizerNode(Node):
             diag_data = json.loads(msg.data)
             self.node_diagnostics[node_name] = diag_data
             self.last_update[node_name] = time.time()
+            
+            # Save error/warning messages to history
+            if 'errors' in diag_data and diag_data['errors']:
+                for error in diag_data['errors']:
+                    self.error_history.append({
+                        'timestamp': time.time(),
+                        'node': node_name,
+                        'type': 'error',
+                        'message': error
+                    })
+                    
+            if 'warnings' in diag_data and diag_data['warnings']:
+                for warning in diag_data['warnings']:
+                    self.error_history.append({
+                        'timestamp': time.time(),
+                        'node': node_name,
+                        'type': 'warning',
+                        'message': warning
+                    })
             
             if self.get_logger().get_effective_level() <= rclpy.logging.LoggingSeverity.DEBUG:
                 self.get_logger().debug(f"Updated diagnostics for {node_name}")
@@ -497,8 +526,20 @@ class DiagnosticsVisualizerNode(Node):
             # Parse JSON data from the status message
             status_data = json.loads(msg.data)
             
+            # Store in history
+            self.status_history.append({
+                'timestamp': time.time(),
+                'data': status_data
+            })
+            
             # Create RViz markers based on the status data
             marker_array = self.create_markers(status_data)
+            
+            # Store marker history
+            self.marker_history.append({
+                'timestamp': time.time(),
+                'markers': marker_array
+            })
             
             # Publish the marker array
             self.marker_publisher.publish(marker_array)
