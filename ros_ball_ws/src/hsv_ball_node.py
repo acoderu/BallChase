@@ -333,11 +333,23 @@ class HSVTennisBallTracker(Node):
             
             # Create and publish the position message
             position_msg = PointStamped()
+            
+            # IMPORTANT: Use the original image timestamp
+            # This is critical for proper synchronization
             position_msg.header.stamp = header.stamp
-            position_msg.header.frame_id = header.frame_id
+            position_msg.header.frame_id = "camera_frame"  # Use consistent frame ID
+            
             position_msg.point.x = float(center_x)
             position_msg.point.y = float(center_y)
             position_msg.point.z = float(best_confidence)  # Use z for confidence
+            
+            # Add sequence number to header for better synchronization
+            if not hasattr(self, 'seq_counter'):
+                self.seq_counter = 0
+            self.seq_counter += 1
+            position_msg.header.seq = self.seq_counter
+            
+            self.get_logger().debug(f"Publishing 2D position with timestamp for synchronization")
             
             # Publish the ball position
             self.ball_publisher.publish(position_msg)

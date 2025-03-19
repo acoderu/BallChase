@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 """
 Tennis Ball Tracking Robot - Depth Camera Node
 ==============================================
@@ -114,6 +116,9 @@ class TennisBall3DPositionEstimator(Node):
         # Initialize camera and detection parameters
         self._init_camera_parameters()
         
+        # Set up tf2 for coordinate transformations
+        self._setup_tf2()
+        
         # Set up subscriptions to receive data
         self._setup_subscriptions()
         
@@ -175,6 +180,16 @@ class TennisBall3DPositionEstimator(Node):
         for y in range(-self.radius, self.radius+1):
             for x in range(-self.radius, self.radius+1):
                 self.offsets.append((x, y))
+    
+    def _setup_tf2(self):
+        """Set up tf2 components for coordinate transformations."""
+        # Import tf2 modules here to avoid circular imports
+        from tf2_ros import Buffer, TransformListener
+        
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        
+        self.get_logger().info("Transform listener initialized for cross-sensor coordination")
     
     def _setup_subscriptions(self):
         """Set up all subscriptions for this node."""
@@ -298,14 +313,14 @@ class TennisBall3DPositionEstimator(Node):
         """
         Handle tennis ball detections from YOLO.
         
-        Args:
-            msg (PointStamped): 2D position of ball detected by YOLO
+        // ...existing docstring...
         """
         start_time = time.time()
         
         self.latest_yolo_detection = msg
         
         # Process immediately for lowest latency
+        # IMPORTANT: Preserve the original timestamp for synchronization
         if self.get_3d_position(msg, "YOLO"):
             self.yolo_count += 1
             process_time = (time.time() - start_time) * 1000  # in milliseconds
@@ -315,14 +330,14 @@ class TennisBall3DPositionEstimator(Node):
         """
         Handle tennis ball detections from HSV.
         
-        Args:
-            msg (PointStamped): 2D position of ball detected by HSV
+        // ...existing docstring...
         """
         start_time = time.time()
         
         self.latest_hsv_detection = msg
         
         # Process all HSV detections (no skipping)
+        # IMPORTANT: Preserve the original timestamp for synchronization
         if self.get_3d_position(msg, "HSV"):
             self.hsv_count += 1
             process_time = (time.time() - start_time) * 1000  # in milliseconds
@@ -343,18 +358,7 @@ class TennisBall3DPositionEstimator(Node):
         """
         Convert a 2D ball detection to a 3D position using depth data.
         
-        This is the core function that:
-        1. Takes a 2D position from a camera-based detector
-        2. Scales it to match the depth camera's resolution
-        3. Samples depth values around that position
-        4. Uses camera intrinsics to calculate the 3D position
-        
-        Args:
-            detection_msg (PointStamped): 2D ball position from detector
-            source (str): Which detector it came from ("YOLO" or "HSV")
-            
-        Returns:
-            bool: True if successful, False otherwise
+        // ...existing docstring...
         """
         # Skip processing if we're missing required data
         if self.camera_info is None or self.depth_image is None or self.fx == 0:
@@ -410,7 +414,26 @@ class TennisBall3DPositionEstimator(Node):
             
             # Step 9: Create and publish 3D position message
             position_msg = PointStamped()
+            
+            # IMPORTANT: Use the timestamp from original detection
+            # This is critical for synchronization across nodes
             position_msg.header = self.depth_header
+            position_msg.header.stamp = detection_msg.header.stamp  # Preserve original timestamp
+            
+            # Set the correct frame ID for consistent coordinate system
+            position_msg.header.frame_id = "camera_frame"
+            
+            # Add sequence number for better synchronization
+            if not hasattr(self, 'seq_counter'):
+                self.seq_counter = 0
+            self.seq_counter += 1
+            position_msg.header.seq = self.seq_counter
+            
+            # Log that we're preserving the timestamp for synchronization
+            self.get_logger().debug(
+                f"Publishing 3D position with preserved timestamp from {source} for synchronization"
+            )
+            
             position_msg.point.x = x
             position_msg.point.y = y
             position_msg.point.z = z

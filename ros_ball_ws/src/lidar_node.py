@@ -128,11 +128,17 @@ class TennisBallLidarDetector(Node):
         # Timer for publishing status
         self.status_timer = self.create_timer(3.0, self.publish_status)
         
-        # Initialize the TF Broadcaster  
-        self.tf_broadcaster = TransformBroadcaster(self)  
+        # Initialize the TF Broadcaster for publishing coordinate transforms
+        self.tf_broadcaster = TransformBroadcaster(self)
+        self.last_transform_log = 0.0  # Track when we last logged transform info
         
-        # Set up a timer for publishing the transform every second  
-        self.transform_timer = self.create_timer(1.0, self.publish_transform)  
+        # Set up a timer for publishing the transform regularly
+        # Publishing at 10Hz ensures the transform is always available
+        self.transform_timer = self.create_timer(0.1, self.publish_transform)
+        
+        # Log that we're publishing the calibrated transform
+        self.get_logger().info("Publishing calibrated LIDAR-to-camera transform (from calibration)")
+        self.get_logger().info("Transform: [-0.326256, 0.210052, 0.504021], Quaternion: [-0.091584, 0.663308, 0.725666, 0.158248]")
 
         self.get_logger().info("LIDAR: Tennis ball detector initialized and ready")
         self.get_logger().info(f"LIDAR: Listening for LaserScan on {TOPICS['input']['lidar_scan']}")
@@ -232,10 +238,10 @@ class TennisBallLidarDetector(Node):
         """
         self.start_time = time.time()  # Reset timer for this scan
         
-        # Store the scan metadata
+        # Store the scan metadata - preserve original frame_id for proper transformation
         self.latest_scan = msg
-        self.scan_timestamp = self.get_clock().now().to_msg()
-        self.scan_frame_id = msg.header.frame_id
+        self.scan_timestamp = msg.header.stamp  # Use original timestamp, not current time
+        self.scan_frame_id = "lidar_frame"  # Always use our consistent frame ID
         
         try:
             # Extract basic scan parameters
@@ -317,8 +323,9 @@ class TennisBallLidarDetector(Node):
                 best_match = ball_results[0]
                 center, cluster_size, circle_quality = best_match
                 
-                # Publish the ball position
-                self.publish_ball_position(center, cluster_size, circle_quality, source)
+                # IMPORTANT: Use original timestamp for synchronization
+                # Publish the ball position with the camera detection's timestamp
+                self.publish_ball_position(center, cluster_size, circle_quality, source, msg.header.stamp)
             else:
                 self.get_logger().info(f"LIDAR: No matching ball found for {source} detection")
             
@@ -432,7 +439,7 @@ class TennisBallLidarDetector(Node):
         # Sort balls by quality (best first) and return
         return sorted(balls_found, key=lambda x: x[2], reverse=True)
     
-    def publish_ball_position(self, center, cluster_size, circle_quality, trigger_source):
+    def publish_ball_position(self, center, cluster_size, circle_quality, trigger_source, original_timestamp=None):
         """
         Publish the 3D position of a detected tennis ball.
         
@@ -444,11 +451,27 @@ class TennisBallLidarDetector(Node):
             cluster_size (int): Number of points in the cluster
             circle_quality (float): How well the points match a circle (0-1)
             trigger_source (str): Which detector triggered this detection (YOLO or HSV)
+            original_timestamp (Time, optional): Original timestamp from the triggering detection
         """
         # Create message for ball position (3D point with timestamp)
         point_msg = PointStamped()
-        point_msg.header.stamp = self.scan_timestamp
-        point_msg.header.frame_id = self.scan_frame_id
+        
+        # IMPORTANT: Use original timestamp if provided, otherwise use scan timestamp
+        # This ensures we maintain the timing relationship for proper synchronization
+        if original_timestamp:
+            point_msg.header.stamp = original_timestamp
+            self.get_logger().debug(f"Using original timestamp from {trigger_source} detection for synchronization")
+        else:
+            point_msg.header.stamp = self.scan_timestamp
+        
+        # Always use our consistent frame ID for proper transformation
+        point_msg.header.frame_id = "lidar_frame"
+        
+        # Add sequence number for better synchronization
+        if not hasattr(self, 'seq_counter'):
+            self.seq_counter = 0
+        self.seq_counter += 1
+        point_msg.header.seq = self.seq_counter
         
         point_msg.point.x = float(center[0])
         point_msg.point.y = float(center[1])
@@ -478,24 +501,37 @@ class TennisBallLidarDetector(Node):
         # Create visualization markers for RViz
         self.visualize_detection(center, cluster_size, circle_quality, trigger_source)
     
-    def publish_transform(self):  
-        transform = TransformStamped()  
-        transform.header.stamp = self.get_clock().now().to_msg()  
-        transform.header.frame_id = "camera_frame"  # Parent frame  
-        transform.child_frame_id = "lidar_frame"    # Child frame  
+    def publish_transform(self):
+        """
+        Publish the LIDAR-to-camera transformation obtained through calibration.
         
-        # Translation from LIDAR to camera  
-        transform.transform.translation.x = -0.326256  
-        transform.transform.translation.y = 0.210052  
-        transform.transform.translation.z = 0.504021  
+        This transformation allows converting coordinates between the LIDAR
+        and camera reference frames, which is essential for proper sensor fusion.
+        """
+        transform = TransformStamped()
+        # Use current time for the transform to ensure it's considered valid
+        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.frame_id = "camera_frame"  # Parent frame
+        transform.child_frame_id = "lidar_frame"    # Child frame
         
-        # Rotation from LIDAR to camera (as quaternion)  
-        transform.transform.rotation.x = -0.091584  
-        transform.transform.rotation.y = 0.663308  
-        transform.transform.rotation.z = 0.725666  
-        transform.transform.rotation.w = 0.158248  
+        # Translation from LIDAR to camera (from calibration)
+        transform.transform.translation.x = -0.326256
+        transform.transform.translation.y = 0.210052
+        transform.transform.translation.z = 0.504021
         
-        self.tf_broadcaster.sendTransform(transform)  
+        # Rotation from LIDAR to camera as quaternion (from calibration)
+        transform.transform.rotation.x = -0.091584
+        transform.transform.rotation.y = 0.663308
+        transform.transform.rotation.z = 0.725666
+        transform.transform.rotation.w = 0.158248
+        
+        self.tf_broadcaster.sendTransform(transform)
+        
+        # Log the transform occasionally to verify it's being published
+        current_time = time.time()
+        if not hasattr(self, 'last_transform_log') or current_time - self.last_transform_log > 60:
+            self.get_logger().info("Publishing LIDAR-to-camera transform from calibration")
+            self.last_transform_log = current_time
 
     def visualize_detection(self, center, cluster_size, circle_quality, trigger_source):
         """
@@ -515,7 +551,7 @@ class TennisBallLidarDetector(Node):
         
         # Create a sphere marker for the ball
         ball_marker = Marker()
-        ball_marker.header.frame_id = self.scan_frame_id
+        ball_marker.header.frame_id = "lidar_frame"  # Use consistent frame ID
         ball_marker.header.stamp = self.scan_timestamp
         ball_marker.ns = "tennis_ball"
         ball_marker.id = 1

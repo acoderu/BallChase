@@ -1,0 +1,29 @@
+# Configuration for the depth camera node
+
+# Depth measurement parameters
+depth:
+  scale: 0.001           # Depth scale factor (converts raw depth to meters)
+  min_depth: 0.1         # Minimum valid depth in meters
+  max_depth: 8.0         # Maximum valid depth in meters
+  radius: 3              # Radius around detection point to sample depth values
+  detection_resolution:  # Resolution of detection images (YOLO/HSV)
+    width: 320
+    height: 320
+
+# Topic configuration
+topics:
+  input:
+    camera_info: "/ascamera/camera_publisher/depth0/camera_info"
+    depth_image: "/ascamera/camera_publisher/depth0/image_raw"
+    yolo_detection: "/tennis_ball/yolo/position"
+    hsv_detection: "/tennis_ball/hsv/position"
+  output:
+    yolo_3d: "/tennis_ball/yolo/position_3d"
+    hsv_3d: "/tennis_ball/hsv/position_3d"
+    combined: "/tennis_ball/detected_position"  # Legacy/combined topic
+
+# Performance and diagnostics
+diagnostics:
+  log_interval: 5.0      # How often to log performance stats (seconds)
+  debug_level: 1         # 0=minimal, 1=normal, 2=verbose
+  threads: 6             # Number of threads for parallel processing

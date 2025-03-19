@@ -1,0 +1,36 @@
+# Configuration for the Kalman filter fusion node
+
+# Process noise: how much uncertainty to add during prediction steps
+process_noise:
+  position: 0.1        # Position uncertainty per second squared
+  velocity: 1.0        # Velocity uncertainty per second
+
+# Measurement noise: how much to trust each sensor type
+measurement_noise:
+  hsv_2d: 50.0         # Pixels - high because 2D only
+  yolo_2d: 30.0        # Pixels - lower because more accurate
+  hsv_3d: 0.05         # Meters - from depth camera with HSV
+  yolo_3d: 0.04        # Meters - from depth camera with YOLO
+  lidar: 0.03          # Meters - most accurate for 3D
+
+# Filter tuning parameters
+filter:
+  max_time_diff: 0.2           # Maximum time difference for fusion (seconds)
+  min_confidence_threshold: 0.5 # Minimum confidence threshold for detections
+  detection_timeout: 0.5        # Time after which a detection is considered stale
+  transform_timeout: 5.0        # Maximum time to wait for transform (seconds)
+  transform_retry_delay: 0.5    # Delay between transform retries (seconds)
+  startup_wait_time: 2.0        # Time to wait on startup before sensor processing
+
+# Tracking reliability thresholds
+tracking:
+  position_uncertainty_threshold: 0.5  # Position uncertainty threshold for reliable tracking
+  velocity_uncertainty_threshold: 1.0  # Velocity uncertainty threshold for reliable tracking
+  consecutive_updates_required: 3       # Required number of successful consecutive updates
+
+# Debugging and diagnostics
+diagnostics:
+  history_length: 100           # Number of states to keep in history
+  debug_level: 1                # Debug level (0=minimal, 1=normal, 2=verbose)
+  log_to_file: false            # Whether to log detailed data to file
+  log_file_path: "/tmp/kalman_filter_log.csv" # Path for log file

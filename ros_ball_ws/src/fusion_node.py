@@ -74,6 +74,9 @@ from collections import deque
 import time
 import json
 
+# New imports for synchronization
+from ball_tracking.sensor_sync_buffer import SimpleSensorBuffer
+
 # Topic configuration (ensures consistency with other nodes)
 TOPICS = {
     "input": {
@@ -117,6 +120,16 @@ class KalmanFilterFusion(Node):
         # Set up filter parameters
         self._declare_parameters()
         
+        # Add a ROS tf2 listener to transform coordinates between frames
+        self._setup_transform_listener()
+        
+        # Create the synchronization buffer
+        self.sync_buffer = SimpleSensorBuffer(
+            sensor_names=['hsv_2d', 'yolo_2d', 'hsv_3d', 'yolo_3d', 'lidar'],
+            buffer_size=30,      # Keep 30 recent measurements per sensor
+            max_time_diff=self.max_time_diff  # Use parameter for time difference
+        )
+        
         # Set up subscriptions to receive data from all sensors
         self._setup_subscriptions()
         
@@ -126,17 +139,28 @@ class KalmanFilterFusion(Node):
         # Initialize Kalman filter state and variables
         self._init_kalman_filter()
         
-        # Set up timers for periodic status updates
+        # Set up timers for periodic status updates and filter updates
         self._setup_timers()
         
         # Set up visualization and debugging tools
         self._init_debugging_tools()
         
-        self.get_logger().info("Kalman Filter Fusion Node has started!")
+        self.get_logger().info("Kalman Filter Fusion Node has started with synchronized input!")
+        self.get_logger().info("Using synchronization window of %.3f seconds", self.max_time_diff)
         self.log_parameters()
         
         # Log topic connections for debugging
         self._log_topic_connections()
+
+    def _setup_transform_listener(self):
+        """Set up tf2 listener for coordinate transformations between sensors."""
+        # Import tf2 modules here to avoid circular imports
+        from tf2_ros import Buffer, TransformListener
+        
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        
+        self.get_logger().info("Transform listener initialized for cross-sensor coordination")
 
     def _declare_parameters(self):
         """Declare and load all node parameters with descriptive comments."""
@@ -194,14 +218,14 @@ class KalmanFilterFusion(Node):
         self.hsv_2d_sub = self.create_subscription(
             PointStamped,
             TOPICS["input"]["hsv_2d"],
-            lambda msg: self.detection_callback(msg, 'hsv_2d'),
+            lambda msg: self.sensor_callback(msg, 'hsv_2d'),
             10
         )
         
         self.yolo_2d_sub = self.create_subscription(
             PointStamped,
             TOPICS["input"]["yolo_2d"],
-            lambda msg: self.detection_callback(msg, 'yolo_2d'),
+            lambda msg: self.sensor_callback(msg, 'yolo_2d'),
             10
         )
         
@@ -209,14 +233,14 @@ class KalmanFilterFusion(Node):
         self.hsv_3d_sub = self.create_subscription(
             PointStamped,
             TOPICS["input"]["hsv_3d"],
-            lambda msg: self.detection_callback(msg, 'hsv_3d'),
+            lambda msg: self.sensor_callback(msg, 'hsv_3d'),
             10
         )
         
         self.yolo_3d_sub = self.create_subscription(
             PointStamped,
             TOPICS["input"]["yolo_3d"],
-            lambda msg: self.detection_callback(msg, 'yolo_3d'),
+            lambda msg: self.sensor_callback(msg, 'yolo_3d'),
             10
         )
         
@@ -224,7 +248,7 @@ class KalmanFilterFusion(Node):
         self.lidar_sub = self.create_subscription(
             PointStamped,
             TOPICS["input"]["lidar"],
-            lambda msg: self.detection_callback(msg, 'lidar'),
+            lambda msg: self.sensor_callback(msg, 'lidar'),
             10
         )
 
@@ -316,6 +340,9 @@ class KalmanFilterFusion(Node):
         
         # Fast status timer (publishes brief status updates at 10Hz)
         self.status_timer = self.create_timer(0.1, self.publish_status)
+        
+        # Kalman filter update timer (runs at 20Hz)
+        self.filter_timer = self.create_timer(0.05, self.filter_update)
 
     def _init_debugging_tools(self):
         """Initialize tools for debugging and visualization."""
@@ -376,172 +403,225 @@ class KalmanFilterFusion(Node):
         
         self.get_logger().info("===============================")
 
-    def detection_callback(self, msg, source):
+    def sensor_callback(self, msg, source):
         """
-        Process detections from any source and update the Kalman filter.
+        Process measurements from any sensor and add to synchronization buffer.
         
-        This is the main entry point for all sensor data. It:
-        1. Validates the incoming detection
-        2. Predicts the state forward to the current time
-        3. Updates the filter with the new measurement
-        4. Updates tracking reliability metrics
-        5. Publishes the updated state
+        This unified callback adds all incoming measurements to the appropriate
+        buffer based on their source.
         
         Args:
-            msg (PointStamped): Detection message with position and timestamp
-            source (str): Source of the detection ('hsv_2d', 'yolo_2d', 'hsv_3d', 'yolo_3d', 'lidar')
+            msg (PointStamped): The incoming measurement
+            source (str): Which sensor it came from ('hsv_2d', 'yolo_2d', etc.)
         """
-        start_time = time.time()
-        detection_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        
-        try:
-            # Log the detection with source
-            if self.debug_level >= 2:
-                x, y, z = msg.point.x, msg.point.y, msg.point.z
-                self.get_logger().debug(f"Received {source} detection: ({x:.2f}, {y:.2f}, {z:.2f})")
-            
-            # Update sensor statistics
-            self.sensor_counts[source] += 1
-            self.sensor_last_seen[source] = time.time()  # Use current time
-            
-            # Extract confidence information if available
-            confidence = 1.0  # Default high confidence
-            if source == 'hsv_2d' or source == 'yolo_2d':
-                # For 2D detections, z coordinate is often used for confidence
-                confidence = msg.point.z
-            
-            # Skip low confidence detections
-            if confidence < self.min_confidence_threshold:
-                if self.debug_level >= 1:
-                    self.get_logger().debug(
-                        f"Skipping low confidence {source} detection: {confidence:.2f}"
-                    )
-                return
-            
-            # If not initialized and this is a 3D source, initialize the filter
-            if not self.initialized and source in ['hsv_3d', 'yolo_3d', 'lidar']:
-                self.initialize_filter(msg, source, detection_time)
-                return
-                
-            # Skip if filter isn't initialized yet
-            if not self.initialized:
-                self.get_logger().debug(f"Received {source} detection but filter not yet initialized")
-                return
-                
-            # Get time difference since last update
-            if self.last_update_time is None:
-                dt = 0.033  # Assume ~30Hz if this is the first measurement
-            else:
-                dt = detection_time - self.last_update_time
-                
-            # Skip if time went backwards significantly or too far forward
-            if dt < -0.1:  # Allow small backward jumps (clock sync issues)
-                self.get_logger().warning(
-                    f"Time went backwards: {dt:.3f}s. Skipping update."
-                )
-                return
-                
-            if dt < 0:  # Small backward time jumps - use small positive value
-                dt = 0.001
-                
-            if dt > 1.0:  # Too much time passed, reset filter
-                self.get_logger().warning(
-                    f"Too much time since last update ({dt:.3f}s). Resetting filter."
-                )
-                self.initialized = False
-                return
-                
-            # First predict state forward to current time
-            self.predict(dt)
-            
-            # Then update with the measurement based on source type
-            if source == 'hsv_2d':
-                self.update_2d(msg, self.measurement_noise_hsv_2d, source, confidence)
-            elif source == 'yolo_2d':
-                self.update_2d(msg, self.measurement_noise_yolo_2d, source, confidence)
-            elif source == 'hsv_3d':
-                self.update_3d(msg, self.measurement_noise_hsv_3d, source)
-            elif source == 'yolo_3d':
-                self.update_3d(msg, self.measurement_noise_yolo_3d, source)
-            elif source == 'lidar':
-                self.update_3d(msg, self.measurement_noise_lidar, source)
-                
-            # Update the last update time
-            self.last_update_time = detection_time
-            
-            # Store state in history
-            self.state_history.append(np.copy(self.state))
-            self.time_history.append(detection_time)
-            
-            # Update tracking reliability metrics
-            self.update_tracking_reliability()
-            
-            # Publish the updated state
-            self.publish_state(msg.header.stamp)
-            
-            # Update stats
-            self.updates_processed += 1
-            
-            # Log to file if enabled
-            if self.log_to_file and self.log_file:
-                self.log_to_file_csv(detection_time, source)
-                
-            # Log filter state periodically
-            if (self.debug_level >= 2 or 
-                (self.debug_level >= 1 and self.updates_processed % 30 == 0)):
-                self.log_filter_state()
-                
-            # Measure and store processing time
-            processing_time = (time.time() - start_time) * 1000  # to ms
-            self.processing_times.append(processing_time)
-                
-        except Exception as e:
-            self.get_logger().error(f"Error in {source} detection callback: {str(e)}")
-
-    def initialize_filter(self, msg, source, detection_time):
-        """
-        Initialize the Kalman filter with the first 3D detection.
-        
-        This is called when we receive the first 3D measurement and sets up the
-        initial state and covariance matrix.
-        
-        Args:
-            msg (PointStamped): First 3D detection
-            source (str): Source of the detection ('hsv_3d', 'yolo_3d', or 'lidar')
-            detection_time (float): Timestamp of the detection in seconds
-        """
-        # Initialize state with position and zero velocity
-        self.state[0] = msg.point.x  # x position
-        self.state[1] = msg.point.y  # y position
-        self.state[2] = msg.point.z  # z position
-        self.state[3] = 0.0  # x velocity (initially zero)
-        self.state[4] = 0.0  # y velocity (initially zero)
-        self.state[5] = 0.0  # z velocity (initially zero)
-        
-        # Initialize covariance - high uncertainty for velocity
-        self.covariance = np.diag([0.1, 0.1, 0.1, 10.0, 10.0, 10.0])
-        
-        # Record time
-        self.last_update_time = detection_time
-        
-        # Mark as initialized
-        self.initialized = True
-        
-        # Reset tracking metrics
-        self.consecutive_updates = 1
-        self.update_tracking_reliability()
-        
-        self.get_logger().info(f"Kalman filter initialized with {source} detection")
-        self.get_logger().info(
-            f"Initial position: ({self.state[0]:.2f}, {self.state[1]:.2f}, {self.state[2]:.2f}) meters"
+        # Add measurement to synchronization buffer
+        self.sync_buffer.add_measurement(
+            sensor_name=source, 
+            data=msg, 
+            timestamp=msg.header.stamp
         )
         
-        # Add to history
-        self.state_history.append(np.copy(self.state))
-        self.time_history.append(detection_time)
+        # Update sensor statistics
+        self.sensor_counts[source] += 1
+        self.sensor_last_seen[source] = time.time()  # Use current time
         
-        # Publish initial state
-        self.publish_state(msg.header.stamp)
+        # Log incoming data if in debug mode
+        if self.debug_level >= 2:
+            self.get_logger().debug(
+                f"Received {source} measurement at "
+                f"t={msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9:.3f}"
+            )
+
+    def filter_update(self, event=None):
+        """
+        Update the Kalman filter with synchronized measurements.
+        
+        This is called regularly by our timer and uses the synchronization buffer
+        to get measurements from multiple sensors that were taken at approximately
+        the same time.
+        """
+        if not self.initialized and not self._try_initialize():
+            return
+
+        # Get synchronized measurements from the buffer
+        sync_data = self.sync_buffer.find_synchronized_data()
+        
+        if not sync_data:
+            if self.debug_level >= 2:
+                self.get_logger().debug("No synchronized sensor data found in this update cycle")
+            return  # No synchronized data available
+        
+        # Log what sensors we have synchronized data from
+        available_sensors = list(sync_data.keys())
+        if self.debug_level >= 1:
+            self.get_logger().debug(f"Processing synchronized data from: {available_sensors}")
+        
+        # Calculate average timestamp of the synchronized measurements
+        total_time = 0.0
+        count = 0
+        for source, msg in sync_data.items():
+            total_time += msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            count += 1
+        
+        if count == 0:
+            return  # No valid timestamps
+            
+        avg_time = total_time / count
+        
+        # If we have a last update time, calculate dt
+        if self.last_update_time is None:
+            dt = 0.033  # Assume ~30Hz if this is the first measurement
+        else:
+            dt = avg_time - self.last_update_time
+        
+        # Handle potential timing issues
+        if dt < -0.1:  # Time went backwards significantly
+            self.get_logger().warning(f"Time went backwards: {dt:.3f}s. Skipping update.")
+            return
+        elif dt < 0:  # Small backward time jump - use small positive value
+            dt = 0.001
+        elif dt > 1.0:  # Too much time passed
+            self.get_logger().warning(
+                f"Too much time since last update ({dt:.3f}s). Resetting."
+            )
+            self.initialized = False
+            return
+        
+        # Predict state forward to the current time
+        self.predict(dt)
+        
+        # Transform all measurements to a common coordinate frame before updating
+        transformed_data = {}
+        
+        # Check if transform is available yet (it might take a moment after startup)
+        transform_available = False
+        if 'lidar' in sync_data:
+            try:
+                # Test if we can transform from lidar frame to camera frame
+                when = rclpy.time.Time()
+                transform_available = self.tf_buffer.can_transform(
+                    "camera_frame",
+                    "lidar_frame",
+                    when,
+                    timeout=rclpy.duration.Duration(seconds=0.1)
+                )
+                
+                if not transform_available and self.debug_level >= 1:
+                    self.get_logger().warn("Transform from lidar_frame to camera_frame not yet available")
+            except Exception as e:
+                self.get_logger().warn(f"Error checking transform availability: {str(e)}")
+        
+        # Try to transform all measurements to a common frame
+        for source, msg in sync_data.items():
+            try:
+                # Only transform LIDAR measurements if the transform is available
+                if source == 'lidar' and transform_available:
+                    transformed_msg = self._transform_point(msg, "camera_frame")
+                    if transformed_msg:
+                        transformed_data[source] = transformed_msg
+                        if self.debug_level >= 2:
+                            self.get_logger().debug(f"Successfully transformed {source} measurement to camera_frame")
+                    else:
+                        self.get_logger().warn(f"Could not transform {source} measurement - skipping")
+                        continue
+                else:
+                    # Non-LIDAR measurements or if transform isn't available yet
+                    transformed_data[source] = msg
+            except Exception as e:
+                self.get_logger().error(f"Error transforming {source} measurement: {str(e)}")
+                continue
+        
+        # Update with each transformed measurement
+        for source, msg in transformed_data.items():
+            if source.endswith('_2d'):  # 2D measurements
+                noise = (self.measurement_noise_hsv_2d if 'hsv' in source 
+                         else self.measurement_noise_yolo_2d)
+                confidence = msg.point.z  # Confidence in z field
+                self.update_2d(msg, noise, source, confidence)
+            else:  # 3D measurements
+                if 'hsv_3d' in source:
+                    noise = self.measurement_noise_hsv_3d
+                elif 'yolo_3d' in source:
+                    noise = self.measurement_noise_yolo_3d
+                else:  # lidar
+                    noise = self.measurement_noise_lidar
+                self.update_3d(msg, noise, source)
+        
+        # Update last update time
+        self.last_update_time = avg_time
+        
+        # Store state in history
+        self.state_history.append(np.copy(self.state))
+        self.time_history.append(avg_time)
+        
+        # Update tracking reliability metrics
+        self.update_tracking_reliability()
+        
+        # Publish the updated state
+        self.publish_state()
+        
+        # Update stats
+        self.updates_processed += 1
+        
+        # Log to file if enabled
+        if self.log_to_file and self.log_file:
+            self.log_to_file_csv(avg_time, '+'.join(available_sensors))
+
+    def _try_initialize(self):
+        """
+        Try to initialize the Kalman filter with the best available 3D measurement.
+        
+        Returns:
+            bool: True if initialization succeeded, False otherwise
+        """
+        # Get the latest data from each sensor
+        best_source = None
+        best_measurement = None
+        
+        # First look for 3D sources in this priority order
+        for source in ['lidar', 'hsv_3d', 'yolo_3d']:
+            data = self.sync_buffer.buffers.get(source, None)
+            if data and len(data) > 0:
+                best_source = source
+                best_measurement = data[-1]['data']
+                break
+        
+        if best_source and best_measurement:
+            # Initialize with the 3D data
+            self.state[0] = best_measurement.point.x  # x position
+            self.state[1] = best_measurement.point.y  # y position
+            self.state[2] = best_measurement.point.z  # z position
+            self.state[3:6] = 0.0  # Initial velocity = 0
+            
+            # Initialize covariance
+            self.covariance = np.diag([0.1, 0.1, 0.1, 10.0, 10.0, 10.0])
+            
+            # Record time
+            timestamp = best_measurement.header.stamp
+            self.last_update_time = timestamp.sec + timestamp.nanosec * 1e-9
+            
+            # Mark as initialized
+            self.initialized = True
+            
+            # Reset tracking metrics
+            self.consecutive_updates = 1
+            self.update_tracking_reliability()
+            
+            self.get_logger().info(f"Kalman filter initialized with {best_source} detection")
+            self.get_logger().info(
+                f"Initial position: ({self.state[0]:.2f}, {self.state[1]:.2f}, {self.state[2]:.2f}) meters"
+            )
+            
+            # Add to history
+            self.state_history.append(np.copy(self.state))
+            self.time_history.append(self.last_update_time)
+            
+            # Publish initial state
+            self.publish_state()
+            
+            return True
+        
+        return False
 
     def predict(self, dt):
         """
@@ -797,18 +877,18 @@ class KalmanFilterFusion(Node):
             self.consecutive_updates = 0
             self.get_logger().info("Tracking reliability lost - resetting consecutive update counter")
 
-    def publish_state(self, timestamp):
+    def publish_state(self, timestamp=None):
         """
         Publish the current state estimate for the PID controller.
         
-        This publishes:
-        - Current position (x, y, z)
-        - Current velocity (vx, vy, vz)
-        - Current position uncertainty
-        
         Args:
-            timestamp (Time): Timestamp to use for the message
+            timestamp (Time, optional): Timestamp to use for the message.
+                If None, current time will be used.
         """
+        # Use current time if no timestamp provided
+        if timestamp is None:
+            timestamp = self.get_clock().now().to_msg()
+            
         # Create and publish position message
         pos_msg = PointStamped()
         pos_msg.header.stamp = timestamp
@@ -994,6 +1074,49 @@ class KalmanFilterFusion(Node):
                 self.log_file.flush()  # Ensure data is written immediately
             except Exception as e:
                 self.get_logger().error(f"Error writing to log file: {str(e)}")
+
+    def _transform_point(self, point_msg, target_frame):
+        """
+        Transform a point from its original frame to the target frame.
+        
+        Args:
+            point_msg (PointStamped): Point to transform
+            target_frame (str): Target frame ID
+            
+        Returns:
+            PointStamped: Transformed point or None if transformation failed
+        """
+        if point_msg.header.frame_id == target_frame:
+            return point_msg  # Already in the right frame
+            
+        try:
+            # Wait for transform to be available
+            when = rclpy.time.Time()
+            self.tf_buffer.can_transform(
+                target_frame,
+                point_msg.header.frame_id,
+                when,
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            
+            # Transform the point
+            from geometry_msgs.msg import TransformStamped
+            from tf2_geometry_msgs import do_transform_point
+            
+            transform = self.tf_buffer.lookup_transform(
+                target_frame,
+                point_msg.header.frame_id,
+                when
+            )
+            
+            transformed_point = do_transform_point(point_msg, transform)
+            return transformed_point
+            
+        except Exception as e:
+            self.get_logger().warn(
+                f"Failed to transform from {point_msg.header.frame_id} to {target_frame}: {str(e)}"
+            )
+            return None
 
 
 def main(args=None):

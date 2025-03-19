@@ -1,0 +1,44 @@
+# Configuration for the LIDAR node
+
+# Tennis ball physical properties
+tennis_ball:
+  radius: 0.033         # Tennis ball radius in meters
+  height: -0.20         # Expected height relative to LIDAR
+  max_distance: 0.1     # Maximum distance for clustering points
+  min_points: 10        # Minimum points to consider a valid cluster
+  quality_threshold:    # Thresholds for circle quality assessment
+    low: 0.5
+    medium: 0.7
+    high: 0.9
+  detection_samples: 30  # Number of random starting points for clustering
+
+# Calibrated transformation from LIDAR to camera
+transform:
+  parent_frame: "camera_frame"
+  child_frame: "lidar_frame"
+  translation:
+    x: -0.326256
+    y: 0.210052
+    z: 0.504021
+  rotation:
+    x: -0.091584
+    y: 0.663308
+    z: 0.725666
+    w: 0.158248
+  publish_frequency: 10.0  # How often to publish the transform (Hz)
+
+# Topic configuration
+topics:
+  input:
+    lidar_scan: "/scan_raw"
+    yolo_detection: "/tennis_ball/yolo/position"
+    hsv_detection: "/tennis_ball/hsv/position"
+  output:
+    ball_position: "/tennis_ball/lidar/position"
+    visualization: "/tennis_ball/lidar/visualization"
+    diagnostics: "/tennis_ball/lidar/diagnostics"
+
+# Performance and diagnostics
+diagnostics:
+  publish_interval: 3.0  # How often to publish diagnostics (seconds)
+  debug_level: 1         # 0=minimal, 1=normal, 2=verbose

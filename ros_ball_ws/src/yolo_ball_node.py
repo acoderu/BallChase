@@ -333,10 +333,18 @@ class TennisBallDetector(Node):
                 # Create and publish the position message with timestamp
                 position_msg = PointStamped()
                 
-                # Copy the timestamp from the original image
+                # IMPORTANT: Copy the timestamp from the original image
                 # This is critical for fusion to know when this detection occurred
                 position_msg.header.stamp = msg.header.stamp
-                position_msg.header.frame_id = msg.header.frame_id
+                position_msg.header.frame_id = "camera_frame"  # Use consistent frame ID
+                
+                # Add sequence number for better synchronization
+                if not hasattr(self, 'seq_counter'):
+                    self.seq_counter = 0
+                self.seq_counter += 1
+                position_msg.header.seq = self.seq_counter
+                
+                self.get_logger().debug(f"Publishing YOLO detection with original timestamp for synchronization")
                 
                 position_msg.point.x = float(center_x)
                 position_msg.point.y = float(center_y)
