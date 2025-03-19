@@ -55,6 +55,7 @@ from config.config_loader import ConfigLoader  # Add ConfigLoader import
 import os
 import threading
 from ball_tracking.resource_monitor import ResourceMonitor
+from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
 
 # Load configuration from YAML file
 config_loader = ConfigLoader()
@@ -231,7 +232,7 @@ class TennisBallLidarDetector(Node):
     def _init_state_tracking(self):
         """Initialize state tracking for all system components."""
         # Performance tracking from _init_performance_tracking will be moved here
-        self.start_time = time.time()
+        self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.processed_scans = 0
         self.successful_detections = 0
         self.detection_times = []
@@ -397,7 +398,7 @@ class TennisBallLidarDetector(Node):
             msg (PointStamped): 2D position (x,y) of ball detected by camera
             source (str): Which detector triggered this detection ("YOLO" or "HSV")
         """
-        detection_start_time = time.time()
+        detection_start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         
         # Check if we have scan data
         if self.latest_scan is None or self.points_array is None or len(self.points_array) == 0:
@@ -425,8 +426,12 @@ class TennisBallLidarDetector(Node):
                 center, cluster_size, circle_quality = best_match
                 
                 # IMPORTANT: Use original timestamp for synchronization
-                # Publish the ball position with the camera detection's timestamp
-                self.publish_ball_position(center, cluster_size, circle_quality, source, msg.header.stamp)
+                # Validate timestamp before publishing
+                if TimeUtils.is_timestamp_valid(msg.header.stamp):
+                    self.publish_ball_position(center, cluster_size, circle_quality, source, msg.header.stamp)
+                else:
+                    self.get_logger().warn(f"Received invalid timestamp from {source}, using current time instead")
+                    self.publish_ball_position(center, cluster_size, circle_quality, source, None)
             else:
                 self.get_logger().info(f"LIDAR: No matching ball found for {source} detection")
             
@@ -435,7 +440,7 @@ class TennisBallLidarDetector(Node):
             self.log_error(error_msg)
         
         # Log processing time for this detection
-        processing_time = (time.time() - detection_start_time) * 1000  # in ms
+        processing_time = (TimeUtils.now_as_float() - detection_start_time) * 1000  # in ms
         self.detection_times.append(processing_time)
         # Keep only the last N detection times
         max_detection_times = DIAG_CONFIG['max_detection_times']
@@ -565,13 +570,14 @@ class TennisBallLidarDetector(Node):
         # Create message for ball position (3D point with timestamp)
         point_msg = PointStamped()
         
-        # IMPORTANT: Use original timestamp if provided, otherwise use scan timestamp
+        # IMPORTANT: Use original timestamp if provided, otherwise use current time
         # This ensures we maintain the timing relationship for proper synchronization
-        if original_timestamp:
+        if original_timestamp and TimeUtils.is_timestamp_valid(original_timestamp):
             point_msg.header.stamp = original_timestamp
             self.get_logger().debug(f"Using original timestamp from {trigger_source} detection for synchronization")
         else:
-            point_msg.header.stamp = self.scan_timestamp
+            point_msg.header.stamp = TimeUtils.now_as_ros_time()
+            self.get_logger().debug(f"Using current time as timestamp (no valid original timestamp)")
         
         # Always use our consistent frame ID for proper transformation
         point_msg.header.frame_id = "lidar_frame"
@@ -618,8 +624,8 @@ class TennisBallLidarDetector(Node):
         and camera reference frames, which is essential for proper sensor fusion.
         """
         transform = TransformStamped()
-        # Use current time for the transform to ensure it's considered valid
-        transform.header.stamp = self.get_clock().now().to_msg()
+        # Use current time from TimeUtils for the transform to ensure it's considered valid
+        transform.header.stamp = TimeUtils.now_as_ros_time()
         transform.header.frame_id = self.transform_parent_frame  # Parent frame from config
         transform.child_frame_id = self.transform_child_frame    # Child frame from config
         
@@ -637,7 +643,7 @@ class TennisBallLidarDetector(Node):
         self.tf_broadcaster.sendTransform(transform)
         
         # Log the transform occasionally to verify it's being published
-        current_time = time.time()
+        current_time = TimeUtils.now_as_float()
         transform_log_interval = lidar_config.get('transform', {}).get('log_interval', 60.0)
         if not hasattr(self, 'last_transform_log') or current_time - self.last_transform_log > transform_log_interval:
             self.get_logger().info("Publishing LIDAR-to-camera transform from calibration")
@@ -742,7 +748,7 @@ class TennisBallLidarDetector(Node):
         """
         try:
             # Calculate running time
-            current_time = time.time()
+            current_time = TimeUtils.now_as_float()
             elapsed = current_time - self.start_time
             
             # Skip if we just started
@@ -875,7 +881,7 @@ class TennisBallLidarDetector(Node):
         
         # Add to error list for diagnostics
         self.errors.append({
-            "timestamp": time.time(),
+            "timestamp": TimeUtils.now_as_float(),
             "message": error_message
         })
         
@@ -884,7 +890,7 @@ class TennisBallLidarDetector(Node):
             self.errors.pop(0)
             
         # Update health based on error frequency
-        self.last_error_time = time.time()
+        self.last_error_time = TimeUtils.now_as_float()
         
         # Reduce LIDAR health score temporarily after an error
         self.lidar_health = max(0.3, self.lidar_health - 0.2)

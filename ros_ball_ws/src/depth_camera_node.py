@@ -59,6 +59,8 @@ from cv_bridge import CvBridge
 import os
 from config.config_loader import ConfigLoader  # Import ConfigLoader
 import json
+from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
+from std_msgs.msg import String
 
 # Load configuration from file
 config_loader = ConfigLoader()
@@ -300,11 +302,11 @@ class TennisBall3DPositionEstimator(Node):
     
     def _init_performance_tracking(self):
         """Initialize performance tracking variables."""
-        self.start_time = time.time()
+        self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.yolo_count = 0
         self.hsv_count = 0
         self.successful_conversions = 0
-        self.last_fps_log_time = time.time()
+        self.last_fps_log_time = TimeUtils.now_as_float()  # Use TimeUtils
         self.processing_times = []
         
         # Add error tracking
@@ -324,14 +326,14 @@ class TennisBall3DPositionEstimator(Node):
             self.get_logger().warning(f"DEPTH: {error_message}")
             # Add to warning list for diagnostics
             self.warnings.append({
-                "timestamp": time.time(),
+                "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils
                 "message": error_message
             })
         else:
             self.get_logger().error(f"DEPTH: {error_message}")
             # Add to error list for diagnostics
             self.errors.append({
-                "timestamp": time.time(),
+                "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils
                 "message": error_message
             })
             
@@ -340,7 +342,7 @@ class TennisBall3DPositionEstimator(Node):
                 self.errors.pop(0)
                 
             # Update health based on error frequency
-            self.last_error_time = time.time()
+            self.last_error_time = TimeUtils.now_as_float()  # Use TimeUtils
             
             # Reduce health score temporarily after an error
             self.depth_camera_health = max(0.3, self.depth_camera_health - 0.2)
@@ -405,7 +407,7 @@ class TennisBall3DPositionEstimator(Node):
         
         // ...existing docstring...
         """
-        start_time = time.time()
+        start_time = TimeUtils.now_as_float()  # Use TimeUtils
         
         self.latest_yolo_detection = msg
         
@@ -413,7 +415,7 @@ class TennisBall3DPositionEstimator(Node):
         # IMPORTANT: Preserve the original timestamp for synchronization
         if self.get_3d_position(msg, "YOLO"):
             self.yolo_count += 1
-            process_time = (time.time() - start_time) * 1000  # in milliseconds
+            process_time = (TimeUtils.now_as_float() - start_time) * 1000  # in milliseconds
             self._update_processing_stats(process_time)
     
     def hsv_callback(self, msg):
@@ -422,7 +424,7 @@ class TennisBall3DPositionEstimator(Node):
         
         // ...existing docstring...
         """
-        start_time = time.time()
+        start_time = TimeUtils.now_as_float()  # Use TimeUtils
         
         self.latest_hsv_detection = msg
         
@@ -430,12 +432,12 @@ class TennisBall3DPositionEstimator(Node):
         # IMPORTANT: Preserve the original timestamp for synchronization
         if self.get_3d_position(msg, "HSV"):
             self.hsv_count += 1
-            process_time = (time.time() - start_time) * 1000  # in milliseconds
+            process_time = (TimeUtils.now_as_float() - start_time) * 1000  # in milliseconds
             self._update_processing_stats(process_time)
     
     def _update_processing_stats(self, process_time):
         """Update processing statistics for performance tracking."""
-        self.processing_times.append(process_time * 1000)  # Convert to milliseconds
+        self.processing_times.append(process_time)
         if len(self.processing_times) > 100:
             self.processing_times.pop(0)
     
@@ -516,9 +518,13 @@ class TennisBall3DPositionEstimator(Node):
             position_msg = PointStamped()
             
             # IMPORTANT: Use the timestamp from original detection
-            # This is critical for synchronization across nodes
-            position_msg.header = self.depth_header
-            position_msg.header.stamp = detection_msg.header.stamp  # Preserve original timestamp
+            # Validate timestamp before using it
+            if TimeUtils.is_timestamp_valid(detection_msg.header.stamp):
+                position_msg.header.stamp = detection_msg.header.stamp
+                self.get_logger().debug(f"Using original timestamp from {source} for synchronization")
+            else:
+                position_msg.header.stamp = TimeUtils.now_as_ros_time()
+                self.get_logger().debug(f"Using current time as timestamp (invalid original timestamp)")
             
             # Set the correct frame ID for consistent coordinate system
             position_msg.header.frame_id = "camera_frame"
@@ -577,7 +583,22 @@ class TennisBall3DPositionEstimator(Node):
             x, y, z (float): 3D position coordinates
             source (str): Detection source ("YOLO" or "HSV")
         """
-        # ...existing code...
+        # Calculate FPS and other metrics periodically
+        current_time = TimeUtils.now_as_float()  # Use TimeUtils
+        time_since_last_log = current_time - self.last_fps_log_time
+        
+        # Log FPS every N seconds (from config)
+        if time_since_last_log >= DIAG_CONFIG.get('log_interval', 5.0):
+            elapsed = current_time - self.start_time
+            conversion_rate = self.successful_conversions / elapsed if elapsed > 0 else 0
+            yolo_rate = self.yolo_count / elapsed if elapsed > 0 else 0
+            hsv_rate = self.hsv_count / elapsed if elapsed > 0 else 0
+            
+            self.get_logger().info(
+                f"3D position ({source}): ({x:.2f}, {y:.2f}, {z:.2f}) meters | "
+                f"FPS: {conversion_rate:.1f} | YOLO: {yolo_rate:.1f} | HSV: {hsv_rate:.1f}"
+            )
+            self.last_fps_log_time = current_time
         
         # Store this detection data for diagnostics
         if not hasattr(self, 'detection_history'):
@@ -589,11 +610,11 @@ class TennisBall3DPositionEstimator(Node):
         # Update detection history
         self.detection_history[source]['count'] += 1
         self.detection_history[source]['latest_position'] = (x, y, z)
-        self.detection_history[source]['last_time'] = time.time()
+        self.detection_history[source]['last_time'] = TimeUtils.now_as_float()  # Use TimeUtils
     
     def publish_system_diagnostics(self):
         """Publish comprehensive system diagnostics for the diagnostics node."""
-        current_time = time.time()
+        current_time = TimeUtils.now_as_float()  # Use TimeUtils
         elapsed = current_time - self.start_time
         
         # Performance metrics
@@ -751,7 +772,7 @@ class TennisBall3DPositionEstimator(Node):
                 self.resource_adaptations = []
             
             self.resource_adaptations.append({
-                "timestamp": time.time(),
+                "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils
                 "resource_type": resource_type,
                 "value": value,
                 "action": f"Reduced sampling radius to {self.radius}"

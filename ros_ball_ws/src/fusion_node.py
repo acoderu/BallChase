@@ -77,6 +77,7 @@ import os  # Add os import
 
 # New imports for synchronization
 from ball_tracking.sensor_sync_buffer import SimpleSensorBuffer
+from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
 
 # Import ConfigLoader
 from config.config_loader import ConfigLoader
@@ -426,7 +427,7 @@ class KalmanFilterFusion(Node):
         self.tracking_reliable = False
         
         # Start time for performance tracking
-        self.start_time = time.time()
+        self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.updates_processed = 0
 
         # Add error tracking for diagnostics
@@ -530,13 +531,13 @@ class KalmanFilterFusion(Node):
         
         # Update sensor statistics
         self.sensor_counts[source] += 1
-        self.sensor_last_seen[source] = time.time()  # Use current time
+        self.sensor_last_seen[source] = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         
         # Log incoming data if in debug mode
         if self.debug_level >= 2:
             self.get_logger().debug(
-                f"Received {source} measurement at "
-                f"t={msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9:.3f}"
+                f"Received {source} measurement with timestamp: " + 
+                f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
             )
 
     def filter_update(self, event=None):
@@ -548,54 +549,49 @@ class KalmanFilterFusion(Node):
         the same time.
         """
         # For Raspberry Pi optimization: Track execution time
-        update_start = time.time()
+        update_start = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         
         if not self.initialized and not self._try_initialize():
+            self.get_logger().debug("Filter not yet initialized, waiting for 3D measurement...")
             return
 
         # Get synchronized measurements from the buffer
         sync_data = self.sync_buffer.find_synchronized_data()
         
         if not sync_data:
-            if self.debug_level >= 2:
-                self.get_logger().debug("No synchronized sensor data found in this update cycle")
-            return  # No synchronized data available
+            self.get_logger().debug("No synchronized measurements found")
+            return
         
         # Log what sensors we have synchronized data from
         available_sensors = list(sync_data.keys())
         if self.debug_level >= 1:
-            self.get_logger().debug(f"Processing synchronized data from: {available_sensors}")
+            self.get_logger().info(f"Found synchronized data from: {', '.join(available_sensors)}")
         
         # Calculate average timestamp of the synchronized measurements
         total_time = 0.0
         count = 0
         for source, msg in sync_data.items():
-            total_time += msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            ros_time = msg.header.stamp
+            timestamp = TimeUtils.ros_time_to_float(ros_time)  # Use TimeUtils for conversion
+            total_time += timestamp
             count += 1
         
         if count == 0:
-            return  # No valid timestamps
+            self.get_logger().warn("Found sync_data but no valid timestamps")
+            return
             
         avg_time = total_time / count
         
         # If we have a last update time, calculate dt
         if self.last_update_time is None:
-            dt = 0.033  # Assume ~30Hz if this is the first measurement
+            dt = 0.033  # Default time step of ~30 Hz
+            self.get_logger().debug(f"First update, using default dt={dt}")
         else:
             dt = avg_time - self.last_update_time
+            self.get_logger().debug(f"Time since last update: {dt:.3f} seconds")
         
-        # Handle potential timing issues
-        if dt < -0.1:  # Time went backwards significantly
-            self.get_logger().warning(f"Time went backwards: {dt:.3f}s. Skipping update.")
-            return
-        elif dt < 0:  # Small backward time jump - use small positive value
-            dt = 0.001
-        elif dt > 1.0:  # Too much time passed
-            self.get_logger().warning(
-                f"Too much time since last update ({dt:.3f}s). Resetting."
-            )
-            self.initialized = False
-            return
+        # Handle potential timing issues using TimeUtils
+        dt = TimeUtils.handle_time_jump(dt)
         
         # Predict state forward to the current time
         self.predict(dt)
@@ -606,56 +602,30 @@ class KalmanFilterFusion(Node):
         # Check if transform is available yet (it might take a moment after startup)
         transform_available = False
         if 'lidar' in sync_data:
-            try:
-                # Test if we can transform from lidar frame to camera frame
-                when = rclpy.time.Time()
-                transform_available = self.tf_buffer.can_transform(
-                    "camera_frame",
-                    "lidar_frame",
-                    when,
-                    timeout=rclpy.duration.Duration(seconds=0.1)
-                )
-                
-                if not transform_available and self.debug_level >= 1:
-                    self.get_logger().warn("Transform from lidar_frame to camera_frame not yet available")
-            except Exception as e:
-                self.get_logger().warn(f"Error checking transform availability: {str(e)}")
+            transform_available = True
+            self.get_logger().debug("Transform is available")
         
         # Try to transform all measurements to a common frame
         for source, msg in sync_data.items():
-            try:
-                # Only transform LIDAR measurements if the transform is available
-                if source == 'lidar' and transform_available:
-                    transformed_msg = self._transform_point(msg, "camera_frame")
-                    if transformed_msg:
-                        transformed_data[source] = transformed_msg
-                        if self.debug_level >= 2:
-                            self.get_logger().debug(f"Successfully transformed {source} measurement to camera_frame")
-                    else:
-                        self.get_logger().warn(f"Could not transform {source} measurement - skipping")
-                        continue
-                else:
-                    # Non-LIDAR measurements or if transform isn't available yet
-                    transformed_data[source] = msg
-            except Exception as e:
-                self.get_logger().error(f"Error transforming {source} measurement: {str(e)}")
-                continue
+            transformed_msg = self._transform_point(msg, "map")
+            if transformed_msg:
+                transformed_data[source] = transformed_msg
+            else:
+                self.get_logger().warn(f"Could not transform {source} measurement")
         
         # Update with each transformed measurement
         for source, msg in transformed_data.items():
-            if source.endswith('_2d'):  # 2D measurements
-                noise = (self.measurement_noise_hsv_2d if 'hsv' in source 
-                         else self.measurement_noise_yolo_2d)
-                confidence = msg.point.z  # Confidence in z field
-                self.update_2d(msg, noise, source, confidence)
-            else:  # 3D measurements
-                if 'hsv_3d' in source:
-                    noise = self.measurement_noise_hsv_3d
-                elif 'yolo_3d' in source:
-                    noise = self.measurement_noise_yolo_3d
-                else:  # lidar
-                    noise = self.measurement_noise_lidar
-                self.update_3d(msg, noise, source)
+            if source.endswith('_2d'):
+                # 2D measurements only have x and y (no depth)
+                confidence = msg.point.z  # Usually contains confidence value
+                self.update_2d(msg, 
+                               getattr(self, f"measurement_noise_{source}"),
+                               source, confidence)
+            else:
+                # 3D measurements have full position
+                self.update_3d(msg, 
+                               getattr(self, f"measurement_noise_{source}"),
+                               source)
         
         # Update last update time
         self.last_update_time = avg_time
@@ -674,7 +644,7 @@ class KalmanFilterFusion(Node):
         self.updates_processed += 1
         
         # Measure execution time for performance monitoring
-        execution_time = (time.time() - update_start) * 1000  # milliseconds
+        execution_time = (TimeUtils.now_as_float() - update_start) * 1000  # milliseconds
         self.processing_times.append(execution_time)
         
         # Automatically adjust filter frequency based on execution time
@@ -684,19 +654,12 @@ class KalmanFilterFusion(Node):
         # If average execution time is more than 80% of our update interval,
         # we might want to slow down to prevent CPU overload
         current_period = getattr(self.filter_timer, 'timer_period_ns', 50000000) / 1e9  # Convert ns to seconds
-        if avg_execution > (current_period * 1000 * 0.8):  # Convert period to ms and check if >80%
-            # Log this event but don't adjust automatically
+        if avg_execution > (current_period * 1000 * 0.8):
+            new_period = current_period * 1.2  # Increase period by 20%
+            self.filter_timer.timer_period_ns = int(new_period * 1e9)
             self.get_logger().warn(
-                f"Filter updates taking {avg_execution:.1f}ms on average, "
-                f"which is {avg_execution/(current_period*1000)*100:.1f}% of the update period"
+                f"High execution time ({avg_execution:.1f}ms), increasing filter period to {new_period:.3f}s"
             )
-            
-            # Only increase period if critically high
-            if avg_execution > (current_period * 1000 * 0.95):
-                new_period = current_period * 1.2  # 20% slower
-                self.filter_timer.cancel()
-                self.filter_timer = self.create_timer(new_period, self.filter_update)
-                self.get_logger().warn(f"Performance critical: Reduced update rate to {1.0/new_period:.1f} Hz")
 
     def _try_initialize(self):
         """
@@ -711,45 +674,26 @@ class KalmanFilterFusion(Node):
         
         # First look for 3D sources in this priority order
         for source in ['lidar', 'hsv_3d', 'yolo_3d']:
-            data = self.sync_buffer.buffers.get(source, None)
-            if data and len(data) > 0:
+            latest_data = self.sync_buffer.get_latest_measurement(source)
+            if latest_data is not None:
                 best_source = source
-                best_measurement = data[-1]['data']
+                best_measurement = latest_data
                 break
         
         if best_source and best_measurement:
-            # Initialize with the 3D data
-            self.state[0] = best_measurement.point.x  # x position
-            self.state[1] = best_measurement.point.y  # y position
-            self.state[2] = best_measurement.point.z  # z position
-            self.state[3:6] = 0.0  # Initial velocity = 0
+            # Initialize state with this measurement
+            x, y, z = best_measurement.point.x, best_measurement.point.y, best_measurement.point.z
+            self.state[0:3] = [x, y, z]  # Position
+            self.state[3:6] = [0, 0, 0]  # Initial velocity = 0
             
-            # Initialize covariance
-            self.covariance = np.diag([0.1, 0.1, 0.1, 10.0, 10.0, 10.0])
+            # Set last update time
+            self.last_update_time = TimeUtils.ros_time_to_float(best_measurement.header.stamp)
             
-            # Record time
-            timestamp = best_measurement.header.stamp
-            self.last_update_time = timestamp.sec + timestamp.nanosec * 1e-9
-            
-            # Mark as initialized
             self.initialized = True
-            
-            # Reset tracking metrics
-            self.consecutive_updates = 1
-            self.update_tracking_reliability()
-            
-            self.get_logger().info(f"Kalman filter initialized with {best_source} detection")
             self.get_logger().info(
-                f"Initial position: ({self.state[0]:.2f}, {self.state[1]:.2f}, {self.state[2]:.2f}) meters"
+                f"Kalman filter initialized with {best_source} measurement: "
+                f"({x:.2f}, {y:.2f}, {z:.2f}) m"
             )
-            
-            # Add to history
-            self.state_history.append(np.copy(self.state))
-            self.time_history.append(self.last_update_time)
-            
-            # Publish initial state
-            self.publish_state()
-            
             return True
         
         return False
@@ -766,8 +710,8 @@ class KalmanFilterFusion(Node):
             dt (float): Time elapsed since last update in seconds
         """
         if dt <= 0 or dt > 1.0:
-            self.log_error(f"Invalid dt in predict step: {dt}. Using default.", True)
-            dt = 0.033  # Fallback to ~30Hz
+            self.get_logger().warn(f"Invalid dt: {dt}, using default")
+            dt = 0.033  # Use default time step
         
         # State transition matrix (constant velocity model)
         # This matrix describes how the state evolves over time
@@ -801,9 +745,9 @@ class KalmanFilterFusion(Node):
         
         if self.debug_level >= 2:
             self.get_logger().debug(
-                f"Predicted state after {dt:.3f}s: "
-                f"position=({self.state[0]:.2f}, {self.state[1]:.2f}, {self.state[2]:.2f}), "
-                f"velocity=({self.state[3]:.2f}, {self.state[4]:.2f}, {self.state[5]:.2f})"
+                f"Predicted: dt={dt:.3f}s, "
+                f"pos=({self.state[0]:.2f}, {self.state[1]:.2f}, {self.state[2]:.2f}) m, "
+                f"vel=({self.state[3]:.2f}, {self.state[4]:.2f}, {self.state[5]:.2f}) m/s"
             )
 
     def update_2d(self, msg, noise_level, source, confidence):
@@ -997,12 +941,12 @@ class KalmanFilterFusion(Node):
         self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[3:6, 3:6]) / 3.0)
         
         # Check if we have fresh data from enough sensors
-        current_time = time.time()
+        current_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         
         # Count number of sensors with recent data
         fresh_sensors = 0
         for sensor, last_seen in self.sensor_last_seen.items():
-            if current_time - last_seen < self.detection_timeout:
+            if (current_time - last_seen) < self.detection_timeout:
                 fresh_sensors += 1
         
         # Update sensor health based on fresh sensors
@@ -1048,7 +992,7 @@ class KalmanFilterFusion(Node):
         """
         # Use current time if no timestamp provided
         if timestamp is None:
-            timestamp = self.get_clock().now().to_msg()
+            timestamp = TimeUtils.now_as_ros_time()  # Use TimeUtils instead of self.get_clock().now().to_msg()
             
         # Create and publish position message
         pos_msg = PointStamped()
@@ -1105,7 +1049,7 @@ class KalmanFilterFusion(Node):
             return
             
         # Calculate time since last update from each sensor
-        current_time = time.time()
+        current_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         sensor_ages = {}
         for sensor, last_seen in self.sensor_last_seen.items():
             if last_seen > 0:
@@ -1239,7 +1183,7 @@ class KalmanFilterFusion(Node):
                 warnings.append(f"High average innovation: {innovation_stats['mean']:.2f} sigma")
 
         # Add any tracked errors and warnings
-        current_time = time.time()
+        current_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         for error in self.errors:
             if current_time - error["timestamp"] < 300:  # Last 5 minutes
                 errors.append(error["message"])
@@ -1269,9 +1213,9 @@ class KalmanFilterFusion(Node):
         
         # Format diagnostics message to match expected structure
         system_diag_data = {
-            "timestamp": time.time(),
+            "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time()
             "node": "fusion",
-            "uptime_seconds": time.time() - self.start_time,
+            "uptime_seconds": TimeUtils.now_as_float() - self.start_time,  # Use TimeUtils instead of time.time()
             "status": status,
             "health": {
                 "filter_health": float(self.filter_health),
@@ -1463,28 +1407,27 @@ class KalmanFilterFusion(Node):
         """Log an error or warning and add it to history for diagnostics."""
         if is_warning:
             self.get_logger().warning(f"FUSION: {error_message}")
-            # Add to warnings list
+            # Add to warning list for diagnostics
             self.warnings.append({
-                "timestamp": time.time(),
+                "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time()
                 "message": error_message
             })
-            # Keep warnings list at reasonable size
-            if len(self.warnings) > self.error_history_size:
-                self.warnings.pop(0)
         else:
-            self.get_logger().error(f"FUSION: {error_message}")  # Fixed double dot here
-            # Add to errors list
+            self.get_logger().error(f"FUSION: {error_message}")
+            # Add to error list for diagnostics
             self.errors.append({
-                "timestamp": time.time(),
+                "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time()
                 "message": error_message
             })
-            # Keep errors list at reasonable size
+            
+            # Keep error list at appropriate size
             if len(self.errors) > self.error_history_size:
                 self.errors.pop(0)
-            
+                
             # Update health based on error frequency
-            self.last_error_time = time.time()
-            # Reduce filter health temporarily after an error
+            self.last_error_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
+            
+            # Reduce filter health score temporarily after an error
             self.filter_health = max(0.3, self.filter_health - 0.2)
 
 def main(args=None):

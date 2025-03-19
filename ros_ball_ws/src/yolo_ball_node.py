@@ -60,6 +60,7 @@ import time
 import os
 from config.config_loader import ConfigLoader  # Import ConfigLoader
 from ball_tracking.resource_monitor import ResourceMonitor  # Add resource monitoring import
+from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
 from collections import deque  # Add import for deque
 import json
 
@@ -181,7 +182,7 @@ class TennisBallDetector(Node):
         self.load_model(self.mnn_config)
 
         # Performance tracking variables
-        self.start_time = time.time()
+        self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.image_count = 0
         
         # Initialize diagnostic metrics
@@ -378,7 +379,7 @@ class TennisBallDetector(Node):
             # Process only every other frame in low power mode
             return
 
-        inference_start = time.time()
+        inference_start = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.image_count += 1
         
         # Update total frames in diagnostic metrics
@@ -392,9 +393,9 @@ class TennisBallDetector(Node):
             input_tensor = self.preprocess_image(cv_image)
             
             # Run the neural network to detect objects
-            infer_start = time.time()
+            infer_start = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
             output_var = self.net.forward(input_tensor)
-            infer_time = (time.time() - infer_start) * 1000  # milliseconds
+            infer_time = (TimeUtils.now_as_float() - infer_start) * 1000  # milliseconds
             
             # Track inference time for diagnostics
             self.diagnostic_metrics['inference_time_history'].append(infer_time)
@@ -415,7 +416,7 @@ class TennisBallDetector(Node):
                 # Update diagnostic metrics for detection
                 self.diagnostic_metrics['detected_frames'] += 1
                 self.diagnostic_metrics['last_detection_position'] = (center_x, center_y)
-                self.diagnostic_metrics['last_detection_time'] = time.time()
+                self.diagnostic_metrics['last_detection_time'] = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
                 self.diagnostic_metrics['confidence_history'].append(confidence)
                 
                 # Calculate detection rate
@@ -433,8 +434,14 @@ class TennisBallDetector(Node):
                 position_msg = PointStamped()
                 
                 # IMPORTANT: Copy the timestamp from the original image
-                # This is critical for fusion to know when this detection occurred
-                position_msg.header.stamp = msg.header.stamp
+                # Validate the timestamp first
+                if TimeUtils.is_timestamp_valid(msg.header.stamp):
+                    position_msg.header.stamp = msg.header.stamp
+                    self.get_logger().debug(f"Using original image timestamp for synchronization")
+                else:
+                    position_msg.header.stamp = TimeUtils.now_as_ros_time()
+                    self.get_logger().debug(f"Using current time as timestamp (invalid original timestamp)")
+                
                 position_msg.header.frame_id = "camera_frame"  # Use consistent frame ID
                 
                 # Add sequence number for better synchronization
@@ -455,8 +462,8 @@ class TennisBallDetector(Node):
                     self.get_logger().debug("No tennis ball detected in recent frames")
 
             # Calculate and display performance metrics
-            total_time = (time.time() - inference_start) * 1000  # milliseconds
-            elapsed_time = time.time() - self.start_time
+            total_time = (TimeUtils.now_as_float() - inference_start) * 1000  # milliseconds
+            elapsed_time = TimeUtils.now_as_float() - self.start_time  # Use TimeUtils instead of time.time()
             fps = self.image_count / elapsed_time if elapsed_time > 0 else 0
             
             # Update metrics for diagnostics
@@ -478,7 +485,7 @@ class TennisBallDetector(Node):
 
     def publish_system_diagnostics(self):
         """Publish comprehensive system diagnostics for the diagnostics node."""
-        current_time = time.time()
+        current_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         elapsed_time = current_time - self.start_time
         
         # Calculate average metrics
@@ -489,7 +496,10 @@ class TennisBallDetector(Node):
         avg_confidence = np.mean(list(self.diagnostic_metrics['confidence_history'])) if self.diagnostic_metrics['confidence_history'] else 0.0
         
         # Time since last detection
-        time_since_detection = current_time - self.diagnostic_metrics['last_detection_time'] if self.diagnostic_metrics['last_detection_time'] > 0 else float('inf')
+        if self.diagnostic_metrics['last_detection_time'] > 0:
+            time_since_detection = current_time - self.diagnostic_metrics['last_detection_time']
+        else:
+            time_since_detection = float('inf')
         
         # Build warnings list
         warnings = []

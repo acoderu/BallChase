@@ -48,6 +48,7 @@ import time
 import os
 from config.config_loader import ConfigLoader  # Import ConfigLoader
 from ball_tracking.resource_monitor import ResourceMonitor  # Add resource monitoring import
+from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
 import json
 from collections import deque  # Add import for deque
 
@@ -201,7 +202,7 @@ class HSVTennisBallTracker(Node):
     def _init_state_variables(self):
         """Initialize all state tracking variables."""
         # Performance tracking
-        self.start_time = time.time()
+        self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.frame_count = 0
         self.no_detection_count = 0
         self.last_detection_time = None
@@ -280,7 +281,7 @@ class HSVTennisBallTracker(Node):
                     self.diagnostic_metrics['adaptations'] = []
                     
                 self.diagnostic_metrics['adaptations'].append({
-                    'timestamp': time.time(),
+                    'timestamp': TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time()
                     'resource_type': resource_type,
                     'value': value,
                     'action': f'Increased frame skip to {self.low_power_skip_frames}'
@@ -312,7 +313,7 @@ class HSVTennisBallTracker(Node):
                 return
         
         # Start timing for performance metrics
-        processing_start = time.time()
+        processing_start = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         self.frame_count += 1
         
         try:
@@ -483,8 +484,14 @@ class HSVTennisBallTracker(Node):
             position_msg = PointStamped()
             
             # IMPORTANT: Use the original image timestamp
-            # This is critical for proper synchronization
-            position_msg.header.stamp = header.stamp
+            # Validate timestamp before using it
+            if TimeUtils.is_timestamp_valid(header.stamp):
+                position_msg.header.stamp = header.stamp
+                self.get_logger().debug(f"Using original timestamp for synchronization")
+            else:
+                position_msg.header.stamp = TimeUtils.now_as_ros_time()
+                self.get_logger().debug(f"Using current time as timestamp (invalid original timestamp)")
+                
             position_msg.header.frame_id = "camera_frame"  # Use consistent frame ID
             
             position_msg.point.x = float(center_x)
@@ -505,7 +512,7 @@ class HSVTennisBallTracker(Node):
             # Reset no detection counter and update statistics
             self.no_detection_count = 0
             self.detection_count += 1
-            self.last_detection_time = time.time()
+            self.last_detection_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
             
             # Store for statistics (keep last 50)
             self.detection_sizes.append(best_area)
@@ -517,7 +524,7 @@ class HSVTennisBallTracker(Node):
             # Store for diagnostics
             if hasattr(self, 'diagnostic_metrics'):
                 self.diagnostic_metrics['last_detection_position'] = (center_x, center_y)
-                self.diagnostic_metrics['last_detection_time'] = time.time()
+                self.diagnostic_metrics['last_detection_time'] = TimeUtils.now_as_float()  # Use TimeUtils
                 
             # Return detection information
             return {
@@ -626,8 +633,8 @@ class HSVTennisBallTracker(Node):
         combined[:, w:] = display_mask
         
         # Add resolution and FPS counter
-        processing_time = (time.time() - processing_start) * 1000
-        elapsed_time = time.time() - self.start_time
+        processing_time = (TimeUtils.now_as_float() - processing_start) * 1000
+        elapsed_time = TimeUtils.now_as_float() - self.start_time
         fps = self.frame_count / elapsed_time if elapsed_time > 0 else 0
         
         cv2.putText(combined, f"{self.target_width}x{self.target_height}", 
@@ -648,7 +655,7 @@ class HSVTennisBallTracker(Node):
             processing_start (float): When processing started for timing
         """
         # Calculate timing metrics
-        processing_time = (time.time() - processing_start) * 1000
+        processing_time = (TimeUtils.now_as_float() - processing_start) * 1000  # Use TimeUtils
         self.processing_times.append(processing_time)
         if len(self.processing_times) > 50:
             self.processing_times.pop(0)
@@ -656,7 +663,7 @@ class HSVTennisBallTracker(Node):
         avg_processing_time = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
         
         # Calculate overall performance
-        elapsed_time = time.time() - self.start_time
+        elapsed_time = TimeUtils.now_as_float() - self.start_time  # Use TimeUtils
         fps = self.frame_count / elapsed_time if elapsed_time > 0 else 0
         detection_rate = self.detection_count / self.frame_count if self.frame_count > 0 else 0
         
@@ -700,7 +707,7 @@ class HSVTennisBallTracker(Node):
         if not hasattr(self, 'diagnostic_metrics'):
             return  # Not enough data collected yet
             
-        current_time = time.time()
+        current_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
         elapsed_time = current_time - self.start_time
         
         # Calculate average metrics
@@ -709,7 +716,11 @@ class HSVTennisBallTracker(Node):
         avg_detection_rate = np.mean(list(self.diagnostic_metrics['detection_rate_history'])) if self.diagnostic_metrics['detection_rate_history'] else 0.0
         
         # Time since last detection
-        time_since_detection = current_time - self.diagnostic_metrics['last_detection_time'] if self.diagnostic_metrics['last_detection_time'] > 0 else float('inf')
+        time_since_detection = 0
+        if self.diagnostic_metrics['last_detection_time'] > 0:
+            time_since_detection = current_time - self.diagnostic_metrics['last_detection_time']
+        else:
+            time_since_detection = float('inf')
         
         # Build warnings list
         warnings = []

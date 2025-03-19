@@ -35,6 +35,8 @@ class TimeUtils:
         Returns:
             Float representing seconds since epoch
         """
+        if not isinstance(ros_time, TimeMsg):
+            raise TypeError("Expected ROS Time message, got {}".format(type(ros_time)))
         return ros_time.sec + ros_time.nanosec * 1e-9
     
     @staticmethod
@@ -48,6 +50,9 @@ class TimeUtils:
         Returns:
             ROS Time message
         """
+        if not isinstance(timestamp, (int, float)):
+            raise TypeError("Expected float or int timestamp, got {}".format(type(timestamp)))
+            
         sec = int(timestamp)
         nanosec = int((timestamp - sec) * 1e9)
         
@@ -68,6 +73,9 @@ class TimeUtils:
         Returns:
             Time difference in seconds (positive if newer > older)
         """
+        if newer is None or older is None:
+            raise ValueError("Cannot calculate time difference with None values")
+            
         # Convert to float seconds if needed
         newer_float = newer if isinstance(newer, float) else TimeUtils.ros_time_to_float(newer)
         older_float = older if isinstance(older, float) else TimeUtils.ros_time_to_float(older)
@@ -86,6 +94,9 @@ class TimeUtils:
         Returns:
             Sanitized time difference suitable for further processing
         """
+        if not isinstance(dt, (int, float)):
+            return default_dt
+            
         # Handle backward time jumps
         if dt < -0.1:  # Significant backward jump
             return default_dt  # Use default instead
@@ -116,8 +127,12 @@ class TimeUtils:
         if isinstance(timestamp, float):
             return timestamp > 0.0
         
-        # For ROS Time messages    
-        return (timestamp.sec > 0 or timestamp.nanosec > 0)
+        # For ROS Time messages - make sure we have either seconds or nanoseconds
+        try:
+            return (timestamp.sec > 0 or timestamp.nanosec > 0)
+        except AttributeError:
+            # If the timestamp doesn't have sec or nanosec attributes
+            return False
     
     @staticmethod
     def now_as_float() -> float:
@@ -155,12 +170,18 @@ class TimeUtils:
             Tuple of (index of closest timestamp, time difference)
             Returns (-1, float('inf')) if no timestamp is close enough
         """
+        if target_time is None or not timestamps:
+            return -1, float('inf')
+            
         target_float = target_time if isinstance(target_time, float) else TimeUtils.ros_time_to_float(target_time)
         
         closest_idx = -1
         min_diff = float('inf')
         
         for i, ts in enumerate(timestamps):
+            if ts is None:
+                continue
+                
             ts_float = ts if isinstance(ts, float) else TimeUtils.ros_time_to_float(ts)
             diff = abs(ts_float - target_float)
             
@@ -185,6 +206,9 @@ class TimeUtils:
         Returns:
             Human-readable duration string
         """
+        if not isinstance(seconds, (int, float)):
+            return "invalid"
+            
         if seconds < 0.001:
             return f"{seconds*1e6:.1f}μs"
         elif seconds < 1.0:
@@ -215,6 +239,7 @@ class TimeUtils:
             return True
             
         ts_float = timestamp if isinstance(timestamp, float) else TimeUtils.ros_time_to_float(timestamp)
-        ref_time = reference_time if reference_time is not None else time.time()
+        ref_time = reference_time if reference_time is not None else TimeUtils.now_as_float()
         
-        return (ref_time - ts_float) > max_age
+        age = ref_time - ts_float
+        return age > max_age
