@@ -7,7 +7,7 @@ model:
   input_height: 320          # Height model expects
   precision: "lowBF"         # Lower precision for faster inference
   backend: "CPU"             # Using CPU for inference
-  thread_count: 4            # Number of CPU threads to use
+  thread_count: 1            # Number of CPU threads to use
   confidence_threshold: 0.25 # Only keep detections above this confidence
   tennis_ball_class_id: 32   # COCO dataset class ID for "sports ball"
 

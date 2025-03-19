@@ -84,7 +84,7 @@ MODEL_CONFIG = config.get('model', {
     "input_height": 320,          # Height our model expects
     "precision": "lowBF",         # Lower precision for faster inference
     "backend": "CPU",             # Using CPU for inference
-    "thread_count": 4,            # Number of CPU threads to use
+    "thread_count": 2,            # Number of CPU threads to use
     "confidence_threshold": 0.25  # Only keep detections above this confidence
 })
 
