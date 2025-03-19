@@ -145,6 +145,14 @@ class HSVTennisBallTracker(Node):
         # Set up visualization if enabled
         self._setup_visualization()
         
+        # Use bounded collections for metrics
+        max_history = 100  # Default or from config
+        self.fps_history = deque(maxlen=max_history)
+        self.processing_times = deque(maxlen=max_history)
+        self.detection_history = deque(maxlen=max_history)
+        self.errors = deque(maxlen=50)
+        self.warnings = deque(maxlen=50)
+        
         self.get_logger().info("HSV Tennis Ball Tracker has started!")
         self.get_logger().info(f"Processing images at {self.target_width}x{self.target_height} to match YOLO")
         self.get_logger().info(f"Looking for balls with area between {self.min_ball_area} and {self.max_ball_area} pixels")
@@ -317,8 +325,12 @@ class HSVTennisBallTracker(Node):
         self.frame_count += 1
         
         try:
+            # Pre-allocate or reuse frame buffer
+            if not hasattr(self, '_frame_buffer') or self._frame_buffer is None:
+                self._frame_buffer = np.zeros((msg.height, msg.width, 3), dtype=np.uint8)
+            
             # Step 1: Convert ROS image to OpenCV format
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8', dst=self._frame_buffer)
             
             # Step 2: Resize to target resolution (320x320 to match YOLO)
             original_height, original_width = frame.shape[:2]
@@ -809,14 +821,25 @@ class HSVTennisBallTracker(Node):
         )
 
     def destroy_node(self):
-        """Clean up resources when the node is shutting down."""
-        # Stop the resource monitor if it exists
-        if hasattr(self, 'resource_monitor'):
-            self.resource_monitor.stop()
+        """Ensure proper cleanup of resources."""
+        # Release any capture objects
+        if hasattr(self, 'cap') and self.cap:
+            self.cap.release()
         
         # Close OpenCV windows if enabled
-        if self.enable_visualization:
-            cv2.destroyAllWindows()
+        if hasattr(self, 'enable_visualization') and self.enable_visualization:
+            try:
+                cv2.destroyAllWindows()
+            except Exception as e:
+                self.get_logger().warn(f"Error closing OpenCV windows: {str(e)}")
+        
+        # Clear large image buffers
+        if hasattr(self, '_frame_buffer'):
+            self._frame_buffer = None
+        
+        # Stop any threads
+        if hasattr(self, 'resource_monitor') and self.resource_monitor:
+            self.resource_monitor.stop()
         
         super().destroy_node()
 

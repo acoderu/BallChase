@@ -511,7 +511,15 @@ class TennisBall3DPositionEstimator(Node):
                 return False
             
             # Step 3: Convert depth image to a numpy array
-            depth_array = self.cv_bridge.imgmsg_to_cv2(self.depth_image)
+            # Pre-allocate depth array if needed or reuse existing one
+            if not hasattr(self, '_depth_array') or self._depth_array is None:
+                self._depth_array = np.zeros((self.depth_image.height, self.depth_image.width), 
+                                            dtype=np.float32)
+            
+            # Reuse buffer for depth conversion
+            depth_array = self.cv_bridge.imgmsg_to_cv2(self.depth_image, 
+                                                      desired_encoding="passthrough",
+                                                      dst=self._depth_array)
             
             # Step 4: Extract depth using adaptive radius if needed
             median_depth, depth_reliability, valid_points = self._get_reliable_depth(
@@ -901,8 +909,23 @@ class TennisBall3DPositionEstimator(Node):
     
     def destroy_node(self):
         """Clean shutdown of the node."""
-        if hasattr(self, 'resource_monitor'):
+        # Clear any large stored images
+        self.depth_image = None
+        self.camera_info = None
+        
+        # Release TF resources
+        if hasattr(self, 'tf_buffer'):
+            self.tf_buffer = None
+        if hasattr(self, 'tf_listener'):
+            self.tf_listener = None
+        
+        # Stop resource monitor and join thread
+        if hasattr(self, 'resource_monitor') and self.resource_monitor:
             self.resource_monitor.stop()
+            # Join thread with timeout
+            if hasattr(self.resource_monitor, 'monitor_thread'):
+                self.resource_monitor.monitor_thread.join(timeout=1.0)
+        
         super().destroy_node()
 
     def _get_reliable_depth(self, depth_array, pixel_x, pixel_y):

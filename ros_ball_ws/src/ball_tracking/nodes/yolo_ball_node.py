@@ -190,6 +190,9 @@ class TennisBallDetector(Node):
         
         self.get_logger().info("Initialization complete, waiting for camera images")
         
+        # Preallocate tensor for reuse
+        self._input_tensor = None
+
     def _init_diagnostic_metrics(self):
         """Initialize metrics for diagnostic monitoring"""
         self.diagnostic_metrics = {
@@ -604,7 +607,19 @@ class TennisBallDetector(Node):
             self.low_power_mode = True
 
     def destroy_node(self):
-        """Clean up resources when the node is shutting down."""
+        """Clean up YOLO model resources."""
+        # Release model resources
+        if hasattr(self, 'model'):
+            del self.model
+        
+        # Release any pre-allocated tensors
+        if hasattr(self, '_input_tensor'):
+            self._input_tensor = None
+        
+        # Force garbage collection to clean up CUDA/ML resources
+        import gc
+        gc.collect()
+        
         if hasattr(self, 'resource_monitor'):
             self.resource_monitor.stop()
         super().destroy_node()

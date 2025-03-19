@@ -229,6 +229,11 @@ class TennisBallLidarDetector(Node):
         
         # Configure detection algorithm based on hardware
         self._configure_detection_algorithm()
+        
+        # Pre-allocate buffers for point cloud processing
+        self._points_buffer = None  # Will be allocated based on first point cloud
+        self._filtered_buffer = None
+        self._cluster_buffer = None
     
     def _init_state_tracking(self):
         """Initialize state tracking for all system components."""
@@ -934,10 +939,19 @@ class TennisBallLidarDetector(Node):
             self.lidar_health = max(0.3, self.lidar_health - 0.2)
     
     def destroy_node(self):
-        """Clean up resources when node is shutting down."""
-        # Stop the resource monitor
-        if hasattr(self, 'resource_monitor'):
+        """Clean shutdown of node resources."""
+        # Release large point cloud buffers
+        if hasattr(self, '_points_buffer'):
+            self._points_buffer = None
+        if hasattr(self, '_filtered_buffer'):
+            self._filtered_buffer = None
+        if hasattr(self, '_cluster_buffer'):
+            self._cluster_buffer = None
+        
+        # Stop any running threads
+        if hasattr(self, 'resource_monitor') and self.resource_monitor:
             self.resource_monitor.stop()
+        
         super().destroy_node()
 
 def main(args=None):

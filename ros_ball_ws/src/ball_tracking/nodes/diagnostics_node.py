@@ -58,7 +58,7 @@ class SystemDiagnosticsNode(Node):
         self.resource_timer = self.create_timer(5.0, self.monitor_resources)
         
         # Open log file
-        self._open_log_file()
+        self.log_file = None
         
         self.get_logger().info("System Diagnostics Node started - monitoring all components")
         
@@ -163,22 +163,34 @@ class SystemDiagnosticsNode(Node):
             10
         )
     
-    def _open_log_file(self):
-        """Open log file for diagnostic data."""
-        # Create log directory if it doesn't exist
-        if not os.path.exists(LOG_FILE_DIR):
-            os.makedirs(LOG_FILE_DIR)
-        
-        # Create a log file with timestamp in filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filepath = os.path.join(LOG_FILE_DIR, f"diagnostics_{timestamp}.log")
-        
+    def open_log_file(self):
+        """Open log file with proper error handling."""
+        if self.log_file:
+            try:
+                self.log_file.close()
+            except Exception:
+                pass
+                
         try:
-            self.log_file = open(log_filepath, 'w')
-            self.get_logger().info(f"Logging diagnostics to {log_filepath}")
+            self.log_file = open(self.log_path, 'a')
+            return True
         except Exception as e:
             self.get_logger().error(f"Failed to open log file: {str(e)}")
-            self.log_file = None
+            return False
+    
+    def write_to_log(self, message):
+        """Write to log file with proper error handling."""
+        if not self.log_file or self.log_file.closed:
+            if not self.open_log_file():
+                return False
+                
+        try:
+            self.log_file.write(message + '\n')
+            self.log_file.flush()  # Ensure data is written
+            return True
+        except Exception as e:
+            self.get_logger().error(f"Failed to write to log: {str(e)}")
+            return False
     
     def log_event(self, event_type: str, node: str, details: str):
         """Log an event to both ROS log and the diagnostics log file."""
@@ -202,12 +214,7 @@ class SystemDiagnosticsNode(Node):
         })
         
         # Log to file
-        if hasattr(self, 'log_file') and self.log_file:
-            try:
-                self.log_file.write(log_entry + "\n")
-                self.log_file.flush()
-            except Exception as e:
-                self.get_logger().error(f"Failed to write to log file: {str(e)}")
+        self.write_to_log(log_entry)
     
     def diagnostic_callback(self, msg: String, node: str):
         """Process diagnostics data from a node."""
@@ -454,10 +461,16 @@ class SystemDiagnosticsNode(Node):
         viz_msg.data = json.dumps(viz_data)
         self.system_viz_pub.publish(viz_msg)
 
-    def __del__(self):
-        """Clean up resources when node is shut down."""
-        if hasattr(self, 'log_file') and self.log_file:
-            self.log_file.close()
+    def destroy_node(self):
+        """Ensure log file is closed."""
+        if self.log_file:
+            try:
+                self.log_file.close()
+            except Exception:
+                pass
+            self.log_file = None
+            
+        super().destroy_node()
 
 
 def main(args=None):

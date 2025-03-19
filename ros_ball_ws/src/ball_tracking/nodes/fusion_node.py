@@ -405,8 +405,10 @@ class KalmanFilterFusion(Node):
         self.last_update_time = None
         
         # History of states for analysis and debugging
-        self.state_history = deque(maxlen=self.history_length)
-        self.time_history = deque(maxlen=self.history_length)
+        history_length = fusion_config.get('history_length', 100)
+        self.state_history = deque(maxlen=history_length)
+        self.covariance_history = deque(maxlen=history_length)
+        self.measurement_history = deque(maxlen=history_length)
         
         # Sensor statistics for diagnostics
         self.sensor_counts = {
@@ -713,28 +715,23 @@ class KalmanFilterFusion(Node):
             self.get_logger().warn(f"Invalid dt: {dt}, using default")
             dt = 0.033  # Use default time step
         
-        # State transition matrix (constant velocity model)
-        # This matrix describes how the state evolves over time
-        F = np.eye(6)
-        F[0, 3] = dt  # x += vx * dt
-        F[1, 4] = dt  # y += vy * dt
-        F[2, 5] = dt  # z += vz * dt
+        if not hasattr(self, '_F_matrix'):
+            # Pre-allocate matrices used in calculations
+            self._F_matrix = np.eye(6)
+            self._Q_matrix = np.zeros((6, 6))
         
-        # Process noise covariance matrix
-        # This represents how much uncertainty to add due to imperfections in our model
-        Q = np.zeros((6, 6))
-        # Position noise (increases with dt^2)
-        Q[0:3, 0:3] = np.eye(3) * self.process_noise_pos * dt**2
-        # Velocity noise (increases with dt)
-        Q[3:6, 3:6] = np.eye(3) * self.process_noise_vel * dt
+        # Update transition matrix F in-place
+        self._F_matrix[0, 3] = dt
+        self._F_matrix[1, 4] = dt
+        self._F_matrix[2, 5] = dt
         
-        # Predict state: x = F*x
-        # This applies the constant velocity model to move the ball forward in time
-        self.state = F @ self.state
+        # Update process noise Q in-place
+        self._Q_matrix[0:3, 0:3] = np.eye(3) * self.process_noise_pos * dt**2
+        self._Q_matrix[3:6, 3:6] = np.eye(3) * self.process_noise_vel * dt
         
-        # Predict covariance: P = F*P*F' + Q
-        # This updates our uncertainty based on the model and process noise
-        self.covariance = F @ self.covariance @ F.T + Q
+        # Use pre-allocated matrices for prediction
+        self.state = self._F_matrix @ self.state
+        self.covariance = self._F_matrix @ self.covariance @ self._F_matrix.T + self._Q_matrix
         
         # Update uncertainty metrics
         self.update_tracking_reliability()
@@ -1401,6 +1398,21 @@ class KalmanFilterFusion(Node):
         """Clean shutdown of the node, stopping all resources."""
         if hasattr(self, 'resource_monitor'):
             self.resource_monitor.stop()
+        
+        # Clear large numpy arrays
+        if hasattr(self, 'state'):
+            self.state = None
+        if hasattr(self, 'covariance'):
+            self.covariance = None
+        
+        # Clear history collections
+        if hasattr(self, 'state_history'):
+            self.state_history.clear()
+        if hasattr(self, 'covariance_history'):
+            self.covariance_history.clear()
+        if hasattr(self, 'measurement_history'):
+            self.measurement_history.clear()
+        
         super().destroy_node()
 
     def log_error(self, error_message, is_warning=False):
