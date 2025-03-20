@@ -601,10 +601,10 @@ class TennisBall3DPositionEstimator(Node):
         self.attempt_counter[source] += 1
         
         # Skip processing if we're missing required data
-        if self.camera_info is None or not hasattr(self, 'depth_array') or self.fx == 0:
+        if self.camera_info is None or self.depth_array is None or self.fx == 0:
             # Every 50 attempts, log status
             if self.attempt_counter[source] % 50 == 0:
-                self.get_logger().warn(f"Missing data: camera_info={self.camera_info is not None}, depth_array={hasattr(self, 'depth_array')}, fx={self.fx}")
+                self.get_logger().warn(f"Missing data: camera_info={self.camera_info is not None}, depth_array={self.depth_array is not None}, fx={self.fx}")
             
             self.failure_reasons['missing_data'] += 1
             return False
@@ -619,7 +619,7 @@ class TennisBall3DPositionEstimator(Node):
             return False
         
         # Prioritize HSV over YOLO when system is under load
-        if source == "YOLO" and self.current_cpu_usage > 85 and hasattr(self, 'detection_history'):
+        if source == "YOLO" and self.current_cpu_usage > 85:
             if 'HSV' in self.detection_history:
                 current_time = TimeUtils.now_as_float()
                 time_since_last_hsv = current_time - self.detection_history['HSV'].get('last_time', 0)
@@ -862,19 +862,17 @@ class TennisBall3DPositionEstimator(Node):
             )
     
     def _handle_resource_alert(self, resource_type, value):
-        """Log resource alerts and trigger performance adjustment."""
-        current_time = TimeUtils.now_as_float()
-        if current_time - self.last_resource_alert_time < 5.0:
-            return  # Avoid too frequent alerts
+        """Simple handler for resource alerts that just updates CPU usage."""
+        # Only handle CPU alerts
+        if resource_type == 'cpu':
+            self.current_cpu_usage = value
             
-        self.last_resource_alert_time = current_time
-        
-        if resource_type == 'cpu' and value > 90.0:
-            self.log_error(f"High {resource_type} usage ({value:.1f}%) - reducing processing load", True)
-        
-        # Let the main adjustment method handle the actual changes
-        self.current_cpu_usage = value if resource_type == 'cpu' else self.current_cpu_usage
-        self._adjust_performance()
+            # Only log critical alerts (once per minute)
+            if value > 90.0:
+                current_time = TimeUtils.now_as_float()
+                if current_time - self.last_resource_alert_time > 60.0:
+                    self.last_resource_alert_time = current_time
+                    self.get_logger().warning(f"Critical CPU usage: {value:.1f}%")
     
     def destroy_node(self):
         """Clean shutdown of the node."""
