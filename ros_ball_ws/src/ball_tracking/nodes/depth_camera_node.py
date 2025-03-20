@@ -211,6 +211,10 @@ class TennisBall3DPositionEstimator(Node):
         self._min_valid_depth = DEPTH_CONFIG["min_depth"]
         self._max_valid_depth = DEPTH_CONFIG["max_depth"]
         
+        # Add these lines to fix the error
+        self.yolo_count = 0
+        self.hsv_count = 0
+        
         # Camera parameters (will be updated later)
         self.camera_info = None
         self.depth_array = None
@@ -239,6 +243,9 @@ class TennisBall3DPositionEstimator(Node):
         }
         self.cache_hits = {'YOLO': 0, 'HSV': 0}
         self.attempt_counter = {'YOLO': 0, 'HSV': 0}
+        self.cache_validity_duration = 0.5  # 500ms for all sources
+        self.yolo_movement_threshold = 0.1  # 10% of image for YOLO
+        self.hsv_movement_threshold = 0.4   # 40% of image for HSV (more jitter)
         
         # Error tracking
         self.error_counts = {}
@@ -246,6 +253,47 @@ class TennisBall3DPositionEstimator(Node):
         
         # Bridge for image conversion
         self.cv_bridge = CvBridge()
+        
+        # Initialize everything that would be checked with hasattr()
+        self.last_resource_alert_time = 0
+        self.last_high_cpu_time = 0
+        self.last_cache_debug_time = 0
+        self.last_diag_log_time = 0
+        self.last_cache_log = 0
+        self.last_minimal_log_time = 0
+        self.transform_not_verified_logged = False
+        self.is_idle = False
+        self.last_detection_time = TimeUtils.now_as_float()
+        self.last_batch_process = TimeUtils.now_as_float()
+        
+        # Initialize containers
+        self.detection_buffer = {'YOLO': [], 'HSV': []}
+        self.failure_reasons = {
+            'missing_data': 0,
+            'transform_not_verified': 0,
+            'coordinates_out_of_bounds': 0, 
+            'no_reliable_depth': 0,
+            'transform_failed': 0,
+            'exceptions': 0,
+            'hsv_priority_skip': 0,
+            'successful': 0
+        }
+        
+        # Simplified caching mechanism with fixed parameters
+        self.position_cache = {
+            'YOLO': {'position': None, 'depth': None, 'timestamp': 0, '3d_position': None},
+            'HSV': {'position': None, 'depth': None, 'timestamp': 0, '3d_position': None}
+        }
+        self.cache_hits = {'YOLO': 0, 'HSV': 0}
+        self.attempt_counter = {'YOLO': 0, 'HSV': 0}
+        
+        # Fixed cache parameters - no dynamic adjustment needed
+        self.cache_validity_duration = 0.5  # 500ms for all sources
+        self.yolo_movement_threshold = 0.1  # 10% of image for YOLO
+        self.hsv_movement_threshold = 0.4   # 40% of image for HSV (more jitter)
+        self.cache_validity_duration = 0.5  # Default for moving balls
+        self.yolo_movement_threshold = 0.1
+        self.hsv_movement_threshold = 0.4
     
     def _setup_callback_group(self):
         """Set up callback group and QoS profile for subscriptions."""
@@ -388,9 +436,8 @@ class TennisBall3DPositionEstimator(Node):
         self.get_logger().info("Published static transform: camera_frame -> base_link")
     
     def _verify_transform(self):
-        """Verify that the transform is correctly registered."""
+        """Verify transform is registered and cancel verification timer if successful."""
         try:
-            # Check if transform is available
             if self.tf_buffer.can_transform(
                 self.reference_frame,
                 "camera_frame",
@@ -400,14 +447,13 @@ class TennisBall3DPositionEstimator(Node):
                 self.verified_transform = True
                 self.get_logger().info("Transform verification successful. Transform chain is complete.")
                 self.transform_check_timer.cancel()
-            else:
-                # If not available, republish transform
-                self.get_logger().warning("Transform not yet available. Republishing...")
-                self._publish_static_transform()
-        except Exception as e:
-            # If there's an error, republish transform
-            self.get_logger().error(f"Transform verification failed: {str(e)}. Republishing...")
-            self._publish_static_transform()
+                return
+        except Exception:
+            pass
+            
+        # If we get here, either transform is not ready or an exception occurred
+        # Republish transform and continue checking
+        self._publish_static_transform()
     
     def _setup_subscriptions(self):
         """Set up all subscriptions for this node."""
@@ -509,50 +555,17 @@ class TennisBall3DPositionEstimator(Node):
         self.detection_health = 1.0
     
     def log_error(self, error_message, is_warning=False):
-        """Log an error and add it to error history for diagnostics."""
+        """Simplified error logging with rate limiting."""
         current_time = TimeUtils.now_as_float()
         
-        # Track error frequency by type
-        if error_message not in self.error_counts:
-            self.error_counts[error_message] = 1
-            self.error_last_logged[error_message] = 0  # Never logged before
-        else:
-            self.error_counts[error_message] += 1
-        
-        # Determine if we should log this error (always log first occurrence and then rate-limit)
-        should_log = False
-        time_since_last_log = current_time - self.error_last_logged.get(error_message, 0)
-        
-        # Always log the first occurrence or if it's been a while since we logged this error
-        if self.error_counts[error_message] == 1 or time_since_last_log > 10.0:
-            should_log = True
+        # Simple rate limiting - log each error type at most once every 10 seconds
+        if error_message not in self.error_last_logged or current_time - self.error_last_logged[error_message] > 10.0:
             self.error_last_logged[error_message] = current_time
             
-            # For repeated errors, include the count
-            if self.error_counts[error_message] > 1:
-                error_message = f"{error_message} (occurred {self.error_counts[error_message]} times)"
-        
-        if should_log:
             if is_warning:
                 self.get_logger().warning(f"DEPTH: {error_message}")
-                # Add to warning list for diagnostics
-                self.warnings.append({
-                    "timestamp": current_time,
-                    "message": error_message
-                })
             else:
                 self.get_logger().error(f"DEPTH: {error_message}")
-                # Add to error list for diagnostics
-                self.errors.append({
-                    "timestamp": current_time,
-                    "message": error_message
-                })
-                
-                # Update health based on error frequency
-                self.last_error_time = current_time
-                
-                # Reduce health score temporarily after an error
-                self.depth_camera_health = max(0.3, self.depth_camera_health - 0.2)
     
     def camera_info_callback(self, msg):
         """
@@ -608,27 +621,20 @@ class TennisBall3DPositionEstimator(Node):
         if hasattr(self, 'depth_camera_health'):
             self.depth_camera_health = 1.0  # Camera is working well
 
-    # Optimize depth image processing
     def depth_callback(self, msg):
-        """Process depth image with aggressive downsampling for performance."""
+        """Process depth image with simple frame skipping for efficiency."""
         try:
             # Skip frames based on current setting
             self.frame_counter += 1
             if self.frame_counter % self.process_every_n_frames != 0:
                 return
                 
-            # Convert with CvBridge
-            depth_img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-            
-            # Aggressive downsampling based on CPU load
-            if self.current_cpu_usage > 90:
-                self.depth_array = depth_img[::4, ::4]  # Every 4th pixel (even more aggressive)
-            elif self.current_cpu_usage > 80:
-                self.depth_array = depth_img[::2, ::2]  # Every 2nd pixel
-            else:
-                self.depth_array = depth_img
-                
+            # Convert with CvBridge - no conditional downsampling needed
+            self.depth_array = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
             self.depth_header = msg.header
+            
+            # Process any pending detections now that we have depth data
+            self._process_detection_batch()
         except Exception as e:
             pass
     
@@ -662,38 +668,29 @@ class TennisBall3DPositionEstimator(Node):
         
     def _process_detection_batch(self):
         """Process all buffered detections at once."""
-        if not hasattr(self, 'detection_buffer'):
+        if not hasattr(self, 'detection_buffer') or not self.detection_buffer:
             return
             
+        # Skip if missing data
+        if self.camera_info is None or self.depth_array is None:
+            return
+        
         start_time = TimeUtils.now_as_float()
         processed = 0
         
-        # Skip if we don't have required data
-        if self.camera_info is None or not hasattr(self, 'depth_array') or self.depth_array is None:
-            return
-        
-        # Process YOLO (only the latest one)
-        if self.detection_buffer['YOLO']:
-            latest_msg, _ = max(self.detection_buffer['YOLO'], key=lambda x: x[1])
-            if self._should_process_detection(latest_msg, "YOLO"):
-                self.get_3d_position(latest_msg, "YOLO")
-                processed += 1
-            self.detection_buffer['YOLO'] = []  # Clear buffer
-        
-        # Process HSV (only the latest one)
-        if self.detection_buffer['HSV']:
-            latest_msg, _ = max(self.detection_buffer['HSV'], key=lambda x: x[1])
-            if self._should_process_detection(latest_msg, "HSV"):
-                self.get_3d_position(latest_msg, "HSV")
-                processed += 1
-            self.detection_buffer['HSV'] = []  # Clear buffer
+        # Process latest detections only
+        for source in ['YOLO', 'HSV']:
+            if self.detection_buffer[source]:
+                latest_msg, _ = max(self.detection_buffer[source], key=lambda x: x[1])
+                if self._should_process_detection(latest_msg, source):
+                    self.get_3d_position(latest_msg, source)
+                    processed += 1
+                self.detection_buffer[source] = []
         
         # Track processing time
         if processed > 0:
             processing_time = (TimeUtils.now_as_float() - start_time) * 1000
             self.processing_times.append(processing_time / processed)
-        
-        self.last_batch_process = TimeUtils.now_as_float()
     
     def _update_processing_stats(self, process_time):
         """Update processing statistics for performance tracking."""
@@ -971,31 +968,14 @@ class TennisBall3DPositionEstimator(Node):
         """Simplified diagnostics output."""
         current_time = TimeUtils.now_as_float()
         
-        # Only publish every 10 seconds
-        if hasattr(self, 'last_diag_log_time') and current_time - self.last_diag_log_time < 10.0:
-            return
-            
-        self.last_diag_log_time = current_time
-        
-        # Calculate metrics
-        elapsed = current_time - self.start_time
-        fps = self.successful_conversions / elapsed if elapsed > 0 else 0
-        avg_processing = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
-        
-        # Log single line status
-        self.get_logger().info(
-            f"Depth camera: {fps:.1f} FPS, CPU: {self.current_cpu_usage:.1f}%, "
-            f"Processing: {avg_processing:.1f}ms, Frames: 1:{self.process_every_n_frames}"
-        )
-        
-        # Less frequent cache stats (once a minute)
-        if not hasattr(self, 'last_cache_log') or current_time - self.last_cache_log > 60.0:
-            self.last_cache_log = current_time
-            
-            for source in ['YOLO', 'HSV']:
-                if self.attempt_counter[source] > 0:
-                    efficiency = self.cache_hits[source] / self.attempt_counter[source]
-                    self.get_logger().info(f"{source} cache: {efficiency:.1%} efficient")
+        # Only log once per LOG_INTERVAL seconds
+        if not hasattr(self, 'last_minimal_log_time') or current_time - self.last_minimal_log_time > LOG_INTERVAL:
+            self.last_minimal_log_time = current_time
+            total_fps = self.successful_conversions / (current_time - self.start_time) if current_time > self.start_time else 0
+            self.get_logger().info(
+                f"Depth camera: {total_fps:.1f} FPS, CPU: {self.current_cpu_usage:.1f}%, "
+                f"Frames: 1:{self.process_every_n_frames}"
+            )
     
     def _handle_resource_alert(self, resource_type, value):
         """Handle resource alerts by adjusting processing parameters."""
@@ -1389,31 +1369,25 @@ class TennisBall3DPositionEstimator(Node):
                 self.cache_validity_duration = 0.5  # 500ms cache for moving balls
 
     def _adjust_performance(self):
-        """Single unified method to adjust all performance parameters."""
-        # Get current CPU usage
+        """Single unified performance adjustment method."""
         cpu_usage = self.current_cpu_usage if hasattr(self, 'current_cpu_usage') else 50.0
-        
-        # Previous frame skip setting - for logging changes
         old_frame_skip = self.process_every_n_frames
         
-        # Simple CPU-based adjustment with 3 tiers
+        # Simple three-tier adjustment
         if cpu_usage > 85:
-            # High CPU - aggressive optimization
             self.process_every_n_frames = min(15, self.process_every_n_frames + 1)
             self.radius = 1
             self._min_valid_points = 1
         elif cpu_usage > 65:
-            # Medium CPU - balanced mode
             self.process_every_n_frames = min(10, max(5, self.process_every_n_frames))
             self.radius = 2
             self._min_valid_points = 2
         elif cpu_usage < 50:
-            # Low CPU - improve quality
             self.process_every_n_frames = max(3, self.process_every_n_frames - 1)
             self.radius = 3
             self._min_valid_points = 3
         
-        # Only log significant changes
+        # Only log when changes occur
         if old_frame_skip != self.process_every_n_frames:
             self.get_logger().info(f"Adjusted processing: 1 in {self.process_every_n_frames} frames (CPU: {cpu_usage:.1f}%)")
 
