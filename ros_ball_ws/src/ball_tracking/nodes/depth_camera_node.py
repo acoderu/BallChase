@@ -272,6 +272,16 @@ class TennisBall3DPositionEstimator(Node):
         
         # Call existing methods to initialize other parameters
         self._init_camera_parameters()
+        
+        # Add these to your existing attributes
+        self.seq_counter = 0
+        self.last_critical_alert = 0
+        self._transform_error_logged = False
+        self.detection_health = 0.8
+        self.depth_reliability = {
+            'YOLO': {'value': 0.0, 'valid_points': 0, 'timestamp': 0},
+            'HSV': {'value': 0.0, 'valid_points': 0, 'timestamp': 0}
+        }
     
     def _setup_callback_group(self):
         """Set up callback group and QoS profile for subscriptions."""
@@ -450,9 +460,6 @@ class TennisBall3DPositionEstimator(Node):
         )
     
     def log_error(self, error_message, is_warning=False):
-        self.diagnostics_timer = self.create_timer(10.0, self.publish_system_diagnostics)
-    
-    def log_error(self, error_message, is_warning=False):
         """Simplified error logging with rate limiting."""
         current_time = TimeUtils.now_as_float()
         
@@ -536,6 +543,20 @@ class TennisBall3DPositionEstimator(Node):
         except Exception as e:
             pass
     
+    def detection_callback(self, msg, source):
+        """Generic callback for buffering detections."""
+        if not hasattr(self, 'detection_buffer'):
+            self.detection_buffer = {'YOLO': [], 'HSV': []}
+            self.last_batch_process = TimeUtils.now_as_float()
+            
+        # Add to buffer
+        self.detection_buffer[source].append((msg, TimeUtils.now_as_float()))
+        
+        # Process if enough time has passed or buffer is large
+        now = TimeUtils.now_as_float()
+        if now - self.last_batch_process > 0.2 or len(self.detection_buffer[source]) > 5:
+            self._process_detection_batch()
+
     def yolo_callback(self, msg):
         """Buffer YOLO detections for batch processing."""
         if not hasattr(self, 'detection_buffer'):
@@ -549,20 +570,10 @@ class TennisBall3DPositionEstimator(Node):
         now = TimeUtils.now_as_float()
         if now - self.last_batch_process > 0.2 or len(self.detection_buffer['YOLO']) > 5:
             self._process_detection_batch()
-        
+    
     def hsv_callback(self, msg):
-        """Buffer HSV detections for batch processing."""
-        if not hasattr(self, 'detection_buffer'):
-            self.detection_buffer = {'YOLO': [], 'HSV': []}
-            self.last_batch_process = TimeUtils.now_as_float()
-            
-        # Add to buffer
-        self.detection_buffer['HSV'].append((msg, TimeUtils.now_as_float()))
-        
-        # Process if enough time has passed or buffer is large
-        now = TimeUtils.now_as_float()
-        if now - self.last_batch_process > 0.2 or len(self.detection_buffer['HSV']) > 5:
-            self._process_detection_batch()
+        """Buffer HSV detections."""
+        self.detection_callback(msg, 'HSV')
         
     def _process_detection_batch(self):
         """Process all buffered detections at once."""
@@ -864,33 +875,19 @@ class TennisBall3DPositionEstimator(Node):
             )
     
     def _handle_resource_alert(self, resource_type, value):
-        """Handle resource alerts by adjusting processing parameters."""
-        if hasattr(self, 'last_resource_alert_time'):
-            current_time = TimeUtils.now_as_float()
-            if current_time - self.last_resource_alert_time < 5.0:
-                return  # Avoid too frequent adjustments
+        """Log resource alerts and trigger performance adjustment."""
+        current_time = TimeUtils.now_as_float()
+        if current_time - self.last_resource_alert_time < 5.0:
+            return  # Avoid too frequent alerts
             
-        self.last_resource_alert_time = TimeUtils.now_as_float()
+        self.last_resource_alert_time = current_time
         
         if resource_type == 'cpu' and value > 90.0:
-            # Only log once per 10 seconds to reduce overhead
-            self.log_error(f"High CPU usage ({value:.1f}%) - reducing processing load", True)
+            self.log_error(f"High {resource_type} usage ({value:.1f}%) - reducing processing load", True)
         
-        if not hasattr(self, 'process_every_n_frames'):
-            self.process_every_n_frames = 1
-        
-        if self.process_every_n_frames < 10:  # Max: process 1 in 10 frames
-            self.process_every_n_frames += 1
-            
-        # Only reduce radius if it's not already at minimum
-        if self.radius > 1:
-            self.radius = max(1, self.radius - 1)
-
-        # CPU recovery - gradually return to normal processing when CPU usage is lower
-        elif resource_type == 'cpu' and value < 70.0 and hasattr(self, 'process_every_n_frames'):
-            if self.process_every_n_frames > 1:
-                self.process_every_n_frames -= 1
-                self.get_logger().info(f"CPU usage normalized, processing 1 in {self.process_every_n_frames} frames")
+        # Let the main adjustment method handle the actual changes
+        self.current_cpu_usage = value if resource_type == 'cpu' else self.current_cpu_usage
+        self._adjust_performance()
     
     def destroy_node(self):
         """Clean shutdown of the node."""
@@ -1140,17 +1137,25 @@ def main(args=None):
         executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info("Stopped by user.")
+    except Exception as e:
+        node.get_logger().error(f"Error: {str(e)}")
     finally:
+        # Stop any monitoring or background tasks
+        if hasattr(node, 'resource_monitor'):
+            node.resource_monitor.stop()
+            
+        # Clean up
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == '__main__':
-    main()
-
-# performance_launch.py
+# Launch file function (keep this separate from the main function)
 def generate_launch_description():
+    from launch import LaunchDescription
+    from launch.actions import DeclareLaunchArgument
+    from launch.substitutions import LaunchConfiguration
+    from launch_ros.actions import Node
+    
     return LaunchDescription([
-        # Performance mode parameter
         DeclareLaunchArgument(
             'performance_mode',
             default_value='balanced',
@@ -1159,7 +1164,7 @@ def generate_launch_description():
         
         Node(
             package='ball_tracking',
-            executable='depth_camera_node.py',
+            executable='depth_camera_node',
             name='tennis_ball_3d_position_estimator',
             parameters=[{
                 'performance_mode': LaunchConfiguration('performance_mode')
@@ -1169,28 +1174,5 @@ def generate_launch_description():
         )
     ])
 
-def main(args=None):
-    # Performance profile settings
-    performance_mode = 'balanced'  # Default
-    
-    for i, arg in enumerate(sys.argv):
-        if arg == '--performance' and i + 1 < len(sys.argv):
-            performance_mode = sys.argv[i + 1]
-    
-    # Apply performance profile settings
-    if performance_mode == 'high_quality':
-        DEPTH_CONFIG["min_valid_points"] = 5
-        DEPTH_CONFIG["radius"] = 5
-        DEPTH_CONFIG["adaptive_radius"] = True
-        os.environ['PROCESS_EVERY_N_FRAMES'] = '3'
-    elif performance_mode == 'low_latency':
-        DEPTH_CONFIG["min_valid_points"] = 1
-        DEPTH_CONFIG["radius"] = 2
-        DEPTH_CONFIG["adaptive_radius"] = False
-        os.environ['PROCESS_EVERY_N_FRAMES'] = '1'
-    elif performance_mode == 'power_saving':
-        DEPTH_CONFIG["min_valid_points"] = 3
-        DEPTH_CONFIG["radius"] = 1
-        DEPTH_CONFIG["adaptive_radius"] = False
-        os.environ['PROCESS_EVERY_N_FRAMES'] = '15'
-    # balanced uses defaults
+if __name__ == '__main__':
+    main()
