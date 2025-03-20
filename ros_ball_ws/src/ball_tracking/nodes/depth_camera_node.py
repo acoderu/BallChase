@@ -215,6 +215,12 @@ class TennisBall3DPositionEstimator(Node):
         self.yolo_count = 0
         self.hsv_count = 0
         
+        # Add this line to initialize detection_history
+        self.detection_history = {
+            'YOLO': {'count': 0, 'latest_position': None, 'last_time': 0},
+            'HSV': {'count': 0, 'latest_position': None, 'last_time': 0}
+        }
+        
         # Tracking variables
         self.start_time = TimeUtils.now_as_float()
         self.successful_conversions = 0
@@ -442,8 +448,8 @@ class TennisBall3DPositionEstimator(Node):
             "/tennis_ball/depth_camera/diagnostics",
             10
         )
-        
-        # Single timer for diagnostics (10 seconds interval)
+    
+    def log_error(self, error_message, is_warning=False):
         self.diagnostics_timer = self.create_timer(10.0, self.publish_system_diagnostics)
     
     def log_error(self, error_message, is_warning=False):
@@ -500,7 +506,7 @@ class TennisBall3DPositionEstimator(Node):
             self.x_scale = self.y_scale  # Use same scale factor
         
         # Log camera info once (first time received)
-        if not hasattr(self, 'camera_info_logged'):
+        if not self.camera_info_logged:
             self.get_logger().info(f"Camera info received: {self.depth_width}x{self.depth_height}, "
                                   f"fx={self.fx:.1f}, fy={self.fy:.1f}, cx={self.cx:.1f}, cy={self.cy:.1f}")
             self.get_logger().info(
@@ -583,11 +589,6 @@ class TennisBall3DPositionEstimator(Node):
         if processed > 0:
             processing_time = (TimeUtils.now_as_float() - start_time) * 1000
             self.processing_times.append(processing_time / processed)
-    
-    def _update_processing_stats(self, process_time):
-        """Update processing statistics for performance tracking."""
-        self.processing_times.append(process_time)
-        # No need to check size and pop - deque handles this automatically
     
     def get_3d_position(self, detection_msg, source):
         """
@@ -828,17 +829,10 @@ class TennisBall3DPositionEstimator(Node):
             )
             self.last_fps_log_time = current_time
         
-        # Store this detection data for diagnostics
-        if not hasattr(self, 'detection_history'):
-            self.detection_history = {
-                'YOLO': {'count': 0, 'latest_position': None, 'last_time': 0},
-                'HSV': {'count': 0, 'latest_position': None, 'last_time': 0}
-            }
-        
         # Update detection history
         self.detection_history[source]['count'] += 1
         self.detection_history[source]['latest_position'] = (x, y, z)
-        self.detection_history[source]['last_time'] = TimeUtils.now_as_float()  # Use TimeUtils
+        self.detection_history[source]['last_time'] = current_time
     
     def publish_system_diagnostics(self):
         """Simplified diagnostics output with minimal logging."""
@@ -1028,8 +1022,6 @@ class TennisBall3DPositionEstimator(Node):
         self.successful_conversions += 1
         
         # Mark as a cache hit for diagnostics
-        if not hasattr(self, 'cache_hits'):
-            self.cache_hits = {'YOLO': 0, 'HSV': 0}
         self.cache_hits[source] += 1
         
         # Update the timestamp to extend cache validity
@@ -1043,19 +1035,29 @@ class TennisBall3DPositionEstimator(Node):
 
     def _adjust_performance(self):
         """Single unified performance adjustment method."""
-        cpu_usage = self.current_cpu_usage if hasattr(self, 'current_cpu_usage') else 50.0
+        cpu_usage = getattr(self, 'current_cpu_usage', 50.0)
         old_frame_skip = self.process_every_n_frames
         
-        # Simple three-tier adjustment
-        if cpu_usage > 85:
+        # CPU-based adjustments
+        if cpu_usage > 90:  # Critical CPU load - most aggressive
+            self.process_every_n_frames = min(20, self.process_every_n_frames + 2)
+            self.radius = 1
+            self._min_valid_points = 1
+            
+            # Log critical situation (rate-limited)
+            current_time = TimeUtils.now_as_float()
+            if not hasattr(self, 'last_critical_alert') or current_time - self.last_critical_alert > 30.0:
+                self.get_logger().warning(f"Critical CPU load ({cpu_usage:.1f}%), reducing processing load")
+                self.last_critical_alert = current_time
+        elif cpu_usage > 85:  # High CPU load
             self.process_every_n_frames = min(15, self.process_every_n_frames + 1)
             self.radius = 1
             self._min_valid_points = 1
-        elif cpu_usage > 65:
+        elif cpu_usage > 65:  # Medium CPU load
             self.process_every_n_frames = min(10, max(5, self.process_every_n_frames))
             self.radius = 2
             self._min_valid_points = 2
-        elif cpu_usage < 50:
+        elif cpu_usage < 50:  # Low CPU load
             self.process_every_n_frames = max(3, self.process_every_n_frames - 1)
             self.radius = 3
             self._min_valid_points = 3
@@ -1064,15 +1066,42 @@ class TennisBall3DPositionEstimator(Node):
         if old_frame_skip != self.process_every_n_frames:
             self.get_logger().info(f"Adjusted processing: 1 in {self.process_every_n_frames} frames (CPU: {cpu_usage:.1f}%)")
 
-def main(args=None):
-    """Main function to initialize and run the 3D position estimator node."""
-    # Add debug mode for troubleshooting
+def apply_debug_flags():
+    """Apply all command line debug flags."""
     if "--debug-depth" in sys.argv:
         print("Starting in depth debugging mode")
-        # Reduce minimum points required and other constraints
         DEPTH_CONFIG["min_valid_points"] = 1
         DEPTH_CONFIG["radius"] = 5
         DEPTH_CONFIG["adaptive_radius"] = True
+        
+    if "--performance" in sys.argv:
+        idx = sys.argv.index("--performance")
+        if idx + 1 < len(sys.argv):
+            mode = sys.argv[idx + 1]
+            apply_performance_mode(mode)
+
+def apply_performance_mode(mode):
+    """Apply performance mode settings."""
+    if mode == 'high_quality':
+        DEPTH_CONFIG["min_valid_points"] = 5
+        DEPTH_CONFIG["radius"] = 5
+        DEPTH_CONFIG["adaptive_radius"] = True
+        os.environ['PROCESS_EVERY_N_FRAMES'] = '3'
+    elif mode == 'low_latency':
+        DEPTH_CONFIG["min_valid_points"] = 1
+        DEPTH_CONFIG["radius"] = 2
+        DEPTH_CONFIG["adaptive_radius"] = False
+        os.environ['PROCESS_EVERY_N_FRAMES'] = '1'
+    elif mode == 'power_saving':
+        DEPTH_CONFIG["min_valid_points"] = 3
+        DEPTH_CONFIG["radius"] = 1
+        DEPTH_CONFIG["adaptive_radius"] = False
+        os.environ['PROCESS_EVERY_N_FRAMES'] = '15'
+
+def main(args=None):
+    """Main function to initialize and run the 3D position estimator node."""
+    # Apply debug and performance flags
+    apply_debug_flags()
     
     rclpy.init(args=args)
     
@@ -1165,17 +1194,3 @@ def main(args=None):
         DEPTH_CONFIG["adaptive_radius"] = False
         os.environ['PROCESS_EVERY_N_FRAMES'] = '15'
     # balanced uses defaults
-
-def publish_system_diagnostics(self):
-    # Skip heavy diagnostics when performance matters
-    current_time = TimeUtils.now_as_float()
-    if MINIMAL_LOGGING or self.current_cpu_usage > 80:
-        # Only log once per LOG_INTERVAL seconds
-        if not hasattr(self, 'last_minimal_log_time') or current_time - self.last_minimal_log_time > LOG_INTERVAL:
-            self.last_minimal_log_time = current_time
-            total_fps = self.successful_conversions / (current_time - self.start_time) if current_time > self.start_time else 0
-            self.get_logger().info(
-                f"Depth camera: {total_fps:.1f} FPS, CPU: {self.current_cpu_usage:.1f}%, "
-                f"Frames: 1:{self.process_every_n_frames}"
-            )
-        return
