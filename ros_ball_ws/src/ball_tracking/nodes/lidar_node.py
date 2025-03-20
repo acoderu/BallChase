@@ -67,6 +67,7 @@ from collections import deque  # Add import for deque
 from utilities.resource_monitor import ResourceMonitor
 from utilities.time_utils import TimeUtils  # Add TimeUtils import
 from config.config_loader import ConfigLoader  # Import ConfigLoader
+from scipy.linalg import block_diag
 
 
 
@@ -80,14 +81,14 @@ lidar_config = config_loader.load_yaml('lidar_config.yaml')
 TENNIS_BALL_CONFIG = lidar_config.get('tennis_ball', {
     "radius": 0.033,         # Tennis ball radius in meters
     "height": -0.20,         # Expected height of ball center relative to LIDAR
-    "max_distance": 0.1,     # Maximum distance for clustering points
-    "min_points": 10,        # Minimum points to consider a valid cluster
-    "quality_threshold": {   # Thresholds for circle quality assessment
-        "low": 0.5,
-        "medium": 0.7,
-        "high": 0.9
+    "max_distance": 0.17,    # Increased from 0.15 to 0.17
+    "min_points": 6,         # Further reduce from 7 to 6
+    "quality_threshold": {
+        "low": 0.32,         # Further reduce from 0.35 to 0.32
+        "medium": 0.45,      # Further reduce from 0.50 to 0.45
+        "high": 0.65         # Further reduce from 0.70 to 0.65
     },
-    "detection_samples": 30  # Number of random starting points for clustering
+    "detection_samples": 40
 })
 
 # Topic configuration from config file
@@ -196,6 +197,7 @@ class TennisBallLidarDetector(Node):
         self.scan_timestamp = None
         self.scan_frame_id = None
         self.points_array = None
+        self.previous_ball_position = None  # For tracking the ball over time
         
         # Set up subscribers
         self._setup_subscribers()
@@ -266,6 +268,74 @@ class TennisBallLidarDetector(Node):
         # Debug data collection (only enabled in debug mode)
         self.debug_mode = DIAG_CONFIG.get('debug_level', 0) > 1
         self.last_point_clouds = deque(maxlen=5) if self.debug_mode else None
+
+        self.position_history = deque(maxlen=10)  # Increase history from 5 to 10 positions
+
+        # Add after other initializations
+        self.kalman_filter = KalmanFilter()
+        self.filtered_positions = deque(maxlen=10)  # Keep track of filtered positions
+        self.use_kalman = True  # Flag to enable/disable Kalman filtering
+        
+        # Add to parameter declarations
+        self.declare_parameter('use_kalman_filter', True)
+        self.use_kalman = self.get_parameter('use_kalman_filter').value
+        
+        if self.use_kalman:
+            self.get_logger().info("Using Kalman filter for position smoothing")
+        
+        # Add diagnostic logging flags (controlled via parameters)
+        self.declare_parameter('detailed_logging', False)
+        self.declare_parameter('cluster_debug', False)
+        self.declare_parameter('kalman_debug', False)
+        
+        self.detailed_logging = self.get_parameter('detailed_logging').value
+        self.cluster_debug = self.get_parameter('cluster_debug').value
+        self.kalman_debug = self.get_parameter('kalman_debug').value
+        
+        # Create dedicated logging files for different analysis aspects
+        self.cluster_log_file = None
+        self.kalman_log_file = None
+        
+        if self.cluster_debug:
+            try:
+                self.cluster_log_file = open("cluster_analysis.log", "a")
+                self.cluster_log_file.write("-------- New Session Started --------\n")
+                self.cluster_log_file.write(f"Timestamp: {TimeUtils.now_as_float()}\n\n")
+            except Exception as e:
+                self.get_logger().error(f"Could not create cluster log file: {e}")
+        
+        if self.kalman_debug:
+            try:
+                self.kalman_log_file = open("kalman_analysis.log", "a")
+                self.kalman_log_file.write("-------- New Session Started --------\n")
+                self.kalman_log_file.write(f"Timestamp: {TimeUtils.now_as_float()}\n\n")
+            except Exception as e:
+                self.get_logger().error(f"Could not create Kalman log file: {e}")
+
+        # Add to __init__ after other initializations
+        if not hasattr(self, 'position_history') or self.position_history is None:
+            self.position_history = deque(maxlen=10)
+
+        if not hasattr(self, 'previous_ball_position'):
+            self.previous_ball_position = None
+
+        if not hasattr(self, 'consecutive_failures'):
+            self.consecutive_failures = 0
+
+        if not hasattr(self, 'last_successful_detection_time'):
+            self.last_successful_detection_time = 0
+
+        if not hasattr(self, 'predicted_position'):
+            self.predicted_position = None
+
+        if not hasattr(self, 'prediction_time'):
+            self.prediction_time = 0
+
+        # Add extra debug logging mode
+        self.declare_parameter('super_verbose_logging', False)
+        self.super_verbose_logging = self.get_parameter('super_verbose_logging').value
+        if self.super_verbose_logging:
+            self.get_logger().info("SUPER VERBOSE LOGGING MODE ENABLED - Will show detailed debugging information")
     
     def _init_state_tracking(self):
         """Initialize state tracking for all system components."""
@@ -278,7 +348,7 @@ class TennisBallLidarDetector(Node):
         max_detection_times = DIAG_CONFIG['max_detection_times']
         self.detection_times = deque(maxlen=max_detection_times)
         
-        # Detection source statistics
+        # Detection source statisti
         self.yolo_detections = 0
         self.hsv_detections = 0
         
@@ -295,6 +365,11 @@ class TennisBallLidarDetector(Node):
         
         # Add point data history with bounded size
         self.point_history = deque(maxlen=100)  # Keep last 100 sets of points
+        
+        # Add detection failure tracking
+        self.consecutive_failures = 0
+        self.last_successful_detection_time = 0
+        self.predicted_position = None
     
     def _setup_subscribers(self):
         """Set up all subscribers for this node."""
@@ -392,6 +467,11 @@ class TennisBallLidarDetector(Node):
             valid_indices = np.isfinite(ranges)
             valid_ranges = ranges[valid_indices]
             
+            # Also filter out very short ranges that might be robot body reflections
+            min_valid_range = 0.05  # Minimum valid range in meters
+            valid_indices = valid_indices & (ranges > min_valid_range)
+            valid_ranges = ranges[valid_indices]
+            
             # Skip processing if no valid ranges
             if len(valid_ranges) == 0:
                 self.get_logger().warn("LIDAR: No valid range measurements in scan")
@@ -441,91 +521,23 @@ class TennisBallLidarDetector(Node):
             self.log_error(error_msg)
             self.points_array = None
     
-    def camera_detection_callback(self, msg, source):
-        """
-        Process ball detections from the camera and find matching points in LIDAR data.
-        
-        This method is triggered whenever one of the camera-based detectors
-        (YOLO or HSV) reports a tennis ball detection. It attempts to correlate
-        this 2D detection with 3D LIDAR point cloud data.
-        
-        Args:
-            msg (PointStamped): 2D position (x,y) of ball detected by camera
-            source (str): Which detector triggered this detection ("YOLO" or "HSV")
-        """
-        detection_start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
-        
-        # Check if we have scan data
-        if self.latest_scan is None or self.points_array is None or len(self.points_array) == 0:
-            self.get_logger().info("LIDAR: Waiting for scan data...")
-            return
-        
-        try:
-            # Extract the camera's detected position and confidence
-            x_2d = msg.point.x
-            y_2d = msg.point.y
-            confidence = msg.point.z  # Usually contains confidence value
-            
-            self.get_logger().info(
-                f"{source}: Ball detected at pixel ({x_2d:.1f}, {y_2d:.1f}) "
-                f"with confidence {confidence:.2f}"
-            )
-            
-            # Find tennis ball patterns in LIDAR data
-            ball_results = self.find_tennis_balls(source)
-            
-            # Process the best detected ball (if any)
-            if (ball_results):
-                # Get the best match (first in the list, already sorted by quality)
-                best_match = ball_results[0]
-                center, cluster_size, circle_quality = best_match
-                
-                # IMPORTANT: Use original timestamp for synchronization
-                # Validate timestamp before publishing
-                if TimeUtils.is_timestamp_valid(msg.header.stamp):
-                    self.publish_ball_position(center, cluster_size, circle_quality, source, msg.header.stamp)
-                else:
-                    self.get_logger().warn(f"Received invalid timestamp from {source}, using current time instead")
-                    self.publish_ball_position(center, cluster_size, circle_quality, source, None)
-            else:
-                self.get_logger().info(f"LIDAR: No matching ball found for {source} detection")
-            
-        except Exception as e:
-            error_msg = f"Error processing {source} detection: {str(e)}"
-            self.log_error(error_msg)
-        
-        # Log processing time for this detection
-        processing_time = (TimeUtils.now_as_float() - detection_start_time) * 1000  # in ms
-        self.detection_times.append(processing_time)
-        
-        # Update detection latency metric
-        self.detection_latency = processing_time
-        
-        self.get_logger().debug(f"LIDAR: {source} processing took {processing_time:.2f}ms")
+    
     
     def find_tennis_balls(self, trigger_source):
         """
-        Search for tennis balls in the latest scan data using a clustering algorithm.
-        
-        This method implements a simple circle-finding algorithm:
-        1. Randomly select seed points from the point cloud
-        2. For each seed, find nearby points within max_distance
-        3. Check if the cluster forms a circular pattern matching a tennis ball
-        4. Return the best matches sorted by quality
-        
-        Args:
-            trigger_source (str): Source of the triggering detection (YOLO or HSV)
-        
-        Returns:
-            list: List of tuples (center, cluster_size, circle_quality) for each detected ball
+        Search for tennis balls using a more deterministic, grid-based approach.
+        Optimized for single-ball detection scenario with cluster merging.
         """
         # Start timing
         operation_start = TimeUtils.now_as_float()
-        trace_points = {}
         
         if self.points_array is None or len(self.points_array) == 0:
             self.get_logger().warn("LIDAR: No points available for analysis")
             return []
+
+        # Add at the beginning of find_tennis_balls method
+        if self.detailed_logging and trigger_source.endswith("_DEBUG"):
+            self.get_logger().info(f"DEBUG MODE: Using min_points={self.min_points}, min_quality={TENNIS_BALL_CONFIG['quality_threshold']['low']}")
         
         self.get_logger().debug(
             f"LIDAR: Analyzing {len(self.points_array)} points triggered by {trigger_source}"
@@ -534,28 +546,136 @@ class TennisBallLidarDetector(Node):
         points = self.points_array
         balls_found = []
         
-        # Use optimized number of starting points for the hardware
-        detection_samples = int(self.detection_samples)
+        # Current time for adaptive parameters
+        current_time = TimeUtils.now_as_float()
         
-        # Try multiple random starting points
-        for _ in range(detection_samples):
-            # Pick a random point as a starting point
-            seed_idx = np.random.randint(0, len(points))
-            seed_point = points[seed_idx]
+        # Dynamically adjust parameters based on consecutive failures
+        # If we've had several failures in a row, we should be more lenient
+        dynamic_min_points = self.min_points
+        dynamic_quality_threshold = TENNIS_BALL_CONFIG["quality_threshold"]["low"]
+        
+        # If we have consecutive failures, gradually reduce requirements
+        if hasattr(self, 'consecutive_failures') and self.consecutive_failures > 2:
+            # Reduce minimum points requirement (but not below 7)
+            dynamic_min_points = max(7, int(self.min_points * (1.0 - 0.1 * min(self.consecutive_failures, 5))))
             
+            # Reduce quality threshold (but not below 0.3)
+            dynamic_quality_threshold = max(0.3, dynamic_quality_threshold * (1.0 - 0.1 * min(self.consecutive_failures, 5)))
+            
+            if self.detailed_logging:
+                self.get_logger().info(
+                    f"ADAPTIVE: After {self.consecutive_failures} failures, using reduced requirements: "
+                    f"min_points={dynamic_min_points} (from {self.min_points}), "
+                    f"quality={dynamic_quality_threshold:.2f} (from {TENNIS_BALL_CONFIG['quality_threshold']['low']:.2f})"
+                )
+        
+        # CHANGE: Create deterministic seed points using a grid-based approach
+        # This is more systematic than random sampling
+        seed_points = []
+        
+        # Always include previous ball position if available (highest priority)
+        if hasattr(self, 'previous_ball_position') and self.previous_ball_position is not None:
+            if isinstance(self.previous_ball_position, np.ndarray):
+                seed_points.append((self.previous_ball_position, 3.0))  # Add highest priority
+            else:
+                self.get_logger().warn(f"Previous ball position has wrong type: {type(self.previous_ball_position)}")
+        
+        # Add predicted position if available (from Kalman filter)
+        if hasattr(self, 'predicted_position') and self.predicted_position is not None:
+            # Only use prediction if it's recent
+            time_since_prediction = current_time - getattr(self, 'prediction_time', 0)
+            if time_since_prediction < 1.0:  # Only use predictions less than 1 second old
+                if isinstance(self.predicted_position, np.ndarray):
+                    seed_points.append((self.predicted_position, 2.5))  # Add high priority
+                else:
+                    self.get_logger().warn(f"Predicted position has wrong type: {type(self.predicted_position)}")
+        
+        # CHANGE: Create a grid of seed points in the area where balls are likely to be found
+        # Find bounds of point cloud to create a reasonable grid
+        if len(points) > 0:
+            x_min, y_min = np.min(points[:, 0:2], axis=0) 
+            x_max, y_max = np.max(points[:, 0:2], axis=0)
+            
+            # Create a grid with reasonable spacing (tennis ball diameter)
+            grid_spacing = self.ball_radius * 1.25  # Decrease from 1.5x to 1.25x for denser sampling in important areas
+            x_grid = np.arange(x_min, x_max, grid_spacing)
+            y_grid = np.arange(y_min, y_max, grid_spacing)
+            
+            # Limit grid size to avoid excessive computation
+            max_grid_points = 30  # Increased from 25 to 30 for better coverage
+            if len(x_grid) > max_grid_points:
+                x_grid = np.linspace(x_min, x_max, max_grid_points)
+            if len(y_grid) > max_grid_points:
+                y_grid = np.linspace(y_min, y_max, max_grid_points)
+            
+            # Create grid points - only use points in reasonable range
+            for x in x_grid:
+                for y in y_grid:
+                    # Add distance-based priority - favor points within 1.5 meters
+                    distance = np.sqrt(x**2 + y**2)
+                    # Only add grid points within reasonable range (increased from 1.5 to 2.0 meters)
+                    if distance < 2.0:
+                        # Give higher priority to central region and closer points
+                        priority = 1.0
+                        if distance < 1.0 and abs(y) < 0.7:  # Expand central forward area (increased from 0.5 to 0.7)
+                            priority = 2.0  # Higher priority for central area
+                        
+                        # Prioritize points at the distance where we've seen good detections
+                        if 0.05 < distance < 0.3:  # Very close range priority (new)
+                            priority += 0.5
+                        seed_points.append((np.array([x, y, self.ball_height]), priority))
+        
+        # Cap the number of seed points to avoid excessive computation
+        max_seed_points = int(self.detection_samples)
+        if len(seed_points) > max_seed_points:
+            # Keep the first point (previous position) and sample from the rest
+            rest_indices = np.random.choice(
+                len(seed_points) - 1, 
+                size=max_seed_points - 1, 
+                replace=False
+            ) + 1
+            seed_points = [seed_points[0]] + [seed_points[i] for i in rest_indices]
+        
+        # Sort and select seed points by priority
+        seed_points.sort(key=lambda sp: sp[1], reverse=True)
+        seed_points = [sp[0] for sp in seed_points[:max_seed_points]]
+        
+        # CHANGE: Dynamically adjust minimum points based on distance
+        # Objects closer to the LIDAR should have more points
+        for seed_point in seed_points:
             # Find points close to this seed point (Euclidean distance in XY plane)
             distances = np.sqrt(
                 (points[:, 0] - seed_point[0])**2 + 
                 (points[:, 1] - seed_point[1])**2
             )
-            cluster_indices = np.where(distances < self.max_distance)[0]
+            
+            # Increased max distance for clustering when having detection failures
+            effective_max_distance = self.max_distance
+            if hasattr(self, 'consecutive_failures') and self.consecutive_failures > 3:
+                # Gradually increase cluster radius for persistent failures
+                effective_max_distance = min(0.18, self.max_distance * (1.0 + 0.15 * min(self.consecutive_failures, 5)))
+                # Only log once per call to find_tennis_balls
+                if self.detailed_logging and not hasattr(self, '_logged_cluster_distance_this_run'):
+                    self.get_logger().info(f"ADAPTIVE: Increased cluster distance to {effective_max_distance:.3f}m")
+                    self._logged_cluster_distance_this_run = True
+            
+            cluster_indices = np.where(distances < effective_max_distance)[0]
             cluster = points[cluster_indices]
             
-            # Skip if cluster is too small
-            if len(cluster) < self.min_points:
+            # CHANGE: Dynamically adjust minimum points threshold based on distance
+            # Closer objects should have more points to be valid
+            distance_to_lidar = np.sqrt(seed_point[0]**2 + seed_point[1]**2)
+            
+            # Scale minimum points - closer objects need more points to be valid
+            # This helps reject false positives from reflections
+            distance_factor = max(0.5, min(1.5, 2.0 - distance_to_lidar))
+            adaptive_min_points = max(7, int(dynamic_min_points * distance_factor))
+            
+            # Skip if cluster is too small for its distance
+            if len(cluster) < adaptive_min_points:
                 continue
-                
-            # Calculate the center of the cluster (centroid) using vectorized operations
+            
+            # Calculate the center of the cluster (centroid)
             center = np.mean(cluster, axis=0)
             
             # Use vectorized operations for circle quality check
@@ -564,6 +684,12 @@ class TennisBallLidarDetector(Node):
                 (cluster[:, 1] - center[1])**2
             )
             
+            # CHANGE: Reject clusters with too much variance in radius
+            # This helps filter out non-circular shapes
+            radius_std = np.std(center_distances)
+            if radius_std > self.ball_radius * 0.5:  # Std dev should be less than 50% of radius
+                continue
+            
             # A tennis ball should have points at approximately ball_radius distance
             radius_errors = np.abs(center_distances - self.ball_radius)
             avg_error = np.mean(radius_errors)
@@ -571,92 +697,466 @@ class TennisBallLidarDetector(Node):
             # Calculate quality metric (1.0 = perfect circle of exactly ball_radius)
             circle_quality = 1.0 - (avg_error / self.ball_radius)
             
-            # Only consider clusters that reasonably match a tennis ball's shape
-            quality_threshold = TENNIS_BALL_CONFIG["quality_threshold"]["low"]
-            if circle_quality > quality_threshold:
-                # Check if this ball is too close to any we've already found
-                is_new_ball = True
-                same_ball_threshold = TENNIS_BALL_CONFIG.get("same_ball_threshold", 2.0)
-                for existing_center, _, _ in balls_found:
-                    dist = np.sqrt(
-                        (center[0] - existing_center[0])**2 + 
-                        (center[1] - existing_center[1])**2
-                    )
-                    # If centers are less than N radii apart, consider it the same ball
-                    if dist < self.ball_radius * same_ball_threshold:
-                        is_new_ball = False
-                        break
-                
-                if is_new_ball:
-                    balls_found.append((center, len(cluster), circle_quality))
-        
-        # Timing checkpoints
-        trace_points["cluster_search_ms"] = (TimeUtils.now_as_float() - operation_start) * 1000
-        
-        # Log results of the detection attempt
-        if balls_found:
-            self.get_logger().debug(
-                f"LIDAR: Found {len(balls_found)} potential tennis balls"
+            # Calculate point density score (normalized against max observed of ~60 points)
+            # More points = more reliable detection
+            point_density_score = min(1.0, len(cluster) / 50.0)  # Reduced from 60 to 50
+            
+            # CHANGE: Add distance factor to quality score
+            # Favor balls at reasonable distances (not too far, not too close)
+            distance_quality = 1.0 - min(1.0, distance_to_lidar / 2.5)  # Increased from 2.0 to 2.5
+            
+            # Combine circle quality, point density, and distance into a weighted score
+            combined_quality = (
+                circle_quality * 0.4 +           # Increased from 30% to 40% circle shape
+                point_density_score * 0.5 +      # Decreased from 60% to 50% point density
+                distance_quality * 0.1           # Keep 10% distance factor
             )
             
-            # Log details of the best candidate
-            best = balls_found[0]
+            # Only consider clusters that reasonably match a tennis ball's shape
+            if circle_quality > dynamic_quality_threshold:
+                balls_found.append((center, len(cluster), combined_quality))
+        
+        if self.detailed_logging:
+            if len(balls_found) == 0:
+                self.get_logger().info(f"LIDAR: No potential clusters found for {trigger_source} trigger")
+            else:
+                self.get_logger().info(
+                    f"LIDAR: Found {len(balls_found)} potential clusters for {trigger_source} trigger")
+        
+        # Sort by combined quality
+        sorted_balls = sorted(balls_found, key=lambda x: x[2], reverse=True)
+        
+        # Keep only the best candidate for single ball scenario
+        if len(sorted_balls) > 1:
+            # If we have a previous position, use it to filter
+            if hasattr(self, 'previous_ball_position') and self.previous_ball_position is not None:
+                consistent_balls = []
+                # Increase max position change when we have consecutive failures
+                max_position_change = 0.7  # Increased base value
+                
+                # Get time since last detection for adaptive thresholds
+                time_since_detection = current_time - getattr(self, 'last_successful_detection_time', 0)
+                
+                # Adaptive threshold based on time and consecutive failures
+                if time_since_detection > 0.3:  # Reduced time threshold
+                    max_position_change *= (1.0 + 0.8 * min(time_since_detection, 2.5))  # More aggressive scaling
+                    
+                if hasattr(self, 'consecutive_failures') and self.consecutive_failures > 2:
+                    # Allow larger jumps if we've had several failures
+                    max_position_change = min(1.2, max_position_change * (1.0 + 0.15 * self.consecutive_failures))
+                
+                for ball in sorted_balls:
+                    center, points, quality = ball
+                    dist_from_previous = np.linalg.norm(center - self.previous_ball_position)
+                    
+                    # If this cluster is close to previous position, it's likely the same ball
+                    if dist_from_previous < max_position_change:
+                        consistent_balls.append(ball)
+                    elif self.detailed_logging:
+                        self.get_logger().info(
+                            f"CONSISTENCY: Rejected cluster at ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) "
+                            f"with {points} points and quality {quality:.2f} - "
+                            f"too far from previous position ({dist_from_previous:.2f}m > {max_position_change:.2f}m)")
+                
+                # If we found any consistent balls, use those instead
+                if consistent_balls:
+                    if self.detailed_logging:
+                        self.get_logger().info(
+                            f"CONSISTENCY: Found {len(consistent_balls)} clusters consistent with previous position")
+                    sorted_balls = sorted(consistent_balls, key=lambda x: x[2], reverse=True)
+        
+        # Update our tracked position if we found a good candidate
+        if sorted_balls:
+            best_ball = sorted_balls[0]
+            new_position = best_ball[0]
+            
+            # Store in position history
+            self.position_history.append(new_position)
+            
+            # Set current position 
+            self.previous_ball_position = new_position
+            
+            # Reset consecutive failures since we found a ball
+            if hasattr(self, 'consecutive_failures'):
+                self.consecutive_failures = 0
+            
+            # Update last successful detection time
+            if hasattr(self, 'last_successful_detection_time'):
+                self.last_successful_detection_time = current_time
+            
+            # Debug log to show which position was selected
             self.get_logger().debug(
-                f"LIDAR: Best candidate at ({best[0][0]:.2f}, {best[0][1]:.2f}) "
-                f"with {best[1]} points and quality {best[2]:.2f}"
+                f"Selected position: ({new_position[0]:.2f}, {new_position[1]:.2f}, {new_position[2]:.2f}), "
+                f"Points: {best_ball[1]}, Quality: {best_ball[2]:.2f}"
             )
         else:
-            self.get_logger().debug("LIDAR: No potential tennis balls found")
+            # Increment consecutive failures
+            if hasattr(self, 'consecutive_failures'):
+                self.consecutive_failures += 1
+            
+            # Generate prediction from Kalman filter if we have one
+            if hasattr(self, 'kalman_filter') and self.kalman_filter.initialized:
+                # Only predict if we had a previous successful detection
+                if hasattr(self, 'last_successful_detection_time'):
+                    time_since_detection = current_time - self.last_successful_detection_time
+                    # Only predict for reasonable time periods (avoid extrapolating too far)
+                    if time_since_detection < 2.0:
+                        self.predicted_position = self.kalman_filter.predict(time_since_detection)
+                        self.prediction_time = current_time
+                        
+                        if self.detailed_logging:
+                            self.get_logger().info(
+                                f"PREDICTION: No detection for {time_since_detection:.2f}s. "
+                                f"Predicted position: ({self.predicted_position[0]:.2f}, "
+                                f"{self.predicted_position[1]:.2f}, {self.predicted_position[2]:.2f})"
+                            )
         
-        # Sort balls by quality (best first) and return
-        trace_points["total_ms"] = (TimeUtils.now_as_float() - operation_start) * 1000
-    
-        # Only log traces in debug mode to avoid overwhelming logs
-        if self.get_logger().get_effective_level() <= rclpy.logging.LoggingSeverity.DEBUG:
-            self.get_logger().debug(f"TRACE: find_tennis_balls timing: {trace_points}")
+        # In the find_tennis_balls method:
+        if hasattr(self, 'position_history') and len(self.position_history) > 0:
+            # Calculate weighted average of recent positions (newer positions have higher weight)
+            recent_positions = np.array(list(self.position_history))
+            
+            # Create weights that favor more recent positions
+            weights = np.linspace(0.5, 1.0, len(recent_positions))
+            weights = weights / np.sum(weights)  # Normalize
+            
+            # Calculate weighted average
+            average_position = np.zeros(3)
+            for i, pos in enumerate(recent_positions):
+                average_position += pos * weights[i]
+            
+            if self.detailed_logging:
+                self.get_logger().info(
+                    f"HISTORY: Using weighted average position: ({average_position[0]:.2f}, "
+                    f"{average_position[1]:.2f}, {average_position[2]:.2f}) from {len(self.position_history)} samples"
+                )
+            
+            # Add strong bias toward positions near the average
+            for i, ball in enumerate(sorted_balls):
+                center = ball[0]
+                distance_to_average = np.linalg.norm(center - average_position)
+                
+                # Adjust quality score based on consistency with history
+                # Positions closer to average get a significant boost
+                consistency_bonus = max(0, 0.3 * (1.0 - min(1.0, distance_to_average / 0.3)))
+                
+                if self.detailed_logging:
+                    self.get_logger().info(
+                        f"HISTORY: Cluster at ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) "
+                        f"distance to avg: {distance_to_average:.2f}m, bonus: +{consistency_bonus:.2f}"
+                    )
+                
+                sorted_balls[i] = (center, ball[1], ball[2] + consistency_bonus)
+                
+            # Re-sort with the consistency bonus
+            sorted_balls = sorted(sorted_balls, key=lambda x: x[2], reverse=True)
+
+        # In find_tennis_balls method, add temporal consistency tracking:
+
+        # Near line 694 (after position history weighted average calculation):
+        # Add temporal consistency tracking for stable detections
+        if self.position_history and len(self.position_history) >= 3:
+            # Track frequency of positions in similar locations
+            position_clusters = {}
+            grid_size = 0.2  # 20cm grid for position binning
+            
+            # Group recent positions into spatial bins
+            for pos in self.position_history:
+                # Create a position bin key
+                bin_key = (
+                    round(pos[0] / grid_size) * grid_size,
+                    round(pos[1] / grid_size) * grid_size
+                )
+                
+                if bin_key in position_clusters:
+                    position_clusters[bin_key].append(pos)
+                else:
+                    position_clusters[bin_key] = [pos]
+            
+            # Find the most consistent cluster (most positions in same area)
+            most_consistent = None
+            max_count = 0
+            for bin_key, positions in position_clusters.items():
+                if len(positions) > max_count:
+                    max_count = len(positions)
+                    most_consistent = bin_key
+            
+            # If we have a consistent cluster, give bonus to nearby detections
+            if most_consistent and max_count >= 3:  # At least 3 detections in similar location
+                consistency_center = np.mean(position_clusters[most_consistent], axis=0)
+                
+                if self.detailed_logging:
+                    self.get_logger().info(
+                        f"CONSISTENCY: Found stable region at ({consistency_center[0]:.2f}, "
+                        f"{consistency_center[1]:.2f}) with {max_count} samples"
+                    )
+                
+                # Add bonus to detections near this consistent region
+                for i, ball in enumerate(sorted_balls):
+                    center = ball[0]
+                    distance_to_consistent = np.linalg.norm(center[0:2] - consistency_center[0:2])
+                    
+                    # Strong bonus for being in a temporally consistent region
+                    if distance_to_consistent < 0.3:  # Within 30cm of consistent detections
+                        temporal_bonus = 0.20 * (1.0 - min(1.0, distance_to_consistent / 0.3))  # Increased from 0.15 to 0.20
+                        sorted_balls[i] = (center, ball[1], ball[2] + temporal_bonus)
+                        
+                        if self.detailed_logging:
+                            self.get_logger().info(
+                                f"CONSISTENCY: Added +{temporal_bonus:.2f} bonus to cluster at "
+                                f"({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) for temporal consistency"
+                            )
+            
+            # Re-sort with the consistency bonus applied
+            sorted_balls = sorted(sorted_balls, key=lambda x: x[2], reverse=True)
+
+        # In find_tennis_balls method:
+
+        # CHANGE: Merge nearby clusters before quality assessment
+        # This helps combine evidence from reflections of the same ball
+        merged_balls = []
+        processed_indices = set()
+
+        # Make merge threshold adaptive to detection difficulties
+        base_merge_threshold = self.ball_radius * 18  # Increased from 15 to 18
+        if hasattr(self, 'consecutive_failures'):
+            # Increase merge radius with consecutive failures
+            failure_factor = 1.0 + min(0.7, 0.15 * self.consecutive_failures)  # Increased from 0.5 to 0.7
+            merge_threshold = base_merge_threshold * failure_factor
+        else:
+            merge_threshold = base_merge_threshold
+
+        # Log the merging threshold for debugging
+        if self.detailed_logging and len(balls_found) > 1:
+            self.get_logger().info(f"MERGE: Using merge threshold of {merge_threshold:.3f}m")
         
-        return sorted(balls_found, key=lambda x: x[2], reverse=True)
+        # Add counter for diagnostics
+        clusters_merged_total = 0
+        
+        # Process each detected ball
+        for i, ball in enumerate(balls_found):
+            if i in processed_indices:
+                continue  # Skip already-merged clusters
+                
+            center_i, points_i, quality_i = ball
+            merged_center = center_i * points_i  # Weighted by point count
+            merged_points = points_i
+            clusters_merged = 1
+            
+            # Keep track of which clusters are being merged with this one
+            merged_clusters_info = []
+            
+            # Look for nearby clusters to merge
+            for j, other_ball in enumerate(balls_found):
+                if j == i or j in processed_indices:
+                    continue  # Skip self or already-merged clusters
+                    
+                center_j, points_j, quality_j = other_ball
+                distance = np.linalg.norm(center_i - center_j)
+                
+                # If clusters are close enough, merge them
+                if distance < merge_threshold:
+                    # Add logging to diagnose merging issues
+                    if self.detailed_logging:
+                        self.get_logger().info(
+                            f"MERGE ATTEMPT: Merging cluster {i} with {j}, distance={distance:.3f}m < threshold={merge_threshold:.3f}m"
+                        )
+                    merged_center += center_j * points_j  # Add weighted by point count
+                    merged_points += points_j
+                    clusters_merged += 1
+                    processed_indices.add(j)
+                    
+                    merged_clusters_info.append({
+                        "index": j,
+                        "center": (center_j[0], center_j[1], center_j[2]),
+                        "points": points_j,
+                        "quality": quality_j,
+                        "distance": distance
+                    })
+                    
+                    if self.cluster_debug and self.cluster_log_file:
+                        self.cluster_log_file.write(f"Merging cluster {i} with {j}: distance={distance:.3f}m\n")
+                        self.cluster_log_file.write(f"  Cluster {i}: ({center_i[0]:.3f}, {center_i[1]:.3f}, {center_i[2]:.3f}) pts={points_i} q={quality_i:.2f}\n")
+                        self.cluster_log_file.write(f"  Cluster {j}: ({center_j[0]:.3f}, {center_j[1]:.3f}, {center_j[2]:.3f}) pts={points_j} q={quality_j:.2f}\n")
+            
+            # Finalize the merged cluster
+            if clusters_merged > 1:
+                # Recalculate center as weighted average 
+                merged_center = merged_center / merged_points
+                
+                # Calculate weighted quality score for the merged cluster
+                total_quality = quality_i * points_i
+                for info in merged_clusters_info:
+                    total_quality += info["quality"] * info["points"]
+
+                # Final quality is weighted average plus a bonus for having multiple confirmations
+                merged_quality = (total_quality / merged_points) * (1.0 + 0.1 * (clusters_merged - 1))
+
+                # Cap quality at 1.0
+                merged_quality = min(1.0, merged_quality)
+                
+                # Update cluster merge counter
+                clusters_merged_total += clusters_merged
+                
+                # Detailed logging
+                if self.detailed_logging:
+                    merge_details = [
+                        f"({info['center'][0]:.2f}, {info['center'][1]:.2f}) with {info['points']} pts" 
+                        for info in merged_clusters_info
+                    ]
+                    merge_details_str = ", ".join(merge_details)
+                    self.get_logger().info(
+                        f"MERGE: Merged {clusters_merged} clusters into ({merged_center[0]:.2f}, {merged_center[1]:.2f}, {merged_center[2]:.2f}) "
+                        f"with {merged_points} total points. Merged: {merge_details_str}")
+                
+                # ... rest of merge recalculation code ...
+                
+                # Add log about merged clusters
+                self.get_logger().info(
+                    f"Merged {clusters_merged} clusters into position " 
+                    f"({merged_center[0]:.2f}, {merged_center[1]:.2f}, {merged_center[2]:.2f}) "
+                    f"with {merged_points} total points, quality: {merged_quality:.2f}"
+                )
+                
+                merged_balls.append((merged_center, merged_points, merged_quality))
+            
+            elif i not in processed_indices:
+                # Keep original ball if it wasn't merged with anything
+                merged_balls.append(ball)
+                
+                if self.detailed_logging:
+                    self.get_logger().info(
+                        f"MERGE: Cluster at ({center_i[0]:.2f}, {center_i[1]:.2f}, {center_i[2]:.2f}) "
+                        f"with {points_i} points remained unmerged (no nearby clusters)")
+        
+        # Log summary of merging operation
+        if self.detailed_logging:
+            if clusters_merged_total > 0:
+                self.get_logger().info(f"MERGE: Merged {clusters_merged_total} clusters into {len(merged_balls)} final clusters")
+            else:
+                self.get_logger().info(f"MERGE: No clusters were merged, {len(merged_balls)} clusters remain")
+        
+        # Replace original balls list with merged version
+        sorted_balls = sorted(merged_balls, key=lambda x: x[2], reverse=True)
+        
+        if hasattr(self, '_logged_cluster_distance_this_run'):
+            delattr(self, '_logged_cluster_distance_this_run')
+        
+        # Add to find_tennis_balls method:
+
+        # After we've had multiple failures, try to extract more information from the point cloud
+        if hasattr(self, 'consecutive_failures') and self.consecutive_failures >= 5:
+            # Get time since last detection
+            time_since_detection = current_time - getattr(self, 'last_successful_detection_time', 0)
+            
+            # If we're in a prolonged detection drought, try even more aggressive clustering
+            if time_since_detection > 1.0:
+                self.get_logger().info(f"DEEP RECOVERY: Using aggressive clustering after {time_since_detection:.1f}s without detection")
+                
+                # Create a denser grid (2x normal density) in the predicted area
+                if hasattr(self, 'predicted_position') and self.predicted_position is not None:
+                    pred_x, pred_y = self.predicted_position[0:2]
+                    search_radius = 0.5  # 50cm search radius around prediction
+                    
+                    # Create a dense grid in this area
+                    dense_x = np.linspace(pred_x - search_radius, pred_x + search_radius, 15)
+                    dense_y = np.linspace(pred_y - search_radius, pred_y + search_radius, 15)
+                    
+                    # Add these points to seed_points with high priority
+                    for x in dense_x:
+                        for y in dense_y:
+                            # Higher priority for points closer to prediction
+                            dist = np.sqrt((x - pred_x)**2 + (y - pred_y)**2)
+                            if dist < search_radius:
+                                priority = 2.5 - (dist / search_radius)
+                                seed_points.append((np.array([x, y, self.ball_height]), priority))
+        
+        # Add after finding the best ball in find_tennis_balls:
+
+        # If we have a detection that's far from history, apply a quality penalty
+        if sorted_balls and len(self.position_history) >= 3:
+            best_ball = sorted_balls[0]
+            center, points, quality = best_ball
+            
+            # Calculate average of recent positions
+            recent_positions = np.array(list(self.position_history)[-3:])  # Last 3 positions
+            avg_position = np.mean(recent_positions, axis=0)
+            
+            # Check if this position is a major outlier
+            distance_from_avg = np.linalg.norm(center - avg_position)
+            if distance_from_avg > 0.8:  # If more than 80cm from recent average
+                # Apply quality penalty based on distance
+                outlier_factor = distance_from_avg / 0.8  # Normalized distance
+                quality_penalty = min(0.2, quality * 0.3)  # Cap at 20% reduction
+                
+                # Apply penalty
+                new_quality = max(0.2, quality - quality_penalty)
+                sorted_balls[0] = (center, points, new_quality)
+                
+                if self.detailed_logging:
+                    self.get_logger().info(
+                        f"OUTLIER: Position ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) is {distance_from_avg:.2f}m "
+                        f"from history average - quality reduced from {quality:.2f} to {new_quality:.2f}"
+                    )
+        
+        # Improve prediction code:
+
+        # When using prediction, apply a weighted blend with history
+        if hasattr(self, 'predicted_position') and self.predicted_position is not None and hasattr(self, 'position_history') and len(self.position_history) > 0:
+            # Calculate average of recent historical positions
+            recent_positions = list(self.position_history)[-3:]  # Last 3 positions
+            if recent_positions:
+                try:
+                    history_avg = np.mean(recent_positions, axis=0)
+                    
+                    # Blend prediction with history (75% prediction, 25% history)
+                    self.predicted_position = self.predicted_position * 0.75 + history_avg * 0.25
+                    
+                    if self.detailed_logging:
+                        self.get_logger().info(f"PREDICTION: Using history-blended position: ({self.predicted_position[0]:.2f}, {self.predicted_position[1]:.2f}, {self.predicted_position[2]:.2f})")
+                except Exception as e:
+                    self.get_logger().warn(f"Error blending prediction with history: {str(e)}")
+        
+        return sorted_balls
     
     def publish_ball_position(self, center, cluster_size, circle_quality, trigger_source, original_timestamp=None):
         """
-        Publish the 3D position of a detected tennis ball.
-        
-        Creates and publishes messages with the ball's position along with
-        visualization markers for RViz debugging.
-        
-        Args:
-            center (numpy.ndarray): Center of the detected ball [x, y, z]
-            cluster_size (int): Number of points in the cluster
-            circle_quality (float): How well the points match a circle (0-1)
-            trigger_source (str): Which detector triggered this detection (YOLO or HSV)
-            original_timestamp (Time, optional): Original timestamp from the triggering detection
+        Publish the detected tennis ball position with quality information.
         """
+        # Apply Kalman filtering if enabled
+        filtered_center = center
+        
+        if self.use_kalman:
+            # Use safe update method instead of direct update
+            filtered_center = self.safe_update_kalman(center, circle_quality, cluster_size)
+            
+            # Calculate how much the filter corrected the position
+            correction = np.linalg.norm(filtered_center - center)
+            
+            # Log the correction amount if significant
+            if correction > 0.05 and self.detailed_logging:
+                self.get_logger().info(
+                    f"Kalman filter corrected position by {correction:.3f}m: "
+                    f"Raw: ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) → "
+                    f"Filtered: ({filtered_center[0]:.2f}, {filtered_center[1]:.2f}, {filtered_center[2]:.2f})"
+                )
+        
         # Create message for ball position (3D point with timestamp)
         point_msg = PointStamped()
         
         # IMPORTANT: Use original timestamp if provided, otherwise use current time
-        # This ensures we maintain the timing relationship for proper synchronization
         if original_timestamp and TimeUtils.is_timestamp_valid(original_timestamp):
             point_msg.header.stamp = original_timestamp
-            self.get_logger().debug(f"Using original timestamp from {trigger_source} detection for synchronization")
         else:
             point_msg.header.stamp = TimeUtils.now_as_ros_time()
-            self.get_logger().debug(f"Using current time as timestamp (no valid original timestamp)")
         
         # Always use our consistent frame ID for proper transformation
         point_msg.header.frame_id = "lidar_frame"
         
-        # ROS2 doesn't use sequence numbers in headers
-        # Track sequence internally if needed (but don't set it on the header)
-        if not hasattr(self, 'seq_counter'):
-            self.seq_counter = 0
-        self.seq_counter += 1
-        # Remove this line that causes the error:
-        # point_msg.header.seq = self.seq_counter
-        
-        point_msg.point.x = float(center[0])
-        point_msg.point.y = float(center[1])
-        point_msg.point.z = float(center[2])
+        # Use the filtered position in the message
+        point_msg.point.x = float(filtered_center[0])
+        point_msg.point.y = float(filtered_center[1])
+        point_msg.point.z = float(filtered_center[2])
         
         # Publish the ball position
         self.position_publisher.publish(point_msg)
@@ -719,9 +1219,10 @@ class TennisBallLidarDetector(Node):
         """
         Create visualization markers for the detected ball in RViz.
         
-        Creates two markers:
-        1. A sphere representing the tennis ball
-        2. A text label showing detection source and quality
+        Creates markers:
+        1. A sphere representing the tennis ball (filtered position)
+        2. A small sphere showing the raw detection (if Kalman is enabled)
+        3. A text label showing detection source and quality
         
         Args:
             center (numpy.ndarray): Center of the detected ball [x, y, z]
@@ -731,7 +1232,12 @@ class TennisBallLidarDetector(Node):
         """
         markers = MarkerArray()
         
-        # Create a sphere marker for the ball
+        # Use filtered position for the main marker if available
+        display_center = center
+        if self.use_kalman and hasattr(self, 'kalman_filter') and self.kalman_filter.initialized:
+            display_center = self.kalman_filter.state[0:3]
+        
+        # Create a sphere marker for the ball - Main sphere (filtered position)
         ball_marker = Marker()
         ball_marker.header.frame_id = "lidar_frame"  # Use consistent frame ID
         ball_marker.header.stamp = self.scan_timestamp
@@ -741,9 +1247,9 @@ class TennisBallLidarDetector(Node):
         ball_marker.action = Marker.ADD
         
         # Set position
-        ball_marker.pose.position.x = center[0]
-        ball_marker.pose.position.y = center[1]
-        ball_marker.pose.position.z = center[2]
+        ball_marker.pose.position.x = display_center[0]
+        ball_marker.pose.position.y = display_center[1]
+        ball_marker.pose.position.z = display_center[2]
         ball_marker.pose.orientation.w = 1.0  # No rotation
         
         # Set color based on quality and source
@@ -802,6 +1308,38 @@ class TennisBallLidarDetector(Node):
         text_marker.lifetime.nanosec = int((VIZ_CONFIG['marker_lifetime'] % 1) * 1e9)
         
         markers.markers.append(text_marker)
+        
+        # If Kalman filter is enabled, show the raw detection as a smaller sphere
+        if self.use_kalman and not np.array_equal(center, display_center):
+            raw_marker = Marker()
+            raw_marker.header.frame_id = "lidar_frame"
+            raw_marker.header.stamp = self.scan_timestamp
+            raw_marker.ns = "tennis_ball_raw"
+            raw_marker.id = 3
+            raw_marker.type = Marker.SPHERE
+            raw_marker.action = Marker.ADD
+            
+            # Position at the raw detection
+            raw_marker.pose.position.x = center[0]
+            raw_marker.pose.position.y = center[1]
+            raw_marker.pose.position.z = center[2]
+            raw_marker.pose.orientation.w = 1.0
+            
+            # Make it smaller and semi-transparent
+            raw_marker.scale.x = self.ball_radius
+            raw_marker.scale.y = self.ball_radius
+            raw_marker.scale.z = self.ball_radius
+            
+            # Red color for raw detections
+            raw_marker.color.r = 1.0
+            raw_marker.color.g = 0.0
+            raw_marker.color.b = 0.0
+            raw_marker.color.a = 0.3
+            
+            raw_marker.lifetime.sec = int(VIZ_CONFIG['marker_lifetime'])
+            raw_marker.lifetime.nanosec = int((VIZ_CONFIG['marker_lifetime'] % 1) * 1e9)
+            
+            markers.markers.append(raw_marker)
         
         # Publish the visualization
         self.marker_publisher.publish(markers)
@@ -924,103 +1462,64 @@ class TennisBallLidarDetector(Node):
         # and keep full point resolution
         self.detection_samples = TENNIS_BALL_CONFIG["detection_samples"]
         
-        # If we have lots of RAM, we can use more samples for better results
-        if self._get_available_memory() > 8000:  # More than 8GB free
-            # Use more samples for better detection quality
-            self.detection_samples = min(50, self.detection_samples * 1.5)
-            self.get_logger().info(f"Using {self.detection_samples} detection samples (high memory mode)")
+        # Check for Raspberry Pi 5
+        is_raspberry_pi = os.environ.get('RASPBERRY_PI') == '1'
         
-        # Set up point cloud processing parameters
-        # No need to downsample on Pi 5 with 16GB
-        self.downsample_points = False
-        self.downsample_factor = 1
-    
-    def _get_available_memory(self):
-        """Get available memory in MB."""
-        try:
-            return psutil.virtual_memory().available / (1024 * 1024)
-        except Exception as e:
-            self.get_logger().warn(f"Error getting memory info: {str(e)}")
-            return 2000  # Default to 2GB if we can't determine
+        if is_raspberry_pi:
+            # On Raspberry Pi, use a more efficient detection approach
+            self.get_logger().info("Configured for Raspberry Pi 5: using optimized detection")
+            # Increase detection samples slightly since the Pi 5 has good performance
+            self.detection_samples = min(40, self.detection_samples)
+        else:
+            # On desktop/laptop, use more thorough detection approach
+            self.get_logger().info("Configured for desktop: using high-quality detection")
+            # More detection samples for higher-powered systems
+            self.detection_samples = min(50, self.detection_samples)
     
     def _handle_resource_alert(self, resource_type, value):
-        """Handle resource alerts by adjusting detector behavior."""
-        # Fix the case method - use upper() instead of UPPER()
-        self.get_logger().warn(f"Resource alert: {resource_type.upper()} at {value:.1f}% - may affect performance")
-        
-        # Add to error list if critical
-        if value > 95.0:
-            if hasattr(self, 'errors'):  # Check if errors attribute exists
-                self.log_error(f"Critical {resource_type} usage: {value:.1f}%")
-            else:
-                self.get_logger().error(f"Critical {resource_type} usage: {value:.1f}%")
-        
-        if resource_type == 'cpu' and value > 90.0:
-            # Check if detection_samples attribute exists
-            if hasattr(self, 'detection_samples'):
-                # Reduce detection samples temporarily to ease CPU load
-                original_samples = self.detection_samples
-                self.detection_samples = max(10, int(self.detection_samples * 0.7))
-                self.get_logger().warn(
-                    f"Temporarily reducing LIDAR detection samples from {original_samples} to {self.detection_samples}"
-                )
-                
-                # Add resource adaptations tracking with deque
-                if not hasattr(self, 'resource_adaptations'):
-                    self.resource_adaptations = deque(maxlen=20)  # Keep only last 20 adaptations
-                
-                self.resource_adaptations.append({
-                    "timestamp": TimeUtils.now_as_float(),
-                    "type": resource_type,
-                    "value": value,
-                    "action": f"Reduced detection samples to {self.detection_samples}"
-                })
-    
-    def log_error(self, error_message):
-        """Log an error and add it to error history for diagnostics."""
+        """Handle resource alerts from the resource monitor."""
+        # Track when we last had a resource alert
         current_time = TimeUtils.now_as_float()
         
-        # Track error frequency by type
-        if not hasattr(self, 'error_counts'):
-            self.error_counts = {}
-            self.error_last_logged = {}
+        if resource_type == 'cpu' and value > 90:
+            # Only log high CPU usage once per minute
+            if not hasattr(self, 'last_high_cpu_time') or current_time - self.last_high_cpu_time > 60:
+                self.get_logger().warning(f"High CPU usage detected: {value:.1f}%")
+                self.last_high_cpu_time = current_time
+                
+                # Adjust detection algorithm to be more efficient
+                self.detection_samples = max(15, self.detection_samples - 5)
+                self.get_logger().info(f"Reducing detection samples to {self.detection_samples} to conserve resources")
         
-        if error_message not in self.error_counts:
-            self.error_counts[error_message] = 1
-            self.error_last_logged[error_message] = 0  # Never logged before
-        else:
-            self.error_counts[error_message] += 1
-        
-        # Determine if we should log this error (always log first occurrence and then rate-limit)
-        should_log = False
-        time_since_last_log = current_time - self.error_last_logged.get(error_message, 0)
-        
-        # Always log the first occurrence or if it's been a while since we logged this error
-        if self.error_counts[error_message] == 1 or time_since_last_log > 10.0:
-            should_log = True
-            self.error_last_logged[error_message] = current_time
+        elif resource_type == 'memory' and value > 85:
+            self.get_logger().warning(f"High memory usage detected: {value:.1f}%")
             
-            # For repeated errors, include the count
-            if self.error_counts[error_message] > 1:
-                error_message = f"{error_message} (occurred {self.error_counts[error_message]} times)"
+        elif resource_type == 'temperature' and value > 80:
+            self.get_logger().error(f"Critical temperature detected: {value:.1f}°C")
+    
+    def log_error(self, error_message):
+        """Log errors with consistent formatting and track for diagnostics."""
+        # Add error to tracking list
+        current_time = TimeUtils.now_as_float()
+        self.errors.append({
+            "timestamp": current_time,
+            "message": error_message
+        })
         
-        if should_log:
-            self.get_logger().error(f"LIDAR: {error_message}")
-            # Add to error list for diagnostics
-            self.errors.append({
-                "timestamp": current_time,
-                "message": error_message
-            })
-            
-            # Update health based on error frequency
-            self.last_error_time = current_time
-            
-            # Reduce health score temporarily after an error
+        # Update last error time for health tracking
+        self.last_error_time = current_time
+        
+        # Reduce health score when errors occur
+        if hasattr(self, 'lidar_health'):
             self.lidar_health = max(0.3, self.lidar_health - 0.2)
+        
+        # Log the error (but rate limit repeating errors)
+        self.get_logger().error(f"LIDAR ERROR: {error_message}")
     
     def destroy_node(self):
-        """Clean shutdown of node resources."""
-        # Release large point cloud buffers
+        """Clean up resources when the node is shutting down."""
+        # Clear any large stored data
+        self.points_array = None
         if hasattr(self, '_points_buffer'):
             self._points_buffer = None
         if hasattr(self, '_filtered_buffer'):
@@ -1031,6 +1530,13 @@ class TennisBallLidarDetector(Node):
         # Stop any running threads
         if hasattr(self, 'resource_monitor') and self.resource_monitor:
             self.resource_monitor.stop()
+        
+        # Close log files if open
+        if hasattr(self, 'cluster_log_file') and self.cluster_log_file:
+            self.cluster_log_file.close()
+        
+        if hasattr(self, 'kalman_log_file') and self.kalman_log_file:
+            self.kalman_log_file.close()
         
         super().destroy_node()
 
@@ -1072,12 +1578,324 @@ class TennisBallLidarDetector(Node):
         elif level == 'error':
             self.get_logger().error(tagged_msg)
 
-def main(args=None):
-    """Main function to initialize and run the LIDAR detector node."""
-    # Initialize ROS
-    rclpy.init(args=args)
+    def safe_get_position_history(self):
+        """Safely access the position history with proper validation."""
+        if not hasattr(self, 'position_history') or self.position_history is None:
+            self.position_history = deque(maxlen=10)
+            return []
+        
+        # Filter out any None values that might have made it into history
+        valid_positions = [pos for pos in self.position_history if pos is not None]
+        return valid_positions
+
+    def safe_update_kalman(self, center, circle_quality, cluster_size):
+        """
+        Safely update the Kalman filter, ensuring we never return None.
+        
+        Args:
+            center (numpy.ndarray): Position measurement to update the filter with
+            circle_quality (float): Quality of the detection (0-1)
+            cluster_size (int): Number of points in the detection cluster
+            
+        Returns:
+            numpy.ndarray: Filtered position, or original position if an error occurs
+        """
+        if center is None:
+            self.get_logger().error("Attempted to update Kalman filter with None center")
+            return np.zeros(3)
+        
+        try:
+            # Verify Kalman filter has been properly initialized
+            if not hasattr(self.kalman_filter, 'state'):
+                self.get_logger().error("Kalman filter not properly initialized, reinitializing")
+                # Reinitialize the Kalman filter
+                self.kalman_filter = KalmanFilter()
+                
+            # If this is the first update, make sure we're initialized
+            if not self.kalman_filter.initialized:
+                self.get_logger().info("Initializing Kalman filter with first position")
+                # Initialize directly with this measurement
+                self.kalman_filter.state[0:3] = center
+                self.kalman_filter.last_update_time = time.time()
+                self.kalman_filter.initialized = True
+                return center
+            
+            # Update with the measurement
+            filtered_center = self.kalman_filter.update(center, circle_quality, cluster_size)
+            
+            # Double-check for None result
+            if filtered_center is None:
+                self.get_logger().error("Kalman filter returned None result, using original position")
+                return np.array(center)
+            
+            # Ensure result is a numpy array
+            if not isinstance(filtered_center, np.ndarray):
+                self.get_logger().error(f"Kalman filter returned non-array: {type(filtered_center)}, using original position")
+                return np.array(center)
+            
+            # Validate size
+            if len(filtered_center) != 3:
+                self.get_logger().error(f"Kalman filter returned array of wrong size: {len(filtered_center)}, using original position")
+                return np.array(center)
+            
+            return filtered_center
+            
+        except Exception as e:
+            self.get_logger().error(f"Error in Kalman filter update: {str(e)}")
+            import traceback
+            self.get_logger().error(f"Traceback: {traceback.format_exc()}")
+            return np.array(center)  # Return original position if any error occurs
+
+    def camera_detection_callback(self, msg, source):
+        """
+        Process ball detections from the camera and find matching points in LIDAR data.
+        """
+        detection_start_time = TimeUtils.now_as_float()
+        
+        try:
+            # Check if we have scan data
+            if self.latest_scan is None or self.points_array is None or len(self.points_array) == 0:
+                self.get_logger().info("LIDAR: Waiting for scan data...")
+                return
+                
+            # Extract the camera's detected position and confidence
+            x_2d = msg.point.x
+            y_2d = msg.point.y
+            confidence = msg.point.z
+            
+            self.get_logger().info(
+                f"{source}: Ball detected at pixel ({x_2d:.1f}, {y_2d:.1f}) "
+                f"with confidence {confidence:.2f}"
+            )
+            
+            # Find tennis ball patterns in LIDAR data
+            ball_results = self.find_tennis_balls(source)
+            
+            # Process the best detected ball (if any)
+            if ball_results and len(ball_results) > 0:
+                # Get the best match (first in the list, already sorted by quality)
+                best_match = ball_results[0]
+                
+                # Ensure best_match has the expected structure
+                if len(best_match) == 3:
+                    center, cluster_size, circle_quality = best_match
+                    
+                    # Safety check for center before publishing
+                    if center is not None:
+                        # Use original timestamp for synchronization
+                        if TimeUtils.is_timestamp_valid(msg.header.stamp):
+                            self.publish_ball_position(center, cluster_size, circle_quality, source, msg.header.stamp)
+                        else:
+                            self.get_logger().warn(f"Received invalid timestamp from {source}, using current time instead")
+                            self.publish_ball_position(center, cluster_size, circle_quality, source, None)
+                    else:
+                        self.get_logger().warn(f"LIDAR: Invalid center point in ball result for {source}")
+                else:
+                    self.get_logger().warn(f"LIDAR: Unexpected structure in ball result for {source}")
+            else:
+                self.get_logger().info(f"LIDAR: No matching ball found for {source} detection")
+                
+        except Exception as e:
+            error_msg = f"Error processing {source} detection: {str(e)}"
+            self.log_error(error_msg)
+            import traceback
+            self.get_logger().error(f"Traceback: {traceback.format_exc()}")
+        
+        # Log processing time for this detection
+        processing_time = (TimeUtils.now_as_float() - detection_start_time) * 1000  # in ms
+        self.detection_times.append(processing_time)
+
+class KalmanFilter:
+    """Simple Kalman filter for tracking a tennis ball in 3D space."""
     
-    # Create detector node
+    def __init__(self):
+        # State: [x, y, z, vx, vy, vz]
+        self.state = np.zeros(6)
+        
+        # Initial uncertainty is high
+        self.P = np.eye(6) * 0.9  # Decreased from 1.0 to 0.9
+        
+        # Process noise (how much we expect the state to change between predictions)
+        self.Q = np.eye(6)
+        self.Q[0:3, 0:3] *= 0.015  # Decreased from 0.02 to 0.015
+        self.Q[3:6, 3:6] *= 0.12   # Decreased from 0.15 to 0.12
+        
+        # Measurement noise (how much we trust the measurements)
+        self.R = np.eye(3) * 0.18  # Decreased from 0.25 to 0.18 - trust measurements even more
+        
+        # State transition matrix (physics model)
+        self.F = np.eye(6)
+        # During prediction, position += velocity * dt
+        self.dt = 0.1  # default time step
+        
+        # Measurement matrix (maps state to measurement)
+        self.H = np.zeros((3, 6))
+        self.H[0:3, 0:3] = np.eye(3)  # We only measure position, not velocity
+        
+        self.initialized = False
+        self.last_update_time = None
+    
+    def predict(self, dt=None):
+        """Predict next state based on motion model."""
+        if not self.initialized:
+            return
+            
+        # Use provided dt or default
+        if dt is not None:
+            self.dt = dt
+        
+        # Update state transition matrix with current dt
+        self.F[0:3, 3:6] = np.eye(3) * self.dt
+        
+        # Predict next state: x = F * x
+        self.state = self.F @ self.state
+        
+        # Update covariance: P = F * P * F^T + Q
+        self.P = self.F @ self.P @ self.F.T + self.Q
+        
+        return self.state[0:3]  # Return predicted position
+    
+    def update(self, measurement, measurement_quality=1.0, cluster_size=0):
+        """Update the filter with a new measurement."""
+        # Validate measurement
+        if measurement is None or not isinstance(measurement, np.ndarray) or len(measurement) != 3:
+            # Log the issue and return the current state or zeros if not initialized
+            return self.state[0:3] if self.initialized else np.zeros(3)
+            
+        current_time = time.time()
+        
+        # Get node reference for logging if available
+        node = None
+        for obj in globals().values():
+            if isinstance(obj, TennisBallLidarDetector):
+                node = obj
+                break
+        
+        # Initialize if this is the first measurement
+        if not self.initialized:
+            self.state[0:3] = measurement
+            self.last_update_time = current_time
+            self.initialized = True
+            
+            if node and hasattr(node, 'kalman_debug') and node.kalman_debug:
+                if hasattr(node, 'kalman_log_file') and node.kalman_log_file:
+                    node.kalman_log_file.write(f"Kalman initialized with position: ({measurement[0]:.3f}, {measurement[1]:.3f}, {measurement[2]:.3f})\n")
+            
+            return self.state[0:3]
+        
+        # Calculate time since last update for prediction
+        dt = current_time - self.last_update_time
+        self.last_update_time = current_time
+        
+        # Save pre-update state for logging
+        old_state = self.state.copy()
+        
+        # Don't use negative or very large dt values
+        if dt > 0 and dt < 1.0:
+            self.predict(dt)
+        else:
+            self.predict()
+        
+        # Adjust measurement noise based on quality AND point count
+        # Lower quality = higher noise = less weight to this measurement
+        quality_factor = max(0.2, measurement_quality)  # Ensure minimum quality factor
+        
+        # Add point count weighting - more points = more trust
+        if cluster_size > 0:
+            # More aggressive scaling based on point count
+            if cluster_size < 10:
+                # Very low point counts get less trust
+                point_factor = 0.4 + (cluster_size / 20.0)  # 0.4 to 0.9 for 1-10 points
+            else:
+                # Higher point counts get more trust
+                point_factor = min(2.5, 0.9 + (cluster_size - 10) / 20.0)  # 0.9 to 2.5
+                
+            quality_factor *= point_factor
+        
+        R_adjusted = self.R / quality_factor
+        
+        # For sudden large changes, increase the noise further
+        if self.initialized:
+            position_change = np.linalg.norm(measurement - self.state[0:3])
+            if position_change > 0.3:  # If position jumped significantly
+                jump_factor = min(3.0, position_change / 0.3)  # Scale up to 3x
+                R_adjusted = R_adjusted * jump_factor
+                
+                # Add debug logging for large jumps
+                if node and hasattr(node, 'detailed_logging') and node.detailed_logging:
+                    node.get_logger().info(
+                        f"KALMAN: Large position jump detected ({position_change:.2f}m), "
+                        f"increasing measurement noise by {jump_factor:.1f}x"
+                    )
+        
+        # Calculate innovation: y = z - H*x
+        y = measurement - self.H @ self.state
+        
+        # Calculate innovation covariance: S = H*P*H^T + R
+        S = self.H @ self.P @ self.H.T + R_adjusted
+        
+        # Default K to None for safer checking later
+        K = None
+        
+        try:
+            # Calculate Kalman gain: K = P*H^T*S^-1
+            K = self.P @ self.H.T @ np.linalg.inv(S)
+            
+            # Update state: x = x + K*y
+            self.state = self.state + K @ y
+            
+            # Update covariance: P = (I - K*H)*P
+            I = np.eye(self.state.shape[0])
+            self.P = (I - K @ self.H) @ self.P
+        except np.linalg.LinAlgError:
+            # Handle potential matrix inversion issues
+            if node:
+                node.get_logger().warn("Kalman filter: Matrix inversion failed, skipping update")
+            # Don't update state - we'll use the predicted state
+        
+        # Enhanced logging if enabled
+        if node and hasattr(node, 'kalman_debug') and node.kalman_debug:
+            if hasattr(node, 'kalman_log_file') and node.kalman_log_file:
+                try:
+                    # Log detailed Kalman filter state
+                    log_file = node.kalman_log_file
+                    log_file.write(f"--- Kalman Update at t={current_time:.3f}, dt={dt:.3f}s ---\n")
+                    log_file.write(f"Measurement: ({measurement[0]:.3f}, {measurement[1]:.3f}, {measurement[2]:.3f}) quality={measurement_quality:.2f}\n")
+                    log_file.write(f"Pre-Update Position: ({old_state[0]:.3f}, {old_state[1]:.3f}, {old_state[2]:.3f})\n")
+                    log_file.write(f"Pre-Update Velocity: ({old_state[3]:.3f}, {old_state[4]:.3f}, {old_state[5]:.3f}) m/s\n")
+                    log_file.write(f"Innovation: ({y[0]:.3f}, {y[1]:.3f}, {y[2]:.3f})\n")
+                    
+                    if K is not None:
+                        log_file.write(f"Kalman Gain: [{K[0,0]:.3f}, {K[1,1]:.3f}, {K[2,2]:.3f}]\n")
+                    else:
+                        log_file.write("Kalman Gain: [ERROR - matrix inversion failed]\n")
+                        
+                    log_file.write(f"Post-Update Position: ({self.state[0]:.3f}, {self.state[1]:.3f}, {self.state[2]:.3f})\n")
+                    log_file.write(f"Post-Update Velocity: ({self.state[3]:.3f}, {self.state[4]:.3f}, {self.state[5]:.3f}) m/s\n")
+                    log_file.write(f"Position Change: ({(self.state[0]-old_state[0])::.3f}, {(self.state[1]-old_state[1]):.3f}, {(self.state[2]-old_state[2]):.3f})\n")
+                    log_file.write(f"Velocity Change: ({(self.state[3]-old_state[3])::.3f}, {(self.state[4]-old_state[4])::.3f}, {(self.state[5]-old_state[5])::.3f})\n\n")
+                except Exception as e:
+                    if node:
+                        node.get_logger().error(f"Error writing to Kalman log file: {str(e)}")
+        
+        # After calculating filtered position, limit the maximum correction
+        position_change = np.linalg.norm(self.state[0:3] - old_state[0:3])
+        if position_change > 0.4:  # Reduce max correction from 0.5m to 0.4m
+            correction_vector = self.state[0:3] - old_state[0:3]
+            normalized = correction_vector / position_change
+            self.state[0:3] = old_state[0:3] + normalized * 0.4
+            if node and hasattr(node, 'detailed_logging') and node.detailed_logging:
+                node.get_logger().info(f"KALMAN: Limited correction to 0.4m (was {position_change:.2f}m)")
+                
+        return self.state[0:3]  # Return updated position
+
+
+def main():
+    """Main entry point for the LIDAR node."""
+    # Initialize ROS
+    rclpy.init()
+    
+    # Create node
     detector = TennisBallLidarDetector()
     
     # Print welcome message

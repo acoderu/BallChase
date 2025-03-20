@@ -63,6 +63,15 @@ Data Pipeline:
    - PID controller uses position and velocity for smooth following
 """
 
+import sys
+import os
+# Add the parent directory of 'config' to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+
+# Add the 'src' directory to the Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -75,17 +84,16 @@ import time
 import json
 import os  # Add os import
 
-# New imports for synchronization
-from ball_tracking.sensor_sync_buffer import SimpleSensorBuffer
-from ball_tracking.time_utils import TimeUtils  # Add TimeUtils import
+from utilities.resource_monitor import ResourceMonitor  # Add resource monitoring import
+from utilities.time_utils import TimeUtils  # Add TimeUtils import
 
-# Import ConfigLoader
-from config.config_loader import ConfigLoader
+# Now you can import ConfigLoader
+from config.config_loader import ConfigLoader  # Import ConfigLoader
 
-# Load configuration
+# Load configuration from file
 config_loader = ConfigLoader()
-config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'fusion_config.yaml')
-fusion_config = config_loader.load_yaml(config_path)
+fusion_config = config_loader.load_yaml('fusion_config.yaml')
+
 
 # Add startup configuration for transform waiting
 STARTUP_CONFIG = fusion_config.get('startup', {
@@ -113,8 +121,6 @@ TOPICS = fusion_config.get('topics', {
     }
 })
 
-# Add resource monitoring import
-from ball_tracking.resource_monitor import ResourceMonitor
 
 class KalmanFilterFusion(Node):
     """
@@ -435,7 +441,7 @@ class KalmanFilterFusion(Node):
         # Add error tracking for diagnostics - ensure all are bounded
         self.error_history_size = DIAG_CONFIG.get('error_history_size', 10)
         self.errors = deque(maxlen=self.error_history_size)
-        self.warnings = deque(maxlen=self.error_history_size)
+        self.warnings = deque(maxlen=self.error_history_size)  # Add this line
         self.last_error_time = 0
         
         # Add health metrics
