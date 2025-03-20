@@ -172,13 +172,17 @@ class TennisBall3DPositionEstimator(Node):
         """Initialize the 3D position estimator node with all required components."""
         super().__init__('tennis_ball_3d_position_estimator')
         
-        # Initialize performance tracking and other parameters FIRST
-        self._init_performance_tracking()
+        # Initialize core attributes once with default values
+        self.init_attributes()
         
-        # Initialize camera parameters BEFORE resource monitor
+        # Setup in logical order - ONCE only
+        self._setup_callback_group()
         self._init_camera_parameters()
+        self._setup_tf2()
+        self._setup_subscriptions()
+        self._setup_publishers()
         
-        # THEN set up the resource monitor
+        # Initialize the resource monitor
         self.resource_monitor = ResourceMonitor(
             node=self,
             publish_interval=20.0,
@@ -187,86 +191,61 @@ class TennisBall3DPositionEstimator(Node):
         self.resource_monitor.add_alert_callback(self._handle_resource_alert)
         self.resource_monitor.start()
         
-        # Rest of initialization
-        self._setup_callback_group()
-        self._setup_tf2()
-        self._setup_subscriptions()
-        self._setup_publishers()
+        # A single timer for performance adjustment
+        self.performance_timer = self.create_timer(5.0, self._adjust_performance)
+        self.diagnostics_timer = self.create_timer(10.0, self.publish_system_diagnostics)
         
-        # Set up callback group for efficient multi-threading - FIX: CALL THIS FUNCTION
-        self._setup_callback_group()
-        
-        # Initialize camera and detection parameters
-        self._init_camera_parameters()
-        
-        # Set up tf2 for coordinate transformations
-        self._setup_tf2()
-        
-        # Set up subscriptions to receive data
-        self._setup_subscriptions()
-        
-        # Set up publishers to send out 3D positions
-        self._setup_publishers()
-        
-        # Add downsampling flag for Raspberry Pi
-        self.enable_downsampling = True
-        # More aggressive frame skipping at startup for better performance
-        self.process_every_n_frames = 10  # Start with 1 in 10 frames, can adjust later
-        self.frame_counter = 0
-        self.depth_frame_counter = 0
-        
-        # Initialize CPU usage variable
-        self.current_cpu_usage = 0.0
-        
-        # Start the adaptive frame skipping system
-        self.frame_skipping_timer = self.create_timer(5.0, self._adjust_frame_skipping)
-
-        # Initialize transform check flag
-        self.verified_transform = False
-
-        # Debug visualization mode
-        self.debug_mode = DIAG_CONFIG.get('debug_level', 1) > 1
-        
+        # Log initialization
         self.get_logger().info("Tennis Ball 3D Position Estimator initialized")
-        self.get_logger().info(f"Using coordinate scaling: detection ({DEPTH_CONFIG['detection_resolution']['width']}x"
-                              f"{DEPTH_CONFIG['detection_resolution']['height']}) -> depth (will be updated when received)")
-        self.get_logger().info(f"Processing every {self.process_every_n_frames} frames for performance optimization")
-        
-        # Pre-allocate these arrays for faster processing
-        self.downsampled_array = None
-        self.downsampled_width = 0
-        self.downsampled_height = 0
-        
-        # Add memory optimization timer (every 30 seconds)
-        self.memory_optimization_timer = self.create_timer(30.0, self._optimize_memory_use)
-        
-        # Add processing flags
-        self.enable_motion_filtering = True  # Only process when ball moves
-        self.enable_transform_caching = True  # Cache transforms
-        self.transform_cache_lifetime = 0.2   # Short lifetime for accuracy
-        
-        # Add cached constants for faster math
+        self.get_logger().info(f"Processing every {self.process_every_n_frames} frames for optimization")
+    
+    def init_attributes(self):
+        """Initialize all attributes with default values."""
+        # Performance settings
+        self.process_every_n_frames = 5  # Start balanced
+        self.frame_counter = 0
+        self.current_cpu_usage = 0.0
+        self.radius = 3
+        self._min_valid_points = 3
         self._scale_factor = DEPTH_CONFIG["scale"]
         self._min_valid_depth = DEPTH_CONFIG["min_depth"]
         self._max_valid_depth = DEPTH_CONFIG["max_depth"]
-        self._min_valid_points = 3
         
-        # Add a flag for performance mode
-        self.performance_mode = "balanced"  # "quality", "balanced", "performance", "ultra_light"
+        # Camera parameters (will be updated later)
+        self.camera_info = None
+        self.depth_array = None
+        self.fx = 0.0
+        self.fy = 0.0
+        self.cx = 0.0
+        self.cy = 0.0
+        self.depth_width = 640
+        self.depth_height = 480
+        self.x_scale = 1.0
+        self.y_scale = 1.0
         
-        # Add flag for downsampling depth
-        self.enable_downsampling = True  # Enable by default
+        # Tracking variables
+        self.start_time = TimeUtils.now_as_float()
+        self.successful_conversions = 0
+        self.processing_times = deque(maxlen=20)
+        self.depth_camera_health = 1.0
+        self.last_fps_log_time = 0
+        self.verified_transform = False
+        self.camera_info_logged = False
         
-        # Add timer for auto performance adjustment
-        self.create_timer(5.0, self._auto_adjust_performance)
-
-        # Add position caching for stationary ball optimization
+        # Caching mechanism
         self.position_cache = {
             'YOLO': {'position': None, 'depth': None, 'timestamp': 0, '3d_position': None},
             'HSV': {'position': None, 'depth': None, 'timestamp': 0, '3d_position': None}
         }
-        self.cache_validity_duration = 0.5  # Cache valid for 500ms when ball is stationary
-        self.movement_threshold = 0.1  # Increase from 0.005 to 0.1 (10% of image)
+        self.cache_hits = {'YOLO': 0, 'HSV': 0}
+        self.attempt_counter = {'YOLO': 0, 'HSV': 0}
+        
+        # Error tracking
+        self.error_counts = {}
+        self.error_last_logged = {}
+        
+        # Bridge for image conversion
+        self.cv_bridge = CvBridge()
     
     def _setup_callback_group(self):
         """Set up callback group and QoS profile for subscriptions."""
@@ -989,36 +968,34 @@ class TennisBall3DPositionEstimator(Node):
         self.detection_history[source]['last_time'] = TimeUtils.now_as_float()  # Use TimeUtils
     
     def publish_system_diagnostics(self):
-        """Publish minimal diagnostics to avoid performance impact."""
+        """Simplified diagnostics output."""
         current_time = TimeUtils.now_as_float()
-        elapsed = current_time - self.start_time
         
-        # Only log once every 10 seconds to reduce overhead
-        if not hasattr(self, 'last_diag_log_time') or current_time - self.last_diag_log_time > 10.0:
-            self.last_diag_log_time = current_time
+        # Only publish every 10 seconds
+        if hasattr(self, 'last_diag_log_time') and current_time - self.last_diag_log_time < 10.0:
+            return
             
-            # Simple performance metrics
-            total_fps = self.successful_conversions / elapsed if elapsed > 0 else 0
-            avg_processing = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
+        self.last_diag_log_time = current_time
+        
+        # Calculate metrics
+        elapsed = current_time - self.start_time
+        fps = self.successful_conversions / elapsed if elapsed > 0 else 0
+        avg_processing = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
+        
+        # Log single line status
+        self.get_logger().info(
+            f"Depth camera: {fps:.1f} FPS, CPU: {self.current_cpu_usage:.1f}%, "
+            f"Processing: {avg_processing:.1f}ms, Frames: 1:{self.process_every_n_frames}"
+        )
+        
+        # Less frequent cache stats (once a minute)
+        if not hasattr(self, 'last_cache_log') or current_time - self.last_cache_log > 60.0:
+            self.last_cache_log = current_time
             
-            # Simple log output
-            self.get_logger().info(
-                f"Depth camera: {total_fps:.1f} FPS, "
-                f"Processing: {avg_processing:.1f}ms, "
-                f"Health: {self.depth_camera_health:.2f}, "
-                f"Status: active"
-            )
-            
-            # Only log cache stats once
-            if hasattr(self, 'cache_hits') and hasattr(self, 'attempt_counter'):
-                for source in ['YOLO', 'HSV']:
-                    if self.attempt_counter.get(source, 0) > 0:
-                        efficiency = self.cache_hits[source] / self.attempt_counter[source]
-                        threshold = 0.1 if source == 'YOLO' else 0.4
-                        self.get_logger().info(
-                            f"{source} cache: {efficiency:.1%} efficient, "
-                            f"threshold={threshold:.6f}, validity=0.5s"
-                        )
+            for source in ['YOLO', 'HSV']:
+                if self.attempt_counter[source] > 0:
+                    efficiency = self.cache_hits[source] / self.attempt_counter[source]
+                    self.get_logger().info(f"{source} cache: {efficiency:.1%} efficient")
     
     def _handle_resource_alert(self, resource_type, value):
         """Handle resource alerts by adjusting processing parameters."""
@@ -1410,6 +1387,35 @@ class TennisBall3DPositionEstimator(Node):
                 self.cache_validity_duration = 2.0  # 2 seconds cache
             else:  # Significant movement
                 self.cache_validity_duration = 0.5  # 500ms cache for moving balls
+
+    def _adjust_performance(self):
+        """Single unified method to adjust all performance parameters."""
+        # Get current CPU usage
+        cpu_usage = self.current_cpu_usage if hasattr(self, 'current_cpu_usage') else 50.0
+        
+        # Previous frame skip setting - for logging changes
+        old_frame_skip = self.process_every_n_frames
+        
+        # Simple CPU-based adjustment with 3 tiers
+        if cpu_usage > 85:
+            # High CPU - aggressive optimization
+            self.process_every_n_frames = min(15, self.process_every_n_frames + 1)
+            self.radius = 1
+            self._min_valid_points = 1
+        elif cpu_usage > 65:
+            # Medium CPU - balanced mode
+            self.process_every_n_frames = min(10, max(5, self.process_every_n_frames))
+            self.radius = 2
+            self._min_valid_points = 2
+        elif cpu_usage < 50:
+            # Low CPU - improve quality
+            self.process_every_n_frames = max(3, self.process_every_n_frames - 1)
+            self.radius = 3
+            self._min_valid_points = 3
+        
+        # Only log significant changes
+        if old_frame_skip != self.process_every_n_frames:
+            self.get_logger().info(f"Adjusted processing: 1 in {self.process_every_n_frames} frames (CPU: {cpu_usage:.1f}%)")
 
 def main(args=None):
     """Main function to initialize and run the 3D position estimator node."""
