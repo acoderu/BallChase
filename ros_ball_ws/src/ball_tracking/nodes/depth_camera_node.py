@@ -172,10 +172,13 @@ class TennisBall3DPositionEstimator(Node):
         """Initialize the 3D position estimator node with all required components."""
         super().__init__('tennis_ball_3d_position_estimator')
         
-        # Initialize performance tracking BEFORE setting up resource monitor
+        # Initialize performance tracking and other parameters FIRST
         self._init_performance_tracking()
         
-        # Add Raspberry Pi resource monitoring
+        # Initialize camera parameters BEFORE resource monitor
+        self._init_camera_parameters()
+        
+        # THEN set up the resource monitor
         self.resource_monitor = ResourceMonitor(
             node=self,
             publish_interval=20.0,
@@ -183,6 +186,12 @@ class TennisBall3DPositionEstimator(Node):
         )
         self.resource_monitor.add_alert_callback(self._handle_resource_alert)
         self.resource_monitor.start()
+        
+        # Rest of initialization
+        self._setup_callback_group()
+        self._setup_tf2()
+        self._setup_subscriptions()
+        self._setup_publishers()
         
         # Set up callback group for efficient multi-threading - FIX: CALL THIS FUNCTION
         self._setup_callback_group()
@@ -269,8 +278,8 @@ class TennisBall3DPositionEstimator(Node):
         
         # Create QoS profiles for various subscription types
         self.qos_profile = QoSProfile(
-            reliability=QoSReliabilityPolicy.RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT,
-            history=QoSHistoryPolicy.RMW_QOS_POLICY_HISTORY_KEEP_LAST,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
             depth=5
         )
     
@@ -980,245 +989,36 @@ class TennisBall3DPositionEstimator(Node):
         self.detection_history[source]['last_time'] = TimeUtils.now_as_float()  # Use TimeUtils
     
     def publish_system_diagnostics(self):
-        """Reduced overhead diagnostics that adapt to CPU load."""
-        # Skip heavy diagnostics when CPU is high
-        if hasattr(self, 'current_cpu_usage') and self.current_cpu_usage > 95:
-            # Very lightweight diagnostics only
-            self.get_logger().info(
-                f"Depth camera: {self.successful_conversions / (TimeUtils.now_as_float() - self.start_time):.1f} FPS, "
-                f"CPU: {self.current_cpu_usage:.1f}%, Status: active"
-            )
-            return
-            
-        # Regular diagnostics code follows...
-        current_time = TimeUtils.now_as_float()  # Use TimeUtils
+        """Publish minimal diagnostics to avoid performance impact."""
+        current_time = TimeUtils.now_as_float()
         elapsed = current_time - self.start_time
         
-        # Performance metrics
-        total_fps = self.successful_conversions / elapsed if elapsed > 0 else 0
-        yolo_fps = self.yolo_count / elapsed if elapsed > 0 else 0
-        hsv_fps = self.hsv_count / elapsed if elapsed > 0 else 0
-        avg_processing = np.mean(self.processing_times) if self.processing_times else 0
-        
-        # Check camera info and depth availability
-        has_camera_info = self.camera_info is not None
-        has_depth_image = self.depth_image is not None
-        
-        # Calculate time since last detection from each source
-        detection_status = {}
-        
-        if hasattr(self, 'detection_history'):
-            for source, data in self.detection_history.items():
-                time_since_last = current_time - data['last_time'] if data['last_time'] > 0 else float('inf')
-                detection_status[source] = {
-                    'count': data['count'],
-                    'time_since_last_s': time_since_last,
-                    'latest_position': data['latest_position'],
-                    'active': time_since_last < 2.0  # Consider active if seen in last 2 seconds
-                }
-        
-        # Collect errors and warnings
-        error_messages = []
-        warning_messages = []
-        
-        # Check for missing camera info
-        if not has_camera_info:
-            warning_messages.append("Missing camera intrinsics - waiting for camera_info")
-        
-        # Check for missing depth images
-        if not has_depth_image:
-            warning_messages.append("No depth image received yet")
-        
-        # If we've run for a while but have no successful conversions, that's concerning
-        if elapsed > 10.0 and self.successful_conversions == 0:
-            error_messages.append("No successful 3D conversions despite running for >10s")
-        
-        # Check for processing time issues
-        if avg_processing > 50.0:  # If processing takes >50ms, it's slow
-            warning_messages.append(f"High processing time: {avg_processing:.1f}ms")
-        
-        # Add tracked errors and warnings
-        for error in self.errors:
-            if current_time - error["timestamp"] < 300:  # Only include recent errors (last 5 minutes)
-                error_messages.append(error["message"])
-        
-        # System resources
-        system_metrics = {}
-        try:
-            system_metrics = {
-                'cpu_percent': psutil.cpu_percent(interval=None),
-                'ram_percent': psutil.virtual_memory().percent
-            }
+        # Only log once every 10 seconds to reduce overhead
+        if not hasattr(self, 'last_diag_log_time') or current_time - self.last_diag_log_time > 10.0:
+            self.last_diag_log_time = current_time
             
-            # Add temperature info if on Raspberry Pi
-            temps = {}
-            if hasattr(psutil, 'sensors_temperatures'):
-                temps = psutil.sensors_temperatures()
-                if temps and 'cpu_thermal' in temps:
-                    system_metrics['temperature'] = temps['cpu_thermal'][0].current
-        except Exception as e:
-            self.get_logger().debug(f"Could not get system metrics: {str(e)}")
-            pass
-        
-        # Health recovery over time (errors become less relevant)
-        time_since_last_error = current_time - self.last_error_time
-        if time_since_last_error > 30.0:  # After 30 seconds with no errors
-            self.depth_camera_health = min(1.0, self.depth_camera_health + 0.05)  # Gradually recover
-        
-        # Calculate overall health (weighted average)
-        overall_health = (
-            self.depth_camera_health * 0.4 + 
-            self.processing_health * 0.3 + 
-            self.detection_health * 0.3
-        )
-        
-        # Determine status based on errors/warnings
-        status = "active"
-        if error_messages:
-            status = "error"
-        elif warning_messages:
-            status = "warning"
-        
-        # Add depth sampling reliability metrics to diagnostics
-        depth_reliability_metrics = {}
-        if hasattr(self, 'depth_reliability'):
-            current_time = TimeUtils.now_as_float()
-            for source, data in self.depth_reliability.items():
-                # Only include recent data (last 5 seconds)
-                if current_time - data['timestamp'] < 5.0:
-                    depth_reliability_metrics[source] = {
-                        'reliability': data['value'],
-                        'valid_points': data['valid_points'],
-                        'age_seconds': current_time - data['timestamp']
-                    }
-        
-        # Create diagnostics data structure formatted for the diagnostics node
-        diag_data = {
-            "timestamp": current_time,
-            "node": "depth_camera",
-            "uptime_seconds": elapsed,
-            "status": status,
-            "health": {
-                "camera_health": self.depth_camera_health,
-                "processing_health": self.processing_health,
-                "detection_health": self.detection_health,
-                "overall": overall_health
-            },
-            "metrics": {
-                "successful_conversions": self.successful_conversions,
-                "conversion_rate": total_fps,
-                "yolo_conversions": self.yolo_count,
-                "yolo_rate": yolo_fps,
-                "hsv_conversions": self.hsv_count,
-                "hsv_rate": hsv_fps,
-                "avg_processing_time_ms": avg_processing
-            },
-            "camera_status": {
-                "has_camera_info": has_camera_info,
-                "has_depth_image": has_depth_image,
-                "camera_resolution": f"{self.depth_width}x{self.depth_height}" if has_camera_info else "unknown"
-            },
-            "detections": detection_status,
-            "resources": system_metrics,
-            "errors": error_messages,
-            "warnings": warning_messages,
-            "config": {
-                "detection_resolution": {
-                    "width": DEPTH_CONFIG["detection_resolution"]["width"],
-                    "height": DEPTH_CONFIG["detection_resolution"]["height"]
-                },
-                "depth_scale": DEPTH_CONFIG["scale"],
-                "sampling_radius": self.radius
-            },
-            "depth_sampling": {
-                "reliability": depth_reliability_metrics,
-                "min_valid_points": DEPTH_CONFIG.get("min_valid_points", 5),
-                "adaptive_radius": DEPTH_CONFIG.get("adaptive_radius", True),
-                "current_radius": self.radius
-            }
-        }
-        
-        # Add transform diagnostics
-        transform_available = False
-        try:
-            transform_available = self.tf_buffer.can_transform(
-                self.reference_frame,
-                "camera_frame",
-                TimeUtils.now_as_ros_time(),
-                rclpy.duration.Duration(seconds=0.1)
-            )
-        except Exception as e:
-            pass
-        
-        # Add to diagnostics data
-        diag_data["transform_status"] = {
-            "available": transform_available,
-            "reference_frame": self.reference_frame,
-            "camera_frame": "camera_frame"
-        }
-        
-        # Include frame skipping info
-        diag_data["performance_adaptations"] = {
-            "process_every_n_frames": getattr(self, "process_every_n_frames", 1),
-            "current_radius": self.radius
-        }
-        
-        # Add cache efficiency metrics
-        cache_metrics = {}
-        if hasattr(self, 'cache_hits'):
-            total_hits = sum(self.cache_hits.values())
-            total_attempts = sum(self.attempt_counter.values()) if hasattr(self, 'attempt_counter') else 1
-            cache_hit_rate = total_hits / total_attempts if total_attempts > 0 else 0
+            # Simple performance metrics
+            total_fps = self.successful_conversions / elapsed if elapsed > 0 else 0
+            avg_processing = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
             
-            cache_metrics = {
-                'hit_rate': cache_hit_rate,
-                'hits_by_source': self.cache_hits,
-                'threshold': self.movement_threshold,
-                'validity_duration_ms': self.cache_validity_duration * 1000
-            }
-        
-        # Add to diagnostics data
-        diag_data["cache_efficiency"] = cache_metrics
-        
-        # Add these lines to your publish_system_diagnostics method right after you check your cache efficiency
-        if hasattr(self, 'cache_hits') and sum(self.cache_hits.values()) > 0:
-            # Calculate efficiency for each source
-            for source in ['YOLO', 'HSV']:
-                if self.attempt_counter.get(source, 0) > 0:
-                    efficiency = self.cache_hits[source] / self.attempt_counter[source]
-                    self.get_logger().info(
-                        f"{source} cache: {efficiency:.1%} efficient, "
-                        f"threshold={self.movement_threshold:.6f}, "
-                        f"validity={self.cache_validity_duration:.1f}s"
-                    )
-        
-        # Publish as JSON
-        msg = String()
-        msg.data = json.dumps(diag_data)
-        self.system_diagnostics_publisher.publish(msg)
-        
-        # Also log summary to console
-        self.get_logger().info(
-            f"Depth camera: {total_fps:.1f} FPS, "
-            f"Processing: {avg_processing:.1f}ms, "
-            f"Health: {overall_health:.2f}, "
-            f"Status: {status}"
-        )
-
-        # Add failure reason statistics to diagnostics
-        if hasattr(self, 'failure_reasons') and sum(self.failure_reasons.values()) > 0:
-            total = sum(self.failure_reasons.values())
-            self.get_logger().info("3D conversion statistics:")
-            for reason, count in self.failure_reasons.items():
-                percentage = (count / total) * 100 if total > 0 else 0
-                self.get_logger().info(f"  - {reason}: {count} ({percentage:.1f}%)")
-        
-        # Also log cache statistics
-        if hasattr(self, 'cache_hits') and sum(self.cache_hits.values()) > 0:
+            # Simple log output
             self.get_logger().info(
-                f"Cache efficiency: {cache_hit_rate:.1%} hits, "
-                f"YOLO: {self.cache_hits['YOLO']}, HSV: {self.cache_hits['HSV']}"
+                f"Depth camera: {total_fps:.1f} FPS, "
+                f"Processing: {avg_processing:.1f}ms, "
+                f"Health: {self.depth_camera_health:.2f}, "
+                f"Status: active"
             )
+            
+            # Only log cache stats once
+            if hasattr(self, 'cache_hits') and hasattr(self, 'attempt_counter'):
+                for source in ['YOLO', 'HSV']:
+                    if self.attempt_counter.get(source, 0) > 0:
+                        efficiency = self.cache_hits[source] / self.attempt_counter[source]
+                        threshold = 0.1 if source == 'YOLO' else 0.4
+                        self.get_logger().info(
+                            f"{source} cache: {efficiency:.1%} efficient, "
+                            f"threshold={threshold:.6f}, validity=0.5s"
+                        )
     
     def _handle_resource_alert(self, resource_type, value):
         """Handle resource alerts by adjusting processing parameters."""
@@ -1350,49 +1150,54 @@ class TennisBall3DPositionEstimator(Node):
                 self.resource_monitor.set_publish_interval(10.0)
 
     def _should_process_detection(self, msg, source):
-        """Determine if a detection needs processing based on previous position and cache."""
+        """Simple check if we should process this detection or use cache."""
         current_time = TimeUtils.now_as_float()
+        curr_x, curr_y = msg.point.x, msg.point.y  # Fixed
         
-        # Get current x,y coordinates
-        curr_x, curr_y = msg.point.x, msg.point.y
+        # Count attempt for diagnostics
+        if not hasattr(self, 'attempt_counter'):
+            self.attempt_counter = {'YOLO': 0, 'HSV': 0}
+        self.attempt_counter[source] += 1
         
-        # Check if we have a cached position for this source
+        # Simple cache check
         if source in self.position_cache and self.position_cache[source]['position'] is not None:
             prev_x, prev_y = self.position_cache[source]['position']
             cache_time = self.position_cache[source]['timestamp']
             
-            # Calculate squared distance (avoid sqrt for speed)
+            # Calculate distance and time since cache
             dist_squared = (curr_x - prev_x)**2 + (curr_y - prev_y)**2
             time_since_cache = current_time - cache_time
             
-            # Debug information occasionally
-            if not hasattr(self, 'last_cache_debug_time') or current_time - self.last_cache_debug_time > 30.0:
-                self.get_logger().info(f"Cache decision: dist={dist_squared:.6f}, threshold={self.movement_threshold}, time={time_since_cache:.1f}s")
+            # Different threshold for HSV vs YOLO
+            threshold = 0.1 if source == 'YOLO' else 0.4  # Higher for HSV's jitter
+            
+            # Log occasionally for debugging
+            if not hasattr(self, 'last_cache_debug_time') or current_time - self.last_cache_debug_time > 60.0:
+                self.get_logger().info(f"Cache decision: dist={dist_squared:.6f}, threshold={threshold:.6f}, time={time_since_cache:.1f}s")
                 self.last_cache_debug_time = current_time
-                
-            # If ball hasn't moved significantly and cache is fresh
-            if dist_squared < self.movement_threshold and time_since_cache < self.cache_validity_duration:
-                # Ball is stationary - skip full processing and reuse cached 3D position
+            
+            # Use cache if position hasn't changed much and cache is fresh
+            if dist_squared < threshold and time_since_cache < 0.5:  # 500ms cache validity
                 if self.position_cache[source]['3d_position'] is not None:
-                    # Just republish the cached 3D position with updated timestamp
                     success = self._republish_cached_position(source, 
                         self.yolo_3d_publisher if source == "YOLO" else self.hsv_3d_publisher)
                     
-                    # Always update timestamp on successful cache use
                     if success:
-                        self.position_cache[source]['timestamp'] = current_time  
-                        return False  # Skip full processing
+                        # Only count cache hit here, not in republish function
+                        if not hasattr(self, 'cache_hits'):
+                            self.cache_hits = {'YOLO': 0, 'HSV': 0}
+                        self.cache_hits[source] += 1
+                        
+                        # Update timestamp
+                        self.position_cache[source]['timestamp'] = current_time
+                        return False  # Skip processing
         
-        # If we get here, we need to process this detection
-        # Update position cache with current coordinates
+        # Update cache with new position
         self.position_cache[source]['position'] = (curr_x, curr_y)
         self.position_cache[source]['timestamp'] = current_time
-        
-        # Reset 3D position cache since we're processing a new position
         self.position_cache[source]['3d_position'] = None
-        self.position_cache[source]['depth'] = None
         
-        return True  # Process this detection (new or moved ball)
+        return True  # Process this detection
 
     def _republish_cached_position(self, source, publisher):
         """Republish the cached 3D position with an updated timestamp."""
