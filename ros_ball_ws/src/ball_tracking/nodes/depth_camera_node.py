@@ -310,83 +310,32 @@ class TennisBall3DPositionEstimator(Node):
             depth=5
         )
     
-    def _adjust_frame_skipping(self):
-        """More aggressive frame skipping when needed."""
-        cpu_usage = self.current_cpu_usage
-        
-        # Ultra-aggressive CPU management
-        if cpu_usage > 95:
-            self.process_every_n_frames = min(20, self.process_every_n_frames + 3)
-            # Log this change but only once in a while
-            if not hasattr(self, 'last_high_cpu_time') or TimeUtils.now_as_float() - self.last_high_cpu_time > 30.0:
-                self.get_logger().warn(f"Very high CPU ({cpu_usage:.1f}%), skipping {self.process_every_n_frames} frames")
-                self.last_high_cpu_time = TimeUtils.now_as_float()
-        elif cpu_usage > 85:
-            self.process_every_n_frames = min(15, self.process_every_n_frames + 1)
-        elif cpu_usage > 75:
-            self.process_every_n_frames = min(10, max(5, self.process_every_n_frames))
-        elif cpu_usage < 55 and self.process_every_n_frames > 5:
-            self.process_every_n_frames = max(5, self.process_every_n_frames - 1)
-        elif cpu_usage < 35 and self.process_every_n_frames > 3:
-            self.process_every_n_frames = max(3, self.process_every_n_frames - 1)
-    
-    def _optimize_memory_use(self):
-        """Periodically optimize memory usage."""
-        # Clear unnecessary caches when memory pressure is high
-        if hasattr(self, 'resource_monitor') and hasattr(self.resource_monitor, 'last_memory_percent'):
-            if self.resource_monitor.last_memory_percent > 85:
-                # Clear transform cache
-                if hasattr(self, 'recent_transforms'):
-                    self.recent_transforms.clear()
-                    
-                # Clear error history caches if they're large
-                if hasattr(self, 'error_counts') and len(self.error_counts) > 20:
-                    self.error_counts.clear()
-                    self.error_last_logged.clear()
-                    
-                # Force garbage collection
-                import gc
-                gc.collect()
-                
-                self.get_logger().info("Memory optimization performed due to high usage")
-
     def _init_camera_parameters(self):
         """Initialize camera and detection parameters."""
         # Camera parameters (will be updated from camera_info)
         self.camera_info = None
-        self.depth_image = None
+        self.depth_array = None
         self.depth_header = None
         
-        # Camera intrinsics (from camera calibration)
-        self.fx = 0.0  # Focal length x
-        self.fy = 0.0  # Focal length y
-        self.cx = 0.0  # Optical center x
-        self.cy = 0.0  # Optical center y
+        # Camera intrinsics
+        self.fx = 0.0
+        self.fy = 0.0
+        self.cx = 0.0
+        self.cy = 0.0
         
-        # Latest detections
-        self.latest_yolo_detection = None
-        self.latest_hsv_detection = None
+        # Depth image resolution (default values)
+        self.depth_width = 640
+        self.depth_height = 480
         
-        # Pre-create bridge for faster conversion
-        self.cv_bridge = CvBridge()
-        
-        # Depth image resolution (will be updated from camera_info)
-        self.depth_width = 640   # Default/initial value
-        self.depth_height = 480  # Default/initial value
-        
-        # Coordinate scaling factors (updated when camera_info is received)
-        self.x_scale = 1.0  # Will be properly calculated when camera_info is received
-        self.y_scale = 1.0  # Will be properly calculated when camera_info is received
+        # Coordinate scaling factors
+        self.x_scale = 1.0
+        self.y_scale = 1.0
         
         # Configuration for depth sampling
         self.radius = DEPTH_CONFIG["radius"]
         
-        # Pre-compute radius search offsets for faster lookup
-        self.offsets = []
-        offsets = [(-5, 0), (5, 0), (0, -5), (0, 5), (-3, -3), (-3, 3), (3, -3), (3, 3)]
-        for y in range(-self.radius, self.radius+1):
-            for x in range(-self.radius, self.radius+1):
-                self.offsets.append((x, y))
+        # Bridge for faster conversion
+        self.cv_bridge = CvBridge()
     
     def _setup_tf2(self):
         """Set up tf2 components for coordinate transformations."""
@@ -524,35 +473,7 @@ class TennisBall3DPositionEstimator(Node):
         
         # Add timer for publishing diagnostics
         self.diagnostics_timer = self.create_timer(5.0, self.publish_system_diagnostics)
-    
-    def _init_performance_tracking(self):
-        """Initialize performance tracking variables."""
-        self.start_time = TimeUtils.now_as_float()
-        self.yolo_count = 0
-        self.hsv_count = 0
-        self.successful_conversions = 0
-        self.last_fps_log_time = TimeUtils.now_as_float()
-        
-        # Use deque with maxlen instead of lists for bounded buffer sizes
-        max_history = DIAG_CONFIG.get('history_length', 100)
-        self.processing_times = deque(maxlen=max_history)
-        
-        # Define error history size FIRST
-        self.error_history_size = DIAG_CONFIG.get('error_history_size', 10)
-        
-        # THEN create the deques with the size
-        self.errors = deque(maxlen=self.error_history_size)
-        self.warnings = deque(maxlen=self.error_history_size)
-        self.last_error_time = 0
-        
-        # Error tracking by type to detect repeated errors
-        self.error_counts = {}
-        self.error_last_logged = {}
-        
-        # Add health metrics
-        self.depth_camera_health = 1.0  # 0.0 to 1.0 scale
-        self.processing_health = 1.0
-        self.detection_health = 1.0
+        self.diagnostics_timer = self.create_timer(10.0, self.publish_system_diagnostics)
     
     def log_error(self, error_message, is_warning=False):
         """Simplified error logging with rate limiting."""
@@ -709,17 +630,16 @@ class TennisBall3DPositionEstimator(Node):
             bool: True if 3D position was successfully calculated and published
         """
         # Initialize failure counters if not existing
-        if not hasattr(self, 'failure_reasons'):
-            self.failure_reasons = {
-                'missing_data': 0,
-                'transform_not_verified': 0,
-                'coordinates_out_of_bounds': 0,
-                'no_reliable_depth': 0,
-                'transform_failed': 0,
-                'exceptions': 0,
-                'hsv_priority_skip': 0,
-                'successful': 0
-            }
+        self.failure_reasons = {
+            'missing_data': 0,
+            'transform_not_verified': 0,
+            'coordinates_out_of_bounds': 0,
+            'no_reliable_depth': 0,
+            'transform_failed': 0,
+            'exceptions': 0,
+            'hsv_priority_skip': 0,
+            'successful': 0
+        }
             
         # Add counter for tracking attempts
         if not hasattr(self, 'attempt_counter'):
@@ -968,14 +888,21 @@ class TennisBall3DPositionEstimator(Node):
         """Simplified diagnostics output."""
         current_time = TimeUtils.now_as_float()
         
-        # Only log once per LOG_INTERVAL seconds
-        if not hasattr(self, 'last_minimal_log_time') or current_time - self.last_minimal_log_time > LOG_INTERVAL:
-            self.last_minimal_log_time = current_time
-            total_fps = self.successful_conversions / (current_time - self.start_time) if current_time > self.start_time else 0
-            self.get_logger().info(
-                f"Depth camera: {total_fps:.1f} FPS, CPU: {self.current_cpu_usage:.1f}%, "
-                f"Frames: 1:{self.process_every_n_frames}"
-            )
+        # Only publish every 10 seconds
+        if current_time - self.last_diag_log_time < LOG_INTERVAL:
+            return
+            
+        self.last_diag_log_time = current_time
+        
+        # Calculate core metrics
+        elapsed = current_time - self.start_time
+        fps = self.successful_conversions / elapsed if elapsed > 0 else 0
+        
+        # Single line status with essential information
+        self.get_logger().info(
+            f"Depth camera: {fps:.1f} FPS, CPU: {self.current_cpu_usage:.1f}%, "
+            f"Frames: 1:{self.process_every_n_frames}"
+        )
     
     def _handle_resource_alert(self, resource_type, value):
         """Handle resource alerts by adjusting processing parameters."""
@@ -1035,76 +962,41 @@ class TennisBall3DPositionEstimator(Node):
         super().destroy_node()
 
     def _get_reliable_depth(self, depth_array, pixel_x, pixel_y):
-        """
-        Optimized depth sampling with better reliability and caching.
-        """
-        # Try center pixel first (fastest approach)
+        """Get reliable depth at the specified pixel coordinates."""
         try:
+            # Try center pixel first
             center_value = depth_array[pixel_y, pixel_x]
             if center_value > 0:
                 depth_m = float(center_value * self._scale_factor)
                 if self._min_valid_depth < depth_m < self._max_valid_depth:
                     return depth_m, 1.0, 1
-        except:
-            pass
-        
-        # If center fails, sample at fixed distances in a cross pattern
-        offsets = [(0, -3), (0, 3), (-3, 0), (3, 0)]
-        valid_depths = []
-        h, w = depth_array.shape
-        
-        for offset_y, offset_x in offsets:
-            y = pixel_y + offset_y
-            x = pixel_x + offset_x
             
-            if 0 <= y < h and 0 <= x < w:
+            # If center fails, try cross pattern
+            valid_depths = []
+            offsets = [(0, -3), (0, 3), (-3, 0), (3, 0), (-2, -2), (2, 2), (-2, 2), (2, -2)]
+            
+            for offset_y, offset_x in offsets:
+                y = pixel_y + offset_y
+                x = pixel_x + offset_x
+                
                 try:
                     val = depth_array[y, x]
                     if val > 0:
                         depth_m = float(val * self._scale_factor)
                         if self._min_valid_depth < depth_m < self._max_valid_depth:
                             valid_depths.append(depth_m)
-                            # Early exit if we have at least 2 valid points
-                            if len(valid_depths) >= 2:
-                                return sum(valid_depths) / len(valid_depths), 0.9, len(valid_depths)
                 except:
-                    continue
-        
-        # If we found any valid points
-        if valid_depths:
-            return valid_depths[0], 0.7, len(valid_depths)
-        
-        # Last resort - use a fixed reasonable value with low confidence
-        return 1.6, 0.1, 0  # Use 1.6m based on logs showing the ball at that distance
-
-    def _check_idle_state(self):
-        """Check if the node has been idle for a while and adjust resource usage."""
-        current_time = TimeUtils.now_as_float()
-        time_since_last_detection = current_time - self.last_detection_time
-        
-        # If no detections for 15 seconds, enter idle mode
-        if time_since_last_detection > 15.0 and not self.is_idle:
-            self.is_idle = True
-            self.get_logger().info("No recent detections - entering idle mode to conserve resources")
+                    pass
             
-            # Increase frame skipping in idle mode
-            self.process_every_n_frames = 10  # Process 1 in 10 frames
+            # If we found valid depths, use their median
+            if valid_depths:
+                return sum(valid_depths) / len(valid_depths), 0.8, len(valid_depths)
             
-            # Lower the resource monitor check frequency
-            if hasattr(self, 'resource_monitor') and self.resource_monitor:
-                self.resource_monitor.set_publish_interval(15.0)  # Check less frequently
-        
-        # If we've had a recent detection but were in idle mode, exit idle mode
-        elif time_since_last_detection < 5.0 and self.is_idle:
-            self.is_idle = False
-            self.get_logger().info("Detections resumed - exiting idle mode")
+            # Fallback value
+            return 1.6, 0.1, 0
             
-            # Return to previous frame processing rate
-            self.process_every_n_frames = 5
-            
-            # Restore resource monitor frequency
-            if hasattr(self, 'resource_monitor') and self.resource_monitor:
-                self.resource_monitor.set_publish_interval(10.0)
+        except Exception as e:
+            return 1.6, 0.1, 0
 
     def _should_process_detection(self, msg, source):
         """Simple check if we should process this detection or use cache."""
@@ -1194,179 +1086,6 @@ class TennisBall3DPositionEstimator(Node):
             self.get_logger().info(f"Cache hit {self.cache_hits[source]} for {source}")
         
         return True
-
-    def _process_detection_queue(self):
-        """Process all queued detections efficiently."""
-        start_time = TimeUtils.now_as_float()
-        
-        # Skip processing if we're missing data
-        if self.camera_info is None or not hasattr(self, 'depth_array') or self.depth_array is None:
-            return
-            
-        # Process up to 5 detections at once to avoid getting behind
-        processed_count = 0
-        while not self.detection_queue.empty() and processed_count < 5:
-            try:
-                msg, source, timestamp = self.detection_queue.get_nowait()
-                
-                # Quick check if we should process this detection
-                if self._should_process_detection(msg, source):
-                    self._process_single_detection(msg, source, timestamp)
-                    
-                # Always mark task as done
-                self.detection_queue.task_done()
-                processed_count += 1
-                
-            except Empty:
-                break
-                
-        # Track processing time
-        if processed_count > 0:
-            processing_time = (TimeUtils.now_as_float() - start_time) * 1000
-            self.processing_times.append(processing_time / processed_count)
-            
-            # Keep only recent times
-            if len(self.processing_times) > 30:
-                self.processing_times = self.processing_times[-30:]
-
-    def _process_single_detection(self, msg, source, timestamp):
-        """Process a single detection efficiently with minimal logging."""
-        try:
-            # Scale coordinates to depth image space
-            pixel_x = int(round(msg.point.x * self.x_scale))
-            pixel_y = int(round(msg.point.y * self.y_scale))
-            
-            # Get depth and reliability
-            depth_meters, reliability, points = self._get_reliable_depth(self.depth_array, pixel_x, pixel_y)
-            if depth_meters <= 0.0:
-                self.failure_reasons['no_reliable_depth'] += 1
-                return
-                
-            # Convert 2D to 3D using camera model
-            x = (pixel_x - self.cx) * depth_meters / self.fx
-            y = (pixel_y - self.cy) * depth_meters / self.fy
-            z = depth_meters
-            
-            # Create position message
-            camera_position = PointStamped()
-            camera_position.header.frame_id = "camera_frame"
-            camera_position.header.stamp = timestamp or TimeUtils.now_as_ros_time()
-            camera_position.point.x = x
-            camera_position.point.y = y
-            camera_position.point.z = z
-            
-            # Transform and publish
-            transformed = self._transform_to_reference_frame(camera_position)
-            if transformed:
-                # Source-specific publishing
-                if source == "YOLO":
-                    self.yolo_3d_publisher.publish(transformed)
-                else:  # HSV
-                    self.hsv_3d_publisher.publish(transformed)
-                    
-                # Also publish to combined topic
-                self.position_publisher.publish(transformed)
-                
-                # Update stats
-                self.successful_conversions += 1
-                self.failure_reasons['successful'] += 1
-                self.last_detection_time = TimeUtils.now_as_float()
-                
-                # Update detection history (only store the latest few)
-                if hasattr(self, 'detection_history'):
-                    self.detection_history[source] = {
-                        'x': transformed.point.x,
-                        'y': transformed.point.y,
-                        'z': transformed.point.z,
-                        'last_time': self.last_detection_time
-                    }
-                    
-                # Log performance less frequently
-                if self.successful_conversions % 10 == 0:
-                    self._log_performance(transformed.point.x, 
-                                          transformed.point.y, 
-                                          transformed.point.z, source)
-            else:
-                self.failure_reasons['transform_failed'] += 1
-                
-        except Exception as e:
-            self.failure_reasons['exceptions'] += 1
-            # Only log serious errors that aren't common
-            if "out of bounds" not in str(e).lower():
-                self.get_logger().error(f"Error: {str(e)}")
-
-    def _auto_adjust_performance(self):
-        """Automatically adjust performance settings based on system load."""
-        if not hasattr(self, 'last_performance_check'):
-            self.last_performance_check = TimeUtils.now_as_float()
-            self.performance_check_interval = 5.0  # Check every 5 seconds
-            return
-        
-        now = TimeUtils.now_as_float()
-        if now - self.last_performance_check < self.performance_check_interval:
-            return
-        
-        self.last_performance_check = now
-        
-        # Get current CPU usage
-        cpu_usage = self.current_cpu_usage if hasattr(self, 'current_cpu_usage') else 50.0
-        
-        # Ultra light mode
-        if cpu_usage > 90:
-            self.process_every_n_frames = min(15, self.process_every_n_frames + 1)
-            self.radius = 1
-            self._min_valid_points = 1
-            self.enable_downsampling = True
-            self.enable_transform_caching = True
-            self.get_logger().info(f"Switched to ultra light mode: skipping {self.process_every_n_frames} frames")
-        
-        # Performance mode
-        elif cpu_usage > 80:
-            self.process_every_n_frames = min(10, max(5, self.process_every_n_frames))
-            self.radius = 2
-            self._min_valid_points = 2
-        
-        # Balanced mode
-        elif cpu_usage > 60:
-            self.process_every_n_frames = 5
-            self.radius = 3
-            self._min_valid_points = 3
-        
-        # Quality mode
-        else:
-            self.process_every_n_frames
-
-        # Dynamically adjust caching parameters based on ball movement patterns
-        if hasattr(self, 'last_movement_samples'):
-            avg_movement = sum(self.last_movement_samples) / len(self.last_movement_samples)
-            
-            # If ball is mostly stationary, use longer cache validity
-            if avg_movement < 0.002:  # Very little movement
-                self.cache_validity_duration = 1.0  # 1 second cache 
-            elif avg_movement < 0.01:  # Small movements
-                self.cache_validity_duration = 0.5  # 500ms cache
-            else:  # Significant movement
-                self.cache_validity_duration = 0.2  # 200ms cache
-
-        # Increase cache duration for better efficiency with stationary objects
-        if not hasattr(self, 'last_movement_samples'):
-            self.last_movement_samples = deque(maxlen=10)
-            self.last_movement_samples.extend([0.0] * 10)  # Initialize with no movement
-        
-        # Always increase cache validity duration for stationary balls
-        self.cache_validity_duration = 5.0  # Increase to 5 seconds for better cache use
-        
-        # Only adjust other parameters based on movement when we actually have samples
-        if sum(self.last_movement_samples) > 0:
-            avg_movement = sum(self.last_movement_samples) / len(self.last_movement_samples)
-            
-            # If ball is mostly stationary, use even longer cache validity
-            if avg_movement < 0.002:  # Very little movement
-                self.cache_validity_duration = 3.0  # Increase to 3 seconds
-            elif avg_movement < 0.01:  # Small movements
-                self.cache_validity_duration = 2.0  # 2 seconds cache
-            else:  # Significant movement
-                self.cache_validity_duration = 0.5  # 500ms cache for moving balls
 
     def _adjust_performance(self):
         """Single unified performance adjustment method."""
