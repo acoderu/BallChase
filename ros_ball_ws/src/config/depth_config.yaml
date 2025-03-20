@@ -26,4 +26,4 @@ topics:
 diagnostics:
   log_interval: 5.0      # How often to log performance stats (seconds)
   debug_level: 1         # 0=minimal, 1=normal, 2=verbose
-  threads: 2             # Number of threads for parallel processing
+  threads: 1             # Number of threads for parallel processing

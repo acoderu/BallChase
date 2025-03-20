@@ -127,7 +127,7 @@ TOPICS = config.get('topics', {
 DIAG_CONFIG = config.get('diagnostics', {
     "log_interval": 10.0,      # Increase from 5.0 to 10.0 seconds
     "debug_level": 0,          # Set to minimal (0)
-    "threads": 2,             # Number of threads for parallel processing
+    "threads": 1,             # Number of threads for parallel processing
     "error_history_size": 10  # Keep track of last 10 errors
 })
 
