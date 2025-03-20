@@ -177,7 +177,7 @@ class TennisBall3DPositionEstimator(Node):
         
         # Setup in logical order - ONCE only
         self._setup_callback_group()
-        self._init_camera_parameters()
+        self._init_camera_parameters()  # Keep this one
         self._setup_tf2()
         self._setup_subscriptions()
         self._setup_publishers()
@@ -545,10 +545,6 @@ class TennisBall3DPositionEstimator(Node):
     
     def detection_callback(self, msg, source):
         """Generic callback for buffering detections."""
-        if not hasattr(self, 'detection_buffer'):
-            self.detection_buffer = {'YOLO': [], 'HSV': []}
-            self.last_batch_process = TimeUtils.now_as_float()
-            
         # Add to buffer
         self.detection_buffer[source].append((msg, TimeUtils.now_as_float()))
         
@@ -558,18 +554,8 @@ class TennisBall3DPositionEstimator(Node):
             self._process_detection_batch()
 
     def yolo_callback(self, msg):
-        """Buffer YOLO detections for batch processing."""
-        if not hasattr(self, 'detection_buffer'):
-            self.detection_buffer = {'YOLO': [], 'HSV': []}
-            self.last_batch_process = TimeUtils.now_as_float()
-            
-        # Add to buffer
-        self.detection_buffer['YOLO'].append((msg, TimeUtils.now_as_float()))
-        
-        # Process if enough time has passed or buffer is large
-        now = TimeUtils.now_as_float()
-        if now - self.last_batch_process > 0.2 or len(self.detection_buffer['YOLO']) > 5:
-            self._process_detection_batch()
+        """Buffer YOLO detections."""
+        self.detection_callback(msg, 'YOLO')
     
     def hsv_callback(self, msg):
         """Buffer HSV detections."""
@@ -577,7 +563,7 @@ class TennisBall3DPositionEstimator(Node):
         
     def _process_detection_batch(self):
         """Process all buffered detections at once."""
-        if not hasattr(self, 'detection_buffer') or not self.detection_buffer:
+        if not self.detection_buffer:
             return
             
         # Skip if missing data
@@ -792,11 +778,13 @@ class TennisBall3DPositionEstimator(Node):
     def _transform_to_reference_frame(self, point_stamped):
         """Transform with caching for efficiency."""
         now = TimeUtils.now_as_float()
+        frame_key = f"{self.reference_frame}_{point_stamped.header.frame_id}"
         
-        # Use cached transform if valid and recent
-        if hasattr(self, '_last_transform') and hasattr(self, '_last_transform_time'):
-            if now - self._last_transform_time < 0.5:  # Valid for 500ms
-                transformed = tf2_geometry_msgs.do_transform_point(point_stamped, self._last_transform)
+        # Check if we have this transform in cache and it's still valid
+        if frame_key in self.transform_cache:
+            cached_time, cached_transform = self.transform_cache[frame_key]
+            if now - cached_time < self.transform_cache_lifetime:
+                transformed = tf2_geometry_msgs.do_transform_point(point_stamped, cached_transform)
                 return transformed
         
         # Otherwise get a new transform
@@ -807,8 +795,7 @@ class TennisBall3DPositionEstimator(Node):
                 rclpy.time.Time())
             
             # Cache it
-            self._last_transform = transform
-            self._last_transform_time = now
+            self.transform_cache[frame_key] = (now, transform)
             
             transformed = tf2_geometry_msgs.do_transform_point(point_stamped, transform)
             return transformed
@@ -1005,21 +992,14 @@ class TennisBall3DPositionEstimator(Node):
         msg = PointStamped()
         msg.header.frame_id = cached_pos.header.frame_id
         msg.header.stamp = TimeUtils.now_as_ros_time()  # Use current time
-        msg.point.x = cached_pos.point.x
-        msg.point.y = cached_pos.point.y
-        msg.point.z = cached_pos.point.z
+        msg.point = cached_pos.point  # Copy the entire point structure
         
-        # Publish to specific publisher
+        # Publish to specific publisher and to combined topic
         publisher.publish(msg)
-        
-        # Also publish to combined topic for compatibility
         self.position_publisher.publish(msg)
         
-        # Count as a successful conversion
+        # Count as a successful conversion and cache hit
         self.successful_conversions += 1
-        
-        # Mark as a cache hit for diagnostics
-        self.cache_hits[source] += 1
         
         # Update the timestamp to extend cache validity
         self.position_cache[source]['timestamp'] = TimeUtils.now_as_float()
@@ -1032,7 +1012,7 @@ class TennisBall3DPositionEstimator(Node):
 
     def _adjust_performance(self):
         """Single unified performance adjustment method."""
-        cpu_usage = getattr(self, 'current_cpu_usage', 50.0)
+        cpu_usage = self.current_cpu_usage
         old_frame_skip = self.process_every_n_frames
         
         # CPU-based adjustments
@@ -1043,7 +1023,7 @@ class TennisBall3DPositionEstimator(Node):
             
             # Log critical situation (rate-limited)
             current_time = TimeUtils.now_as_float()
-            if not hasattr(self, 'last_critical_alert') or current_time - self.last_critical_alert > 30.0:
+            if current_time - self.last_critical_alert > 30.0:
                 self.get_logger().warning(f"Critical CPU load ({cpu_usage:.1f}%), reducing processing load")
                 self.last_critical_alert = current_time
         elif cpu_usage > 85:  # High CPU load
