@@ -61,6 +61,24 @@ Data Pipeline:
 3. Next in pipeline:
    - State management node uses the fused position and tracking reliability 
    - PID controller uses position and velocity for smooth following
+
+LIDAR Detection Reliability:
+---------------------------
+This system accounts for a fundamental limitation of 2D LIDAR when detecting ground objects:
+
+1. Objects close to the robot (<1.0m) are often detected unreliably or missed entirely
+   due to the scanning plane geometry. At close distances, the LIDAR beam may pass
+   over small objects like tennis balls.
+
+2. Medium distances (1.2-3.0m) provide optimal detection conditions for the LIDAR.
+
+3. We implement a distance-based filtering approach:
+   - Detections closer than 1.0m are marked as unreliable
+   - Unreliable detections can be optionally filtered out or published with lower confidence
+   - The fusion system adjusts trust levels based on detection distance
+
+This approach ensures the system relies more on the depth camera for close-range detection
+while leveraging LIDAR data when it's most reliable.
 """
 
 import sys
@@ -83,6 +101,7 @@ from collections import deque
 import time
 import json
 import os  # Add os import
+from scipy.linalg import block_diag  # Add block_diag import for covariance init
 
 from utilities.resource_monitor import ResourceMonitor  # Add resource monitoring import
 from utilities.time_utils import TimeUtils  # Add TimeUtils import
@@ -194,6 +213,18 @@ class KalmanFilterFusion(Node):
         # Log topic connections for debugging
         self._log_topic_connections()
 
+        # Flag to enable ground tracking mode (constraints Z to ground level)
+        self.ground_tracking_mode = True
+        self.ball_ground_height = 0.0381  # 1.5 inches in meters (ball center height)
+        self.get_logger().info(f"Ground tracking mode enabled: ball height constrained to {self.ball_ground_height}m")
+        
+        # Base measurement noise parameters
+        self.base_measurement_noise_hsv_2d = self.get_parameter('measurement_noise_hsv_2d').value
+        self.base_measurement_noise_yolo_2d = self.get_parameter('measurement_noise_yolo_2d').value
+        self.base_measurement_noise_hsv_3d = self.get_parameter('measurement_noise_hsv_3d').value
+        self.base_measurement_noise_yolo_3d = self.get_parameter('measurement_noise_yolo_3d').value
+        self.base_measurement_noise_lidar = self.get_parameter('measurement_noise_lidar').value
+
     def _wait_for_transforms(self):
         """
         Wait for required transforms to become available.
@@ -298,6 +329,10 @@ class KalmanFilterFusion(Node):
         self.measurement_noise_hsv_3d = self.get_parameter('measurement_noise_hsv_3d').value
         self.measurement_noise_yolo_3d = self.get_parameter('measurement_noise_yolo_3d').value
         self.measurement_noise_lidar = self.get_parameter('measurement_noise_lidar').value
+        
+        # Increase Z component noise for LIDAR measurements due to constant Z limitation
+        self.lidar_z_noise_factor = 3.0  # Higher noise factor for Z component
+        
         self.max_time_diff = self.get_parameter('max_time_diff').value
         self.min_confidence_threshold = self.get_parameter('min_confidence_threshold').value
         self.detection_timeout = self.get_parameter('detection_timeout').value
@@ -306,6 +341,29 @@ class KalmanFilterFusion(Node):
         self.history_length = self.get_parameter('history_length').value
         self.debug_level = self.get_parameter('debug_level').value
         self.log_to_file = self.get_parameter('log_to_file').value
+
+        # Base measurement noise parameters
+        self.base_measurement_noise_hsv_2d = self.get_parameter('measurement_noise_hsv_2d').value
+        self.base_measurement_noise_yolo_2d = self.get_parameter('measurement_noise_yolo_2d').value
+        self.base_measurement_noise_hsv_3d = self.get_parameter('measurement_noise_hsv_3d').value
+        self.base_measurement_noise_yolo_3d = self.get_parameter('measurement_noise_yolo_3d').value
+        self.base_measurement_noise_lidar = self.get_parameter('measurement_noise_lidar').value
+
+        # Current adaptive measurement noise values (will be updated dynamically)
+        self.measurement_noise_hsv_2d = self.base_measurement_noise_hsv_2d
+        self.measurement_noise_yolo_2d = self.base_measurement_noise_yolo_2d
+        self.measurement_noise_hsv_3d = self.base_measurement_noise_hsv_3d
+        self.measurement_noise_yolo_3d = self.base_measurement_noise_yolo_3d
+        self.measurement_noise_lidar = self.base_measurement_noise_lidar
+
+        # Add tracking of sensor reliability over time (higher is better)
+        self.sensor_reliability = {
+            'hsv_2d': 0.5,   # Start with neutral reliability
+            'yolo_2d': 0.5,
+            'hsv_3d': 0.5,
+            'yolo_3d': 0.5,
+            'lidar': 0.5
+        }
 
     def _setup_subscriptions(self):
         """Set up all subscriptions for this node."""
@@ -399,10 +457,16 @@ class KalmanFilterFusion(Node):
         # vx, vy, vz = 3D velocity components
         self.state = np.zeros(6)
         
-        # Kalman filter covariance matrix (6x6)
-        # Represents uncertainty in our state estimate
-        # Diagonal elements = variance (uncertainty squared) of each state variable
-        self.covariance = np.eye(6) * 1000  # Start with high uncertainty
+        # Create a more balanced initial covariance
+        # Position uncertainty (first 3 diagonal elements)
+        position_variance = 10.0  # Still high but not extreme
+        # Velocity uncertainty (next 3 diagonal elements)
+        velocity_variance = 100.0  # Higher uncertainty for initial velocity
+
+        # Create block diagonal covariance matrix
+        position_block = np.eye(3) * position_variance
+        velocity_block = np.eye(3) * velocity_variance
+        self.covariance = block_diag(position_block, velocity_block)
         
         # Flag to track if filter has been initialized
         self.initialized = False
@@ -448,6 +512,11 @@ class KalmanFilterFusion(Node):
         self.filter_health = 1.0  # 0.0 to 1.0 scale
         self.tracking_health = 1.0
         self.sensor_health = 1.0
+        
+        # LIDAR reliability parameters
+        self.lidar_min_reliable_distance = 1.0  # Minimum distance for reliable LIDAR data (meters)
+        self.lidar_optimal_range = (1.2, 3.0)   # Range where LIDAR data is most reliable
+        self.lidar_max_range = 5.0              # Maximum effective range for LIDAR
 
     def _setup_timers(self):
         """Set up timer callbacks for periodic tasks."""
@@ -563,12 +632,33 @@ class KalmanFilterFusion(Node):
             self.get_logger().debug("Filter not yet initialized, waiting for 3D measurement...")
             return
 
+        # Ensure we're using the improved buffer
+        if not hasattr(self, 'improved_buffer_initialized'):
+            self.improve_sync_buffer()
+            self.improved_buffer_initialized = True
+
         # Get synchronized measurements from the buffer
         sync_data = self.sync_buffer.find_synchronized_data()
         
         if not sync_data:
             self.get_logger().debug("No synchronized measurements found")
             return
+        
+        # Log additional details about synchronization quality
+        if self.debug_level >= 2:
+            timestamps = {}
+            for source, msg in sync_data.items():
+                if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
+                    timestamps[source] = TimeUtils.ros_time_to_float(msg.header.stamp)
+                
+            if timestamps:
+                min_time = min(timestamps.values())
+                max_time = max(timestamps.values())
+                time_spread = max_time - min_time
+                self.get_logger().debug(
+                    f"Synchronized data time spread: {time_spread:.3f}s, "
+                    f"Sources: {list(timestamps.keys())}"
+                )
         
         # Log what sensors we have synchronized data from
         available_sensors = list(sync_data.keys())
@@ -841,22 +931,74 @@ class KalmanFilterFusion(Node):
                 f"magnitude={innovation_magnitude:.2f}"
             )
 
+    def adjust_sensor_noise(self, source, position):
+        """
+        Dynamically adjust sensor noise based on position and source.
+        
+        Args:
+            source (str): Sensor source ('lidar', 'hsv_3d', etc.)
+            position (numpy.ndarray): 3D position measurement
+        
+        Returns:
+            float: Adjusted noise level
+        """
+        base_noise = getattr(self, f"base_measurement_noise_{source}")
+        
+        # For LIDAR, apply special distance-based adjustment
+        if source == 'lidar':
+            # Calculate distance from sensor origin
+            distance = np.sqrt(position[0]**2 + position[1]**2)
+            
+            # Apply distance-based adjustment for ground-level tennis ball
+            if distance < 0.5:  # <0.5m - very unreliable (beam passes over ball)
+                return base_noise * 10.0  # Essentially ignore LIDAR at very close range
+            elif distance < 1.0:  # 0.5-1.0m - becoming reliable
+                # Linear transition from very unreliable to moderately reliable
+                reliability_factor = (distance - 0.5) / 0.5  # 0 at 0.5m, 1 at 1.0m
+                return base_noise * (10.0 - reliability_factor * 7.0)
+            elif distance < 3.0:  # 1.0-3.0m - optimal range
+                # Peak reliability in mid-range
+                reliability_factor = 1.0 - ((distance - 1.0) / 2.0)  # 1 at 1.0m, 0 at 3.0m
+                return base_noise * (0.5 + 0.5 * (1.0 - reliability_factor))
+            else:  # >3.0m - decreasing reliability
+                return base_noise * (1.0 + 0.5 * (distance - 3.0))
+        
+        # For depth camera, adjust based on known performance characteristics
+        elif source.endswith('_3d'):
+            distance = np.sqrt(position[0]**2 + position[1]**2)
+            
+            # Most depth cameras work well at close-to-medium ranges
+            if distance < 1.0:  # <1m - highly reliable
+                return base_noise * 0.7
+            elif distance < 3.0:  # 1-3m - still reliable
+                return base_noise * (0.7 + 0.3 * (distance - 1.0) / 2.0)
+            else:  # >3m - decreasing reliability
+                return base_noise * (1.0 + 0.5 * (distance - 3.0))
+        
+        # Return base noise for other sources
+        return base_noise
+
     def update_3d(self, msg, noise_level, source):
         """
-        Update the filter with a 3D measurement (x,y,z).
-        
-        This implements the update step of the Kalman filter for 3D measurements,
-        which provides more complete information about the ball's position.
+        Update the filter with a 3D measurement, applying ground constraints for tennis ball.
         
         Args:
             msg (PointStamped): 3D position measurement
-            noise_level (float): Measurement noise level in meters
-            source (str): Source of measurement (for logging)
+            noise_level (float): Measurement noise level
+            source (str): Source of measurement ('lidar', 'hsv_3d', etc.)
         """
         # Extract position from message
         x_meas = float(msg.point.x)
         y_meas = float(msg.point.y)
         z_meas = float(msg.point.z)
+        
+        # Apply ground constraint in ground tracking mode
+        if self.ground_tracking_mode:
+            z_meas = self.ball_ground_height
+        
+        # Get dynamically adjusted noise
+        position = np.array([x_meas, y_meas, z_meas])
+        adjusted_noise = self.adjust_sensor_noise(source, position)
         
         # For 3D, we measure x, y, and z position
         # Measurement model H maps state to expected measurement
@@ -874,41 +1016,142 @@ class KalmanFilterFusion(Node):
         # Innovation (difference between observation and prediction)
         innovation = z - expected_z
         
-        # Measurement noise covariance
-        R = np.eye(3) * noise_level
+        # Create custom noise matrix with stronger Z constraint in ground tracking mode
+        R = np.eye(3) * adjusted_noise
+        if self.ground_tracking_mode:
+            # Much lower uncertainty in Z (we know it's on the ground)
+            R[2, 2] = adjusted_noise * 0.1
         
-        # Innovation covariance (uncertainty in the innovation)
+        # If this is LIDAR data, increase the Z component noise due to 2D LIDAR limitations
+        if source == 'lidar':
+            R[2, 2] *= self.lidar_z_noise_factor  # Apply higher uncertainty to Z component
+        
+        # Calculate innovation covariance (uncertainty in the innovation)
         S = H @ self.covariance @ H.T + R
         
-        # Check if innovation is reasonable using Mahalanobis distance
+        # Robust Mahalanobis distance computation
         try:
-            S_inv = np.linalg.inv(S)
+            # Check if S is positive definite and condition number is reasonable
+            S_eigenvals = np.linalg.eigvalsh(S)
+            min_eigenval = np.min(S_eigenvals)
+            condition_number = np.max(S_eigenvals) / max(min_eigenval, 1e-10)
+            
+            if min_eigenval <= 0 or condition_number > 1e6:
+                # If poorly conditioned, regularize the matrix
+                self.get_logger().warn(
+                    f"Regularizing innovation covariance matrix: "
+                    f"min_eig={min_eigenval:.2e}, condition={condition_number:.2e}"
+                )
+                # Add small value to diagonal for regularization
+                S_reg = S + np.eye(S.shape[0]) * (abs(min_eigenval) + 1e-6)
+                S_inv = np.linalg.inv(S_reg)
+            else:
+                # Matrix is well-conditioned, proceed normally
+                S_inv = np.linalg.inv(S)
+            
+            # Compute Mahalanobis distance (how many standard deviations the measurement is from prediction)
             innovation_magnitude = np.sqrt(innovation.T @ S_inv @ innovation)
             
             # Store for diagnostics
             self.innovation_history.append(innovation_magnitude)
             
+            # Adaptive rejection threshold based on moving average of past innovations
+            if len(self.innovation_history) > 3:
+                recent_innovations = list(self.innovation_history)[-10:]
+                mean_innovation = np.mean(recent_innovations)
+                std_innovation = np.std(recent_innovations) + 1e-6  # Avoid division by zero
+                
+                # Set threshold to mean + 3*std, but at least 3.0 and at most 10.0
+                adaptive_threshold = mean_innovation + 3.0 * std_innovation
+                adaptive_threshold = max(3.0, min(10.0, adaptive_threshold))
+            else:
+                # Use fixed threshold for first few measurements
+                adaptive_threshold = 5.0
+            
+            # Update sensor reliability based on innovation
+            reliability_factor = max(0.0, 1.0 - (innovation_magnitude / adaptive_threshold))
+            self.sensor_reliability[source] = 0.9 * self.sensor_reliability[source] + 0.1 * reliability_factor
+            
             # Skip updates that are too far from prediction (outliers)
-            if innovation_magnitude > 5.0:
+            if innovation_magnitude > adaptive_threshold:
                 self.log_error(
-                    f"Rejecting {source} 3D update - too far from prediction: "
-                    f"{innovation_magnitude:.2f} sigma",
+                    f"Rejecting {source} update - too far from prediction: "
+                    f"{innovation_magnitude:.2f} sigma (threshold: {adaptive_threshold:.2f})",
                     True
                 )
                 return
-        except np.linalg.LinAlgError:
-            self.get_logger().error(f"Error computing innovation covariance inverse for {source}")
-            return
+            
+            # Log when we're close to threshold
+            elif innovation_magnitude > adaptive_threshold * 0.8:
+                self.get_logger().warn(
+                    f"High innovation for {source}: {innovation_magnitude:.2f} sigma "
+                    f"(threshold: {adaptive_threshold:.2f})"
+                )
+                
+        except np.linalg.LinAlgError as e:
+            self.get_logger().error(f"Error computing innovation covariance inverse for {source}: {str(e)}")
+            # Fall back to a simpler distance check in case of numerical issues
+            max_position_change = 0.5  # meters
+            if source.endswith('_3d') or source == 'lidar':
+                # Extract position from measurement
+                measured_position = z
+                
+                # Compare with current position estimate
+                current_position = self.state[0:3]
+                position_change = np.linalg.norm(measured_position - current_position)
+                
+                if position_change > max_position_change:
+                    self.get_logger().warn(
+                        f"Rejecting {source} update using fallback check: "
+                        f"position change {position_change:.2f}m > {max_position_change:.2f}m"
+                    )
+                    return
+            else:
+                # Can't do fallback check for 2D measurements
+                return
         
         # Kalman gain (how much to trust this measurement vs. our prediction)
         K = self.covariance @ H.T @ S_inv
         
         # Update state: x = x + K*y
-        self.state = self.state + K @ innovation
+        updated_state = self.state + K @ innovation
+
+        # Add physical plausibility checks
+        # 1. Position constraints (limit to plausible arena size if specified)
+        arena_limit = 10.0  # Maximum distance in meters from origin
+        for i in range(3):  # x, y, z position
+            if abs(updated_state[i]) > arena_limit:
+                self.get_logger().warn(
+                    f"Position constraint violated: component {i} = {updated_state[i]:.2f}m, "
+                    f"clamping to {arena_limit}m"
+                )
+                updated_state[i] = np.sign(updated_state[i]) * arena_limit
+
+        # 2. Velocity constraints (limit to physically reasonable speeds)
+        max_velocity = 5.0  # Maximum velocity in m/s for tennis ball
+        velocity_magnitude = np.linalg.norm(updated_state[3:6])
+        if velocity_magnitude > max_velocity:
+            # Scale down velocity vector
+            scale_factor = max_velocity / velocity_magnitude
+            updated_state[3:6] = updated_state[3:6] * scale_factor
+            self.get_logger().debug(
+                f"Velocity constraint applied: {velocity_magnitude:.2f} m/s exceeds limit, "
+                f"scaling to {max_velocity:.2f} m/s"
+            )
+
+        # Apply validated state update
+        self.state = updated_state
         
         # Update covariance: P = (I - K*H)*P
         I = np.eye(6)
         self.covariance = (I - K @ H) @ self.covariance
+        
+        # Ensure covariance stays positive definite (numerical stability)
+        # Add small epsilon to diagonal if needed
+        min_variance = 1e-6
+        for i in range(6):
+            if self.covariance[i, i] < min_variance:
+                self.covariance[i, i] = min_variance
         
         # Update tracking reliability
         self.consecutive_updates += 1
@@ -1344,6 +1587,42 @@ class KalmanFilterFusion(Node):
         if point_msg.header.frame_id == target_frame:
             return point_msg  # Already in the right frame
             
+        # Store frame key for caching
+        now = TimeUtils.now_as_float()
+        frame_key = f"{target_frame}_{point_msg.header.frame_id}"
+        
+        # Special handling for dynamic frames that might change frequently
+        is_dynamic_frame = False
+        dynamic_frames = ['base_link', 'odom', 'map']  # Add any frames that might move
+        if point_msg.header.frame_id in dynamic_frames or target_frame in dynamic_frames:
+            is_dynamic_frame = True
+            
+        # For dynamic transforms, use a shorter cache lifetime
+        dynamic_cache_lifetime = 0.05  # 50ms for dynamic frames
+        static_cache_lifetime = 0.5   # 500ms for static frames
+        effective_lifetime = dynamic_cache_lifetime if is_dynamic_frame else static_cache_lifetime
+        
+        # Check if we have this transform in cache and it's still valid
+        cache_valid = False
+        if hasattr(self, 'transform_cache') and frame_key in self.transform_cache:
+            cached_time, cached_transform = self.transform_cache[frame_key]
+            cache_valid = (now - cached_time < effective_lifetime)
+            
+            # Use cached transform if valid
+            if cache_valid:
+                try:
+                    from tf2_geometry_msgs import do_transform_point
+                    transformed_point = do_transform_point(point_msg, cached_transform)
+                    return transformed_point
+                except Exception as e:
+                    self.get_logger().debug(f"Error using cached transform: {str(e)}")
+                    # Continue to fetch a new transform
+        
+        # Initialize cache and statistics if not already done
+        if not hasattr(self, 'transform_cache'):
+            self.transform_cache = {}
+            self.transform_cache_stats = {'hits': 0, 'misses': 0}
+        
         try:
             # Wait for transform to be available with shorter timeout now that we've
             # already waited during initialization
@@ -1359,11 +1638,30 @@ class KalmanFilterFusion(Node):
             from geometry_msgs.msg import TransformStamped
             from tf2_geometry_msgs import do_transform_point
             
+            # Try to use the message timestamp for more accurate transforms
+            when = point_msg.header.stamp
+            
+            # If the timestamp is in the future or too old, use current time instead
+            current_ros_time = self.get_clock().now()
+            if not TimeUtils.is_timestamp_valid(when) or \
+               (hasattr(when, 'nanosecs') and hasattr(current_ros_time, 'nanoseconds') and \
+                when.nanosecs > current_ros_time.nanoseconds):
+                when = current_ros_time
+            
             transform = self.tf_buffer.lookup_transform(
                 target_frame,
                 point_msg.header.frame_id,
                 when
             )
+            
+            # Cache it with the appropriate lifetime
+            self.transform_cache[frame_key] = (now, transform)
+            
+            # Count cache hit/miss for diagnostics
+            if cache_valid:
+                self.transform_cache_stats['hits'] += 1
+            else:
+                self.transform_cache_stats['misses'] += 1
             
             transformed_point = do_transform_point(point_msg, transform)
             return transformed_point
@@ -1443,6 +1741,87 @@ class KalmanFilterFusion(Node):
             
             # Reduce filter health score temporarily after an error
             self.filter_health = max(0.3, self.filter_health - 0.2)
+
+    def improve_sync_buffer(self):
+        """Enhance the synchronization buffer with better timestamp handling."""
+        # Replace the existing SimpleBuffer with an improved version
+        class ImprovedSensorBuffer:
+            def __init__(self, sensor_names, buffer_size, max_time_diff):
+                self.buffers = {name: deque(maxlen=buffer_size) for name in sensor_names}
+                self.max_time_diff = max_time_diff
+                
+            def add_measurement(self, sensor_name, data, timestamp):
+                """Add a measurement to the buffer with its timestamp."""
+                if sensor_name in self.buffers:
+                    # Convert ROS timestamp to float for easier comparison
+                    time_float = TimeUtils.ros_time_to_float(timestamp)
+                    self.buffers[sensor_name].append((data, time_float))
+                    
+            def get_latest_measurement(self, sensor_name):
+                """Get the most recent measurement for a sensor."""
+                if sensor_name in self.buffers and self.buffers[sensor_name]:
+                    return self.buffers[sensor_name][-1][0]  # Return most recent data
+                return None
+                    
+            def find_synchronized_data(self):
+                """Find measurements from different sensors that were taken at approximately the same time."""
+                # 1. Find the sensor with the least data (to minimize iterations)
+                min_sensor = None
+                min_length = float('inf')
+                for sensor, buffer in self.buffers.items():
+                    if 0 < len(buffer) < min_length:
+                        min_sensor = sensor
+                        min_length = len(buffer)
+                        
+                if min_sensor is None:
+                    return {}  # No data to synchronize
+                    
+                # 2. For each measurement from the minimal sensor, find closest from other sensors
+                best_sync_data = {}
+                best_time_range = float('inf')
+                
+                for base_data, base_time in self.buffers[min_sensor]:
+                    # Try to find synchronized data around this timestamp
+                    current_sync = {min_sensor: base_data}
+                    min_time = base_time
+                    max_time = base_time
+                    
+                    # Check each other sensor
+                    for sensor in self.buffers.keys():
+                        if sensor == min_sensor:
+                            continue
+                            
+                        # Find the measurement closest to base_time
+                        closest_data = None
+                        closest_time_diff = float('inf')
+                        
+                        for data, time_float in self.buffers[sensor]:
+                            time_diff = abs(base_time - time_float)
+                            if time_diff < closest_time_diff:
+                                closest_time_diff = time_diff
+                                closest_data = data
+                                
+                        # If within time threshold, add to synchronized data
+                        if closest_data is not None and closest_time_diff <= self.max_time_diff:
+                            current_sync[sensor] = closest_data
+                            min_time = min(min_time, base_time - closest_time_diff)
+                            max_time = max(max_time, base_time + closest_time_diff)
+                            
+                    # If we found data from all sensors, check if it's better than previous best
+                    time_range = max_time - min_time
+                    if len(current_sync) == len(self.buffers) and time_range < best_time_range:
+                        best_sync_data = current_sync
+                        best_time_range = time_range
+                        
+                return best_sync_data
+                    
+        # Create the improved buffer if needed
+        if not hasattr(self, 'sync_buffer') or not self.sync_buffer:
+            self.sync_buffer = ImprovedSensorBuffer(
+                sensor_names=['hsv_2d', 'yolo_2d', 'hsv_3d', 'yolo_3d', 'lidar'],
+                buffer_size=30,
+                max_time_diff=self.max_time_diff
+            )
 
 def main(args=None):
     """Main function to initialize and run the fusion node."""

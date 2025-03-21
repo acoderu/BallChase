@@ -37,6 +37,24 @@ This LIDAR node adds depth information to the tennis ball tracking by:
 - Confirming these patterns when triggered by camera-based detections
 - Publishing the ball's 3D position in the robot's coordinate frame
 - Providing visualization markers for debugging in RViz
+
+LIDAR Detection Reliability:
+---------------------------
+This system accounts for a fundamental limitation of 2D LIDAR when detecting ground objects:
+
+1. Objects close to the robot (<1.0m) are often detected unreliably or missed entirely
+   due to the scanning plane geometry. At close distances, the LIDAR beam may pass
+   over small objects like tennis balls.
+
+2. Medium distances (1.2-3.0m) provide optimal detection conditions for the LIDAR.
+
+3. We implement a distance-based filtering approach:
+   - Detections closer than 1.0m are marked as unreliable
+   - Unreliable detections can be optionally filtered out or published with lower confidence
+   - The fusion system adjusts trust levels based on detection distance
+
+This approach ensures the system relies more on the depth camera for close-range detection
+while leveraging LIDAR data when it's most reliable.
 """
 
 
@@ -153,6 +171,10 @@ class TennisBallLidarDetector(Node):
         """Initialize the tennis ball LIDAR detector node."""
         super().__init__('tennis_ball_lidar_detector')
         
+        # Initialize thread lock for thread-safe collections
+        import threading
+        self.lock = threading.RLock()
+        
         # Initialize state tracking (replaces _init_performance_tracking)
         self._init_state_tracking()
         
@@ -185,11 +207,26 @@ class TennisBallLidarDetector(Node):
         except:
             pass
         
-        # Load physical parameters of the tennis ball
+        # Load physical parameters of the tennis ball with updated values
+        self.lidar_height = 0.1524  # 6 inches in meters
         self.ball_radius = TENNIS_BALL_CONFIG["radius"]
-        self.ball_height = TENNIS_BALL_CONFIG["height"]
+        self.ball_center_height = 0.0381  # 1.5 inches in meters 
+        self.ball_height = 0.05  # Setting to ball radius above LIDAR plane (LIDAR at 15cm, ball radius ~3.3cm)
+        self.lidar_to_ball_height = self.lidar_height - self.ball_center_height  # Height difference
         self.max_distance = TENNIS_BALL_CONFIG["max_distance"]
         self.min_points = TENNIS_BALL_CONFIG["min_points"]
+        
+        # Load reliability configuration
+        reliability_config = lidar_config.get('detection_reliability', {
+            'min_reliable_distance': 1.0,  # Default to 1.0 meter
+            'publish_unreliable': False     # Default to not publishing unreliable detections
+        })
+        self.min_reliable_distance = reliability_config.get('min_reliable_distance', 1.0)
+        self.publish_unreliable_detections = reliability_config.get('publish_unreliable', False)
+        self.confidence_distance_factor = 0.7  # How much distance affects confidence
+        
+        # Add unsuccessful detections counter
+        self.unsuccessful_detections = 0
         
         # Initialize state variables
         self.latest_scan = None
@@ -326,6 +363,10 @@ class TennisBallLidarDetector(Node):
         self.super_verbose_logging = self.get_parameter('super_verbose_logging').value
         if self.super_verbose_logging:
             self.get_logger().info("SUPER VERBOSE LOGGING MODE ENABLED - Will show detailed debugging information")
+        
+        # Add calibration validation tracking
+        self.calibration_errors = deque(maxlen=30)
+        self.last_calibration_check_time = 0
     
     def _init_state_tracking(self):
         """Initialize state tracking for all system components."""
@@ -477,6 +518,8 @@ class TennisBallLidarDetector(Node):
             
             # Add Z coordinate (assumes LIDAR is parallel to ground)
             z = np.full_like(x, self.ball_height)
+            # Note: We're setting Z to a constant because 2D LIDAR operates in a fixed plane.
+            # The actual height will be accounted for in the transform to camera frame.
             
             # Stack coordinates to create points array [x, y, z]
             self.points_array = np.column_stack((x, y, z))
@@ -522,6 +565,12 @@ class TennisBallLidarDetector(Node):
             self.get_logger().warn("LIDAR: No points available for analysis")
             return []
 
+        # Get adaptive processing parameters
+        processing_params = self.determine_processing_level()
+        detection_samples = processing_params["detection_samples"]
+        adaptive_max_distance = processing_params["radius"] * self.ball_radius
+        adaptive_min_points = processing_params["min_points"]
+        
         if self.detailed_logging and trigger_source.endswith("_DEBUG"):
             self.get_logger().info(f"DEBUG MODE: Using min_points={self.min_points}, min_quality={TENNIS_BALL_CONFIG['quality_threshold']['low']}")
         
@@ -539,13 +588,16 @@ class TennisBallLidarDetector(Node):
         dynamic_min_points = self.min_points
         dynamic_quality_threshold = TENNIS_BALL_CONFIG["quality_threshold"]["low"]
         
+        # Create a consistent adaptive factor
+        adaptation_factor = min(0.5, 0.1 * min(self.consecutive_failures, 5))
+        
         # If we have consecutive failures, gradually reduce requirements
         if self.consecutive_failures > 2:
             # Reduce minimum points requirement (but not below 5)
-            dynamic_min_points = max(5, int(self.min_points * (1.0 - 0.1 * min(self.consecutive_failures, 5))))
+            dynamic_min_points = max(5, int(self.min_points * (1.0 - adaptation_factor)))
             
             # Reduce quality threshold (but not below 0.3)
-            dynamic_quality_threshold = max(0.3, dynamic_quality_threshold * (1.0 - 0.1 * min(self.consecutive_failures, 5)))
+            dynamic_quality_threshold = max(0.3, dynamic_quality_threshold * (1.0 - adaptation_factor))
             
             if self.detailed_logging:
                 self.get_logger().info(
@@ -691,7 +743,7 @@ class TennisBallLidarDetector(Node):
             
             # Increase threshold if we've had failures
             if self.consecutive_failures > 2:
-                max_position_change = min(1.0, max_position_change * (1.0 + 0.1 * self.consecutive_failures))
+                max_position_change = min(1.0, max_position_change * (1.0 + adaptation_factor))
             
             for ball in sorted_balls:
                 center, points, quality = ball
@@ -714,8 +766,9 @@ class TennisBallLidarDetector(Node):
             best_ball = sorted_balls[0]
             new_position = best_ball[0]
             
-            # Store in position history
-            self.position_history.append(new_position)
+            # Store in position history with thread safety
+            with self.lock:
+                self.position_history.append(new_position)
             
             # Set current position 
             self.previous_ball_position = new_position
@@ -782,23 +835,63 @@ class TennisBallLidarDetector(Node):
     
     def publish_ball_position(self, center, cluster_size, circle_quality, trigger_source, original_timestamp=None):
         """
-        Publish the detected tennis ball position with quality information.
+        Publish the detected tennis ball position with ground projection.
+        
+        Args:
+            center (numpy.ndarray): Detected center from LIDAR
+            cluster_size (int): Number of points in cluster
+            circle_quality (float): Quality score from circle fitting
+            trigger_source (str): Source of detection trigger
+            original_timestamp (Time, optional): Original detection timestamp
         """
+        # Apply ground projection
+        projected_center = self.project_to_ground_plane(center)
+        
+        # Calculate distance and confidence
+        distance_from_lidar = np.sqrt(projected_center[0]**2 + projected_center[1]**2)
+        distance_confidence = self.calculate_detection_confidence(projected_center)
+        
+        # Determine reliability based on distance
+        is_reliable = distance_from_lidar >= self.min_reliable_distance
+        
+        # Adjust confidence score based on distance
+        if not is_reliable:
+            # Reduce confidence for close detections
+            distance_factor = max(0.1, distance_from_lidar / self.min_reliable_distance) 
+            adjusted_quality = circle_quality * distance_factor * distance_confidence
+            reliability_text = f"UNRELIABLE ({distance_from_lidar:.2f}m < {self.min_reliable_distance:.1f}m)"
+        else:
+            adjusted_quality = circle_quality * distance_confidence
+            reliability_text = "RELIABLE"
+        
+        # Log the detection with reliability information
+        self.get_logger().info(
+            f"LIDAR: Ground-projected ball at ({projected_center[0]:.2f}, {projected_center[1]:.2f}, {projected_center[2]:.2f}) meters | "
+            f"3D distance: {distance_from_lidar:.2f}m | {reliability_text} | "
+            f"Quality: {adjusted_quality:.2f} (orig: {circle_quality:.2f}) | Triggered by: {trigger_source}"
+        )
+        
+        # Skip publishing unreliable detections unless explicitly enabled
+        if not is_reliable and not self.publish_unreliable_detections:
+            self.get_logger().info("Skipping publication of unreliable close-range detection")
+            self.unsuccessful_detections += 1
+            return
+            
         # Apply Kalman filtering if enabled
-        filtered_center = center
+        filtered_center = projected_center
         
         if self.use_kalman:
-            # Use safe update method instead of direct update
-            filtered_center = self.safe_update_kalman(center, circle_quality, cluster_size)
+            # Use safe update method with adjusted quality
+            filtered_center = self.safe_update_kalman(projected_center, adjusted_quality, cluster_size)
             
             # Calculate how much the filter corrected the position
-            correction = np.linalg.norm(filtered_center - center)
+            correction = np.linalg.norm(filtered_center - projected_center)
             
             # Log the correction amount if significant
             if correction > 0.05 and self.detailed_logging:
                 self.get_logger().info(
                     f"Kalman filter corrected position by {correction:.3f}m: "
-                    f"Raw: ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) → "
+                    f"Raw: ({projected_center[0]:.2f}, {projected_center[1]:.2f}, {projected_center[2]:.2f}) → "
                     f"Filtered: ({filtered_center[0]:.2f}, {filtered_center[1]:.2f}, {filtered_center[2]:.2f})"
                 )
         
@@ -835,13 +928,13 @@ class TennisBallLidarDetector(Node):
             
         # Log the detection with detailed information
         self.get_logger().info(
-            f"LIDAR: Tennis ball detected at ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) meters "
-            f"with {cluster_size} points | Quality: {confidence_text} ({circle_quality:.2f}) | "
+            f"LIDAR: Tennis ball detected at ({filtered_center[0]:.2f}, {filtered_center[1]:.2f}, {filtered_center[2]:.2f}) meters "
+            f"with {cluster_size} points | Quality: {confidence_text} ({adjusted_quality:.2f}) | "
             f"Triggered by: {trigger_source}"
         )
         
         # Create visualization markers for RViz
-        self.visualize_detection(center, cluster_size, circle_quality, trigger_source)
+        self.visualize_detection(filtered_center, cluster_size, adjusted_quality, trigger_source)
     
     def publish_transform(self):
         """
@@ -859,9 +952,12 @@ class TennisBallLidarDetector(Node):
         # Translation from LIDAR to camera (from config)
         transform.transform.translation.x = self.transform_translation['x']
         transform.transform.translation.y = self.transform_translation['y']
-        transform.transform.translation.z = self.transform_translation['z']
         
-        # Rotation from LIDAR to camera as quaternion (from config)
+        # Override Z with known physical offset between LIDAR and camera
+        # LIDAR at 15cm, camera at 10cm from ground = 5cm difference
+        transform.transform.translation.z = 0.05  # 5cm difference
+        
+        # Use calibration for rotation components
         transform.transform.rotation.x = self.transform_rotation['x']
         transform.transform.rotation.y = self.transform_rotation['y']
         transform.transform.rotation.z = self.transform_rotation['z']
@@ -1275,8 +1371,18 @@ class TennisBallLidarDetector(Node):
             # If this is the first update, make sure we're initialized
             if not self.kalman_filter.initialized:
                 self.get_logger().info("Initializing Kalman filter with first position")
-                # Initialize directly with this measurement
-                self.kalman_filter.state[0:3] = center
+                
+                # Validate center is appropriate for initialization
+                if center is None or not isinstance(center, np.ndarray) or center.shape != (3,):
+                    self.get_logger().error(f"Invalid center for Kalman initialization: {center}")
+                    # Create a safe default with zero velocity
+                    self.kalman_filter.state = np.zeros(6)
+                    center = np.zeros(3)  # Safe default
+                else:
+                    # Initialize with measurement and zero velocity
+                    self.kalman_filter.state = np.zeros(6)
+                    self.kalman_filter.state[0:3] = center
+                
                 self.kalman_filter.last_update_time = time.time()
                 self.kalman_filter.initialized = True
                 return center
@@ -1327,8 +1433,8 @@ class TennisBallLidarDetector(Node):
                 f"with confidence {confidence:.2f}"
             )
             
-            # Find tennis ball patterns in LIDAR data
-            ball_results = self.find_tennis_balls(source)
+            # Find tennis ball patterns in LIDAR data using RANSAC for robustness
+            ball_results = self.find_tennis_balls_ransac(source)
             
             # Process the best detected ball (if any)
             if ball_results and len(ball_results) > 0:
@@ -1379,7 +1485,388 @@ class TennisBallLidarDetector(Node):
         
         self.get_logger().debug(f"LIDAR: {source} processing took {processing_time:.2f}ms")
 
-    # SIMPLIFIED KALMAN FILTER
+    def validate_calibration(self, lidar_point, camera_point):
+        """Validate calibration by comparing transformed lidar point with camera point."""
+        # Transform lidar point to camera frame
+        transformed_point = self._transform_point(lidar_point, "camera_frame")
+        
+        if transformed_point is None:
+            self.get_logger().warn("Could not transform point for calibration validation")
+            return None
+        
+        # Calculate error
+        error = np.linalg.norm([
+            transformed_point.point.x - camera_point.point.x,
+            transformed_point.point.y - camera_point.point.y,
+            transformed_point.point.z - camera_point.point.z
+        ])
+        
+        with self.lock:
+            self.calibration_errors.append(error)
+        
+        # Log significant errors
+        if error > 0.1:  # 10cm threshold
+            self.get_logger().warn(f"Large calibration error: {error:.3f}m")
+        
+        return error
+
+    def _transform_point(self, point_msg, target_frame):
+        """Transform a point from its original frame to the target frame."""
+        try:
+            from tf2_ros import Buffer, TransformListener
+            from tf2_geometry_msgs import do_transform_point
+            from geometry_msgs.msg import TransformStamped
+            
+            # Create a buffer and listener if they don't exist
+            if not hasattr(self, 'tf_buffer'):
+                self.tf_buffer = Buffer()
+                self.tf_listener = TransformListener(self.tf_buffer, self)
+                
+            # Look up transformation
+            transform = self.tf_buffer.lookup_transform(
+                target_frame,
+                point_msg.header.frame_id,
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            
+            # Apply transform
+            transformed_point = do_transform_point(point_msg, transform)
+            return transformed_point
+        except Exception as e:
+            self.get_logger().warn(f"Transform error: {str(e)}")
+            return None
+
+    def filter_ground_points(self, points, max_height=0.05):
+        """Filter out points likely to be from the ground."""
+        # Assuming z axis points upward, filter points below max_height
+        if points is None or len(points) == 0:
+            return points
+            
+        non_ground_indices = np.where(points[:, 2] > max_height)[0]
+        return points[non_ground_indices]
+
+    def adjust_for_ball_height(self, center, radius):
+        """Adjust detected position to account for tennis ball height."""
+        # For a ball on the ground, the LIDAR may detect its upper portion
+        # Adjust z coordinate to be at the center of the ball
+        if center is None:
+            return center
+            
+        adjusted_center = np.copy(center)
+        adjusted_center[2] = radius  # Ball center is one radius above ground
+        return adjusted_center
+
+    def _fit_circle_to_points(self, points):
+        """
+        Fit a circle to a set of 2D points using the geometric method.
+        
+        Args:
+            points: Numpy array of shape (n, 2) or (n, 3) - if 3D, only x,y are used
+            
+        Returns:
+            center: (x, y) coordinates of circle center
+            radius: radius of the circle
+        """
+        # Extract x, y coordinates if points are 3D
+        if points.shape[1] > 2:
+            points_2d = points[:, 0:2]
+        else:
+            points_2d = points
+            
+        if len(points_2d) < 3:
+            raise ValueError("Need at least 3 points to fit a circle")
+        
+        # Special case for exactly 3 points - direct calculation
+        if len(points_2d) == 3:
+            # Get coordinates
+            x1, y1 = points_2d[0]
+            x2, y2 = points_2d[1]
+            x3, y3 = points_2d[2]
+            
+            # Calculate circle parameters using determinants
+            temp = x2*x2 + y2*y2
+            bc = (x1*x1 + y1*y1 - temp) / 2
+            cd = (temp - x3*x3 - y3*y3) / 2
+            det = (x1 - x2) * (y2 - y3) - (x2 - x3) * (y1 - y2)
+            
+            if abs(det) < 1e-6:
+                raise ValueError("Points are collinear, cannot fit circle")
+                
+            cx = (bc*(y2 - y3) - cd*(y1 - y2)) / det
+            cy = ((x1 - x2)*cd - (x2 - x3)*bc) / det
+            
+            # Calculate radius
+            radius = np.sqrt((cx - x1)**2 + (cy - y1)**2)
+            
+            return np.array([cx, cy]), radius
+        
+        # For more than 3 points, use least squares approach
+        # Based on Kåsa method - fast and works well for small arcs
+        
+        # Shift coordinates for better numerical stability
+        centroid = np.mean(points_2d, axis=0)
+        points_centered = points_2d - centroid
+        
+        # Set up matrix for least squares solution
+        x = points_centered[:, 0]
+        y = points_centered[:, 1]
+        z = x**2 + y**2
+        
+        # Set up matrix equation: [x y 1] * [A B C]^T = z
+        A = np.column_stack([x, y, np.ones(len(x))])
+        params, _, _, _ = np.linalg.lstsq(A, z, rcond=None)
+        
+        # Extract circle parameters
+        A, B, C = params
+        center_x = A / 2 + centroid[0]
+        center_y = B / 2 + centroid[1]
+        radius = np.sqrt(C + (A**2 + B**2) / 4)
+        
+        return np.array([center_x, center_y]), radius
+
+    def ransac_circle_fit(self, points, max_iterations=50, threshold=0.01):
+        """Use RANSAC to fit a circle to points, robust to outliers."""
+        if points is None or len(points) < 3:
+            return None, 0, 0
+            
+        best_inliers = []
+        best_center = None
+        best_radius = 0
+        
+        for _ in range(max_iterations):
+            # Randomly sample 3 points (minimum needed for circle)
+            if len(points) < 3:
+                continue
+            sample_indices = np.random.choice(len(points), 3, replace=False)
+            sample_points = points[sample_indices]
+            
+            # Fit circle to these three points
+            try:
+                center, radius = self._fit_circle_to_points(sample_points)
+                
+                # Count inliers
+                distances = np.sqrt(
+                    (points[:, 0] - center[0])**2 + 
+                    (points[:, 1] - center[1])**2
+                )
+                inliers = np.abs(distances - radius) < threshold
+                inlier_count = np.sum(inliers)
+                
+                if inlier_count > len(best_inliers):
+                    best_inliers = inliers
+                    best_center = center
+                    best_radius = radius
+            except Exception as e:
+                if self.super_verbose_logging:
+                    self.get_logger().debug(f"RANSAC iteration failed: {str(e)}")
+                continue
+        
+        if best_center is None:
+            return None, 0, 0
+        
+        # Refine fit using all inliers
+        inlier_points = points[best_inliers]
+        if len(inlier_points) < 3:
+            # Not enough inliers for refinement, use the basic fit
+            return np.append(best_center, 0), len(best_inliers), 0.5
+            
+        try:
+            refined_center, refined_radius = self._fit_circle_to_points(inlier_points)
+            
+            # Calculate quality based on inlier ratio and radius error
+            inlier_ratio = len(inlier_points) / len(points)
+            radius_error = abs(refined_radius - self.ball_radius) / self.ball_radius
+            quality = inlier_ratio * (1.0 - min(radius_error, 1.0))
+            
+            # Create 3D center (x, y, z) using LIDAR height
+            center_3d = np.array([refined_center[0], refined_center[1], self.ball_height])
+            
+            # Adjust for ball height
+            center_3d = self.adjust_for_ball_height(center_3d, self.ball_radius)
+            
+            return center_3d, len(inlier_points), quality
+            
+        except Exception as e:
+            self.get_logger().warn(f"Circle fitting failed during refinement: {str(e)}")
+            # Return the unrefined result with moderate quality
+            center_3d = np.array([best_center[0], best_center[1], self.ball_height])
+            return center_3d, len(best_inliers), 0.5
+
+    def find_tennis_balls_ransac(self, trigger_source):
+        """Search for tennis balls using RANSAC for robust circle fitting."""
+        operation_start = TimeUtils.now_as_float()
+        
+        if self.points_array is None or len(self.points_array) == 0:
+            self.get_logger().warn("LIDAR: No points available for analysis")
+            return []
+            
+        self.get_logger().debug(
+            f"LIDAR: Analyzing {len(self.points_array)} points with RANSAC triggered by {trigger_source}"
+        )
+        
+        # Filter ground points for cleaner detection
+        filtered_points = self.filter_ground_points(self.points_array)
+        
+        if len(filtered_points) < self.min_points:
+            self.get_logger().debug(f"LIDAR: Not enough non-ground points: {len(filtered_points)}")
+            # Fall back to all points if filtering removed too many
+            filtered_points = self.points_array
+        
+        # Create a consistent adaptive factor
+        adaptation_factor = min(0.5, 0.1 * min(self.consecutive_failures, 5))
+        
+        # Dynamically adjust parameters based on consecutive failures
+        dynamic_min_points = max(5, int(self.min_points * (1.0 - adaptation_factor)))
+        threshold = 0.01 * (1.0 + adaptation_factor * 2)  # Increase threshold with failures
+        
+        # Try RANSAC circle fitting
+        center, inlier_count, quality = self.ransac_circle_fit(
+            filtered_points, 
+            max_iterations=30,
+            threshold=threshold
+        )
+        
+        # Check if we found a valid circle
+        if center is None or inlier_count < dynamic_min_points:
+            if self.detailed_logging:
+                if center is None:
+                    self.get_logger().debug(f"RANSAC found no valid circles")
+                else:
+                    self.get_logger().debug(f"RANSAC circle has too few points: {inlier_count} < {dynamic_min_points}")
+            return []
+            
+        # Quality threshold also adapts based on consecutive failures
+        dynamic_quality_threshold = max(0.3, TENNIS_BALL_CONFIG["quality_threshold"]["low"] * (1.0 - adaptation_factor))
+        
+        # Check quality
+        if quality < dynamic_quality_threshold:
+            if self.detailed_logging:
+                self.get_logger().debug(f"RANSAC circle quality too low: {quality:.2f} < {dynamic_quality_threshold:.2f}")
+            return []
+            
+        # Success! Return the result
+        if self.detailed_logging:
+            self.get_logger().info(
+                f"RANSAC found tennis ball at ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) "
+                f"with {inlier_count} points and quality {quality:.2f}"
+            )
+            
+        # Return in same format as original method: [(center, point_count, quality)]
+        return [(center, inlier_count, quality)]
+
+    def project_to_ground_plane(self, detected_point):
+        """
+        Project LIDAR detection to ground plane for accurate ball tracking.
+        
+        Args:
+            detected_point (numpy.ndarray): 3D point from LIDAR [x, y, z]
+            
+        Returns:
+            numpy.ndarray: Ground-projected point with ball center height
+        """
+        # Physical measurements in meters
+        lidar_height = self.lidar_height  # 6 inches
+        ball_radius = self.ball_radius  # 1.35 inches
+        ball_center_height = self.ball_center_height  # 1.5 inches
+        
+        # Calculate horizontal distance
+        xy_distance = np.sqrt(detected_point[0]**2 + detected_point[1]**2)
+        
+        # Calculate correction based on geometry of LIDAR beam intersecting upper portion of ball
+        # Only apply if we have a reasonable distance (avoid division by zero)
+        if xy_distance > 0.1:
+            height_diff = lidar_height - ball_center_height
+            # If LIDAR beam hits the ball, it hits above the center
+            # Calculate how far above the center based on the ball radius
+            intersection_height_from_center = height_diff - ball_radius
+            
+            # If intersection is within the ball's radius
+            if abs(intersection_height_from_center) < ball_radius:
+                # Calculate horizontal offset based on chord geometry
+                chord_offset = np.sqrt(ball_radius**2 - intersection_height_from_center**2)
+                
+                # Calculate the horizontal displacement needed
+                correction_factor = chord_offset / xy_distance
+                
+                # Create corrected point (extend distance slightly)
+                angle = np.arctan2(detected_point[1], detected_point[0])
+                corrected_x = (xy_distance + chord_offset) * np.cos(angle)
+                corrected_y = (xy_distance + chord_offset) * np.sin(angle)
+                
+                # Keep Z at ball height for ground tracking
+                return np.array([corrected_x, corrected_y, ball_center_height])
+        
+        # For very close points or if intersection calculation fails, just set Z to ball height
+        return np.array([detected_point[0], detected_point[1], ball_center_height])
+
+    def calculate_detection_confidence(self, point):
+        """
+        Calculate the detection confidence based on distance from LIDAR.
+        
+        Args:
+            point (numpy.ndarray): 3D point [x, y, z]
+            
+        Returns:
+            float: Confidence value between 0.0 and 1.0
+        """
+        # Calculate distance on XY plane
+        distance = np.sqrt(point[0]**2 + point[1]**2)
+        
+        # Define confidence curve for ground-level tennis ball
+        if distance < 0.5:  # Less than 0.5m
+            # Too close - LIDAR beam likely passes over ball completely
+            confidence = 0.1
+        elif distance < 1.0:  # 0.5-1.0m
+            # Transitional range - linear increase
+            confidence = 0.1 + 0.5 * ((distance - 0.5) / 0.5)
+        elif distance < 3.0:  # 1.0-3.0m
+            # Optimal range
+            confidence = 0.6 + 0.3 * (1.0 - (distance - 1.0) / 2.0)
+        else:  # >3.0m
+            # Too far - decreasing confidence
+            confidence = max(0.1, 0.9 - 0.2 * ((distance - 3.0) / 1.0))
+        
+        return confidence
+
+    def determine_processing_level(self):
+        """
+        Determine processing level based on CPU usage and recent detections.
+        
+        Returns:
+            dict: Processing parameters including samples, radius, and min_points
+        """
+        # Get CPU usage
+        import psutil
+        cpu_usage = psutil.cpu_percent(interval=None)
+        
+        # Get time since last successful detection
+        current_time = TimeUtils.now_as_float()
+        time_since_detection = current_time - self.last_successful_detection_time
+        
+        # Base parameters
+        params = {
+            "detection_samples": 30,
+            "radius": self.ball_radius * 3.5,
+            "min_points": 6
+        }
+        
+        # If high CPU usage, reduce processing
+        if cpu_usage > 85:
+            params["detection_samples"] = 20
+            params["radius"] = self.ball_radius * 2.5
+            params["min_points"] = 5
+            self.get_logger().debug("High CPU load - using minimal processing")
+        # If low CPU and we haven't detected in a while, increase processing
+        elif cpu_usage < 50 and time_since_detection > 2.0:
+            params["detection_samples"] = 50
+            params["radius"] = self.ball_radius * 4.0
+            params["min_points"] = 5  # Keep min_points lower for better sensitivity
+            self.get_logger().debug("Low CPU load and no recent detections - using intensive processing")
+        
+        return params
+
+# SIMPLIFIED KALMAN FILTER
 class KalmanFilter:
     """Simple Kalman filter for tracking a tennis ball in 3D space."""
     

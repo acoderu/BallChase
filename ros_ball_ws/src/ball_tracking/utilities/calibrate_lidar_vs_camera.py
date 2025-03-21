@@ -92,6 +92,12 @@ class LidarCameraCalibrator(Node):
         self.get_logger().info("  't' - Test transformation on current points")
         self.get_logger().info("  'q' - Quit")
         
+        # Physical measurements for ground-level tracking
+        self.lidar_height = 0.1524  # 6 inches in meters
+        self.camera_height = 0.1016  # 4 inches in meters
+        self.ball_height = 0.0381  # 1.5 inches in meters (ball center)
+        self.ball_radius = 0.03429  # 1.35 inches in meters
+        
         # Start input thread
         self.running = True
         self.input_thread = threading.Thread(target=self.input_loop)
@@ -149,6 +155,10 @@ class LidarCameraCalibrator(Node):
                 self.remove_last_point()
             elif cmd == 'x':  # Calculate transformation
                 self.calculate_transformation()
+            elif cmd == 'p':  # Calculate with physical constraints
+                self.calibrate_with_physical_constraints()  # Add this option
+            elif cmd == 'a':  # Assess calibration quality
+                self.assess_calibration_quality()
             elif cmd == 't':  # Test transformation
                 self.test_transformation()
             elif cmd == 'q':  # Quit
@@ -157,9 +167,10 @@ class LidarCameraCalibrator(Node):
                 break
             else:
                 self.get_logger().info("Unknown command")
+                self.get_logger().info("Commands: c=capture, l=list, r=remove, x=calculate, p=physical, a=assess, t=test, q=quit")
 
     def capture_point_pair(self):
-        """Capture a pair of corresponding points from camera and LIDAR."""
+        """Capture a pair of corresponding points with distance information."""
         with self.lock:
             camera_point = self.latest_camera_point
             lidar_point = self.latest_lidar_point
@@ -173,14 +184,25 @@ class LidarCameraCalibrator(Node):
             
         if camera_age > 0.5 or lidar_age > 0.5:
             self.get_logger().warn(f"Using stale data: camera={camera_age:.2f}s, lidar={lidar_age:.2f}s")
-            
+        
+        # Calculate distance from LIDAR
+        lidar_distance = np.sqrt(lidar_point[0]**2 + lidar_point[1]**2)
+        
         # Add the points to our calibration sets
         self.camera_points.append(np.copy(camera_point))
         self.lidar_points.append(np.copy(lidar_point))
         
+        # Print distance information for calibration reference
         self.get_logger().info(f"Captured point pair #{len(self.camera_points)}:")
         self.get_logger().info(f"  Camera: ({camera_point[0]:.3f}, {camera_point[1]:.3f}, {camera_point[2]:.3f})")
         self.get_logger().info(f"  LIDAR:  ({lidar_point[0]:.3f}, {lidar_point[1]:.3f}, {lidar_point[2]:.3f})")
+        self.get_logger().info(f"  Distance from LIDAR: {lidar_distance:.3f}m")
+        
+        # Provide guidance on calibration ranges
+        if lidar_distance < 0.5:
+            self.get_logger().warn("Point is very close to LIDAR. Reliability may be low.")
+        elif 1.0 <= lidar_distance <= 3.0:
+            self.get_logger().info("Point is in optimal LIDAR range (1-3m). Good calibration point.")
 
     def list_points(self):
         """List all captured point pairs."""
@@ -205,7 +227,7 @@ class LidarCameraCalibrator(Node):
         self.get_logger().info(f"Removed last point pair. {len(self.camera_points)} pairs remaining.")
 
     def calculate_transformation(self):
-        """Calculate the rigid transformation from LIDAR to camera frame."""
+        """Calculate the rigid transformation from LIDAR to camera frame, optimized for ground plane."""
         if len(self.camera_points) < 3:
             self.get_logger().error("Need at least 3 point pairs for calibration!")
             return
@@ -214,30 +236,52 @@ class LidarCameraCalibrator(Node):
         camera_array = np.array(self.camera_points)
         lidar_array = np.array(self.lidar_points)
         
+        # Check if points are well-distributed in 3D space
+        lidar_spread = np.std(lidar_array, axis=0)
+        camera_spread = np.std(camera_array, axis=0)
+        if np.any(lidar_spread < 0.1) or np.any(camera_spread < 0.1):
+            self.get_logger().warn("Points are not well distributed in 3D space!")
+            self.get_logger().warn(f"LIDAR spread: {lidar_spread}, Camera spread: {camera_spread}")
+            self.get_logger().warn("For better calibration, place the ball at widely different positions")
+        
+        self.get_logger().warn("Note: Since LIDAR Z values are constant, calibration will be accurate in X and Y but not in Z.")
+        self.get_logger().warn("Z transformation should be manually set based on physical measurements of sensor positions.")
+        
         try:
-            # Compute centroids
-            camera_centroid = np.mean(camera_array, axis=0)
-            lidar_centroid = np.mean(lidar_array, axis=0)
+            # --- Step 1: Find 2D transformation in X-Y plane ---
+            camera_xy = camera_array[:, :2]  # Just X,Y coordinates
+            lidar_xy = lidar_array[:, :2]    # Just X,Y coordinates
             
-            # Center the points
-            camera_centered = camera_array - camera_centroid
-            lidar_centered = lidar_array - lidar_centroid
+            # Compute 2D centroids
+            camera_centroid_xy = np.mean(camera_xy, axis=0)
+            lidar_centroid_xy = np.mean(lidar_xy, axis=0)
             
-            # Compute the covariance matrix
-            H = lidar_centered.T @ camera_centered
+            # Center the points in 2D
+            camera_centered_xy = camera_xy - camera_centroid_xy
+            lidar_centered_xy = lidar_xy - lidar_centroid_xy
             
-            # Find the rotation using SVD
-            U, _, Vt = np.linalg.svd(H)
+            # Find best 2D rotation
+            H_xy = lidar_centered_xy.T @ camera_centered_xy
+            U, _, Vt = np.linalg.svd(H_xy)
+            R_xy = Vt.T @ U.T
             
-            # Ensure a right-handed coordinate system
-            R = Vt.T @ U.T
-            if np.linalg.det(R) < 0:
-                self.get_logger().warn("Reflection detected in rotation. Fixing...")
+            if np.linalg.det(R_xy) < 0:
+                self.get_logger().warn("Reflection detected in 2D rotation. Fixing...")
                 Vt[-1, :] *= -1
-                R = Vt.T @ U.T
+                R_xy = Vt.T @ U.T
             
-            # Calculate the translation
-            t = camera_centroid - R @ lidar_centroid
+            # --- Step 2: Construct full 3D transformation ---
+            # Full rotation matrix (only rotate in X-Y plane)
+            R = np.eye(3)
+            R[:2, :2] = R_xy
+            
+            # Calculate Z offset directly (average difference)
+            z_offset = np.mean(camera_array[:, 2]) - np.mean(lidar_array[:, 2])
+            
+            # Translation vector
+            t = np.zeros(3)
+            t[:2] = camera_centroid_xy - (R_xy @ lidar_centroid_xy)
+            t[2] = z_offset
             
             # Store the transformation
             self.rotation_matrix = R
@@ -248,10 +292,10 @@ class LidarCameraCalibrator(Node):
             rotation = Rotation.from_matrix(R)
             euler_angles = rotation.as_euler('xyz', degrees=True)
             
-            self.get_logger().info("=== LIDAR to Camera Transformation ===")
+            self.get_logger().info("=== LIDAR to Camera Transformation (Ground-Plane Optimized) ===")
             self.get_logger().info("Translation vector:")
             self.get_logger().info(f"  [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}]")
-            self.get_logger().info("Rotation matrix:")
+            self.get_logger().info("Rotation matrix (planar rotation only):")
             for i in range(3):
                 self.get_logger().info(f"  [{R[i, 0]:.4f}, {R[i, 1]:.4f}, {R[i, 2]:.4f}]")
             self.get_logger().info("Euler angles (degrees):")
@@ -263,9 +307,78 @@ class LidarCameraCalibrator(Node):
             
             # Provide ROS TF2 code
             self.output_tf2_code(R, t, euler_angles)
+
+            self.get_logger().info("\n=== 3D Error Visualization ===")
+            for i, (lidar, camera, transformed) in enumerate(zip(
+                self.lidar_points, 
+                self.camera_points,
+                [self.rotation_matrix @ lp + self.translation for lp in self.lidar_points]
+            )):
+                err = np.linalg.norm(transformed - camera)
+                self.get_logger().info(f"Point {i+1}: Error = {err:.3f}m {'<!>' if err > 0.1 else ''}")
+                
+            self.get_logger().info("\n=== Manual Z Adjustment ===")
+            self.get_logger().info("IMPORTANT: Since LIDAR values have constant Z, the Z component of translation")
+            self.get_logger().info("should be manually set to the physical difference between sensors:")
+            self.get_logger().info("1. Measure the height of the LIDAR from the ground")
+            self.get_logger().info("2. Measure the height of the camera from the ground")
+            self.get_logger().info("3. Set transform_translation.z to (camera_height - lidar_height)")
+            self.get_logger().info("For example, with LIDAR at 15cm and camera at 10cm, use z = -0.05")
             
         except Exception as e:
             self.get_logger().error(f"Error calculating transformation: {str(e)}")
+
+    def calibrate_with_physical_constraints(self):
+        """
+        Calibrate transformation with physical measurements as constraints.
+        This ensures accurate Z-axis calibration for ground-level ball tracking.
+        """
+        # Physical measurements in meters
+        lidar_height = self.lidar_height  # 6 inches
+        camera_height = self.camera_height  # 4 inches
+        ball_height = self.ball_height  # 1.5 inches
+        
+        # Calculate standard transformation first (for X-Y plane)
+        self.calculate_transformation()
+        
+        # Override Z component based on physical measurements
+        height_diff = camera_height - lidar_height
+        self.translation[2] = height_diff
+        
+        # Apply identity rotation for Z-axis (assuming sensors are level)
+        # This preserves X-Y rotation but ensures Z is handled by translation only
+        self.rotation_matrix[2, 2] = 1.0
+        self.rotation_matrix[0, 2] = 0.0
+        self.rotation_matrix[1, 2] = 0.0
+        self.rotation_matrix[2, 0] = 0.0
+        self.rotation_matrix[2, 1] = 0.0
+        
+        # Update the has_transform flag
+        self.has_transform = True
+        
+        # Log the applied constraints
+        self.get_logger().info("Applied physical constraint: Z-translation set to measured height difference")
+        self.get_logger().info(f"Camera height: {camera_height}m, LIDAR height: {lidar_height}m")
+        self.get_logger().info(f"Height difference: {height_diff}m")
+        
+        # Calculate and log error
+        error = self.calculate_error()
+        self.get_logger().info(f"Mean squared error after constraint: {error:.6f} meters")
+        
+        # Convert to useful formats
+        rotation = Rotation.from_matrix(self.rotation_matrix)
+        euler_angles = rotation.as_euler('xyz', degrees=True)
+        quaternion = rotation.as_quat()  # [x, y, z, w]
+        
+        # Output full transformation details
+        self.get_logger().info("=== LIDAR to Camera Transformation with Physical Constraints ===")
+        self.get_logger().info("Translation vector:")
+        self.get_logger().info(f"  [{self.translation[0]:.6f}, {self.translation[1]:.6f}, {self.translation[2]:.6f}]")
+        self.get_logger().info("Rotation matrix:")
+        for i in range(3):
+            self.get_logger().info(f"  [{self.rotation_matrix[i, 0]:.6f}, {self.rotation_matrix[i, 1]:.6f}, {self.rotation_matrix[i, 2]:.6f}]")
+        self.get_logger().info("Quaternion [x, y, z, w]:")
+        self.get_logger().info(f"  [{quaternion[0]:.6f}, {quaternion[1]:.6f}, {quaternion[2]:.6f}, {quaternion[3]:.6f}]")
 
     def calculate_error(self):
         """Calculate the mean squared error of the transformation."""
@@ -384,6 +497,72 @@ def publish_transform(self):
 </joint>
 """
         self.get_logger().info(urdf_code)
+
+    def assess_calibration_quality(self):
+        """
+        Assess the quality of the current calibration and provide guidance.
+        
+        Returns:
+            tuple: (quality_string, mean_error)
+        """
+        if not self.has_transform:
+            self.get_logger().error("No transformation calculated yet!")
+            return "None", float('inf')
+            
+        # Calculate error statistics
+        errors = []
+        for lidar_point, camera_point in zip(self.lidar_points, self.camera_points):
+            # Transform LIDAR point to camera frame
+            transformed = self.rotation_matrix @ lidar_point + self.translation
+            # Calculate error magnitude
+            error = np.linalg.norm(transformed - camera_point)
+            errors.append(error)
+        
+        # Calculate statistics
+        mean_error = np.mean(errors)
+        max_error = np.max(errors)
+        min_error = np.min(errors)
+        std_error = np.std(errors)
+        
+        # Evaluate calibration quality
+        if mean_error < 0.03:
+            quality = "Excellent"
+        elif mean_error < 0.07:
+            quality = "Good"
+        elif mean_error < 0.15:
+            quality = "Fair"
+        else:
+            quality = "Poor"
+        
+        # Print assessment
+        self.get_logger().info("=== Calibration Quality Assessment ===")
+        self.get_logger().info(f"Quality: {quality}")
+        self.get_logger().info(f"Mean error: {mean_error:.3f}m")
+        self.get_logger().info(f"Error range: {min_error:.3f}m - {max_error:.3f}m")
+        self.get_logger().info(f"Standard deviation: {std_error:.3f}m")
+        
+        # Recommendations
+        if quality == "Poor":
+            self.get_logger().info("Recommendation: Recalibrate with more well-distributed points")
+            self.get_logger().info("Focus on collecting points in the 1-3m range for optimal LIDAR detection")
+        elif std_error > 0.05:
+            self.get_logger().info("Recommendation: Add more calibration points to improve consistency")
+        
+        # Distance distribution analysis
+        distances = [np.sqrt(p[0]**2 + p[1]**2) for p in self.lidar_points]
+        close_points = sum(1 for d in distances if d < 1.0)
+        optimal_points = sum(1 for d in distances if 1.0 <= d <= 3.0)
+        far_points = sum(1 for d in distances if d > 3.0)
+        
+        self.get_logger().info("Distance distribution of calibration points:")
+        self.get_logger().info(f"  Close range (<1m): {close_points}/{len(distances)}")
+        self.get_logger().info(f"  Optimal range (1-3m): {optimal_points}/{len(distances)}")
+        self.get_logger().info(f"  Far range (>3m): {far_points}/{len(distances)}")
+        
+        if optimal_points < 3:
+            self.get_logger().info("Recommendation: Add more points in the optimal 1-3m range")
+        
+        return quality, mean_error
 
 
 def main(args=None):

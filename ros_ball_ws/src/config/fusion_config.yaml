@@ -21,16 +21,27 @@ filter:
   transform_timeout: 5.0        # Maximum time to wait for transform (seconds)
   transform_retry_delay: 0.5    # Delay between transform retries (seconds)
   startup_wait_time: 2.0        # Time to wait on startup before sensor processing
+  ground_tracking_mode: true    # Enable ground tracking constraint
+  ball_ground_height: 0.0381    # 1.5 inches in meters
 
 # Tracking reliability thresholds
 tracking:
   position_uncertainty_threshold: 0.5  # Position uncertainty threshold for reliable tracking
   velocity_uncertainty_threshold: 1.0  # Velocity uncertainty threshold for reliable tracking
-  consecutive_updates_required: 3       # Required number of successful consecutive updates
+  consecutive_updates_required: 3      # Required number of successful consecutive updates
 
-# Debugging and diagnostics
-diagnostics:
-  history_length: 100           # Number of states to keep in history
-  debug_level: 1                # Debug level (0=minimal, 1=normal, 2=verbose)
-  log_to_file: false            # Whether to log detailed data to file
-  log_file_path: "/tmp/kalman_filter_log.csv" # Path for log file
+# Distance-based reliability settings
+reliability:
+  lidar:
+    close_range: 0.5            # Below this distance, LIDAR is very unreliable
+    optimal_range_start: 1.0    # LIDAR becomes reliable at this distance
+    optimal_range_end: 3.0      # LIDAR reliability decreases beyond this
+    close_range_factor: 10.0    # Noise multiplier for close range
+    optimal_range_factor: 0.6   # Noise multiplier for optimal range
+
+# Physical measurements
+physical_measurements:
+  lidar_height: 0.1524      # LIDAR height from ground (6 inches)
+  camera_height: 0.1016     # Camera height from ground (4 inches)
+  ball_center_height: 0.0381 # Tennis ball center height from ground (1.5 inches)
+  ball_radius: 0.03429      # Tennis ball radius in meters (1.35 inches)

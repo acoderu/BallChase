@@ -1009,7 +1009,7 @@ class TennisBall3DPositionEstimator(Node):
         return True
 
     def _adjust_performance(self):
-        """Single unified performance adjustment method."""
+        """Unified performance adjustment method optimized for ground ball tracking."""
         cpu_usage = self.current_cpu_usage
         old_frame_skip = self.process_every_n_frames
         
@@ -1018,12 +1018,6 @@ class TennisBall3DPositionEstimator(Node):
             self.process_every_n_frames = min(20, self.process_every_n_frames + 2)
             self.radius = 1
             self._min_valid_points = 1
-            
-            # Log critical situation (rate-limited)
-            current_time = TimeUtils.now_as_float()
-            if current_time - self.last_critical_alert > 30.0:
-                self.get_logger().warning(f"Critical CPU load ({cpu_usage:.1f}%), reducing processing load")
-                self.last_critical_alert = current_time
         elif cpu_usage > 85:  # High CPU load
             self.process_every_n_frames = min(15, self.process_every_n_frames + 1)
             self.radius = 1
@@ -1036,6 +1030,34 @@ class TennisBall3DPositionEstimator(Node):
             self.process_every_n_frames = max(3, self.process_every_n_frames - 1)
             self.radius = 3
             self._min_valid_points = 3
+            
+        # Add distance-based processing for ground-level ball
+        current_time = TimeUtils.now_as_float()
+        
+        # Check if we have a recent position estimate
+        position_available = False
+        estimated_distance = None
+        
+        # Get latest position from any source
+        for source in ['HSV', 'YOLO']:
+            if hasattr(self, 'detection_history') and source in self.detection_history:
+                time_since_detection = current_time - self.detection_history[source].get('last_time', 0)
+                if time_since_detection < 0.5 and self.detection_history[source].get('latest_position'):
+                    position = self.detection_history[source]['latest_position']
+                    estimated_distance = np.sqrt(position[0]**2 + position[1]**2)
+                    position_available = True
+                    break
+        
+        # Adjust based on distance if available
+        if position_available and estimated_distance is not None:
+            if estimated_distance < 0.5:  # Very close - focus on depth camera, less on LIDAR
+                # Reduce depth camera frame skip for better close range tracking
+                self.process_every_n_frames = max(1, self.process_every_n_frames - 2)
+                self.get_logger().debug(f"Ball is close ({estimated_distance:.2f}m) - prioritizing depth camera")
+            elif estimated_distance > 3.0:  # Far - can reduce depth camera processing
+                # Increase frame skip to save resources
+                self.process_every_n_frames = min(15, self.process_every_n_frames + 2)
+                self.get_logger().debug(f"Ball is far ({estimated_distance:.2f}m) - reducing depth camera processing")
         
         # Only log when changes occur
         if old_frame_skip != self.process_every_n_frames:
