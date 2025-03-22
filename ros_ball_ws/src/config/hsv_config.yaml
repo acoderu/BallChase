@@ -19,7 +19,7 @@ topics:
   input:
     camera: "/ascamera/camera_publisher/rgb0/image"
   output:
-    position: "/tennis_ball/hsv/position"
+    position: "/basketball/hsv/position"
 
 # Display parameters
 display:

@@ -16,7 +16,7 @@ topics:
   input:
     camera: "/ascamera/camera_publisher/rgb0/image"
   output:
-    position: "/tennis_ball/yolo/position"
+    position: "/basketball/yolo/position"
 
 # Performance and diagnostics
 diagnostics:

@@ -1,0 +1,26 @@
+depth_correction:
+  calibration_date: '2025-03-22 00:29:39'
+  mean_error: 0.014757111568561021
+  num_samples: 8
+  parameters:
+  - 0.030380111607603007
+  - 0.8900820691119005
+  - 0.05505712876507369
+  raw_data:
+  - measured: 0.996
+    'true': 1.0
+  - measured: 1.506
+    'true': 1.42
+  - measured: 1.687
+    'true': 1.67
+  - measured: 2.586
+    'true': 2.56
+  - measured: 0.8270000000000001
+    'true': 0.81
+  - measured: 0.649
+    'true': 0.64
+  - measured: 0.683
+    'true': 0.67
+  - measured: 0.874
+    'true': 0.86
+  type: polynomial

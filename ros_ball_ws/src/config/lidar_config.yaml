@@ -1,26 +1,27 @@
-# Configuration for the LIDAR node
+# Configuration for the LIDAR node - Basketball tracking
 
-# Tennis ball physical properties with updated measurements
-tennis_ball:
-  radius: 0.03429      # Tennis ball radius in meters (1.35 inches)
-  height: -0.1143      # Expected height of ball center relative to LIDAR (-4.5 inches)
-  max_distance: 0.12   # Maximum distance for clustering points
+# Basketball physical properties
+basketball:
+  radius: 0.127      # Basketball radius in meters (10 inch diameter / 2)
+  expected_height: 0.127  # Expected height of ball center relative to ground (5 inches)
+  max_distance: 0.2    # Maximum distance for clustering points
   min_points: 6        # Minimum points to consider a valid cluster
   quality_threshold:   # Thresholds for circle quality assessment
     low: 0.35          # Lower threshold for increased sensitivity
     medium: 0.6
     high: 0.8
-  detection_samples: 40 # Number of random starting points for clustering
+  detection_samples: 30 # Number of random starting points for clustering
   same_ball_threshold: 2.0  # Multiple of radius to determine if it's the same ball
 
-# Calibrated transformation from LIDAR to camera - to be updated by calibration tool
+# Calibrated transformation from LIDAR to camera 
+# To be updated by calibration tool
 transform:
   parent_frame: "camera_frame"
   child_frame: "lidar_frame"
   translation:
     x: 0.0  # To be updated from calibration
     y: 0.0  # To be updated from calibration
-    z: -0.0508  # 2 inches difference between LIDAR (6") and camera (4") heights
+    z: 0.0  # To be updated from calibration
   rotation:
     x: 0.0  # To be updated from calibration
     y: 0.0  # To be updated from calibration
@@ -29,58 +30,55 @@ transform:
   publish_frequency: 10.0  # How often to publish the transform (Hz)
   log_interval: 60.0       # How often to log transform info (seconds)
 
-# LIDAR sensor transform configuration
-sensor_transform:
-  position:
-    x: 0.5  # X offset from base_link
-    y: 0.0  # Y offset from base_link
-    z: 0.2  # Z offset from base_link
-  orientation:
-    roll: 0.0  # Roll in radians
-    pitch: 0.0  # Pitch in radians
-    yaw: 0.0  # Yaw in radians
+# LIDAR sensor configuration
+sensor:
+  height: 0.1524         # LIDAR height from ground (6 inches)
+  beam_intersection:     # Where the LIDAR beam intersects with the basketball
+    min_height: 0.02     # Minimum height above ground to consider points (meters)
+    max_height: 0.2      # Maximum height to consider (meters)
+    expected_height: 0.1 # Expected height of beam intersection with ball
 
 # Topic configuration
 topics:
   input:
     lidar_scan: "/scan_raw"
-    yolo_detection: "/tennis_ball/yolo/position"
-    hsv_detection: "/tennis_ball/hsv/position"
+    yolo_detection: "/basketball/yolo/position"
+    hsv_detection: "/basketball/hsv/position"
   output:
-    ball_position: "/tennis_ball/lidar/position"
-    visualization: "/tennis_ball/lidar/visualization"
-    diagnostics: "/tennis_ball/lidar/diagnostics"
+    ball_position: "/basketball/lidar/position"
+    visualization: "/basketball/lidar/visualization"
+    diagnostics: "/basketball/lidar/diagnostics"
   queue_size: 10  # Default ROS2 queue size for all topics
 
 # Physical measurements
 physical_measurements:
   lidar_height: 0.1524      # LIDAR height from ground (6 inches)
   camera_height: 0.1016     # Camera height from ground (4 inches)
-  ball_center_height: 0.0381 # Tennis ball center height from ground (1.5 inches)
-  ball_height_offset: 0.1143 # Height difference between LIDAR and ball center (4.5 inches)
+  ball_radius: 0.127        # Basketball radius (5 inches)
+  ball_center_height: 0.127 # Basketball center height from ground (5 inches)
 
 # Detection reliability settings
 detection_reliability:
-  min_reliable_distance: 1.0    # Minimum distance for reliable detections in meters
-  publish_unreliable: true      # Set to true to allow publishing close-range detections
+  min_reliable_distance: 0.5    # Minimum distance for reliable detections in meters
+  publish_unreliable: true      # Always publish for calibration
   confidence_scaling: true      # Apply confidence scaling based on distance
 
 # Visualization settings
 visualization:
   marker_lifetime: 1.0  # Seconds to display markers
-  text_height_offset: 0.1  # Height above ball for text (meters)
+  text_height_offset: 0.2  # Height above ball for text (meters)
   text_size: 0.05  # Size of text markers
   colors:
     yolo:
       r: 0.0
       g: 1.0
       b: 0.3
-      base_alpha: 0.5  # Base transparency (quality adds to this)
+      base_alpha: 0.5
     hsv:
       r: 1.0
       g: 0.6
       b: 0.0
-      base_alpha: 0.5  # Base transparency (quality adds to this)
+      base_alpha: 0.5
     text:
       r: 1.0
       g: 1.0
@@ -94,24 +92,12 @@ diagnostics:
   log_scan_interval: 20  # Log scan info every N scans
   max_detection_times: 100  # Number of detection times to keep for averaging
 
-# Ground filtering parameters
-ground_filtering:
-  enabled: true
-  min_height: 0.02    # Minimum height above ground to keep points (meters)
-  max_height: 0.3     # Maximum height to consider (meters)
-
-# RANSAC circle fitting parameters
+# RANSAC circle fitting parameters - optimized for basketball
 ransac:
   enabled: true
-  max_iterations: 50    # Maximum RANSAC iterations
-  inlier_threshold: 0.01  # Distance threshold for inliers (meters)
-  min_inliers: 5       # Minimum inlier count for valid detection
+  max_iterations: 30     # Maximum RANSAC iterations (reduced for performance)
+  inlier_threshold: 0.02  # Distance threshold for inliers (meters)
+  min_inliers: 5         # Minimum inlier count for valid detection
   quality_weight:
-    inlier_ratio: 0.6   # Weight for inlier ratio in quality calculation
-    radius_error: 0.4   # Weight for radius error in quality calculation
-    
-# Calibration validation
-calibration:
-  validate: true       # Whether to validate calibration online
-  error_threshold: 0.1  # Error threshold to log warnings (meters)
-  check_interval: 10.0  # How often to check calibration (seconds)
+    inlier_ratio: 0.6    # Weight for inlier ratio in quality calculation
+    radius_error: 0.4    # Weight for radius error in quality calculation

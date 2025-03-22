@@ -1,62 +1,39 @@
 #!/usr/bin/env python3
 
 """
-Tennis Ball Tracking Robot - LIDAR Detection Node
-=================================================
+Basketball Tracking Robot - LIDAR Detection Node
+===============================================
 
-Project Overview:
-----------------
-This project involves a robotic car designed to autonomously track and follow a moving tennis ball.
-The system uses multiple sensing modalities for robust detection:
-- YOLO neural network detection (subscribes to '/tennis_ball/yolo/position')
-- HSV color-based detection (subscribes to '/tennis_ball/hsv/position')
-- LIDAR for depth sensing (this node)
-- Depth camera for additional depth information
+This node processes 2D LIDAR data to detect a basketball and provide 3D position information.
+It correlates LIDAR data with camera-based detections from YOLO and HSV nodes.
 
-Data Pipeline:
--------------
-1. Camera images are processed by:
-   - YOLO detection node (yolo_ball_node.py) publishing to '/tennis_ball/yolo/position'
-   - HSV color detector (hsv_ball_node.py) publishing to '/tennis_ball/hsv/position'
+Features:
+- Processes 2D LIDAR scans to find circular patterns matching a basketball
+- Uses YOLO and HSV detections to trigger validation of potential basketball locations
+- Publishes the basketball's 3D position in the robot's coordinate frame
+- Provides visualization markers for debugging in RViz
+- Includes simplified detection algorithms optimized for Raspberry Pi 5
 
-2. This LIDAR node:
-   - Subscribes to raw LIDAR scans from '/scan_raw'
-   - Subscribes to both YOLO and HSV detection results
-   - Correlates 2D camera detections with 3D LIDAR point data
-   - Publishes 3D positions to '/tennis_ball/lidar/position'
-
-3. Data is then passed to:
-   - Sensor fusion node to combine all detection methods
-   - State management node for decision-making
-   - PID controller for motor control
-
-This Node's Purpose:
-------------------
-This LIDAR node adds depth information to the tennis ball tracking by:
-- Processing 2D laser scan data to find circular patterns matching a tennis ball
-- Confirming these patterns when triggered by camera-based detections
-- Publishing the ball's 3D position in the robot's coordinate frame
-- Providing visualization markers for debugging in RViz
-
-LIDAR Detection Reliability:
----------------------------
-This system accounts for a fundamental limitation of 2D LIDAR when detecting ground objects:
-
-1. Objects close to the robot (<1.0m) are often detected unreliably or missed entirely
-   due to the scanning plane geometry. At close distances, the LIDAR beam may pass
-   over small objects like tennis balls.
-
-2. Medium distances (1.2-3.0m) provide optimal detection conditions for the LIDAR.
-
-3. We implement a distance-based filtering approach:
-   - Detections closer than 1.0m are marked as unreliable
-   - Unreliable detections can be optionally filtered out or published with lower confidence
-   - The fusion system adjusts trust levels based on detection distance
-
-This approach ensures the system relies more on the depth camera for close-range detection
-while leveraging LIDAR data when it's most reliable.
+Physical Setup:
+- LIDAR mounted 6 inches (15.24 cm) above ground
+- Basketball diameter: 10 inches (25.4 cm)
+- LIDAR beam intersects basketball at a consistent height
 """
 
+import rclpy
+from rclpy.node import Node
+import numpy as np
+import math
+import time
+from collections import deque
+import threading
+
+from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import PointStamped, TransformStamped
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import String
+from tf2_ros import TransformBroadcaster
+import json
 
 import sys
 import os
@@ -66,174 +43,32 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 # Add the 'src' directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-import rclpy
-from rclpy.node import Node
-import time
-import json
-import math
-import numpy as np
-from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import PointStamped
-from geometry_msgs.msg import TransformStamped  
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import String
-from tf2_ros import TransformBroadcaster
-import psutil  # Move psutil import here with other imports
-import os
-import threading
-from collections import deque  # Add import for deque
-from utilities.resource_monitor import ResourceMonitor
-from utilities.time_utils import TimeUtils  # Add TimeUtils import
 from config.config_loader import ConfigLoader  # Import ConfigLoader
-from scipy.linalg import block_diag
 
 
 
-# Load configuration from file
-config_loader = ConfigLoader()
-lidar_config = config_loader.load_yaml('lidar_config.yaml')
-
-
-
-# Tennis ball configuration from config file - fix parameter values for better detection
-TENNIS_BALL_CONFIG = lidar_config.get('tennis_ball', {
-    "radius": 0.033,         # Tennis ball radius in meters
-    "height": -0.20,         # Expected height of ball center relative to LIDAR
-    "max_distance": 0.12,    # Optimal distance for clustering
-    "min_points": 6,         # Minimum points needed for valid detection
-    "quality_threshold": {   # Thresholds for circle quality assessment
-        "low": 0.35,         # Base threshold for valid detection
-        "medium": 0.6,       # Medium confidence threshold
-        "high": 0.8          # High confidence threshold
-    },
-    "detection_samples": 40  # Number of sampling points to try
-})
-
-# Topic configuration from config file
-TOPICS = lidar_config.get('topics', {
-    "input": {
-        "lidar_scan": "/scan_raw",
-        "yolo_detection": "/tennis_ball/yolo/position",
-        "hsv_detection": "/tennis_ball/hsv/position"
-    },
-    "output": {
-        "ball_position": "/tennis_ball/lidar/position",
-        "visualization": "/tennis_ball/lidar/visualization",
-        "diagnostics": "/tennis_ball/lidar/diagnostics"
-    }
-})
-
-# Get default queue size from config
-DEFAULT_QUEUE_SIZE = lidar_config.get('topics', {}).get('queue_size', 10)
-
-# Get visualization settings
-VIZ_CONFIG = lidar_config.get('visualization', {
-    'marker_lifetime': 1.0,
-    'text_height_offset': 0.1,
-    'text_size': 0.05,
-    'colors': {
-        'yolo': {'r': 0.0, 'g': 1.0, 'b': 0.3, 'base_alpha': 0.5},
-        'hsv': {'r': 1.0, 'g': 0.6, 'b': 0.0, 'base_alpha': 0.5},
-        'text': {'r': 1.0, 'g': 1.0, 'b': 1.0, 'a': 1.0}
-    }
-})
-
-# Get diagnostic settings
-DIAG_CONFIG = lidar_config.get('diagnostics', {
-    'publish_interval': 3.0,
-    'debug_level': 1,
-    'log_scan_interval': 20,
-    'max_detection_times': 100,
-    'error_history_size': 10  # Keep track of last 10 errors
-})
-
-
-class TennisBallLidarDetector(Node):
+class BasketballLidarDetector(Node):
     """
-    A ROS2 node to detect tennis balls using a 2D laser scanner.
+    A ROS2 node to detect basketballs using a 2D laser scanner.
     
-    This node correlates LIDAR data with camera detections to provide 3D position 
-    information for detected tennis balls, which is essential for accurate tracking
-    and following behavior in the robot.
-    
-    Subscribed Topics:
-    - LaserScan from 2D LIDAR ({TOPICS["input"]["lidar_scan"]})
-    - PointStamped from YOLO detection ({TOPICS["input"]["yolo_detection"]})
-    - PointStamped from HSV detection ({TOPICS["input"]["hsv_detection"]})
-    
-    Published Topics:
-    - PointStamped with 3D position ({TOPICS["output"]["ball_position"]})
-    - MarkerArray for visualization ({TOPICS["output"]["visualization"]})
-    - String with diagnostic information ({TOPICS["output"]["diagnostics"]})
+    Correlates LIDAR data with camera detections to provide 3D position
+    information for detected basketballs.
     """
     
     def __init__(self):
-        """Initialize the tennis ball LIDAR detector node."""
-        super().__init__('tennis_ball_lidar_detector')
+        """Initialize the basketball LIDAR detector node."""
+        super().__init__('basketball_lidar_detector')
         
-        # Initialize thread lock for thread-safe collections
-        import threading
-        self.lock = threading.RLock()
-        
-        # Initialize state tracking (replaces _init_performance_tracking)
-        self._init_state_tracking()
-        
-        # Initialize detection parameters early
-        self.detection_samples = TENNIS_BALL_CONFIG["detection_samples"]
-        
-        # Add resource monitoring for Raspberry Pi 5
-        self.resource_monitor = ResourceMonitor(
-            node=self,
-            publish_interval=20.0,  # Less frequent updates to reduce overhead
-            enable_temperature=True
-        )
-        self.resource_monitor.add_alert_callback(self._handle_resource_alert)
-        self.resource_monitor.start()
-        
-        # Use PyTorch/NumPy optimized for Raspberry Pi if available
+        # Load configuration
+        self.config_loader = ConfigLoader()
         try:
-            # Try to set number of threads for better Pi 5 performance
-            import torch
-            if hasattr(torch, 'set_num_threads'):
-                # Leave one core free for system processes
-                torch.set_num_threads(3)
-                self.get_logger().info(f"Set PyTorch to use 3 threads on Pi 5")
-        except ImportError:
-            pass
-            
-        try:
-            # Configure NumPy for better performance
-            np.set_printoptions(precision=4, suppress=True)
-        except:
-            pass
+            self.config = self.config_loader.load_yaml('lidar_config.yaml')
+        except Exception as e:
+            self.get_logger().error(f"Failed to load config: {str(e)}")
+            self.config = {}
         
-        # Load physical parameters of the tennis ball with updated values
-        self.lidar_height = 0.1524  # 6 inches in meters
-        self.ball_radius = TENNIS_BALL_CONFIG["radius"]
-        self.ball_center_height = 0.0381  # 1.5 inches in meters 
-        self.ball_height = 0.05  # Setting to ball radius above LIDAR plane (LIDAR at 15cm, ball radius ~3.3cm)
-        self.lidar_to_ball_height = self.lidar_height - self.ball_center_height  # Height difference
-        self.max_distance = TENNIS_BALL_CONFIG["max_distance"]
-        self.min_points = TENNIS_BALL_CONFIG["min_points"]
-        
-        # Load reliability configuration
-        reliability_config = lidar_config.get('detection_reliability', {
-            'min_reliable_distance': 1.0,  # Default to 1.0 meter
-            'publish_unreliable': False     # Default to not publishing unreliable detections
-        })
-        self.min_reliable_distance = reliability_config.get('min_reliable_distance', 1.0)
-        self.publish_unreliable_detections = reliability_config.get('publish_unreliable', False)
-        self.confidence_distance_factor = 0.7  # How much distance affects confidence
-        
-        # Add unsuccessful detections counter
-        self.unsuccessful_detections = 0
-        
-        # Initialize state variables
-        self.latest_scan = None
-        self.scan_timestamp = None
-        self.scan_frame_id = None
-        self.points_array = None
-        self.previous_ball_position = None  # For tracking the ball over time
+        # Initialize state
+        self._init_state()
         
         # Set up subscribers
         self._setup_subscribers()
@@ -241,222 +76,253 @@ class TennisBallLidarDetector(Node):
         # Set up publishers
         self._setup_publishers()
         
-        # Timer for publishing status
-        self.status_timer = self.create_timer(
-            lidar_config.get('diagnostics', {}).get('publish_interval', 3.0), 
-            self.publish_status
-        )
-        
-        # Initialize the TF Broadcaster for publishing coordinate transforms
+        # Set up TF broadcaster
         self.tf_broadcaster = TransformBroadcaster(self)
-        self.last_transform_log = 0.0  # Track when we last logged transform info
         
-        # Set up a timer for publishing the transform regularly
-        # Publishing frequency from config
-        self.transform_timer = self.create_timer(
-            1.0 / lidar_config.get('transform', {}).get('publish_frequency', 10.0), 
-            self.publish_transform
-        )
+        # Set up transform timer
+        transform_freq = self.config.get('transform', {}).get('publish_frequency', 10.0)
+        self.transform_timer = self.create_timer(1.0 / transform_freq, self.publish_transform)
         
-        # Load transform parameters from config
-        transform_config = lidar_config.get('transform', {})
-        self.transform_parent_frame = transform_config.get('parent_frame', 'camera_frame')
-        self.transform_child_frame = transform_config.get('child_frame', 'lidar_frame')
-        self.transform_translation = transform_config.get('translation', {
-            'x': -0.326256, 'y': 0.210052, 'z': 0.504021
-        })
-        self.transform_rotation = transform_config.get('rotation', {
-            'x': -0.091584, 'y': 0.663308, 'z': 0.725666, 'w': 0.158248
-        })
+        # Set up diagnostics timer
+        diag_interval = self.config.get('diagnostics', {}).get('publish_interval', 3.0)
+        self.diagnostics_timer = self.create_timer(diag_interval, self.publish_diagnostics)
         
-        # Log that we're publishing the calibrated transform
-        self.get_logger().info(f"Publishing calibrated LIDAR-to-camera transform (from calibration)")
-        self.get_logger().info(
-            f"Transform: [{self.transform_translation['x']}, {self.transform_translation['y']}, "
-            f"{self.transform_translation['z']}], Quaternion: [{self.transform_rotation['x']}, "
-            f"{self.transform_rotation['y']}, {self.transform_rotation['z']}, {self.transform_rotation['w']}]"
-        )
+        # Load basketball parameters
+        self._load_basketball_parameters()
 
-        self.get_logger().info("LIDAR: Tennis ball detector initialized and ready")
-        self.get_logger().info(f"LIDAR: Listening for LaserScan on {TOPICS['input']['lidar_scan']}")
-        self.get_logger().info(f"LIDAR: Listening for YOLO detections on {TOPICS['input']['yolo_detection']}")
-        self.get_logger().info(f"LIDAR: Listening for HSV detections on {TOPICS['input']['hsv_detection']}")
+        # Initialize coordinate transform parameters
+        self._init_transform_parameters()
         
-        # Configure detection algorithm based on hardware
-        self._configure_detection_algorithm()
+        # Create a lock for thread safety
+        self.lock = threading.RLock()
         
-        # Pre-allocate buffers for point cloud processing
-        self._points_buffer = None  # Will be allocated based on first point cloud
-        self._filtered_buffer = None
-        self._cluster_buffer = None
-
-        # Configure logging levels from config
-        log_config = lidar_config.get('logging', {
-            'console_level': 'info',   # Options: debug, info, warn, error
-            'file_level': 'debug',     # Options: debug, info, warn, error
-            'log_file': 'lidar_node.log',
-            'max_file_size_mb': 10
-        })
-
-        # Set logger level programmatically
-        self._configure_logging(log_config)
-
-        # Debug data collection (only enabled in debug mode)
-        self.debug_mode = DIAG_CONFIG.get('debug_level', 0) > 1
-        self.last_point_clouds = deque(maxlen=5) if self.debug_mode else None
-
-        self.position_history = deque(maxlen=10)  # Increase history from 5 to 10 positions
-
-        # Add after other initializations
-        self.kalman_filter = KalmanFilter()
-        self.filtered_positions = deque(maxlen=10)  # Keep track of filtered positions
-        self.use_kalman = True  # Flag to enable/disable Kalman filtering
+        # Debug timer
+        self.debug_timer = self.create_timer(2.0, self.publish_debug_point)
         
-        # Add to parameter declarations
-        self.declare_parameter('use_kalman_filter', True)
-        self.use_kalman = self.get_parameter('use_kalman_filter').value
-        
-        if self.use_kalman:
-            self.get_logger().info("Using Kalman filter for position smoothing")
-        
-        # Simplify debug flags - use a single detailed_logging parameter
-        self.declare_parameter('detailed_logging', False)
-        self.detailed_logging = self.get_parameter('detailed_logging').value
-        
-        # Add logging files based on detailed_logging flag
-        self.cluster_log_file = None
-        self.kalman_log_file = None
-        
-        if self.detailed_logging:
-            try:
-                self.cluster_log_file = open("cluster_analysis.log", "a")
-                self.cluster_log_file.write("-------- New Session Started --------\n")
-                self.cluster_log_file.write(f"Timestamp: {TimeUtils.now_as_float()}\n\n")
-                
-                self.kalman_log_file = open("kalman_analysis.log", "a")
-                self.kalman_log_file.write("-------- New Session Started --------\n")
-                self.kalman_log_file.write(f"Timestamp: {TimeUtils.now_as_float()}\n\n")
-            except Exception as e:
-                self.get_logger().error(f"Could not create log files: {e}")
-
-        # Add to __init__ after other initializations
-        if not hasattr(self, 'position_history') or self.position_history is None:
-            self.position_history = deque(maxlen=10)
-
-        if not hasattr(self, 'previous_ball_position'):
-            self.previous_ball_position = None
-
-        if not hasattr(self, 'consecutive_failures'):
-            self.consecutive_failures = 0
-
-        if not hasattr(self, 'last_successful_detection_time'):
-            self.last_successful_detection_time = 0
-
-        if not hasattr(self, 'predicted_position'):
-            self.predicted_position = None
-
-        if not hasattr(self, 'prediction_time'):
-            self.prediction_time = 0
-
-        # Add extra debug logging mode
-        self.declare_parameter('super_verbose_logging', False)
-        self.super_verbose_logging = self.get_parameter('super_verbose_logging').value
-        if self.super_verbose_logging:
-            self.get_logger().info("SUPER VERBOSE LOGGING MODE ENABLED - Will show detailed debugging information")
-        
-        # Add calibration validation tracking
-        self.calibration_errors = deque(maxlen=30)
-        self.last_calibration_check_time = 0
+        self.get_logger().info("Basketball LIDAR detector initialized")
     
-    def _init_state_tracking(self):
-        """Initialize state tracking for all system components."""
-        # Performance tracking from _init_performance_tracking will be moved here
-        self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
+    def _init_state(self):
+        """Initialize internal state tracking."""
+        # Scan data
+        self.latest_scan = None
+        self.scan_timestamp = None
+        self.scan_frame_id = None
+        self.points_array = None
+        
+        # Performance tracking
+        self.start_time = time.time()
         self.processed_scans = 0
         self.successful_detections = 0
+        self.detection_times = deque(maxlen=100)
         
-        # Use deque with maxlen for detection times instead of unbounded list
-        max_detection_times = DIAG_CONFIG['max_detection_times']
-        self.detection_times = deque(maxlen=max_detection_times)
-        
-        # Detection source statisti
+        # Detection sources
         self.yolo_detections = 0
         self.hsv_detections = 0
         
-        # Error tracking (for diagnostics) - use deque with maxlen
-        error_history_size = DIAG_CONFIG.get('error_history_size', 10)
-        self.errors = deque(maxlen=error_history_size)
-        self.warnings = deque(maxlen=error_history_size) # Add warnings collection too
-        self.last_error_time = 0
-        
-        # System health indicators
-        self.lidar_health = 1.0  # 0.0 to 1.0 scale
-        self.detection_health = 1.0
-        self.detection_latency = 0.0
-        
-        # Add point data history with bounded size
-        self.point_history = deque(maxlen=100)  # Keep last 100 sets of points
-        
-        # Add detection failure tracking
+        # Position tracking
+        self.position_history = deque(maxlen=10)
+        self.previous_ball_position = None
         self.consecutive_failures = 0
         self.last_successful_detection_time = 0
         self.predicted_position = None
+        
+        # Health monitoring
+        self.lidar_health = 1.0
+        self.detection_health = 1.0
+        self.detection_latency = 0.0
+        self.errors = deque(maxlen=10)
+        self.last_error_time = 0
+    
+    def _load_basketball_parameters(self):
+        """Load basketball physical parameters from config."""
+        # Get basketball configuration
+        basketball_config = self.config.get('basketball', {})
+        
+        # Core parameters
+        self.ball_radius = basketball_config.get('radius', 0.127)  # 5 inches
+        self.max_distance = basketball_config.get('max_distance', 0.2)
+        self.min_points = basketball_config.get('min_points', 6)
+        self.detection_samples = basketball_config.get('detection_samples', 30)
+        
+        # Quality thresholds
+        quality_thresholds = basketball_config.get('quality_threshold', {})
+        self.quality_low = quality_thresholds.get('low', 0.35)
+        self.quality_medium = quality_thresholds.get('medium', 0.6)
+        self.quality_high = quality_thresholds.get('high', 0.8)
+        
+        # Physical measurements
+        physical = self.config.get('physical_measurements', {})
+        self.lidar_height = physical.get('lidar_height', 0.1524)  # 6 inches
+        self.ball_center_height = physical.get('ball_center_height', 0.127)  # 5 inches
+        
+        # Detection reliability
+        reliability = self.config.get('detection_reliability', {})
+        self.min_reliable_distance = reliability.get('min_reliable_distance', 0.5)
+        self.publish_unreliable = reliability.get('publish_unreliable', True)
+        
+        # RANSAC parameters
+        ransac_config = self.config.get('ransac', {})
+        self.ransac_enabled = ransac_config.get('enabled', True)
+        self.ransac_max_iterations = ransac_config.get('max_iterations', 30)
+        self.ransac_inlier_threshold = ransac_config.get('inlier_threshold', 0.02)
+        self.ransac_min_inliers = ransac_config.get('min_inliers', 5)
+    
+    def _init_transform_parameters(self):
+        """Initialize coordinate transform parameters."""
+        transform_config = self.config.get('transform', {})
+        
+        # Frame IDs
+        self.transform_parent_frame = transform_config.get('parent_frame', 'camera_frame')
+        self.transform_child_frame = transform_config.get('child_frame', 'lidar_frame')
+        
+        # Translation vector
+        translation = transform_config.get('translation', {})
+        self.transform_translation = {
+            'x': translation.get('x', 0.0),
+            'y': translation.get('y', 0.0),
+            'z': translation.get('z', 0.0)
+        }
+        
+        # Rotation quaternion
+        rotation = transform_config.get('rotation', {})
+        self.transform_rotation = {
+            'x': rotation.get('x', 0.0),
+            'y': rotation.get('y', 0.0),
+            'z': rotation.get('z', 0.0),
+            'w': rotation.get('w', 1.0)
+        }
+        
+        # Log transform interval
+        self.last_transform_log = 0.0
     
     def _setup_subscribers(self):
-        """Set up all subscribers for this node."""
-        # Subscribe to LIDAR scan data
+        """Set up subscribers for this node."""
+        # Get topic config
+        topics = self.config.get('topics', {})
+        input_topics = topics.get('input', {})
+        queue_size = topics.get('queue_size', 10)
+        
+        # LIDAR scan subscription
+        lidar_topic = input_topics.get('lidar_scan', '/scan')
         self.scan_subscription = self.create_subscription(
             LaserScan,
-            TOPICS["input"]["lidar_scan"],
+            lidar_topic,
             self.scan_callback,
-            DEFAULT_QUEUE_SIZE
+            queue_size
         )
         
-        # Subscribe to YOLO detections
+        # YOLO detection subscription
+        yolo_topic = input_topics.get('yolo_detection', '/basketball/yolo/position')
         self.yolo_subscription = self.create_subscription(
             PointStamped,
-            TOPICS["input"]["yolo_detection"],
+            yolo_topic,
             self.yolo_callback,
-            DEFAULT_QUEUE_SIZE
+            queue_size
         )
         
-        # Subscribe to HSV detections
+        # HSV detection subscription
+        hsv_topic = input_topics.get('hsv_detection', '/basketball/hsv/position')
         self.hsv_subscription = self.create_subscription(
             PointStamped,
-            TOPICS["input"]["hsv_detection"],
+            hsv_topic,
             self.hsv_callback,
-            DEFAULT_QUEUE_SIZE
+            queue_size
         )
     
     def _setup_publishers(self):
-        """Set up all publishers for this node."""
-        # Publisher for 3D tennis ball position
+        """Set up publishers for this node."""
+        # Get topic config
+        topics = self.config.get('topics', {})
+        output_topics = topics.get('output', {})
+        queue_size = topics.get('queue_size', 10)
+        
+        # Ball position publisher
+        position_topic = output_topics.get('ball_position', '/basketball/lidar/position')
         self.position_publisher = self.create_publisher(
             PointStamped,
-            TOPICS["output"]["ball_position"],
-            DEFAULT_QUEUE_SIZE
+            position_topic,
+            queue_size
         )
         
-        # Publisher for visualization markers (for RViz)
+        # Visualization publisher
+        viz_topic = output_topics.get('visualization', '/basketball/lidar/visualization')
         self.marker_publisher = self.create_publisher(
             MarkerArray,
-            TOPICS["output"]["visualization"],
-            DEFAULT_QUEUE_SIZE
+            viz_topic,
+            queue_size
         )
         
-        # Update diagnostics publisher to match the expected topic from the diagnostics node
+        # Diagnostics publisher
+        diag_topic = output_topics.get('diagnostics', '/basketball/lidar/diagnostics')
         self.diagnostics_publisher = self.create_publisher(
             String,
-            "/tennis_ball/lidar/diagnostics",
-            DEFAULT_QUEUE_SIZE
+            diag_topic,
+            queue_size
         )
+    
+    def scan_callback(self, msg):
+        """
+        Process LaserScan messages from the LIDAR.
+        
+        Converts polar coordinates to Cartesian coordinates.
+        """
+        try:
+            # Store scan metadata
+            self.latest_scan = msg
+            self.scan_timestamp = msg.header.stamp
+            self.scan_frame_id = "lidar_frame"
+            
+            # Extract scan parameters
+            angle_min = msg.angle_min
+            angle_increment = msg.angle_increment
+            ranges = np.array(msg.ranges)
+            
+            # Filter out invalid measurements
+            valid_indices = np.isfinite(ranges)
+            
+            # Filter out very short ranges (robot body reflections)
+            min_valid_range = 0.05
+            valid_indices = valid_indices & (ranges > min_valid_range)
+            
+            # Skip if no valid ranges
+            if np.sum(valid_indices) == 0:
+                self.get_logger().warn("No valid range measurements in scan")
+                self.points_array = None
+                return
+            
+            valid_ranges = ranges[valid_indices]
+            angles = angle_min + angle_increment * np.arange(len(ranges))[valid_indices]
+            
+            # Convert to Cartesian coordinates
+            x = valid_ranges * np.cos(angles)
+            y = valid_ranges * np.sin(angles)
+            
+            # Setting Z coordinates based on LIDAR height and expected ball intersection
+            # For a flat LIDAR at 6 inches, the beam will intersect the ball at a consistent height
+            # We'll set this to 0 in the LIDAR frame, and handle the actual height in transformation
+            z = np.zeros_like(x)
+            
+            # Stack coordinates
+            self.points_array = np.column_stack((x, y, z))
+            
+            # Update statistics
+            self.processed_scans += 1
+            
+            # Log scan information
+            log_interval = self.config.get('diagnostics', {}).get('log_scan_interval', 20)
+            if self.processed_scans % log_interval == 0:
+                self.get_logger().debug(
+                    f"Processed scan #{self.processed_scans} with "
+                    f"{len(self.points_array)} valid points"
+                )
+            
+        except Exception as e:
+            self.log_error(f"Error processing scan: {str(e)}")
+            self.points_array = None
     
     def yolo_callback(self, msg):
         """
         Handle ball detections from the YOLO neural network.
-        
-        Args:
-            msg (PointStamped): The detected ball position from YOLO
         """
         self.yolo_detections += 1
         self.camera_detection_callback(msg, "YOLO")
@@ -464,966 +330,24 @@ class TennisBallLidarDetector(Node):
     def hsv_callback(self, msg):
         """
         Handle ball detections from the HSV color detector.
-        
-        Args:
-            msg (PointStamped): The detected ball position from HSV detector
         """
         self.hsv_detections += 1
         self.camera_detection_callback(msg, "HSV")
     
-    def scan_callback(self, msg):
-        """
-        Process LaserScan messages from the LIDAR.
-        
-        Extracts point cloud data from 2D laser scan by converting
-        polar coordinates to Cartesian coordinates.
-        
-        Args:
-            msg (LaserScan): The laser scan message
-        """
-        self.start_time = time.time()  # Reset timer for this scan
-        
-        # Store the scan metadata - preserve original frame_id for proper transformation
-        self.latest_scan = msg
-        self.scan_timestamp = msg.header.stamp  # Use original timestamp, not current time
-        self.scan_frame_id = "lidar_frame"  # Always use our consistent frame ID
-        
-        try:
-            # Extract basic scan parameters
-            angle_min = msg.angle_min
-            angle_increment = msg.angle_increment
-            ranges = np.array(msg.ranges)
-            
-            # Filter out invalid measurements (inf, NaN)
-            valid_indices = np.isfinite(ranges)
-            valid_ranges = ranges[valid_indices]
-            
-            # Also filter out very short ranges that might be robot body reflections
-            min_valid_range = 0.05  # Minimum valid range in meters
-            valid_indices = valid_indices & (ranges > min_valid_range)
-            valid_ranges = ranges[valid_indices]
-            
-            # Skip processing if no valid ranges
-            if len(valid_ranges) == 0:
-                self.get_logger().warn("LIDAR: No valid range measurements in scan")
-                self.points_array = None
-                return
-            
-            # Convert polar coordinates to Cartesian coordinates
-            angles = angle_min + angle_increment * np.arange(len(ranges))[valid_indices]
-            
-            # Vectorized computation is much faster
-            x = valid_ranges * np.cos(angles)  # x = r * cos(θ)
-            y = valid_ranges * np.sin(angles)  # y = r * sin(θ)
-            
-            # Add Z coordinate (assumes LIDAR is parallel to ground)
-            z = np.full_like(x, self.ball_height)
-            # Note: We're setting Z to a constant because 2D LIDAR operates in a fixed plane.
-            # The actual height will be accounted for in the transform to camera frame.
-            
-            # Stack coordinates to create points array [x, y, z]
-            self.points_array = np.column_stack((x, y, z))
-            
-            # Update statistics
-            self.processed_scans += 1
-            
-            # Log scan information (debug level to avoid flooding logs)
-            log_scan_interval = DIAG_CONFIG['log_scan_interval']
-            if self.processed_scans % log_scan_interval == 0:  # Log every Nth scan
-                self.get_logger().debug(
-                    f"LIDAR: Processed scan #{self.processed_scans} with "
-                    f"{len(self.points_array)} valid points"
-                )
-            
-            # Gradually recover health if we're successfully processing scans
-            if hasattr(self, 'lidar_health'):
-                self.lidar_health = min(1.0, self.lidar_health + 0.01)
-            
-            if self.debug_mode and self.points_array is not None:
-                # Store a sample of points for debugging
-                sample_size = min(100, len(self.points_array))
-                indices = np.random.choice(len(self.points_array), sample_size, replace=False)
-                self.last_point_clouds.append({
-                    "timestamp": self.scan_timestamp.sec + self.scan_timestamp.nanosec/1e9,
-                    "points_sample": self.points_array[indices].tolist(),
-                    "total_points": len(self.points_array)
-                })
-            
-        except Exception as e:
-            error_msg = f"Error processing scan: {str(e)}"
-            self.log_error(error_msg)
-            self.points_array = None
-    
-    
-    
-    def find_tennis_balls(self, trigger_source):
-        """Search for tennis balls using a grid-based approach."""
-        # Start timing
-        operation_start = TimeUtils.now_as_float()
-        
-        if self.points_array is None or len(self.points_array) == 0:
-            self.get_logger().warn("LIDAR: No points available for analysis")
-            return []
-
-        # Get adaptive processing parameters
-        processing_params = self.determine_processing_level()
-        detection_samples = processing_params["detection_samples"]
-        adaptive_max_distance = processing_params["radius"] * self.ball_radius
-        adaptive_min_points = processing_params["min_points"]
-        
-        if self.detailed_logging and trigger_source.endswith("_DEBUG"):
-            self.get_logger().info(f"DEBUG MODE: Using min_points={self.min_points}, min_quality={TENNIS_BALL_CONFIG['quality_threshold']['low']}")
-        
-        self.get_logger().debug(
-            f"LIDAR: Analyzing {len(self.points_array)} points triggered by {trigger_source}"
-        )
-        
-        points = self.points_array
-        balls_found = []
-        
-        # Current time for adaptive parameters
-        current_time = TimeUtils.now_as_float()
-        
-        # Dynamically adjust parameters based on consecutive failures
-        dynamic_min_points = self.min_points
-        dynamic_quality_threshold = TENNIS_BALL_CONFIG["quality_threshold"]["low"]
-        
-        # Create a consistent adaptive factor
-        adaptation_factor = min(0.5, 0.1 * min(self.consecutive_failures, 5))
-        
-        # If we have consecutive failures, gradually reduce requirements
-        if self.consecutive_failures > 2:
-            # Reduce minimum points requirement (but not below 5)
-            dynamic_min_points = max(5, int(self.min_points * (1.0 - adaptation_factor)))
-            
-            # Reduce quality threshold (but not below 0.3)
-            dynamic_quality_threshold = max(0.3, dynamic_quality_threshold * (1.0 - adaptation_factor))
-            
-            if self.detailed_logging:
-                self.get_logger().info(
-                    f"ADAPTIVE: After {self.consecutive_failures} failures, using reduced requirements: "
-                    f"min_points={dynamic_min_points} (from {self.min_points}), "
-                    f"quality={dynamic_quality_threshold:.2f} (from {TENNIS_BALL_CONFIG['quality_threshold']['low']:.2f})"
-                )
-        
-        # SIMPLIFIED: Create seed points using a more straightforward approach
-        seed_points = []
-        
-        # Always include previous ball position if available (highest priority)
-        if self.previous_ball_position is not None:
-            seed_points.append(self.previous_ball_position)
-            
-        # Add predicted position if available (from Kalman filter)
-        if self.predicted_position is not None:
-            # Only use prediction if it's recent
-            time_since_prediction = current_time - getattr(self, 'prediction_time', 0)
-            if time_since_prediction < 1.0:  # Only use predictions less than 1 second old
-                seed_points.append(self.predicted_position)
-                
-                if self.detailed_logging:
-                    self.get_logger().info(
-                        f"PREDICTION: Using predicted position at "
-                        f"({self.predicted_position[0]:.2f}, {self.predicted_position[1]:.2f}, {self.predicted_position[2]:.2f})"
-                    )
-        
-        # Create a grid of seed points in the area where balls are likely to be found
-        if len(points) > 0:
-            x_min, y_min = np.min(points[:, 0:2], axis=0) 
-            x_max, y_max = np.max(points[:, 0:2], axis=0)
-            
-            # Create a grid with reasonable spacing
-            grid_spacing = self.ball_radius * 1.5
-            x_grid = np.arange(x_min, x_max, grid_spacing)
-            y_grid = np.arange(y_min, y_max, grid_spacing)
-            
-            # Limit grid size to avoid excessive computation
-            max_grid_points = 25
-            if len(x_grid) > max_grid_points:
-                x_grid = np.linspace(x_min, x_max, max_grid_points)
-            if len(y_grid) > max_grid_points:
-                y_grid = np.linspace(y_min, y_max, max_grid_points)
-            
-            # Create grid points - focus on forward-facing area
-            for x in x_grid:
-                for y in y_grid:
-                    distance = np.sqrt(x**2 + y**2)
-                    # Only add grid points within reasonable range
-                    if distance < 2.0:
-                        seed_points.append(np.array([x, y, self.ball_height]))
-        
-        # Cap the number of seed points
-        max_seed_points = int(self.detection_samples)
-        if len(seed_points) > max_seed_points:
-            # Keep the first few points (previous position, prediction) and sample from the rest
-            keep_count = min(2, len(seed_points))
-            points_to_keep = seed_points[:keep_count]
-            points_to_sample = seed_points[keep_count:]
-            
-            if len(points_to_sample) > max_seed_points - keep_count:
-                sample_indices = np.random.choice(
-                    len(points_to_sample),
-                    size=max_seed_points - keep_count,
-                    replace=False
-                )
-                seed_points = points_to_keep + [points_to_sample[i] for i in sample_indices]
-            else:
-                seed_points = points_to_keep + points_to_sample
-        
-        # Process each seed point to find clusters
-        for seed_point in seed_points:
-            # Find points close to this seed point
-            distances = np.sqrt(
-                (points[:, 0] - seed_point[0])**2 + 
-                (points[:, 1] - seed_point[1])**2
-            )
-            
-            # Use adaptive clustering radius based on failures
-            effective_max_distance = self.max_distance
-            if self.consecutive_failures > 3:
-                # Gradually increase cluster radius for persistent failures
-                effective_max_distance = min(0.18, self.max_distance * (1.0 + 0.1 * min(self.consecutive_failures, 5)))
-            
-            cluster_indices = np.where(distances < effective_max_distance)[0]
-            cluster = points[cluster_indices]
-            
-            # Skip if cluster is too small
-            if len(cluster) < dynamic_min_points:
-                continue
-            
-            # Calculate the center of the cluster (centroid)
-            center = np.mean(cluster, axis=0)
-            
-            # Use vectorized operations for circle quality check
-            center_distances = np.sqrt(
-                (cluster[:, 0] - center[0])**2 + 
-                (cluster[:, 1] - center[1])**2
-            )
-            
-            # Reject clusters with too much variance in radius
-            radius_std = np.std(center_distances)
-            if radius_std > self.ball_radius * 0.5:  # Std dev should be less than 50% of radius
-                continue
-            
-            # Calculate quality metrics
-            radius_errors = np.abs(center_distances - self.ball_radius)
-            avg_error = np.mean(radius_errors)
-            circle_quality = 1.0 - (avg_error / self.ball_radius)
-            
-            # Calculate additional quality factors
-            point_density_score = min(1.0, len(cluster) / 50.0)
-            distance_to_lidar = np.sqrt(center[0]**2 + center[1]**2)
-            distance_quality = 1.0 - min(1.0, distance_to_lidar / 2.0)
-            
-            # Combine into a weighted score
-            combined_quality = (
-                circle_quality * 0.4 +
-                point_density_score * 0.5 +
-                distance_quality * 0.1
-            )
-            
-            # Only consider clusters that reasonably match a tennis ball's shape
-            if circle_quality > dynamic_quality_threshold:
-                balls_found.append((center, len(cluster), combined_quality))
-        
-        if self.detailed_logging:
-            if len(balls_found) == 0:
-                self.get_logger().info(f"LIDAR: No potential clusters found for {trigger_source} trigger")
-            else:
-                self.get_logger().info(
-                    f"LIDAR: Found {len(balls_found)} potential clusters for {trigger_source} trigger")
-        
-        # Sort by combined quality
-        sorted_balls = sorted(balls_found, key=lambda x: x[2], reverse=True)
-        
-        # Implement position consistency checking for multiple candidates
-        if len(sorted_balls) > 1 and self.previous_ball_position is not None:
-            consistent_balls = []
-            # Adaptive position change threshold
-            max_position_change = 0.5  # Base value
-            
-            # Increase threshold if we've had failures
-            if self.consecutive_failures > 2:
-                max_position_change = min(1.0, max_position_change * (1.0 + adaptation_factor))
-            
-            for ball in sorted_balls:
-                center, points, quality = ball
-                dist_from_previous = np.linalg.norm(center - self.previous_ball_position)
-                
-                # If this cluster is close to previous position, it's likely the same ball
-                if dist_from_previous < max_position_change:
-                    consistent_balls.append(ball)
-                elif self.detailed_logging:
-                    self.get_logger().info(
-                        f"CONSISTENCY: Rejected cluster at ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) "
-                        f"too far from previous position ({dist_from_previous:.2f}m > {max_position_change:.2f}m)")
-            
-            # If we found any consistent balls, use those instead
-            if consistent_balls:
-                sorted_balls = sorted(consistent_balls, key=lambda x: x[2], reverse=True)
-        
-        # Update tracking based on detection results
-        if sorted_balls:
-            best_ball = sorted_balls[0]
-            new_position = best_ball[0]
-            
-            # Store in position history with thread safety
-            with self.lock:
-                self.position_history.append(new_position)
-            
-            # Set current position 
-            self.previous_ball_position = new_position
-            
-            # Reset consecutive failures since we found a ball
-            self.consecutive_failures = 0
-            
-            # Update last successful detection time
-            self.last_successful_detection_time = current_time
-        else:
-            # Increment consecutive failures
-            self.consecutive_failures += 1
-            
-            # Generate prediction from Kalman filter if we have one
-            if hasattr(self, 'kalman_filter') and self.kalman_filter.initialized:
-                # Only predict if we had a previous successful detection
-                time_since_detection = current_time - self.last_successful_detection_time
-                # Only predict for reasonable time periods
-                if time_since_detection < 2.0:
-                    self.predicted_position = self.kalman_filter.predict(time_since_detection)
-                    self.prediction_time = current_time
-        
-        # SIMPLIFIED APPROACH: Simple cluster merging for nearby detections
-        # This combines evidence from reflections of the same ball
-        if len(sorted_balls) > 1:
-            merge_threshold = self.ball_radius * 9  # ~30cm for tennis ball
-            merged_balls = []
-            processed = set()
-            
-            for i, ball in enumerate(sorted_balls):
-                if i in processed:
-                    continue
-                    
-                center_i, points_i, quality_i = ball
-                merged_points = points_i
-                weighted_center = center_i * points_i  # Weight by point count
-                merged_quality = quality_i * points_i  # Weighted quality
-                
-                # Look for balls to merge with this one
-                for j, other_ball in enumerate(sorted_balls):
-                    if j == i or j in processed:
-                        continue
-                        
-                    center_j, points_j, quality_j = other_ball
-                    distance = np.linalg.norm(center_i - center_j)
-                    
-                    if distance < merge_threshold:
-                        weighted_center += center_j * points_j
-                        merged_points += points_j
-                        merged_quality += quality_j * points_j
-                        processed.add(j)
-                
-                # Calculate merged center and quality
-                merged_center = weighted_center / merged_points
-                merged_quality_score = merged_quality / merged_points
-                
-                merged_balls.append((merged_center, merged_points, merged_quality_score))
-            
-            # Replace with merged result if we did any merging
-            if merged_balls:
-                sorted_balls = sorted(merged_balls, key=lambda x: x[2], reverse=True)
-        
-        return sorted_balls
-    
-    def publish_ball_position(self, center, cluster_size, circle_quality, trigger_source, original_timestamp=None):
-        """
-        Publish the detected tennis ball position with ground projection.
-        
-        Args:
-            center (numpy.ndarray): Detected center from LIDAR
-            cluster_size (int): Number of points in cluster
-            circle_quality (float): Quality score from circle fitting
-            trigger_source (str): Source of detection trigger
-            original_timestamp (Time, optional): Original detection timestamp
-        """
-        # Apply ground projection
-        projected_center = self.project_to_ground_plane(center)
-        
-        # Calculate distance and confidence
-        distance_from_lidar = np.sqrt(projected_center[0]**2 + projected_center[1]**2)
-        distance_confidence = self.calculate_detection_confidence(projected_center)
-        
-        # Determine reliability based on distance
-        is_reliable = distance_from_lidar >= self.min_reliable_distance
-        
-        # Adjust confidence score based on distance
-        if not is_reliable:
-            # Reduce confidence for close detections
-            distance_factor = max(0.1, distance_from_lidar / self.min_reliable_distance) 
-            adjusted_quality = circle_quality * distance_factor * distance_confidence
-            reliability_text = f"UNRELIABLE ({distance_from_lidar:.2f}m < {self.min_reliable_distance:.1f}m)"
-        else:
-            adjusted_quality = circle_quality * distance_confidence
-            reliability_text = "RELIABLE"
-        
-        # Log the detection with reliability information
-        self.get_logger().info(
-            f"LIDAR: Ground-projected ball at ({projected_center[0]:.2f}, {projected_center[1]:.2f}, {projected_center[2]:.2f}) meters | "
-            f"3D distance: {distance_from_lidar:.2f}m | {reliability_text} | "
-            f"Quality: {adjusted_quality:.2f} (orig: {circle_quality:.2f}) | Triggered by: {trigger_source}"
-        )
-        
-        # Skip publishing unreliable detections unless explicitly enabled
-        if not is_reliable and not self.publish_unreliable_detections:
-            self.get_logger().info("Skipping publication of unreliable close-range detection")
-            self.unsuccessful_detections += 1
-            return
-            
-        # Apply Kalman filtering if enabled
-        filtered_center = projected_center
-        
-        if self.use_kalman:
-            # Use safe update method with adjusted quality
-            filtered_center = self.safe_update_kalman(projected_center, adjusted_quality, cluster_size)
-            
-            # Calculate how much the filter corrected the position
-            correction = np.linalg.norm(filtered_center - projected_center)
-            
-            # Log the correction amount if significant
-            if correction > 0.05 and self.detailed_logging:
-                self.get_logger().info(
-                    f"Kalman filter corrected position by {correction:.3f}m: "
-                    f"Raw: ({projected_center[0]:.2f}, {projected_center[1]:.2f}, {projected_center[2]:.2f}) → "
-                    f"Filtered: ({filtered_center[0]:.2f}, {filtered_center[1]:.2f}, {filtered_center[2]:.2f})"
-                )
-        
-        # Create message for ball position (3D point with timestamp)
-        point_msg = PointStamped()
-        
-        # IMPORTANT: Use original timestamp if provided, otherwise use current time
-        if original_timestamp and TimeUtils.is_timestamp_valid(original_timestamp):
-            point_msg.header.stamp = original_timestamp
-        else:
-            point_msg.header.stamp = TimeUtils.now_as_ros_time()
-        
-        # Always use our consistent frame ID for proper transformation
-        point_msg.header.frame_id = "lidar_frame"
-        
-        # Use the filtered position in the message
-        point_msg.point.x = float(filtered_center[0])
-        point_msg.point.y = float(filtered_center[1])
-        point_msg.point.z = float(filtered_center[2])
-        
-        # Publish the ball position
-        self.position_publisher.publish(point_msg)
-        
-        # Update statistics
-        self.successful_detections += 1
-        
-        # Determine confidence level based on circle quality
-        if circle_quality > TENNIS_BALL_CONFIG["quality_threshold"]["high"]:
-            confidence_text = "HIGH"
-        elif circle_quality > TENNIS_BALL_CONFIG["quality_threshold"]["medium"]:
-            confidence_text = "MEDIUM"
-        else:
-            confidence_text = "LOW"
-            
-        # Log the detection with detailed information
-        self.get_logger().info(
-            f"LIDAR: Tennis ball detected at ({filtered_center[0]:.2f}, {filtered_center[1]:.2f}, {filtered_center[2]:.2f}) meters "
-            f"with {cluster_size} points | Quality: {confidence_text} ({adjusted_quality:.2f}) | "
-            f"Triggered by: {trigger_source}"
-        )
-        
-        # Create visualization markers for RViz
-        self.visualize_detection(filtered_center, cluster_size, adjusted_quality, trigger_source)
-    
-    def publish_transform(self):
-        """
-        Publish the LIDAR-to-camera transformation obtained through calibration.
-        
-        This transformation allows converting coordinates between the LIDAR
-        and camera reference frames, which is essential for proper sensor fusion.
-        """
-        transform = TransformStamped()
-        # Use current time from TimeUtils for the transform to ensure it's considered valid
-        transform.header.stamp = TimeUtils.now_as_ros_time()
-        transform.header.frame_id = self.transform_parent_frame  # Parent frame from config
-        transform.child_frame_id = self.transform_child_frame    # Child frame from config
-        
-        # Translation from LIDAR to camera (from config)
-        transform.transform.translation.x = self.transform_translation['x']
-        transform.transform.translation.y = self.transform_translation['y']
-        
-        # Override Z with known physical offset between LIDAR and camera
-        # LIDAR at 15cm, camera at 10cm from ground = 5cm difference
-        transform.transform.translation.z = 0.05  # 5cm difference
-        
-        # Use calibration for rotation components
-        transform.transform.rotation.x = self.transform_rotation['x']
-        transform.transform.rotation.y = self.transform_rotation['y']
-        transform.transform.rotation.z = self.transform_rotation['z']
-        transform.transform.rotation.w = self.transform_rotation['w']
-        
-        self.tf_broadcaster.sendTransform(transform)
-        
-        # Log the transform occasionally to verify it's being published
-        current_time = TimeUtils.now_as_float()
-        transform_log_interval = lidar_config.get('transform', {}).get('log_interval', 60.0)
-        if not hasattr(self, 'last_transform_log') or current_time - self.last_transform_log > transform_log_interval:
-            self.get_logger().info("Publishing LIDAR-to-camera transform from calibration")
-            self.last_transform_log = current_time
-
-    def visualize_detection(self, center, cluster_size, circle_quality, trigger_source):
-        """
-        Create visualization markers for the detected ball in RViz.
-        
-        Creates markers:
-        1. A sphere representing the tennis ball (filtered position)
-        2. A small sphere showing the raw detection (if Kalman is enabled)
-        3. A text label showing detection source and quality
-        
-        Args:
-            center (numpy.ndarray): Center of the detected ball [x, y, z]
-            cluster_size (int): Number of points in the cluster
-            circle_quality (float): How well the points match a circle (0-1)
-            trigger_source (str): Which detector triggered this detection
-        """
-        markers = MarkerArray()
-        
-        # Use filtered position for the main marker if available
-        display_center = center
-        if self.use_kalman and hasattr(self, 'kalman_filter') and self.kalman_filter.initialized:
-            display_center = self.kalman_filter.state[0:3]
-        
-        # Create a sphere marker for the ball - Main sphere (filtered position)
-        ball_marker = Marker()
-        ball_marker.header.frame_id = "lidar_frame"  # Use consistent frame ID
-        ball_marker.header.stamp = self.scan_timestamp
-        ball_marker.ns = "tennis_ball"
-        ball_marker.id = 1
-        ball_marker.type = Marker.SPHERE  # Show as a sphere
-        ball_marker.action = Marker.ADD
-        
-        # Set position
-        ball_marker.pose.position.x = display_center[0]
-        ball_marker.pose.position.y = display_center[1]
-        ball_marker.pose.position.z = display_center[2]
-        ball_marker.pose.orientation.w = 1.0  # No rotation
-        
-        # Set color based on quality and source
-        color_config = None
-        if trigger_source.lower() == "yolo":
-            color_config = VIZ_CONFIG['colors']['yolo']
-        else:  # HSV
-            color_config = VIZ_CONFIG['colors']['hsv']
-        
-        ball_marker.color.r = color_config['r']
-        ball_marker.color.g = color_config['g']
-        ball_marker.color.b = color_config['b']
-        
-        # Adjust transparency based on confidence
-        base_alpha = color_config.get('base_alpha', 0.5)
-        ball_marker.color.a = min(base_alpha + circle_quality * 0.5, 1.0)  # Higher quality = more opaque
-        
-        # Set size (tennis ball diameter)
-        ball_marker.scale.x = self.ball_radius * 2.0
-        ball_marker.scale.y = self.ball_radius * 2.0
-        ball_marker.scale.z = self.ball_radius * 2.0
-        
-        # Set how long to display (from config)
-        ball_marker.lifetime.sec = int(VIZ_CONFIG['marker_lifetime'])
-        ball_marker.lifetime.nanosec = int((VIZ_CONFIG['marker_lifetime'] % 1) * 1e9)
-        
-        markers.markers.append(ball_marker)
-        
-        # Add a text marker to show source and quality
-        text_marker = Marker()
-        text_marker.header.frame_id = self.scan_frame_id
-        text_marker.header.stamp = self.scan_timestamp
-        text_marker.ns = "tennis_ball_text"
-        text_marker.id = 2
-        text_marker.type = Marker.TEXT_VIEW_FACING
-        text_marker.action = Marker.ADD
-        
-        # Position text above the ball (height from config)
-        text_marker.pose.position.x = center[0]
-        text_marker.pose.position.y = center[1]
-        text_marker.pose.position.z = center[2] + VIZ_CONFIG['text_height_offset']
-        text_marker.pose.orientation.w = 1.0
-        
-        # Set text content
-        quality_pct = int(circle_quality * 100)
-        text_marker.text = f"{trigger_source}: {quality_pct}%"
-        
-        # Set text appearance (from config)
-        text_marker.scale.z = VIZ_CONFIG['text_size']
-        text_color = VIZ_CONFIG['colors']['text']
-        text_marker.color.r = text_color['r']
-        text_marker.color.g = text_color['g']
-        text_marker.color.b = text_color['b']
-        text_marker.color.a = text_color['a']
-        text_marker.lifetime.sec = int(VIZ_CONFIG['marker_lifetime'])
-        text_marker.lifetime.nanosec = int((VIZ_CONFIG['marker_lifetime'] % 1) * 1e9)
-        
-        markers.markers.append(text_marker)
-        
-        # If Kalman filter is enabled, show the raw detection as a smaller sphere
-        if self.use_kalman and not np.array_equal(center, display_center):
-            raw_marker = Marker()
-            raw_marker.header.frame_id = "lidar_frame"
-            raw_marker.header.stamp = self.scan_timestamp
-            raw_marker.ns = "tennis_ball_raw"
-            raw_marker.id = 3
-            raw_marker.type = Marker.SPHERE
-            raw_marker.action = Marker.ADD
-            
-            # Position at the raw detection
-            raw_marker.pose.position.x = center[0]
-            raw_marker.pose.position.y = center[1]
-            raw_marker.pose.position.z = center[2]
-            raw_marker.pose.orientation.w = 1.0
-            
-            # Make it smaller and semi-transparent
-            raw_marker.scale.x = self.ball_radius
-            raw_marker.scale.y = self.ball_radius
-            raw_marker.scale.z = self.ball_radius
-            
-            # Red color for raw detections
-            raw_marker.color.r = 1.0
-            raw_marker.color.g = 0.0
-            raw_marker.color.b = 0.0
-            raw_marker.color.a = 0.3
-            
-            raw_marker.lifetime.sec = int(VIZ_CONFIG['marker_lifetime'])
-            raw_marker.lifetime.nanosec = int((VIZ_CONFIG['marker_lifetime'] % 1) * 1e9)
-            
-            markers.markers.append(raw_marker)
-        
-        # Publish the visualization
-        self.marker_publisher.publish(markers)
-    
-    def publish_status(self):
-        """
-        Publish diagnostic information about the node's performance.
-        
-        Format is compatible with the central diagnostics node.
-        """
-        try:
-            # Calculate running time
-            current_time = TimeUtils.now_as_float()
-            elapsed = current_time - self.start_time
-            
-            # Skip if we just started
-            if elapsed < 0.1:
-                return
-                
-            # Calculate performance statistics
-            scan_rate = self.processed_scans / elapsed if elapsed > 0 else 0
-            detection_rate = self.successful_detections / elapsed if elapsed > 0 else 0
-            
-            # Calculate average processing time
-            avg_time = 0
-            if self.detection_times:
-                avg_time = sum(self.detection_times) / len(self.detection_times)
-            
-            # Health recovery over time (errors become less relevant)
-            time_since_last_error = current_time - self.last_error_time
-            if time_since_last_error > 30.0:  # After 30 seconds with no errors
-                self.lidar_health = min(1.0, self.lidar_health + 0.05)  # Gradually recover
-            
-            # Calculate detection health (based on detection rate)
-            expected_rate = 1.0  # expected detections/sec
-            self.detection_health = min(1.0, detection_rate / expected_rate) if expected_rate > 0 else 0.5
-            
-            # Extract recent errors for diagnostics
-            recent_errors = []
-            cutoff_time = current_time - 300  # Last 5 minutes
-            for error in self.errors:
-                if error["timestamp"] > cutoff_time:
-                    recent_errors.append(error["message"])
-            
-            # Create comprehensive diagnostics message in expected format
-            diagnostics = {
-                "timestamp": current_time,
-                "node": "lidar",
-                "uptime_seconds": elapsed,
-                "status": "active",
-                "health": {
-                    "lidar_health": self.lidar_health,
-                    "detection_health": self.detection_health,
-                    "overall": (self.lidar_health * 0.7 + self.detection_health * 0.3)  # weighted average
-                },
-                "metrics": {
-                    "processed_scans": self.processed_scans,
-                    "successful_detections": self.successful_detections,
-                    "scan_rate": scan_rate,
-                    "detection_rate": detection_rate,
-                    "avg_processing_time_ms": avg_time * 1000,
-                    "detection_latency_ms": self.detection_latency,
-                    "sources": {
-                        "yolo_detections": self.yolo_detections,
-                        "hsv_detections": self.hsv_detections,
-                    }
-                },
-                "resources": {
-                    "cpu_usage": getattr(self.resource_monitor, 'cpu_percent', 0),
-                    "memory_usage": getattr(self.resource_monitor, 'mem_percent', 0),
-                    "temperature": getattr(self.resource_monitor, 'temperature', 0)
-                },
-                "errors": recent_errors,
-                "config": {
-                    "ball_radius": self.ball_radius,
-                    "max_distance": self.max_distance,
-                    "min_points": self.min_points,
-                    "detection_samples": self.detection_samples
-                }
-            }
-            
-            # Calculate additional health metrics
-            scan_frequency_health = min(1.0, scan_rate / lidar_config.get('expected_scan_rate', 10.0))
-            detection_latency_health = 1.0 - min(1.0, self.detection_latency / 100.0)
-
-            diagnostics["health"]["scan_frequency_health"] = scan_frequency_health
-            diagnostics["health"]["detection_latency_health"] = detection_latency_health 
-            diagnostics["health"]["resource_health"] = 1.0 - (getattr(self.resource_monitor, 'cpu_percent', 0) / 100.0)
-
-            # Overall health is weighted average of all components
-            diagnostics["health"]["overall"] = (
-                self.lidar_health * 0.3 + 
-                self.detection_health * 0.3 + 
-                scan_frequency_health * 0.2 +
-                detection_latency_health * 0.1 +
-                diagnostics["health"]["resource_health"] * 0.1
-            )
-            
-            # Publish diagnostics as JSON string
-            msg = String()
-            msg.data = json.dumps(diagnostics)
-            self.diagnostics_publisher.publish(msg)
-            
-            # Log basic summary (not the full diagnostics)
-            self.get_logger().info(
-                f"LIDAR: Status: {scan_rate:.1f} scans/sec, "
-                f"{detection_rate:.1f} detections/sec, "
-                f"YOLO: {self.yolo_detections}, HSV: {self.hsv_detections}, "
-                f"Health: {diagnostics['health']['overall']:.2f}, "
-                f"Errors: {len(recent_errors)}"
-            )
-            
-        except Exception as e:
-            self.log_error(f"Error publishing diagnostics: {str(e)}")
-    
-    def _configure_detection_algorithm(self):
-        """Configure the detection algorithm based on hardware capabilities."""
-        # Detection parameters
-        # On Pi 5 with 16GB RAM, we can use more detection samples 
-        # and keep full point resolution
-        self.detection_samples = TENNIS_BALL_CONFIG["detection_samples"]
-        
-        # Check for Raspberry Pi 5
-        is_raspberry_pi = os.environ.get('RASPBERRY_PI') == '1'
-        
-        if is_raspberry_pi:
-            # On Raspberry Pi, use a more efficient detection approach
-            self.get_logger().info("Configured for Raspberry Pi 5: using optimized detection")
-            # Increase detection samples slightly since the Pi 5 has good performance
-            self.detection_samples = min(40, self.detection_samples)
-        else:
-            # On desktop/laptop, use more thorough detection approach
-            self.get_logger().info("Configured for desktop: using high-quality detection")
-            # More detection samples for higher-powered systems
-            self.detection_samples = min(50, self.detection_samples)
-    
-    def _handle_resource_alert(self, resource_type, value):
-        """Handle resource alerts from the resource monitor."""
-        # Track when we last had a resource alert
-        current_time = TimeUtils.now_as_float()
-        
-        if resource_type == 'cpu' and value > 90:
-            # Only log high CPU usage once per minute
-            if not hasattr(self, 'last_high_cpu_time') or current_time - self.last_high_cpu_time > 60:
-                self.get_logger().warning(f"High CPU usage detected: {value:.1f}%")
-                self.last_high_cpu_time = current_time
-                
-                # Adjust detection algorithm to be more efficient
-                self.detection_samples = max(15, self.detection_samples - 5)
-                self.get_logger().info(f"Reducing detection samples to {self.detection_samples} to conserve resources")
-        
-        elif resource_type == 'memory' and value > 85:
-            self.get_logger().warning(f"High memory usage detected: {value:.1f}%")
-            
-        elif resource_type == 'temperature' and value > 80:
-            self.get_logger().error(f"Critical temperature detected: {value:.1f}°C")
-    
-    def log_error(self, error_message):
-        """Log errors with consistent formatting and track for diagnostics."""
-        # Add error to tracking list
-        current_time = TimeUtils.now_as_float()
-        self.errors.append({
-            "timestamp": current_time,
-            "message": error_message
-        })
-        
-        # Update last error time for health tracking
-        self.last_error_time = current_time
-        
-        # Reduce health score when errors occur
-        if hasattr(self, 'lidar_health'):
-            self.lidar_health = max(0.3, self.lidar_health - 0.2)
-        
-        # Log the error (but rate limit repeating errors)
-        self.get_logger().error(f"LIDAR ERROR: {error_message}")
-    
-    def destroy_node(self):
-        """Clean up resources when the node is shutting down."""
-        # Clear any large stored data
-        self.points_array = None
-        if hasattr(self, '_points_buffer'):
-            self._points_buffer = None
-        if hasattr(self, '_filtered_buffer'):
-            self._filtered_buffer = None
-        if hasattr(self, '_cluster_buffer'):
-            self._cluster_buffer = None
-        
-        # Stop any running threads
-        if hasattr(self, 'resource_monitor') and self.resource_monitor:
-            self.resource_monitor.stop()
-        
-        # Close log files if open
-        if hasattr(self, 'cluster_log_file') and self.cluster_log_file:
-            self.cluster_log_file.close()
-        
-        if hasattr(self, 'kalman_log_file') and self.kalman_log_file:
-            self.kalman_log_file.close()
-        
-        super().destroy_node()
-
-    def _configure_logging(self, log_config):
-        """Configure logger levels based on config."""
-        level_map = {
-            'debug': rclpy.logging.LoggingSeverity.DEBUG,
-            'info': rclpy.logging.LoggingSeverity.INFO,
-            'warn': rclpy.logging.LoggingSeverity.WARN,
-            'error': rclpy.logging.LoggingSeverity.ERROR
-        }
-        
-        console_level = level_map.get(log_config.get('console_level', 'info').lower(), 
-                                      rclpy.logging.LoggingSeverity.INFO)
-        
-        # Set logger level
-        self.get_logger().set_level(console_level)
-        self.get_logger().info(f"Logging level set to: {log_config.get('console_level', 'info').upper()}")
-
-    # Create a helper method for consistent log formatting:
-
-    def _log(self, level, component, message, extra_data=None):
-        """Unified logging with component tags and optional data."""
-        tagged_msg = f"[{component}] {message}"
-        
-        if extra_data and isinstance(extra_data, dict) and self.debug_mode:
-            # Add data as JSON if in debug mode
-            data_str = json.dumps(extra_data)
-            if len(data_str) > 100:  # Truncate long data
-                data_str = data_str[:97] + "..."
-            tagged_msg += f" | {data_str}"
-        
-        if level == 'debug':
-            self.get_logger().debug(tagged_msg)
-        elif level == 'info':
-            self.get_logger().info(tagged_msg)
-        elif level == 'warn':
-            self.get_logger().warn(tagged_msg)
-        elif level == 'error':
-            self.get_logger().error(tagged_msg)
-
-    def safe_get_position_history(self):
-        """Safely access the position history with proper validation."""
-        if not hasattr(self, 'position_history') or self.position_history is None:
-            self.position_history = deque(maxlen=10)
-            return []
-        
-        # Filter out any None values that might have made it into history
-        valid_positions = [pos for pos in self.position_history if pos is not None]
-        return valid_positions
-
-    def safe_update_kalman(self, center, circle_quality, cluster_size):
-        """
-        Safely update the Kalman filter, ensuring we never return None.
-        
-        Args:
-            center (numpy.ndarray): Position measurement to update the filter with
-            circle_quality (float): Quality of the detection (0-1)
-            cluster_size (int): Number of points in the detection cluster
-            
-        Returns:
-            numpy.ndarray: Filtered position, or original position if an error occurs
-        """
-        if center is None:
-            self.get_logger().error("Attempted to update Kalman filter with None center")
-            return np.zeros(3)
-        
-        try:
-            # Verify Kalman filter has been properly initialized
-            if not hasattr(self.kalman_filter, 'state'):
-                self.get_logger().error("Kalman filter not properly initialized, reinitializing")
-                # Reinitialize the Kalman filter
-                self.kalman_filter = KalmanFilter()
-                
-            # If this is the first update, make sure we're initialized
-            if not self.kalman_filter.initialized:
-                self.get_logger().info("Initializing Kalman filter with first position")
-                
-                # Validate center is appropriate for initialization
-                if center is None or not isinstance(center, np.ndarray) or center.shape != (3,):
-                    self.get_logger().error(f"Invalid center for Kalman initialization: {center}")
-                    # Create a safe default with zero velocity
-                    self.kalman_filter.state = np.zeros(6)
-                    center = np.zeros(3)  # Safe default
-                else:
-                    # Initialize with measurement and zero velocity
-                    self.kalman_filter.state = np.zeros(6)
-                    self.kalman_filter.state[0:3] = center
-                
-                self.kalman_filter.last_update_time = time.time()
-                self.kalman_filter.initialized = True
-                return center
-            
-            # Update with the measurement
-            filtered_center = self.kalman_filter.update(center, circle_quality, cluster_size)
-            
-            # Double-check for None result
-            if filtered_center is None:
-                self.get_logger().error("Kalman filter returned None result, using original position")
-                return np.array(center)
-            
-            # Ensure result is a numpy array
-            if not isinstance(filtered_center, np.ndarray):
-                self.get_logger().error(f"Kalman filter returned non-array: {type(filtered_center)}, using original position")
-                return np.array(center)
-            
-            # Validate size
-            if len(filtered_center) != 3:
-                self.get_logger().error(f"Kalman filter returned array of wrong size: {len(filtered_center)}, using original position")
-                return np.array(center)
-            
-            return filtered_center
-            
-        except Exception as e:
-            self.get_logger().error(f"Error in Kalman filter update: {str(e)}")
-            import traceback
-            self.get_logger().error(f"Traceback: {traceback.format_exc()}")
-            return np.array(center)  # Return original position if any error occurs
-
     def camera_detection_callback(self, msg, source):
-        """Process ball detections from the camera and find matching points in LIDAR data."""
-        detection_start_time = TimeUtils.now_as_float()
+        """
+        Process ball detections from camera systems (YOLO or HSV).
+        Find matching points in LIDAR data.
+        """
+        detection_start_time = time.time()
         
         try:
-            # Check if we have scan data
+            # Check if we have valid scan data
             if self.latest_scan is None or self.points_array is None or len(self.points_array) == 0:
-                self.get_logger().info("LIDAR: Waiting for scan data...")
+                self.get_logger().info(f"LIDAR: Waiting for scan data for {source} detection")
                 return
-                
-            # Extract the camera's detected position and confidence
+            
+            # Extract camera detection info
             x_2d = msg.point.x
             y_2d = msg.point.y
             confidence = msg.point.z
@@ -1433,588 +357,617 @@ class TennisBallLidarDetector(Node):
                 f"with confidence {confidence:.2f}"
             )
             
-            # Find tennis ball patterns in LIDAR data using RANSAC for robustness
-            ball_results = self.find_tennis_balls_ransac(source)
+            # Find basketball in LIDAR data
+            ball_results = self.find_basketball_ransac()
             
             # Process the best detected ball (if any)
             if ball_results and len(ball_results) > 0:
-                # Get the best match (first in the list)
+                # Get the best match
                 best_match = ball_results[0]
                 center, cluster_size, circle_quality = best_match
                 
-                # Use original timestamp for synchronization if valid
-                if TimeUtils.is_timestamp_valid(msg.header.stamp):
-                    self.publish_ball_position(center, cluster_size, circle_quality, source, msg.header.stamp)
-                else:
-                    self.get_logger().warn(f"Received invalid timestamp from {source}, using current time instead")
-                    self.publish_ball_position(center, cluster_size, circle_quality, source, None)
+                # Publish ball position
+                self.publish_ball_position(center, cluster_size, circle_quality, source, msg.header.stamp)
             else:
                 self.get_logger().info(f"LIDAR: No matching ball found for {source} detection")
-                
-                # Enhanced recovery for failed detections
-                if self.detailed_logging:
-                    self.get_logger().info(f"NO_MATCH: Point cloud has {len(self.points_array)} points")
-                
-                # Try with reduced requirements if needed
-                if self.consecutive_failures >= 3:
-                    saved_min_points = self.min_points
-                    self.min_points = max(5, int(self.min_points * 0.5))  # Try with half the minimum points
-                    debug_results = self.find_tennis_balls(f"{source}_DEBUG")
-                    self.min_points = saved_min_points  # Restore original
-                    
-                    if debug_results:
-                        recovery_center, recovery_points, recovery_quality = debug_results[0]
-                        self.get_logger().info(f"RECOVERY: Found possible match with {recovery_points} points")
-                        
-                        # Use a reduced quality score for this fallback detection
-                        fallback_quality = min(0.4, recovery_quality)
-                        if TimeUtils.is_timestamp_valid(msg.header.stamp):
-                            self.publish_ball_position(recovery_center, recovery_points, fallback_quality, f"{source}_FALLBACK", msg.header.stamp)
-                        else:
-                            self.publish_ball_position(recovery_center, recovery_points, fallback_quality, f"{source}_FALLBACK", None)
-                
+                self.consecutive_failures += 1
+            
         except Exception as e:
             self.log_error(f"Error processing {source} detection: {str(e)}")
         
         # Log processing time
-        processing_time = (TimeUtils.now_as_float() - detection_start_time) * 1000  # in ms
+        processing_time = (time.time() - detection_start_time) * 1000  # in ms
         self.detection_times.append(processing_time)
-        
-        # Update detection latency metric
         self.detection_latency = processing_time
-        
         self.get_logger().debug(f"LIDAR: {source} processing took {processing_time:.2f}ms")
-
-    def validate_calibration(self, lidar_point, camera_point):
-        """Validate calibration by comparing transformed lidar point with camera point."""
-        # Transform lidar point to camera frame
-        transformed_point = self._transform_point(lidar_point, "camera_frame")
+    
+    def find_basketball_ransac(self):
+        """
+        Find a basketball in LIDAR data using RANSAC for robust circle fitting.
         
-        if transformed_point is None:
-            self.get_logger().warn("Could not transform point for calibration validation")
-            return None
-        
-        # Calculate error
-        error = np.linalg.norm([
-            transformed_point.point.x - camera_point.point.x,
-            transformed_point.point.y - camera_point.point.y,
-            transformed_point.point.z - camera_point.point.z
-        ])
-        
-        with self.lock:
-            self.calibration_errors.append(error)
-        
-        # Log significant errors
-        if error > 0.1:  # 10cm threshold
-            self.get_logger().warn(f"Large calibration error: {error:.3f}m")
-        
-        return error
-
-    def _transform_point(self, point_msg, target_frame):
-        """Transform a point from its original frame to the target frame."""
-        try:
-            from tf2_ros import Buffer, TransformListener
-            from tf2_geometry_msgs import do_transform_point
-            from geometry_msgs.msg import TransformStamped
+        Returns:
+            list: List of (center, cluster_size, quality) tuples for detected basketballs
+        """
+        if self.points_array is None or len(self.points_array) == 0:
+            return []
             
-            # Create a buffer and listener if they don't exist
-            if not hasattr(self, 'tf_buffer'):
-                self.tf_buffer = Buffer()
-                self.tf_listener = TransformListener(self.tf_buffer, self)
+        # Create seed points for RANSAC
+        seed_points = []
+        
+        # Include previous ball position if available
+        if self.previous_ball_position is not None:
+            seed_points.append(self.previous_ball_position)
+        
+        # Include current points array
+        if len(self.points_array) > 0:
+            # Create a few seed points based on point clusters
+            # Focus on points within a reasonable range
+            distances = np.sqrt(self.points_array[:, 0]**2 + self.points_array[:, 1]**2)
+            valid_indices = np.where((distances > 0.3) & (distances < 3.0))[0]
+            
+            if len(valid_indices) > 0:
+                # Sample a few points to try as seeds
+                sample_count = min(10, len(valid_indices))
+                indices = np.random.choice(valid_indices, sample_count, replace=False)
+                for idx in indices:
+                    seed_points.append(self.points_array[idx])
+        
+        # Best result tracking
+        best_center = None
+        best_inlier_count = 0
+        best_quality = 0
+        
+        # Try RANSAC with each seed point
+        for seed_point in seed_points:
+            # Find all points near this seed
+            distances = np.sqrt(
+                (self.points_array[:, 0] - seed_point[0])**2 + 
+                (self.points_array[:, 1] - seed_point[1])**2
+            )
+            nearby_indices = np.where(distances < self.max_distance * 3)[0]
+            
+            if len(nearby_indices) < self.min_points:
+                continue
                 
-            # Look up transformation
-            transform = self.tf_buffer.lookup_transform(
-                target_frame,
-                point_msg.header.frame_id,
-                rclpy.time.Time(),
-                timeout=rclpy.duration.Duration(seconds=0.1)
+            # Get points near seed
+            nearby_points = self.points_array[nearby_indices]
+            
+            # Try fitting a circle using RANSAC
+            center, inlier_count, quality = self.ransac_circle_fit(
+                nearby_points, 
+                self.ransac_max_iterations,
+                self.ransac_inlier_threshold
             )
             
-            # Apply transform
-            transformed_point = do_transform_point(point_msg, transform)
-            return transformed_point
-        except Exception as e:
-            self.get_logger().warn(f"Transform error: {str(e)}")
-            return None
-
-    def filter_ground_points(self, points, max_height=0.05):
-        """Filter out points likely to be from the ground."""
-        # Assuming z axis points upward, filter points below max_height
-        if points is None or len(points) == 0:
-            return points
+            # Check if this is better than current best
+            if quality > best_quality and inlier_count >= self.min_points:
+                best_center = center
+                best_inlier_count = inlier_count
+                best_quality = quality
+        
+        # Return result if found
+        if best_center is not None and best_quality >= self.quality_low:
+            # Store the position for future reference
+            self.previous_ball_position = best_center
             
-        non_ground_indices = np.where(points[:, 2] > max_height)[0]
-        return points[non_ground_indices]
-
-    def adjust_for_ball_height(self, center, radius):
-        """Adjust detected position to account for tennis ball height."""
-        # For a ball on the ground, the LIDAR may detect its upper portion
-        # Adjust z coordinate to be at the center of the ball
-        if center is None:
-            return center
+            # Update statistics
+            self.consecutive_failures = 0
+            self.last_successful_detection_time = time.time()
             
-        adjusted_center = np.copy(center)
-        adjusted_center[2] = radius  # Ball center is one radius above ground
-        return adjusted_center
-
-    def _fit_circle_to_points(self, points):
+            # Return as list of results (keeping same format as original code)
+            return [(best_center, best_inlier_count, best_quality)]
+        
+        return []
+    
+    def ransac_circle_fit(self, points, max_iterations=30, threshold=0.02):
         """
-        Fit a circle to a set of 2D points using the geometric method.
+        Use RANSAC to fit a circle to points, robust to outliers.
         
         Args:
-            points: Numpy array of shape (n, 2) or (n, 3) - if 3D, only x,y are used
+            points: Points to fit circle to
+            max_iterations: Maximum RANSAC iterations
+            threshold: Distance threshold for inliers
             
         Returns:
-            center: (x, y) coordinates of circle center
-            radius: radius of the circle
+            tuple: (center, inlier_count, quality)
         """
-        # Extract x, y coordinates if points are 3D
-        if points.shape[1] > 2:
-            points_2d = points[:, 0:2]
-        else:
-            points_2d = points
-            
-        if len(points_2d) < 3:
-            raise ValueError("Need at least 3 points to fit a circle")
-        
-        # Special case for exactly 3 points - direct calculation
-        if len(points_2d) == 3:
-            # Get coordinates
-            x1, y1 = points_2d[0]
-            x2, y2 = points_2d[1]
-            x3, y3 = points_2d[2]
-            
-            # Calculate circle parameters using determinants
-            temp = x2*x2 + y2*y2
-            bc = (x1*x1 + y1*y1 - temp) / 2
-            cd = (temp - x3*x3 - y3*y3) / 2
-            det = (x1 - x2) * (y2 - y3) - (x2 - x3) * (y1 - y2)
-            
-            if abs(det) < 1e-6:
-                raise ValueError("Points are collinear, cannot fit circle")
-                
-            cx = (bc*(y2 - y3) - cd*(y1 - y2)) / det
-            cy = ((x1 - x2)*cd - (x2 - x3)*bc) / det
-            
-            # Calculate radius
-            radius = np.sqrt((cx - x1)**2 + (cy - y1)**2)
-            
-            return np.array([cx, cy]), radius
-        
-        # For more than 3 points, use least squares approach
-        # Based on Kåsa method - fast and works well for small arcs
-        
-        # Shift coordinates for better numerical stability
-        centroid = np.mean(points_2d, axis=0)
-        points_centered = points_2d - centroid
-        
-        # Set up matrix for least squares solution
-        x = points_centered[:, 0]
-        y = points_centered[:, 1]
-        z = x**2 + y**2
-        
-        # Set up matrix equation: [x y 1] * [A B C]^T = z
-        A = np.column_stack([x, y, np.ones(len(x))])
-        params, _, _, _ = np.linalg.lstsq(A, z, rcond=None)
-        
-        # Extract circle parameters
-        A, B, C = params
-        center_x = A / 2 + centroid[0]
-        center_y = B / 2 + centroid[1]
-        radius = np.sqrt(C + (A**2 + B**2) / 4)
-        
-        return np.array([center_x, center_y]), radius
-
-    def ransac_circle_fit(self, points, max_iterations=50, threshold=0.01):
-        """Use RANSAC to fit a circle to points, robust to outliers."""
         if points is None or len(points) < 3:
             return None, 0, 0
             
-        best_inliers = []
+        best_inlier_count = 0
         best_center = None
         best_radius = 0
         
-        for _ in range(max_iterations):
-            # Randomly sample 3 points (minimum needed for circle)
+        # Limit iterations based on point count for better performance
+        actual_iterations = min(max_iterations, len(points) // 2)
+        actual_iterations = max(10, actual_iterations)  # At least 10 iterations
+        
+        for _ in range(actual_iterations):
+            # Randomly sample 3 points
             if len(points) < 3:
                 continue
+                
             sample_indices = np.random.choice(len(points), 3, replace=False)
             sample_points = points[sample_indices]
             
-            # Fit circle to these three points
+            # Fit circle to these points
             try:
-                center, radius = self._fit_circle_to_points(sample_points)
+                center, radius = self.fit_circle(sample_points)
+                
+                # Skip if radius is too different from expected
+                if abs(radius - self.ball_radius) > self.ball_radius * 0.5:
+                    continue
                 
                 # Count inliers
                 distances = np.sqrt(
                     (points[:, 0] - center[0])**2 + 
                     (points[:, 1] - center[1])**2
                 )
+                
+                # Inliers are points close to the expected circle
                 inliers = np.abs(distances - radius) < threshold
                 inlier_count = np.sum(inliers)
                 
-                if inlier_count > len(best_inliers):
-                    best_inliers = inliers
+                if inlier_count > best_inlier_count:
+                    best_inlier_count = inlier_count
                     best_center = center
                     best_radius = radius
-            except Exception as e:
-                if self.super_verbose_logging:
-                    self.get_logger().debug(f"RANSAC iteration failed: {str(e)}")
+            except Exception:
                 continue
         
         if best_center is None:
             return None, 0, 0
         
-        # Refine fit using all inliers
-        inlier_points = points[best_inliers]
-        if len(inlier_points) < 3:
-            # Not enough inliers for refinement, use the basic fit
-            return np.append(best_center, 0), len(best_inliers), 0.5
+        # Refine with all inliers if we have enough
+        if best_inlier_count >= 5:
+            # Calculate quality metrics
+            inlier_ratio = best_inlier_count / len(points)
+            radius_error = abs(best_radius - self.ball_radius) / self.ball_radius
+            quality = 0.7 * inlier_ratio + 0.3 * (1.0 - min(radius_error, 1.0))
             
+            # Add z-coordinate for 3D position
+            # Set Z to ball_center_height for consistent ground plane projection
+            center_3d = np.array([best_center[0], best_center[1], self.ball_center_height])
+            
+            return center_3d, best_inlier_count, quality
+        
+        return None, 0, 0
+    
+    def fit_circle(self, points):
+        """
+        Fit a circle to 2D or 3D points.
+        
+        Args:
+            points: Numpy array of shape (n, 2) or (n, 3)
+            
+        Returns:
+            tuple: (center, radius)
+        """
+        # Extract 2D coordinates
+        if points.shape[1] > 2:
+            points_2d = points[:, 0:2]
+        else:
+            points_2d = points
+        
+        # Need at least 3 points
+        if len(points_2d) < 3:
+            raise ValueError("Need at least 3 points to fit a circle")
+        
+        # Direct calculation for exactly 3 points
+        if len(points_2d) == 3:
+            # Get coordinates
+            x1, y1 = points_2d[0]
+            x2, y2 = points_2d[1]
+            x3, y3 = points_2d[2]
+            
+            # Calculate circle parameters
+            A = x1 * (y2 - y3) - y1 * (x2 - x3) + x2 * y3 - x3 * y2
+            B = (x1**2 + y1**2) * (y3 - y2) + (x2**2 + y2**2) * (y1 - y3) + (x3**2 + y3**2) * (y2 - y1)
+            C = (x1**2 + y1**2) * (x2 - x3) + (x2**2 + y2**2) * (x3 - x1) + (x3**2 + y3**2) * (x1 - x2)
+            
+            if abs(A) < 1e-10:
+                raise ValueError("Points are collinear, cannot fit circle")
+                
+            x0 = -B / (2 * A)
+            y0 = -C / (2 * A)
+            r = np.sqrt((x0 - x1)**2 + (y0 - y1)**2)
+            
+            return np.array([x0, y0]), r
+        
+        # For more points, use least squares method
+        # Center the data for numerical stability
+        centroid = np.mean(points_2d, axis=0)
+        x = points_2d[:, 0] - centroid[0]
+        y = points_2d[:, 1] - centroid[1]
+        
+        # Formulate and solve the least squares problem
+        A = np.column_stack([x, y, np.ones(len(x))])
+        b = x**2 + y**2
+        c = np.linalg.lstsq(A, b, rcond=None)[0]
+        
+        # Extract circle parameters
+        x0 = c[0] / 2 + centroid[0]
+        y0 = c[1] / 2 + centroid[1]
+        r = np.sqrt(c[2] + (c[0]**2 + c[1]**2) / 4)
+        
+        return np.array([x0, y0]), r
+    
+    def publish_ball_position(self, center, cluster_size, circle_quality, trigger_source, timestamp=None):
+        """
+        Publish the detected basketball position.
+        
+        Args:
+            center: Center of detected ball (3D)
+            cluster_size: Number of points in the ball cluster
+            circle_quality: Quality of the circle fit
+            trigger_source: Which detector triggered this (YOLO or HSV)
+            timestamp: Original timestamp for the detection
+        """
+        # Calculate distance and reliability
+        distance = np.sqrt(center[0]**2 + center[1]**2)
+        is_reliable = distance >= self.min_reliable_distance
+        
+        # Adjust quality based on distance
+        if not is_reliable:
+            distance_factor = max(0.1, distance / self.min_reliable_distance)
+            adjusted_quality = circle_quality * distance_factor
+            reliability_text = f"UNRELIABLE ({distance:.2f}m < {self.min_reliable_distance:.1f}m)"
+        else:
+            adjusted_quality = circle_quality
+            reliability_text = "RELIABLE"
+        
+        # Log the detection
+        self.get_logger().info(
+            f"LIDAR: Basketball at ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) meters | "
+            f"Distance: {distance:.2f}m | {reliability_text} | "
+            f"Quality: {adjusted_quality:.2f} | Triggered by: {trigger_source}"
+        )
+        
+        # Skip unreliable detections if configured to do so
+        if not is_reliable and not self.publish_unreliable:
+            self.get_logger().info("Skipping publication of unreliable detection")
+            return
+        
+        # Create and publish position message
+        msg = PointStamped()
+        
+        # Use original timestamp if provided, otherwise use current time
+        if timestamp is not None:
+            msg.header.stamp = timestamp
+        else:
+            msg.header.stamp = self.get_clock().now().to_msg()
+        
+        msg.header.frame_id = "lidar_frame"
+        msg.point.x = float(center[0])
+        msg.point.y = float(center[1])
+        msg.point.z = float(center[2])
+        
+        self.position_publisher.publish(msg)
+        
+        # Update statistics
+        self.successful_detections += 1
+        
+        # Determine confidence level
+        if circle_quality > self.quality_high:
+            confidence_text = "HIGH"
+        elif circle_quality > self.quality_medium:
+            confidence_text = "MEDIUM"
+        else:
+            confidence_text = "LOW"
+        
+        # Create visualization markers
+        self.visualize_detection(center, circle_quality, trigger_source)
+        
+        # With the lock, update position history
+        with self.lock:
+            self.position_history.append(center)
+    
+    def visualize_detection(self, center, quality, source):
+        """
+        Create visualization markers for the detected ball.
+        
+        Args:
+            center: Ball center position
+            quality: Detection quality 
+            source: Detection source (YOLO or HSV)
+        """
+        markers = MarkerArray()
+        
+        # Get visualization settings
+        viz_config = self.config.get('visualization', {})
+        marker_lifetime = viz_config.get('marker_lifetime', 1.0)
+        
+        # Create sphere marker for the ball
+        ball_marker = Marker()
+        ball_marker.header.frame_id = "lidar_frame"
+        ball_marker.header.stamp = self.scan_timestamp
+        ball_marker.ns = "basketball"
+        ball_marker.id = 1
+        ball_marker.type = Marker.SPHERE
+        ball_marker.action = Marker.ADD
+        
+        # Set position
+        ball_marker.pose.position.x = center[0]
+        ball_marker.pose.position.y = center[1]
+        ball_marker.pose.position.z = center[2]
+        ball_marker.pose.orientation.w = 1.0
+        
+        # Set color based on source
+        colors = viz_config.get('colors', {})
+        
+        if source.lower() == "yolo":
+            color_config = colors.get('yolo', {'r': 0.0, 'g': 1.0, 'b': 0.3, 'base_alpha': 0.5})
+        else:  # HSV
+            color_config = colors.get('hsv', {'r': 1.0, 'g': 0.6, 'b': 0.0, 'base_alpha': 0.5})
+        
+        ball_marker.color.r = color_config.get('r', 0.0)
+        ball_marker.color.g = color_config.get('g', 1.0)
+        ball_marker.color.b = color_config.get('b', 0.3)
+        
+        # Adjust transparency based on quality
+        base_alpha = color_config.get('base_alpha', 0.5)
+        ball_marker.color.a = min(base_alpha + quality * 0.5, 1.0)
+        
+        # Set size (basketball diameter)
+        ball_marker.scale.x = self.ball_radius * 2.0
+        ball_marker.scale.y = self.ball_radius * 2.0
+        ball_marker.scale.z = self.ball_radius * 2.0
+        
+        # Set marker lifetime
+        ball_marker.lifetime.sec = int(marker_lifetime)
+        ball_marker.lifetime.nanosec = int((marker_lifetime % 1) * 1e9)
+        
+        markers.markers.append(ball_marker)
+        
+        # Add text marker
+        text_marker = Marker()
+        text_marker.header.frame_id = "lidar_frame"
+        text_marker.header.stamp = self.scan_timestamp
+        text_marker.ns = "basketball_text"
+        text_marker.id = 2
+        text_marker.type = Marker.TEXT_VIEW_FACING
+        text_marker.action = Marker.ADD
+        
+        # Position text above the ball
+        text_height_offset = viz_config.get('text_height_offset', 0.2)
+        text_marker.pose.position.x = center[0]
+        text_marker.pose.position.y = center[1]
+        text_marker.pose.position.z = center[2] + text_height_offset
+        text_marker.pose.orientation.w = 1.0
+        
+        # Set text content
+        quality_pct = int(quality * 100)
+        text_marker.text = f"{source}: {quality_pct}%"
+        
+        # Set text appearance
+        text_size = viz_config.get('text_size', 0.05)
+        text_marker.scale.z = text_size
+        
+        text_color = colors.get('text', {'r': 1.0, 'g': 1.0, 'b': 1.0, 'a': 1.0})
+        text_marker.color.r = text_color.get('r', 1.0)
+        text_marker.color.g = text_color.get('g', 1.0)
+        text_marker.color.b = text_color.get('b', 1.0)
+        text_marker.color.a = text_color.get('a', 1.0)
+        
+        text_marker.lifetime.sec = int(marker_lifetime)
+        text_marker.lifetime.nanosec = int((marker_lifetime % 1) * 1e9)
+        
+        markers.markers.append(text_marker)
+        
+        # Publish all markers
+        self.marker_publisher.publish(markers)
+    
+    def publish_transform(self):
+        """Publish the transform from LIDAR to camera frame."""
+        transform = TransformStamped()
+        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.frame_id = self.transform_parent_frame
+        transform.child_frame_id = self.transform_child_frame
+        
+        # Set translation
+        transform.transform.translation.x = self.transform_translation['x']
+        transform.transform.translation.y = self.transform_translation['y']
+        transform.transform.translation.z = self.transform_translation['z']
+        
+        # Set rotation
+        transform.transform.rotation.x = self.transform_rotation['x']
+        transform.transform.rotation.y = self.transform_rotation['y']
+        transform.transform.rotation.z = self.transform_rotation['z']
+        transform.transform.rotation.w = self.transform_rotation['w']
+        
+        # Publish transform
+        self.tf_broadcaster.sendTransform(transform)
+        
+        # Log transform occasionally
+        current_time = time.time()
+        log_interval = self.config.get('transform', {}).get('log_interval', 60.0)
+        
+        if current_time - self.last_transform_log > log_interval:
+            self.get_logger().info("Publishing LIDAR-to-camera transform from calibration")
+            self.last_transform_log = current_time
+    
+    def publish_diagnostics(self):
+        """Publish diagnostic information about the node."""
         try:
-            refined_center, refined_radius = self._fit_circle_to_points(inlier_points)
+            # Calculate statistics
+            current_time = time.time()
+            elapsed = current_time - self.start_time
             
-            # Calculate quality based on inlier ratio and radius error
-            inlier_ratio = len(inlier_points) / len(points)
-            radius_error = abs(refined_radius - self.ball_radius) / self.ball_radius
-            quality = inlier_ratio * (1.0 - min(radius_error, 1.0))
+            if elapsed < 0.1:
+                return
             
-            # Create 3D center (x, y, z) using LIDAR height
-            center_3d = np.array([refined_center[0], refined_center[1], self.ball_height])
+            # Calculate rates
+            scan_rate = self.processed_scans / elapsed if elapsed > 0 else 0
+            detection_rate = self.successful_detections / elapsed if elapsed > 0 else 0
             
-            # Adjust for ball height
-            center_3d = self.adjust_for_ball_height(center_3d, self.ball_radius)
+            # Calculate average processing time
+            avg_time = 0
+            if self.detection_times:
+                avg_time = sum(self.detection_times) / len(self.detection_times)
             
-            return center_3d, len(inlier_points), quality
+            # Create diagnostics message
+            diagnostics = {
+                "timestamp": current_time,
+                "node": "lidar",
+                "uptime_seconds": elapsed,
+                "status": "active",
+                "health": {
+                    "lidar_health": self.lidar_health,
+                    "detection_health": self.detection_health,
+                    "overall": (self.lidar_health * 0.7 + self.detection_health * 0.3)
+                },
+                "metrics": {
+                    "processed_scans": self.processed_scans,
+                    "successful_detections": self.successful_detections,
+                    "scan_rate": scan_rate,
+                    "detection_rate": detection_rate,
+                    "avg_processing_time_ms": avg_time * 1000,
+                    "sources": {
+                        "yolo_detections": self.yolo_detections,
+                        "hsv_detections": self.hsv_detections
+                    }
+                },
+                "config": {
+                    "ball_radius": self.ball_radius,
+                    "max_distance": self.max_distance,
+                    "min_points": self.min_points
+                }
+            }
             
-        except Exception as e:
-            self.get_logger().warn(f"Circle fitting failed during refinement: {str(e)}")
-            # Return the unrefined result with moderate quality
-            center_3d = np.array([best_center[0], best_center[1], self.ball_height])
-            return center_3d, len(best_inliers), 0.5
-
-    def find_tennis_balls_ransac(self, trigger_source):
-        """Search for tennis balls using RANSAC for robust circle fitting."""
-        operation_start = TimeUtils.now_as_float()
-        
-        if self.points_array is None or len(self.points_array) == 0:
-            self.get_logger().warn("LIDAR: No points available for analysis")
-            return []
+            # Publish as JSON string
+            msg = String()
+            msg.data = json.dumps(diagnostics)
+            self.diagnostics_publisher.publish(msg)
             
-        self.get_logger().debug(
-            f"LIDAR: Analyzing {len(self.points_array)} points with RANSAC triggered by {trigger_source}"
-        )
-        
-        # Filter ground points for cleaner detection
-        filtered_points = self.filter_ground_points(self.points_array)
-        
-        if len(filtered_points) < self.min_points:
-            self.get_logger().debug(f"LIDAR: Not enough non-ground points: {len(filtered_points)}")
-            # Fall back to all points if filtering removed too many
-            filtered_points = self.points_array
-        
-        # Create a consistent adaptive factor
-        adaptation_factor = min(0.5, 0.1 * min(self.consecutive_failures, 5))
-        
-        # Dynamically adjust parameters based on consecutive failures
-        dynamic_min_points = max(5, int(self.min_points * (1.0 - adaptation_factor)))
-        threshold = 0.01 * (1.0 + adaptation_factor * 2)  # Increase threshold with failures
-        
-        # Try RANSAC circle fitting
-        center, inlier_count, quality = self.ransac_circle_fit(
-            filtered_points, 
-            max_iterations=30,
-            threshold=threshold
-        )
-        
-        # Check if we found a valid circle
-        if center is None or inlier_count < dynamic_min_points:
-            if self.detailed_logging:
-                if center is None:
-                    self.get_logger().debug(f"RANSAC found no valid circles")
-                else:
-                    self.get_logger().debug(f"RANSAC circle has too few points: {inlier_count} < {dynamic_min_points}")
-            return []
-            
-        # Quality threshold also adapts based on consecutive failures
-        dynamic_quality_threshold = max(0.3, TENNIS_BALL_CONFIG["quality_threshold"]["low"] * (1.0 - adaptation_factor))
-        
-        # Check quality
-        if quality < dynamic_quality_threshold:
-            if self.detailed_logging:
-                self.get_logger().debug(f"RANSAC circle quality too low: {quality:.2f} < {dynamic_quality_threshold:.2f}")
-            return []
-            
-        # Success! Return the result
-        if self.detailed_logging:
+            # Log basic summary
             self.get_logger().info(
-                f"RANSAC found tennis ball at ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) "
-                f"with {inlier_count} points and quality {quality:.2f}"
+                f"LIDAR: Status: {scan_rate:.1f} scans/sec, "
+                f"{detection_rate:.1f} detections/sec, "
+                f"YOLO: {self.yolo_detections}, HSV: {self.hsv_detections}"
             )
             
-        # Return in same format as original method: [(center, point_count, quality)]
-        return [(center, inlier_count, quality)]
-
-    def project_to_ground_plane(self, detected_point):
-        """
-        Project LIDAR detection to ground plane for accurate ball tracking.
-        
-        Args:
-            detected_point (numpy.ndarray): 3D point from LIDAR [x, y, z]
-            
-        Returns:
-            numpy.ndarray: Ground-projected point with ball center height
-        """
-        # Physical measurements in meters
-        lidar_height = self.lidar_height  # 6 inches
-        ball_radius = self.ball_radius  # 1.35 inches
-        ball_center_height = self.ball_center_height  # 1.5 inches
-        
-        # Calculate horizontal distance
-        xy_distance = np.sqrt(detected_point[0]**2 + detected_point[1]**2)
-        
-        # Calculate correction based on geometry of LIDAR beam intersecting upper portion of ball
-        # Only apply if we have a reasonable distance (avoid division by zero)
-        if xy_distance > 0.1:
-            height_diff = lidar_height - ball_center_height
-            # If LIDAR beam hits the ball, it hits above the center
-            # Calculate how far above the center based on the ball radius
-            intersection_height_from_center = height_diff - ball_radius
-            
-            # If intersection is within the ball's radius
-            if abs(intersection_height_from_center) < ball_radius:
-                # Calculate horizontal offset based on chord geometry
-                chord_offset = np.sqrt(ball_radius**2 - intersection_height_from_center**2)
-                
-                # Calculate the horizontal displacement needed
-                correction_factor = chord_offset / xy_distance
-                
-                # Create corrected point (extend distance slightly)
-                angle = np.arctan2(detected_point[1], detected_point[0])
-                corrected_x = (xy_distance + chord_offset) * np.cos(angle)
-                corrected_y = (xy_distance + chord_offset) * np.sin(angle)
-                
-                # Keep Z at ball height for ground tracking
-                return np.array([corrected_x, corrected_y, ball_center_height])
-        
-        # For very close points or if intersection calculation fails, just set Z to ball height
-        return np.array([detected_point[0], detected_point[1], ball_center_height])
-
-    def calculate_detection_confidence(self, point):
-        """
-        Calculate the detection confidence based on distance from LIDAR.
-        
-        Args:
-            point (numpy.ndarray): 3D point [x, y, z]
-            
-        Returns:
-            float: Confidence value between 0.0 and 1.0
-        """
-        # Calculate distance on XY plane
-        distance = np.sqrt(point[0]**2 + point[1]**2)
-        
-        # Define confidence curve for ground-level tennis ball
-        if distance < 0.5:  # Less than 0.5m
-            # Too close - LIDAR beam likely passes over ball completely
-            confidence = 0.1
-        elif distance < 1.0:  # 0.5-1.0m
-            # Transitional range - linear increase
-            confidence = 0.1 + 0.5 * ((distance - 0.5) / 0.5)
-        elif distance < 3.0:  # 1.0-3.0m
-            # Optimal range
-            confidence = 0.6 + 0.3 * (1.0 - (distance - 1.0) / 2.0)
-        else:  # >3.0m
-            # Too far - decreasing confidence
-            confidence = max(0.1, 0.9 - 0.2 * ((distance - 3.0) / 1.0))
-        
-        return confidence
-
-    def determine_processing_level(self):
-        """
-        Determine processing level based on CPU usage and recent detections.
-        
-        Returns:
-            dict: Processing parameters including samples, radius, and min_points
-        """
-        # Get CPU usage
-        import psutil
-        cpu_usage = psutil.cpu_percent(interval=None)
-        
-        # Get time since last successful detection
-        current_time = TimeUtils.now_as_float()
-        time_since_detection = current_time - self.last_successful_detection_time
-        
-        # Base parameters
-        params = {
-            "detection_samples": 30,
-            "radius": self.ball_radius * 3.5,
-            "min_points": 6
-        }
-        
-        # If high CPU usage, reduce processing
-        if cpu_usage > 85:
-            params["detection_samples"] = 20
-            params["radius"] = self.ball_radius * 2.5
-            params["min_points"] = 5
-            self.get_logger().debug("High CPU load - using minimal processing")
-        # If low CPU and we haven't detected in a while, increase processing
-        elif cpu_usage < 50 and time_since_detection > 2.0:
-            params["detection_samples"] = 50
-            params["radius"] = self.ball_radius * 4.0
-            params["min_points"] = 5  # Keep min_points lower for better sensitivity
-            self.get_logger().debug("Low CPU load and no recent detections - using intensive processing")
-        
-        return params
-
-# SIMPLIFIED KALMAN FILTER
-class KalmanFilter:
-    """Simple Kalman filter for tracking a tennis ball in 3D space."""
+        except Exception as e:
+            self.log_error(f"Error publishing diagnostics: {str(e)}")
     
-    def __init__(self):
-        # State: [x, y, z, vx, vy, vz]
-        self.state = np.zeros(6)
-        
-        # Initial uncertainty is high
-        self.P = np.eye(6) * 0.8
-        
-        # Process noise (how much we expect the state to change between predictions)
-        self.Q = np.eye(6)
-        self.Q[0:3, 0:3] *= 0.02  # Position variance
-        self.Q[3:6, 3:6] *= 0.2   # Velocity variance
-        
-        # Measurement noise (how much we trust the measurements)
-        self.R = np.eye(3) * 0.2
-        
-        # State transition matrix (physics model)
-        self.F = np.eye(6)
-        self.F[0:3, 3:6] = np.eye(3) * 0.1  # Default dt = 0.1
-        self.dt = 0.1  # default time step
-        
-        # Measurement matrix (maps state to measurement)
-        self.H = np.zeros((3, 6))
-        self.H[0:3, 0:3] = np.eye(3)  # We only measure position, not velocity
-        
-        self.initialized = False
-        self.last_update_time = None
-    
-    def predict(self, dt=None):
-        """Predict next state based on motion model."""
-        if not self.initialized:
-            return np.zeros(3)
-            
-        # Use provided dt or default
-        if dt is not None:
-            self.dt = dt
-            self.F[0:3, 3:6] = np.eye(3) * dt
-        
-        # Predict next state: x = F * x
-        self.state = self.F @ self.state
-        
-        # Update covariance: P = F * P * F^T + Q
-        self.P = self.F @ self.P @ self.F.T + self.Q
-        
-        return self.state[0:3]  # Return predicted position
-    
-    def update(self, measurement, measurement_quality=1.0, cluster_size=0):
-        """Update the filter with a new measurement."""
-        current_time = time.time()
-        
-        # Initialize if this is the first measurement
-        if not self.initialized:
-            self.state[0:3] = measurement
-            self.last_update_time = current_time
-            self.initialized = True
-            return self.state[0:3]
-        
-        # Calculate time since last update for prediction
-        dt = current_time - self.last_update_time
-        self.last_update_time = current_time
-        
-        # Don't use negative or very large dt values
-        if dt > 0 and dt < 1.0:
-            self.predict(dt)
-        else:
-            self.predict()
-        
-        # Adjust measurement noise based on quality and cluster size
-        quality_factor = max(0.1, measurement_quality)
-        
-        # Better points = more trust
-        if cluster_size > 0:
-            point_factor = min(1.5, 0.5 + (cluster_size / 20.0))
-            quality_factor *= point_factor
-        
-        R_adjusted = self.R / quality_factor
+    def publish_debug_point(self):
+        """
+        Publish a debug point for calibration purposes.
+        Selects visible points from the LIDAR scan.
+        """
+        if self.points_array is None or len(self.points_array) == 0:
+            return
         
         try:
-            # Calculate innovation: y = z - H*x
-            y = measurement - self.H @ self.state
+            # Group points by distance ranges
+            points = self.points_array
+            distances = np.sqrt(points[:, 0]**2 + points[:, 1]**2)
             
-            # Calculate innovation covariance: S = H*P*H^T + R
-            S = self.H @ self.P @ self.H.T + R_adjusted
+            # Find points in different ranges
+            close_indices = np.where((distances >= 0.5) & (distances < 1.0))[0]
+            mid_indices = np.where((distances >= 1.0) & (distances < 2.0))[0]
+            far_indices = np.where((distances >= 2.0) & (distances < 3.0))[0]
             
-            # Calculate Kalman gain: K = P*H^T*S^-1
-            K = self.P @ self.H.T @ np.linalg.inv(S)
+            # Select which range to use
+            if hasattr(self, 'last_debug_range'):
+                if self.last_debug_range == "close" and len(mid_indices) > 0:
+                    indices = mid_indices
+                    range_name = "mid"
+                elif self.last_debug_range == "mid" and len(far_indices) > 0:
+                    indices = far_indices
+                    range_name = "far"
+                elif self.last_debug_range == "far" and len(close_indices) > 0:
+                    indices = close_indices
+                    range_name = "close"
+                # Default if can't follow pattern
+                elif len(mid_indices) > 0:
+                    indices = mid_indices
+                    range_name = "mid"
+                elif len(far_indices) > 0:
+                    indices = far_indices
+                    range_name = "far"
+                elif len(close_indices) > 0:
+                    indices = close_indices
+                    range_name = "close"
+                else:
+                    # No suitable points
+                    return
+            else:
+                # First run, prefer mid-range
+                if len(mid_indices) > 0:
+                    indices = mid_indices
+                    range_name = "mid"
+                elif len(far_indices) > 0:
+                    indices = far_indices
+                    range_name = "far"
+                elif len(close_indices) > 0:
+                    indices = close_indices
+                    range_name = "close"
+                else:
+                    # No suitable points
+                    return
             
-            # Update state: x = x + K*y
-            self.state = self.state + K @ y
+            # Save range for next time
+            self.last_debug_range = range_name
             
-            # Update covariance: P = (I - K*H)*P
-            I = np.eye(self.state.shape[0])
-            self.P = (I - K @ self.H) @ self.P
-        except np.linalg.LinAlgError:
-            # Handle matrix inversion issues gracefully
-            pass
-        
-        # Limit the maximum velocity to avoid instability
-        max_velocity = 2.0  # m/s
-        speed = np.linalg.norm(self.state[3:6])
-        if speed > max_velocity:
-            self.state[3:6] = self.state[3:6] * (max_velocity / speed)
-        
-        return self.state[0:3]  # Return updated position
-
-
-def main():
-    """Main entry point for the LIDAR node."""
-    # Initialize ROS
-    rclpy.init()
+            # Select a point with good Y variation
+            selected_points = points[indices]
+            y_values = np.abs(selected_points[:, 1])
+            max_y_idx = np.argmax(y_values)
+            selected_point = selected_points[max_y_idx]
+            
+            # Create and publish message
+            point_msg = PointStamped()
+            point_msg.header.stamp = self.get_clock().now().to_msg()
+            point_msg.header.frame_id = "lidar_frame"
+            point_msg.point.x = float(selected_point[0])
+            point_msg.point.y = float(selected_point[1])
+            point_msg.point.z = float(self.ball_center_height)  # Set to expected height
+            
+            self.position_publisher.publish(point_msg)
+            
+            # Log for calibration
+            distance = np.sqrt(selected_point[0]**2 + selected_point[1]**2)
+            self.get_logger().info(
+                f"CALIBRATION: Debug point at ({selected_point[0]:.3f}, "
+                f"{selected_point[1]:.3f}, {self.ball_center_height:.3f}), "
+                f"distance: {distance:.2f}m, range: {range_name}"
+            )
+            
+        except Exception as e:
+            self.log_error(f"Error publishing debug point: {str(e)}")
     
-    # Create node
-    detector = TennisBallLidarDetector()
+    def log_error(self, message):
+        """Log an error and update health status."""
+        # Add to error collection
+        current_time = time.time()
+        self.errors.append({
+            "timestamp": current_time,
+            "message": message
+        })
+        
+        # Update health
+        self.last_error_time = current_time
+        self.lidar_health = max(0.3, self.lidar_health - 0.2)
+        
+        # Log the error
+        self.get_logger().error(f"LIDAR ERROR: {message}")
+
+def main(args=None):
+    """Main entry point."""
+    rclpy.init(args=args)
     
-    # Print welcome message
-    print("=================================================")
-    print("Tennis Ball LIDAR Detector")
-    print("=================================================")
-    print("This node detects tennis balls using a 2D laser scanner.")
-    print(f"Subscribing to LIDAR data on: {TOPICS['input']['lidar_scan']}")
-    print(f"Subscribing to YOLO detections on: {TOPICS['input']['yolo_detection']}")
-    print(f"Subscribing to HSV detections on: {TOPICS['input']['hsv_detection']}")
-    print(f"Publishing ball positions to: {TOPICS['output']['ball_position']}")
-    print("Use RViz to see the visualizations.")
-    print("Press Ctrl+C to stop the program.")
-    print("=================================================")
+    # Create and spin node
+    detector = BasketballLidarDetector()
     
     try:
-        # Set thread priority for better real-time performance on Linux (Pi)
-        try:
-            import os
-            os.nice(10)  # Lower priority slightly to favor critical nodes
-        except:
-            pass
-            
-        # Keep the node running
         rclpy.spin(detector)
     except KeyboardInterrupt:
-        print("LIDAR: Shutting down (Ctrl+C pressed)")
+        detector.get_logger().info("Shutting down (Ctrl+C)")
     except Exception as e:
-        print(f"LIDAR: Error: {str(e)}")
+        detector.get_logger().error(f"Error: {str(e)}")
     finally:
-        # Clean shutdown
         detector.destroy_node()
         rclpy.shutdown()
-        print("LIDAR: Tennis Ball LIDAR Detector has been shut down.")
 
 if __name__ == '__main__':
     main()
