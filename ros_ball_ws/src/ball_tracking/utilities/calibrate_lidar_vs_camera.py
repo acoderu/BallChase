@@ -71,6 +71,14 @@ class LidarCameraCalibrator(Node):
         self.camera_time = 0
         self.lidar_time = 0
         
+        # Quality and stability tracking for LIDAR
+        self.latest_lidar_quality = 0.0
+        self.previous_lidar_points = []
+        self.lidar_quality_threshold = 0.4  # Reduced threshold for reliable calibration 
+        self.position_stability_threshold = 0.3  # Increased threshold for movement between readings (meters)
+        self.consecutive_filtered_points = 0  # Track consecutive filtered points
+        self.max_valid_data_age = 2.0  # Maximum age for valid data in seconds
+        
         # Physical measurements (in meters)
         self.lidar_height = 0.1524      # LIDAR height from ground (6 inches)
         self.camera_height = 0.1016     # Camera height from ground (4 inches)
@@ -130,10 +138,12 @@ class LidarCameraCalibrator(Node):
         self.get_logger().info("====================================================")
         self.get_logger().info("This tool helps align LIDAR and camera coordinate frames")
         self.get_logger().info("")
-        self.get_logger().info("Instructions:")
-        self.get_logger().info("1. Place the basketball in view of both sensors")
-        self.get_logger().info("2. Wait for both sensors to detect the ball")
-        self.get_logger().info("3. Use commands below to capture points & calculate transform")
+        self.get_logger().info("IMPORTANT - READ BEFORE CALIBRATING:")
+        self.get_logger().info("1. Make sure lidar_node.py is running with debug points")
+        self.get_logger().info("   publishing to a separate topic")
+        self.get_logger().info("2. Move the basketball to generate new detections")
+        self.get_logger().info("3. Watch the logs - capture within 2 seconds of")
+        self.get_logger().info("   seeing a valid detection")
         self.get_logger().info("")
         self.get_logger().info("Commands:")
         self.get_logger().info("  'c' - Capture current point pair")
@@ -147,16 +157,19 @@ class LidarCameraCalibrator(Node):
         self.get_logger().info("  'q' - Quit")
         self.get_logger().info("====================================================")
         self.get_logger().info("Tips for Good Calibration:")
+        self.get_logger().info("- Ensure your lidar_node and camera are working properly")
         self.get_logger().info("- Collect at least 5-6 point pairs at different positions")
-        self.get_logger().info("- Include points at different distances (0.5-3m)")
-        self.get_logger().info("- Include points at different sides of the robot")
-        self.get_logger().info("- Best results in the 1-2m range for both sensors")
+        self.get_logger().info("- Include points at different distances (0.8-2m)")
+        self.get_logger().info("- If data is too old (>2s), move the ball to get new data")
+        self.get_logger().info("- If capture fails, check if camera and LIDAR detect the same ball")
+        self.get_logger().info("- Watch for 'Large distance mismatch' warnings")
+        self.get_logger().info("- Remove bad points with 'r' if needed")
         self.get_logger().info("====================================================")
     
     def camera_callback(self, msg):
         """Process camera position messages."""
         # Debug print to confirm callback is being triggered
-        self.get_logger().info(f"Camera callback triggered: ({msg.point.x:.3f}, {msg.point.y:.3f}, {msg.point.z:.3f})")
+        #self.get_logger().info(f"Camera callback triggered: ({msg.point.x:.3f}, {msg.point.y:.3f}, {msg.point.z:.3f})")
         
         with self.lock:
             self.latest_camera_point = np.array([
@@ -167,16 +180,62 @@ class LidarCameraCalibrator(Node):
             self.camera_time = time.time()
     
     def lidar_callback(self, msg):
-        """Process LIDAR position messages."""
-        # Debug print to confirm callback is being triggered
-        self.get_logger().info(f"LIDAR callback triggered: ({msg.point.x:.3f}, {msg.point.y:.3f}, {msg.point.z:.3f})")
+        """
+        Process LIDAR position messages with quality filtering and stability checks.
+        """
+        # Extract position
+        position = np.array([
+            msg.point.x,
+            msg.point.y, 
+            msg.point.z
+        ])
         
+        # Calculate distance
+        distance = np.sqrt(position[0]**2 + position[1]**2)
+        
+        # Debug print to confirm callback is being triggered
+        #self.get_logger().info(f"LIDAR callback triggered: ({position[0]:.3f}, {position[1]:.3f}, {position[2]:.3f})")
+        
+        # SIMPLIFIED FILTERING - be much more lenient about accepting points
+        is_filtered = False
+        
+        # Only filter extreme cases - points near -1.0y that are clear debug points
+        if abs(position[1] + 1.0) < 0.05 and abs(distance - 1.0) < 0.05:
+            self.get_logger().warn(f"Filtered out likely debug point: exact -1.0y, 1.0m distance")
+            is_filtered = True
+        
+        # Basic stability check - only if we have previous points and only for very large jumps
+        if len(self.previous_lidar_points) > 0:
+            # Get last position
+            last_position = self.previous_lidar_points[-1]
+            position_change = np.linalg.norm(position - last_position)
+            
+            # Only filter extremely large changes (much more permissive)
+            if position_change > 1.0:  # Changed from 0.5 to 1.0
+                self.get_logger().warn(f"Filtered out extremely unstable point: {position_change:.2f}m position change")
+                is_filtered = True
+                self.consecutive_filtered_points += 1
+            else:
+                self.consecutive_filtered_points = 0
+        
+        # If we've filtered too many points in a row, reset our history to stop rejecting everything
+        if self.consecutive_filtered_points > 5:
+            self.get_logger().warn("Too many filtered points in a row - resetting position history")
+            self.previous_lidar_points = []
+            self.consecutive_filtered_points = 0
+        
+        # Skip filtered points
+        if is_filtered:
+            return
+            
+        # Store position for point stability tracking - max 3 points to avoid old history problems
+        if len(self.previous_lidar_points) >= 3:
+            self.previous_lidar_points.pop(0)  # Remove oldest
+        self.previous_lidar_points.append(position)
+            
+        # If passed all filters, use this point
         with self.lock:
-            self.latest_lidar_point = np.array([
-                msg.point.x,
-                msg.point.y,
-                msg.point.z
-            ])
+            self.latest_lidar_point = position
             self.lidar_time = time.time()
     
     def timer_callback(self):
@@ -185,17 +244,77 @@ class LidarCameraCalibrator(Node):
         if self.has_transform:
             self.publish_transform()
         
-        # Check data freshness
+        # Check data freshness less frequently
         current_time = time.time()
-        with self.lock:
-            camera_age = current_time - self.camera_time if self.camera_time > 0 else float('inf')
-            lidar_age = current_time - self.lidar_time if self.lidar_time > 0 else float('inf')
         
-        # Report if data is stale
-        if camera_age > 10.0:
-            self.get_logger().warn(f"No recent camera data (last seen {camera_age:.1f}s ago)")
-        if lidar_age > 10.0:
-            self.get_logger().warn(f"No recent LIDAR data (last seen {lidar_age:.1f}s ago)")
+        # Only check every 1 second to reduce log spam
+        if not hasattr(self, 'last_data_check') or (current_time - self.last_data_check) > 1.0:
+            self.last_data_check = current_time
+            
+            with self.lock:
+                camera_age = current_time - self.camera_time if self.camera_time > 0 else float('inf')
+                lidar_age = current_time - self.lidar_time if self.lidar_time > 0 else float('inf')
+            
+            # Track if data was ready
+            is_ready_now = camera_age <= self.max_valid_data_age and lidar_age <= self.max_valid_data_age
+            
+            # Only log when state changes or on a timer
+            if not hasattr(self, 'was_ready_last_check'):
+                self.was_ready_last_check = False
+                
+            if is_ready_now:
+                # Show ready message when state changes or every 3 seconds
+                if not self.was_ready_last_check or int(current_time * 10) % 30 == 0:
+                    self.get_logger().info(f"✓ READY TO CAPTURE - Data fresh: camera={camera_age:.1f}s, lidar={lidar_age:.1f}s")
+            else:
+                # Only show waiting message occasionally (every 5 seconds)
+                if not hasattr(self, 'last_waiting_message') or (current_time - self.last_waiting_message) > 5.0:
+                    self.get_logger().info("Waiting for fresh sensor data... Move the basketball to trigger detection.")
+                    self.last_waiting_message = current_time
+            
+            # Check position stability but only when data is fresh
+            if is_ready_now and len(self.previous_lidar_points) >= 2:
+                stability = self.check_position_stability()
+                if stability >= self.position_stability_threshold:
+                    self.get_logger().warn(f"LIDAR position unstable (variance: {stability:.3f}m)")
+            
+            # Update state
+            self.was_ready_last_check = is_ready_now
+    
+    def check_position_stability(self):
+        """
+        Check the stability of recent LIDAR readings.
+        
+        Returns:
+            float: Average distance between consecutive points (lower is more stable)
+        """
+        if len(self.previous_lidar_points) < 2:
+            return 0.0
+            
+        # Use a better stability metric - average deviation from mean position
+        # This is more robust than just looking at consecutive points
+        if len(self.previous_lidar_points) >= 3:
+            # Calculate mean position
+            points_array = np.array(self.previous_lidar_points)
+            mean_position = np.mean(points_array, axis=0)
+            
+            # Calculate average deviation from mean
+            total_deviation = 0.0
+            for point in self.previous_lidar_points:
+                deviation = np.linalg.norm(point - mean_position)
+                total_deviation += deviation
+                
+            return total_deviation / len(self.previous_lidar_points)
+        else:
+            # Fall back to original method for just 2 points
+            total_distance = 0.0
+            for i in range(1, len(self.previous_lidar_points)):
+                distance = np.linalg.norm(
+                    self.previous_lidar_points[i] - self.previous_lidar_points[i-1]
+                )
+                total_distance += distance
+                
+            return total_distance / (len(self.previous_lidar_points) - 1)
     
     def input_loop(self):
         """Handle user input for calibration process."""
@@ -208,6 +327,8 @@ class LidarCameraCalibrator(Node):
                 self.list_points()
             elif cmd == 'r':  # Remove
                 self.remove_last_point()
+            elif cmd == 'f':  # Filter outliers automatically
+                self.filter_outliers()
             elif cmd == 'x':  # Calculate
                 self.calculate_transformation()
             elif cmd == 'p':  # Physical constraints
@@ -224,10 +345,13 @@ class LidarCameraCalibrator(Node):
                 break
             else:
                 self.get_logger().info("Unknown command")
-                self.get_logger().info("Commands: c=capture, l=list, r=remove, x=calculate, p=physical, a=assess, t=test, q=quit")
+                self.get_logger().info("Commands: c=capture, l=list, r=remove, f=filter outliers, x=calculate, p=physical, a=assess, t=test, q=quit")
     
     def capture_point_pair(self):
-        """Capture a pair of corresponding points from both sensors."""
+        """
+        Capture a pair of corresponding points from both sensors,
+        with stability and quality checking.
+        """
         with self.lock:
             camera_point = self.latest_camera_point
             lidar_point = self.latest_lidar_point
@@ -239,16 +363,40 @@ class LidarCameraCalibrator(Node):
             self.get_logger().error("Missing data from one or both sensors")
             return
         
+        # Check if data is too old (important to prevent using very stale data)
+        if camera_age > self.max_valid_data_age or lidar_age > self.max_valid_data_age:
+            self.get_logger().error(f"Data too old to use: camera={camera_age:.2f}s, lidar={lidar_age:.2f}s")
+            self.get_logger().error(f"Maximum valid age is {self.max_valid_data_age}s")
+            self.get_logger().error("Try moving the basketball to trigger new detections")
+            return
+        
+        # Warn about slightly stale data but still allow it
         if camera_age > 0.5 or lidar_age > 0.5:
-            self.get_logger().warn(f"Using stale data: camera={camera_age:.2f}s, lidar={lidar_age:.2f}s")
+            self.get_logger().warn(f"Using moderately stale data: camera={camera_age:.2f}s, lidar={lidar_age:.2f}s")
+        
+        # Calculate distance to check for reasonable correspondence
+        lidar_distance = np.sqrt(lidar_point[0]**2 + lidar_point[1]**2)
+        camera_distance = np.sqrt(camera_point[0]**2 + camera_point[1]**2)
+        
+        # Check for major distance mismatch (likely indicates something wrong)
+        distance_ratio = abs(lidar_distance - camera_distance) / max(camera_distance, 0.1)
+        if distance_ratio > 0.8:  # If distances differ by more than 80%
+            self.get_logger().error(f"Large distance mismatch: camera={camera_distance:.2f}m, lidar={lidar_distance:.2f}m")
+            self.get_logger().error("This suggests misaligned detections or debug points")
+            self.get_logger().error("Try again with the ball in a different position")
+            return
+        
+        # Less strict position stability check
+        if len(self.previous_lidar_points) >= 3:
+            stability = self.check_position_stability()
+            if stability > self.position_stability_threshold:
+                self.get_logger().warn(f"LIDAR position somewhat unstable ({stability:.3f}m > {self.position_stability_threshold:.3f}m)")
+                self.get_logger().warn("Consider trying again for better results")
+                # But still continue with capture
         
         # Add the points to calibration sets
         self.camera_points.append(np.copy(camera_point))
         self.lidar_points.append(np.copy(lidar_point))
-        
-        # Calculate distance for reference
-        lidar_distance = np.sqrt(lidar_point[0]**2 + lidar_point[1]**2)
-        camera_distance = np.sqrt(camera_point[0]**2 + camera_point[1]**2)
         
         # Print capture info
         self.get_logger().info(f"Captured point pair #{len(self.camera_points)}:")
@@ -256,10 +404,10 @@ class LidarCameraCalibrator(Node):
         self.get_logger().info(f"  LIDAR:  ({lidar_point[0]:.3f}, {lidar_point[1]:.3f}, {lidar_point[2]:.3f}), dist={lidar_distance:.2f}m")
         
         # Provide guidance
-        if lidar_distance < 0.5:
-            self.get_logger().warn("Point is very close to LIDAR. Reliability may be low.")
-        elif 1.0 <= lidar_distance <= 3.0:
-            self.get_logger().info("Point is in optimal LIDAR range (1-3m). Good calibration point.")
+        if lidar_distance < 0.8:
+            self.get_logger().warn("Point is close to LIDAR. Reliability may be low.")
+        elif 1.0 <= lidar_distance <= 2.0:
+            self.get_logger().info("Point is in optimal LIDAR range (1-2m). Good calibration point.")
         
         # After 3+ points, analyze distribution
         if len(self.lidar_points) >= 3:
@@ -603,7 +751,8 @@ transform:
         self.get_logger().info("\nRecommendations:")
         if quality == "Poor":
             self.get_logger().info("- Recalibrate with more well-distributed points")
-            self.get_logger().info("- Focus on collecting points in the 1-3m range")
+            self.get_logger().info("- Focus on collecting points in the 1-2m range")
+            self.get_logger().info("- Make sure the basketball is stable when capturing points")
         elif std_error > 0.05:
             self.get_logger().info("- Add more calibration points to improve consistency")
             self.get_logger().info("- Try the 'p' option to apply physical constraints")
@@ -678,12 +827,10 @@ transform:
             recommendations.append("Add points with more Y variation (different sides)")
         
         # Recommend based on distance distribution
-        if close_points < 2:
-            recommendations.append("Add more close range points (<1m)")
+        if close_points < 2 and mid_points < 2:
+            recommendations.append("Add more points in the 0.8-2m range")
         if mid_points < 2:
             recommendations.append("Add more medium range points (1-2m)")
-        if far_points < 2:
-            recommendations.append("Add more far range points (>2m)")
         
         # Recommend based on quadrant
         min_quadrant = min(quadrants)
@@ -697,6 +844,109 @@ transform:
             self.get_logger().info("\nRecommendations for Better Calibration:")
             for i, rec in enumerate(recommendations):
                 self.get_logger().info(f"- {rec}")
+    
+    def filter_outliers(self):
+        """
+        Automatically identify and remove outlier calibration points.
+        
+        This function removes points that:
+        1. Have large discrepancies between camera and LIDAR distances
+        2. Show high errors after transformation
+        3. Are statistical outliers based on error metrics
+        
+        Returns:
+            int: Number of points removed
+        """
+        if len(self.camera_points) < 4:
+            self.get_logger().error("Need at least 4 points to identify outliers")
+            return 0
+        
+        # First calculate a transformation to identify errors
+        if not self.has_transform:
+            self.calculate_transformation()
+        
+        # Get error for each point
+        errors = []
+        for i, (camera_point, lidar_point) in enumerate(zip(self.camera_points, self.lidar_points)):
+            # 1. Calculate distance discrepancy
+            camera_dist = np.linalg.norm(camera_point[:2])  # XY plane distance
+            lidar_dist = np.linalg.norm(lidar_point[:2])    # XY plane distance
+            dist_error = abs(camera_dist - lidar_dist) / max(camera_dist, 0.1)
+            
+            # 2. Calculate transformation error
+            transformed = self.rotation_matrix @ lidar_point + self.translation
+            transform_error = np.linalg.norm(transformed - camera_point)
+            
+            # Store error metrics
+            total_error = transform_error
+            errors.append({
+                'index': i,
+                'dist_error': dist_error,
+                'transform_error': transform_error,
+                'total_error': total_error,
+                'camera_point': camera_point,
+                'lidar_point': lidar_point
+            })
+        
+        # Calculate mean and standard deviation of transform errors
+        error_values = [e['transform_error'] for e in errors]
+        mean_error = np.mean(error_values)
+        std_error = np.std(error_values)
+        
+        # Set thresholds for different error types
+        transform_threshold = mean_error + 1.5 * std_error
+        distance_threshold = 0.4  # 40% difference in distance
+        
+        # Identify outliers
+        outliers = []
+        for e in errors:
+            # Mark as outlier if transform error is high
+            if e['transform_error'] > transform_threshold:
+                outliers.append(e)
+                continue
+                
+            # Mark as outlier if distance discrepancy is high
+            if e['dist_error'] > distance_threshold:
+                outliers.append(e)
+                continue
+        
+        if not outliers:
+            self.get_logger().info("No clear outliers detected in calibration data")
+            return 0
+        
+        # Sort outliers by index in reverse order (to remove from end first)
+        outliers.sort(key=lambda x: x['index'], reverse=True)
+        
+        # Remove outliers
+        removed_count = 0
+        for outlier in outliers:
+            idx = outlier['index']
+            camera_point = outlier['camera_point']
+            lidar_point = outlier['lidar_point']
+            
+            # Get the point distances for logging
+            camera_dist = np.linalg.norm(camera_point[:2])
+            lidar_dist = np.linalg.norm(lidar_point[:2])
+            
+            # Log the removal
+            self.get_logger().warn(f"Removing outlier point {idx+1}:")
+            self.get_logger().warn(f"  Camera: ({camera_point[0]:.3f}, {camera_point[1]:.3f}, {camera_point[2]:.3f}), dist={camera_dist:.2f}m")
+            self.get_logger().warn(f"  LIDAR:  ({lidar_point[0]:.3f}, {lidar_point[1]:.3f}, {lidar_point[2]:.3f}), dist={lidar_dist:.2f}m")
+            self.get_logger().warn(f"  Error: {outlier['transform_error']:.3f}m, Distance mismatch: {outlier['dist_error']*100:.1f}%")
+            
+            # Remove the points
+            del self.camera_points[idx]
+            del self.lidar_points[idx]
+            removed_count += 1
+        
+        # Recalculate transformation after removing outliers
+        if removed_count > 0:
+            self.get_logger().info(f"Removed {removed_count} outlier points")
+            self.calculate_transformation()
+            self.get_logger().info("New calibration quality after filtering:")
+            self.assess_calibration_quality()
+        
+        return removed_count
 
 
 def main(args=None):

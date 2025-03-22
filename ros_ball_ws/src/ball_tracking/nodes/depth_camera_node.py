@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 
 """
-Optimized Tennis/Basketball Tracking Robot - Depth Camera Node
-==============================================================
+Raspberry Pi 5 Optimized Basketball Tracking - Depth Camera Node
+================================================================
 
-This node converts 2D ball detections from YOLO and HSV into 3D positions
-using depth camera data. Optimized for basketball tracking on Raspberry Pi 5.
+High-performance implementation for basketball tracking designed 
+specifically for the Raspberry Pi 5's resource constraints.
 """
 # Standard library imports
 import sys
 import os
 import yaml
 from collections import deque
+import time
 
 # Add the parent directory of 'config' to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-
-# Add the 'src' directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 # ROS2 imports
@@ -29,13 +28,11 @@ from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import PointStamped, TransformStamped
 from sensor_msgs.msg import Image, CameraInfo
 from std_msgs.msg import String
-from tf2_msgs.msg import TFMessage
 from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
 import tf2_geometry_msgs
 
 # Third-party libraries
 import numpy as np
-import psutil
 from cv_bridge import CvBridge
 
 # Project utilities
@@ -53,7 +50,7 @@ DEPTH_CONFIG = config.get('depth', {
     "scale": 0.001,           # Depth scale factor (converts raw depth to meters)
     "min_depth": 0.1,         # Minimum valid depth in meters
     "max_depth": 8.0,         # Maximum valid depth in meters
-    "radius": 5,              # Radius around detection point to sample depth values (increased for basketball)
+    "radius": 5,              # Radius around detection point to sample depth values
     "min_valid_points": 5,    # Minimum number of valid points required for reliable estimation
     "calibration_file": "depth_camera_calibration.yaml"  # Calibration parameters file
 })
@@ -87,7 +84,7 @@ COMMON_REFERENCE_FRAME = config.get('frames', {
 
 # Minimal logging by default
 MINIMAL_LOGGING = True
-LOG_INTERVAL = 15.0  # Increased from 10 to 15 seconds
+LOG_INTERVAL = 15.0  # Log interval in seconds
 
 
 class DepthCorrector:
@@ -156,7 +153,7 @@ class DepthCorrector:
             return measured_depth
 
 
-class TennisBall3DPositionEstimator(Node):
+class OptimizedPositionEstimator(Node):
     """
     A ROS2 node that converts 2D ball detections to 3D positions.
     Optimized for basketball tracking on Raspberry Pi 5.
@@ -167,7 +164,7 @@ class TennisBall3DPositionEstimator(Node):
         super().__init__('tennis_ball_3d_position_estimator')
         
         # Initialize core attributes
-        self.init_attributes()
+        self._init_attributes()
         
         # Initialize the depth corrector for calibration
         calibration_file = DEPTH_CONFIG.get("calibration_file", "depth_camera_calibration.yaml")
@@ -180,7 +177,22 @@ class TennisBall3DPositionEstimator(Node):
         self._setup_subscriptions()
         self._setup_publishers()
         
-        # Initialize the resource monitor with reduced monitoring frequency
+        # Performance optimization settings
+        self.use_roi_only = True  # Process only regions of interest
+        self.roi_size = 20       # 30x30 pixel region around detection
+        self.log_cache_info = True  # Enable cache debugging
+        self.max_cpu_target = 80.0  # Target max CPU usage
+        self.last_cpu_log = 0  # Timestamp for CPU logging
+        
+        # Fixed caching structure that separates 2D and 3D positions
+        self.detection_cache = {
+            'YOLO': {'detection_2d': None, 'position_3d': None, 'timestamp': 0},
+            'HSV': {'detection_2d': None, 'position_3d': None, 'timestamp': 0}
+        }
+        self.cache_hits = 0
+        self.total_attempts = 0
+        
+        # Initialize the resource monitor with reduced frequency
         self.resource_monitor = ResourceMonitor(
             node=self,
             publish_interval=30.0,  # Increased from 20.0 to 30.0 seconds
@@ -194,17 +206,12 @@ class TennisBall3DPositionEstimator(Node):
         self.diagnostics_timer = self.create_timer(15.0, self.publish_system_diagnostics)
         
         # Log initialization (minimal)
-        self.get_logger().info("3D Position Estimator initialized")
-        
-        # Log calibration status (only if available)
-        if self.depth_corrector.correction_type and self.depth_corrector.parameters:
-            if self.depth_corrector.correction_type != "identity":
-                self.get_logger().info(f"Depth calibration active: {self.depth_corrector.correction_type}")
+        self.get_logger().info("Pi-Optimized 3D Position Estimator initialized")
     
-    def init_attributes(self):
+    def _init_attributes(self):
         """Initialize all attributes with default values."""
         # Performance settings
-        self.process_every_n_frames = 3  # Default to every 3rd frame for efficient processing
+        self.process_every_n_frames = 2  # Process every 2nd frame by default
         self.frame_counter = 0
         self.current_cpu_usage = 0.0
         self._scale_factor = float(DEPTH_CONFIG["scale"])
@@ -212,45 +219,31 @@ class TennisBall3DPositionEstimator(Node):
         self._max_valid_depth = float(DEPTH_CONFIG["max_depth"])
         
         # Debug flags
-        self.debug_mode = True  # Enable debug mode for moving ball tracking development
+        self.debug_mode = False  # Full debug with verbose logging - off by default
         self.last_debug_log = 0
         
         # Performance tracking
         self.start_time = TimeUtils.now_as_float()
         self.successful_conversions = 0
-        self.processing_times = deque(maxlen=10)
-        self.depth_camera_health = 1.0
-        self.last_fps_log_time = 0
-        self.fps_history = deque(maxlen=10)  # Track recent FPS values
+        self.fps_history = deque(maxlen=5)  # Reduced from 10 to 5
         self.verified_transform = False
         self.camera_info_logged = False
         
-        # Position tracking and filtering
-        self.position_history = deque(maxlen=5)  # Store last 5 valid positions
-        self.velocity = [0.0, 0.0, 0.0]  # Simple velocity estimate (m/s)
+        # Position tracking and filtering - minimal
+        self.last_position = None
         self.last_position_time = 0
-        self.position_filter_alpha = 0.3  # Weight for position smoothing (lower = more smoothing)
+        self.position_filter_alpha = 0.8  # Higher alpha for more responsive tracking
         
-        # Max allowed position change per second (in meters)
-        self.max_position_change = 2.0  # m/s
+        # Max allowed position change per second
+        self.max_position_change = 4.0  # Increased for more responsive tracking
         
         # Detection tracking
         self.detection_history = {
-            'YOLO': {'count': 0, 'latest_position': None, 'last_time': 0},
-            'HSV': {'count': 0, 'latest_position': None, 'last_time': 0}
+            'YOLO': {'latest_position': None, 'last_time': 0},
+            'HSV': {'latest_position': None, 'last_time': 0}
         }
         
-        # Optimized caching mechanism for basketball
-        self.position_cache = {
-            'YOLO': {'position': None, 'timestamp': 0, '3d_position': None},
-            'HSV': {'position': None, 'timestamp': 0, '3d_position': None}
-        }
-        self.cache_hits = {'YOLO': 0, 'HSV': 0}
-        self.cache_validity_duration = 0.3  # 300ms validity for basketball
-        self.movement_threshold = 0.2  # 20% movement threshold for basketball
-        
-        # Error tracking (minimal)
-        self.error_counts = {}
+        # Error tracking
         self.error_last_logged = {}
         
         # Timestamps
@@ -259,31 +252,29 @@ class TennisBall3DPositionEstimator(Node):
         self.last_diag_log_time = 0
         self.transform_not_verified_logged = False
         self.last_detection_time = TimeUtils.now_as_float()
-        self.last_batch_process = TimeUtils.now_as_float()
         
-        # Simplified detection buffer
-        self.detection_buffer = {'YOLO': [], 'HSV': []}
-        
-        # Transform cache for optimization
+        # Transform cache
         self.transform_cache = {}
-        self.transform_cache_lifetime = 2.0  # 2 seconds
+        self.transform_cache_lifetime = 10.0  # 10 seconds for Pi optimizations
         
         # Bridge for image conversion
         self.cv_bridge = CvBridge()
         
-        # Initialize attempt counter to track detection conversion attempts
-        self.attempt_counter = {'YOLO': 0, 'HSV': 0}
+        # Status counters
+        self.current_fps = 0.0
+        self.last_fps_update = 0
     
     def _setup_callback_group(self):
         """Set up callback group and QoS profile for subscriptions."""
+        # Single reentrant callback group
         self.callback_group = ReentrantCallbackGroup()
         
-        # QoS profile with increased depth
+        # QoS profile with minimal buffer sizes
         from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
         self.qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
-            depth=3  # Reduced from 5 to 3
+            depth=1  # Minimal buffering
         )
     
     def _init_camera_parameters(self):
@@ -304,8 +295,8 @@ class TennisBall3DPositionEstimator(Node):
         self.depth_height = 480
         
         # Coordinate scaling factors
-        self.x_scale = 1.0
-        self.y_scale = 1.0
+        self.x_scale = 2.0  # Default values
+        self.y_scale = 2.0
     
     def _setup_tf2(self):
         """Set up tf2 components for coordinate transformations."""
@@ -336,12 +327,9 @@ class TennisBall3DPositionEstimator(Node):
         # Set the camera position relative to base_link (in meters)
         transform.transform.translation.x = 0.1016  # Camera is 4 inches in front of LIDAR
         transform.transform.translation.y = 0.0     # Camera is centered
-        
-        # INVERTED HEIGHT RELATIONSHIP:
-        # The camera appears to be above the base_link, not below it
         transform.transform.translation.z = 0.1524  # Camera is 6 inches ABOVE base_link
         
-        # Keep the correct +90-degree rotation around Y-axis
+        # +90-degree rotation around Y-axis for proper coordinate mapping
         import math
         angle = math.pi/2  # +90 degrees in radians
         transform.transform.rotation.w = math.cos(angle/2)
@@ -354,7 +342,7 @@ class TennisBall3DPositionEstimator(Node):
         
         # Only log once
         if not hasattr(self, 'transform_published') or not self.transform_published:
-            self.get_logger().info("Published static transform: camera_frame -> base_link with proper coordinate rotation")
+            self.get_logger().info("Published static transform: camera_frame -> base_link")
             self.transform_published = True
     
     def _verify_transform(self):
@@ -471,29 +459,11 @@ class TennisBall3DPositionEstimator(Node):
         self.depth_width = msg.width
         self.depth_height = msg.height
         
-        # Update scaling factors with proper aspect ratio handling
-        detect_width = DEPTH_CONFIG.get("detection_resolution", {}).get("width", 320)
-        detect_height = DEPTH_CONFIG.get("detection_resolution", {}).get("height", 320)
-        
-        # Maintain aspect ratio in scaling
-        if (self.depth_width / self.depth_height) > (detect_width / detect_height):
-            # Width-constrained
-            self.x_scale = float(self.depth_width / detect_width)
-            self.y_scale = self.x_scale
-        else:
-            # Height-constrained
-            self.y_scale = float(self.depth_height / detect_height)
-            self.x_scale = self.y_scale
-        
         # Log camera info once (first time received)
         if not self.camera_info_logged:
             self.get_logger().info(f"Camera info received: {self.depth_width}x{self.depth_height}")
-            self.get_logger().info(f"Camera intrinsics: fx={self.fx}, fy={self.fy}, cx={self.cx}, cy={self.cy}")
             self.get_logger().info(f"Scaling factors: x_scale={self.x_scale}, y_scale={self.y_scale}")
             self.camera_info_logged = True
-        
-        # Update camera health
-        self.depth_camera_health = 1.0
 
     def depth_callback(self, msg):
         """Process depth image with efficient frame skipping."""
@@ -507,344 +477,165 @@ class TennisBall3DPositionEstimator(Node):
             self.depth_array = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
             self.depth_header = msg.header
             
-            # Only log depth information in debug mode
-            if self.debug_mode and self.frame_counter % 100 == 0:
-                self.get_logger().info(f"Depth array shape: {self.depth_array.shape}, " 
-                                      f"min: {np.min(self.depth_array)}, max: {np.max(self.depth_array)}")
-            
-            # Process any pending detections
-            self._process_detection_batch()
-            
         except Exception as e:
             self.log_error(f"Depth processing error: {str(e)}")
     
     def yolo_callback(self, msg):
         """Handle YOLO detections."""
-        self.detection_callback(msg, 'YOLO')
+        self._process_detection(msg, 'YOLO')
     
     def hsv_callback(self, msg):
         """Handle HSV detections."""
-        self.detection_callback(msg, 'HSV')
+        self._process_detection(msg, 'HSV')
         
-    def detection_callback(self, msg, source):
-        """Generic callback for processing detections."""
-        # Only log detection information in debug mode
-        if self.debug_mode:
-            self.get_logger().info(
-                f"Detection ({source}): ({msg.point.x:.2f}, {msg.point.y:.2f})"
-            )
-        
-        # Add to buffer
-        current_time = TimeUtils.now_as_float()
-        self.detection_buffer[source].append((msg, current_time))
-        
-        # Process immediately if we have depth data
-        if self.depth_array is not None:
-            if self.debug_mode:
-                self.get_logger().info(f"Processing detection immediately")
-            self._process_detection_batch()
-    
-    def _process_detection_batch(self):
-        """Process all buffered detections efficiently."""
-        current_time = TimeUtils.now_as_float()
-        self.last_batch_process = current_time
-        
-        # Skip if missing required data
-        if self.camera_info is None or self.depth_array is None or self.fx == 0:
-            if self.debug_mode:
-                self.get_logger().warning("Missing required data for processing")
+    def _process_detection(self, msg, source):
+        """Ultra-optimized detection processing."""
+        # Skip if we don't have depth data yet
+        if self.depth_array is None or self.camera_info is None:
             return
             
-        # Process only the latest detection for each source
-        for source in ['YOLO', 'HSV']:
-            if self.detection_buffer[source]:
-                # Get the most recent detection
-                latest_msg, _ = max(self.detection_buffer[source], key=lambda x: x[1])
-                
-                # Debug info
-                if self.debug_mode:
-                    self.get_logger().info(f"Processing {source} detection in batch")
-                
-                # Process if needed - use caching for efficiency
-                if self._should_process_detection(latest_msg, source):
-                    self.get_3d_position(latest_msg, source)
-                
-                # Clear buffer
-                self.detection_buffer[source] = []
-    
-    def _should_process_detection(self, msg, source):
-        """Determine if we should process this detection or use cached result."""
-        current_time = TimeUtils.now_as_float()
-        curr_x, curr_y = msg.point.x, msg.point.y
-        
-        # Check cache
-        if self.position_cache[source]['position'] is not None:
-            prev_x, prev_y = self.position_cache[source]['position']
-            cache_time = self.position_cache[source]['timestamp']
-            
-            # Calculate distance and time since cache
-            dist_squared = (curr_x - prev_x)**2 + (curr_y - prev_y)**2
-            time_since_cache = current_time - cache_time
-            
-            # Basketball-optimized threshold (20% of image size)
-            threshold = self.movement_threshold
-            
-            # Log cache decisions occasionally (debug only)
-            if self.debug_mode and current_time - self.last_cache_log_time > 60.0:
-                self.get_logger().info(f"Cache decision: dist={dist_squared:.6f}, threshold={threshold:.6f}, time={time_since_cache:.1f}s")
-                self.last_cache_log_time = current_time
-            
-            # Use cache if position hasn't changed much and cache is fresh
-            if dist_squared < threshold and time_since_cache < self.cache_validity_duration:
-                if self.position_cache[source]['3d_position'] is not None:
-                    success = self._republish_cached_position(source, 
-                        self.yolo_3d_publisher if source == "YOLO" else self.hsv_3d_publisher)
-                    
-                    if success:
-                        self.cache_hits[source] += 1
-                        # Log cache hit occasionally
-                        if self.debug_mode and self.cache_hits[source] % 100 == 0:
-                            self.get_logger().info(f"Cache hit {self.cache_hits[source]} for {source}")
-                        return False  # Skip processing
-        
-        # Update cache with new position
-        self.position_cache[source]['position'] = (curr_x, curr_y)
-        self.position_cache[source]['timestamp'] = current_time
-        
-        return True  # Process this detection
-    
-    def _republish_cached_position(self, source, publisher):
-        """Republish the cached 3D position with an updated timestamp."""
-        if self.position_cache[source]['3d_position'] is None:
-            return False
-            
-        # Get cached position
-        cached_pos = self.position_cache[source]['3d_position']
-        
-        # Create new message with updated timestamp
-        msg = PointStamped()
-        msg.header.frame_id = cached_pos.header.frame_id
-        msg.header.stamp = TimeUtils.now_as_ros_time()
-        msg.point = cached_pos.point
-        
-        # Publish to specific publisher and to combined topic
-        publisher.publish(msg)
-        self.position_publisher.publish(msg)
-        
-        # Count as a successful conversion
-        self.successful_conversions += 1
-        
-        return True
-    
-    def _get_reliable_depth_vectorized(self, depth_array, pixel_x, pixel_y):
-        """
-        Adaptive depth sampling for basketball tracking.
-        Progressively increases sampling radius until finding enough valid points.
-        """
-        # Try with increasing radius sizes to handle moving ball
-        for radius in [5, 10, 15, 20]:
-            try:
-                # Create a slice of the depth array around the target pixel
-                y_min = max(0, pixel_y - radius)
-                y_max = min(depth_array.shape[0], pixel_y + radius + 1)
-                x_min = max(0, pixel_x - radius)
-                x_max = min(depth_array.shape[1], pixel_x + radius + 1)
-                
-                # Get the depth values in the region
-                region = depth_array[y_min:y_max, x_min:x_max].astype(np.float32)
-                
-                # Create a mask for valid depths (non-zero values)
-                valid_mask = (region > 0)
-                
-                # If no valid depths, try larger radius
-                if not np.any(valid_mask):
-                    if self.debug_mode:
-                        self.get_logger().info(f"No valid depths with radius {radius}, trying larger")
-                    continue
-                
-                # Convert to meters
-                depths_m = region[valid_mask] * self._scale_factor
-                
-                # Apply calibration to all valid depths
-                if hasattr(self, 'depth_corrector') and self.depth_corrector.correction_type == "linear":
-                    a, b = self.depth_corrector.parameters
-                    depths_m = a * depths_m + b
-                elif hasattr(self, 'depth_corrector') and self.depth_corrector.correction_type == "polynomial":
-                    a, b, c = self.depth_corrector.parameters
-                    depths_m = a * depths_m**2 + b * depths_m + c
-                
-                # Filter by min/max depth
-                valid_depths_mask = (depths_m > self._min_valid_depth) & (depths_m < self._max_valid_depth)
-                valid_depths = depths_m[valid_depths_mask]
-                
-                # For basketball, median is more stable than mean
-                if len(valid_depths) >= 10:  # Lowered threshold from original 49
-                    # Convert NumPy median to Python float for ROS2 compatibility
-                    median_depth = float(np.median(valid_depths))
-                    if self.debug_mode:
-                        self.get_logger().info(f"Found reliable depth with radius {radius}, {len(valid_depths)} points")
-                    return median_depth, 0.9, len(valid_depths)
-                
-                # If we didn't get enough valid points, try larger radius
-                if self.debug_mode:
-                    self.get_logger().info(f"Only {len(valid_depths)} valid points with radius {radius}")
-                
-            except Exception as e:
-                if self.debug_mode:
-                    self.get_logger().error(f"Error with radius {radius}: {str(e)}")
-        
-        # If we still don't have a reliable depth, try to estimate from previous data
-        estimated_depth = self._estimate_depth_from_previous(pixel_x, pixel_y)
-        if estimated_depth is not None:
-            return estimated_depth, 0.5, 5  # Lower reliability for estimated values
-        
-        # If all else fails
-        return None, 0.0, 0
-    
-    def _estimate_depth_from_previous(self, pixel_x, pixel_y):
-        """
-        Estimate depth based on previous readings and position history.
-        Returns estimated depth or None if no reliable estimation can be made.
-        """
-        # Check if we have any previous detection history from YOLO or HSV
-        for source in ['YOLO', 'HSV']:
-            if source in self.detection_history and self.detection_history[source].get('latest_position'):
-                # Get the most recent valid 3D position
-                latest_pos = self.detection_history[source]['latest_position']
-                last_time = self.detection_history[source]['last_time']
-                current_time = TimeUtils.now_as_float()
-                
-                # Only use recent history (within 1 second)
-                if current_time - last_time < 1.0:
-                    if self.debug_mode:
-                        self.get_logger().info(f"Estimating depth from previous {source} position: {latest_pos}")
-                    # Return the Z-coordinate (depth) from the latest position
-                    return float(latest_pos[2])
-        
-        # If no recent history, use a reasonable default for a basketball at playing distance
-        if self.debug_mode:
-            self.get_logger().info("No recent history available, using default depth")
-        return 1.2  # Default depth value in meters (adjust based on your specific use case)
-    
-    def _apply_position_filter(self, position, source):
-        """Apply a simple position filter to smooth the tracking."""
-        current_time = TimeUtils.now_as_float()
-        
-        # Unpack position tuple
-        x, y, z = position
-        
-        # If we don't have a position history yet, create it
-        if len(self.position_history) == 0:
-            # Just add the current position
-            self.position_history.append(position)
-            return position
-            
-        # Simple Exponential Moving Average filter
-        # Apply different smoothing based on source reliability
-        alpha = self.position_filter_alpha
-        if source == 'HSV':
-            # HSV is typically less stable, more smoothing
-            alpha = max(0.2, alpha - 0.1)
-            
-        # Calculate filtered position
-        prev_pos = self.position_history[-1]
-        smoothed_x = alpha * x + (1 - alpha) * prev_pos[0]
-        smoothed_y = alpha * y + (1 - alpha) * prev_pos[1]
-        smoothed_z = alpha * z + (1 - alpha) * prev_pos[2]
-        
-        # Validate position change (limit max change)
-        if len(self.position_history) > 1 and self.last_position_time > 0:
-            dt = current_time - self.last_position_time
-            if dt > 0:
-                # Calculate change per second for each dimension
-                dx_per_sec = abs(smoothed_x - prev_pos[0]) / dt
-                dy_per_sec = abs(smoothed_y - prev_pos[1]) / dt
-                dz_per_sec = abs(smoothed_z - prev_pos[2]) / dt
-                
-                # Check if any dimension exceeds max allowed change
-                if (dx_per_sec > self.max_position_change or
-                    dy_per_sec > self.max_position_change or
-                    dz_per_sec > self.max_position_change):
-                    
-                    # Use a blend of previous position and validated change
-                    max_change = self.max_position_change * dt
-                    
-                    # Limit change in each dimension
-                    dx = smoothed_x - prev_pos[0]
-                    dy = smoothed_y - prev_pos[1]
-                    dz = smoothed_z - prev_pos[2]
-                    
-                    # Calculate scaling factor to limit change
-                    max_component = max(abs(dx), abs(dy), abs(dz))
-                    if max_component > max_change:
-                        scale = max_change / max_component
-                        dx *= scale
-                        dy *= scale
-                        dz *= scale
-                    
-                    # Apply limited change
-                    smoothed_x = prev_pos[0] + dx
-                    smoothed_y = prev_pos[1] + dy
-                    smoothed_z = prev_pos[2] + dz
-                    
-                    if self.debug_mode:
-                        self.get_logger().info(f"Limited position change: {dx_per_sec:.2f}, {dy_per_sec:.2f}, {dz_per_sec:.2f} m/s")
-        
-        # Create filtered position tuple
-        filtered_position = (float(smoothed_x), float(smoothed_y), float(smoothed_z))
-        
-        # Update history and time
-        self.position_history.append(filtered_position)
-        self.last_position_time = current_time
-        
-        # Update velocity estimate (if we have at least 2 positions)
-        if len(self.position_history) >= 2 and self.last_position_time > 0:
-            dt = current_time - self.last_position_time
-            if dt > 0:
-                # Position at t-1 and t
-                pos_1 = self.position_history[-2]
-                pos_2 = filtered_position
-                
-                # Velocity = (pos_2 - pos_1) / dt
-                self.velocity = [
-                    (pos_2[0] - pos_1[0]) / dt,
-                    (pos_2[1] - pos_1[1]) / dt,
-                    (pos_2[2] - pos_1[2]) / dt
-                ]
-        
-        return filtered_position
-    
-    def get_3d_position(self, detection_msg, source):
-        """
-        Convert a 2D ball detection to a 3D position using depth data.
-        Optimized for basketball tracking with improved handling of moving balls.
-        """
-        # Track attempt counts
-        self.attempt_counter[source] += 1
-        
-        # Skip processing if we're missing required data
-        if self.camera_info is None or self.depth_array is None or self.fx == 0:
-            if self.debug_mode:
-                self.get_logger().warning(
-                    f"Missing data for {source}: camera_info={self.camera_info is not None}, "
-                    f"depth_array={self.depth_array is not None}, fx={self.fx}"
-                )
-            return False
-        
-        # Skip if transform is not verified yet
+        # Skip if transform not verified
         if not self.verified_transform:
-            if not self.transform_not_verified_logged:
-                self.log_error("Transform not yet verified", True)
-                self.transform_not_verified_logged = True
+            return
+            
+        # Check cache first for performance
+        if self._check_position_cache(msg, source):
+            return
+            
+        # Process detection
+        self._get_3d_position(msg, source)
+    
+    def _check_position_cache(self, msg, source):
+        """Compare in the same coordinate space for proper caching."""
+        # Skip cache check if no cached position
+        if self.detection_cache[source]['detection_2d'] is None:
             return False
+                
+        # Get current detection and cached 2D detection (same coordinate space)
+        curr_x, curr_y = msg.point.x, msg.point.y
+        cached_detection = self.detection_cache[source]['detection_2d']
+        cached_x, cached_y = cached_detection.point.x, cached_detection.point.y
         
+        # Calculate 2D distance in the SAME coordinate space
+        dx = curr_x - cached_x
+        dy = curr_y - cached_y
+        dist_sq = dx*dx + dy*dy
+        
+        # Cache timing check
+        curr_time = time.time()
+        cached_time = self.detection_cache[source]['timestamp']
+        
+        # Reasonable thresholds for 2D image space
+        movement_threshold = 0.3  # Much smaller in 2D space
+        cache_duration = 0.5       # 500ms validity
+        
+        # Debug log the actual values
+        if self.log_cache_info and self.total_attempts % 20 == 0:
+            self.get_logger().info(
+                f"Cache check: current=({curr_x:.2f},{curr_y:.2f}), "
+                f"cached=({cached_x:.2f},{cached_y:.2f}), dist={dist_sq:.4f}"
+            )
+        
+        # Use cache if position is similar and cache is fresh
+        if dist_sq < movement_threshold and curr_time - cached_time < cache_duration:
+            cached_3d = self.detection_cache[source]['position_3d']
+            
+            # Create new message with updated timestamp
+            new_msg = PointStamped()
+            new_msg.header.frame_id = cached_3d.header.frame_id
+            new_msg.header.stamp = self.get_clock().now().to_msg()
+            new_msg.point = cached_3d.point
+            
+            # Publish
+            if source == 'YOLO':
+                self.yolo_3d_publisher.publish(new_msg)
+            else:
+                self.hsv_3d_publisher.publish(new_msg)
+                
+            self.position_publisher.publish(new_msg)
+            
+            # Count cache hit
+            self.cache_hits += 1
+            self.successful_conversions += 1
+            
+            # Log cache hit
+            if self.log_cache_info and self.cache_hits % 10 == 0:
+                self.get_logger().info(f"Cache hit #{self.cache_hits}: dist={dist_sq:.4f}")
+            
+            return True
+        
+        # Log cache miss occasionally
+        if self.log_cache_info and self.total_attempts % 20 == 0:
+            self.get_logger().info(
+                f"Cache miss: dist={dist_sq:.4f} > {movement_threshold}, "
+                f"age={curr_time-cached_time:.3f}s > {cache_duration}"
+            )
+        
+        # Update total attempts
+        self.total_attempts += 1
+        
+        return False
+    
+    def _ultra_fast_depth(self, pixel_x, pixel_y):
+        """Ultra-minimal depth processing with ROI."""
+        try:
+            # Use ROI-only mode for drastic performance improvement
+            # Process ONLY a tiny area around the detection instead of full frame
+            
+            # Define a very small region size
+            roi_size = self.roi_size if hasattr(self, 'roi_size') else 30
+            
+            # Calculate region bounds
+            y_min = max(0, pixel_y - roi_size//2)
+            y_max = min(self.depth_array.shape[0], y_min + roi_size)
+            x_min = max(0, pixel_x - roi_size//2)
+            x_max = min(self.depth_array.shape[1], x_min + roi_size)
+            
+            # Extract just the ROI - dramatically smaller data
+            roi = self.depth_array[y_min:y_max, x_min:x_max]
+            
+            # Direct calculation with minimal operations
+            nonzeros = roi[roi > 0]
+            
+            # If we have any valid points, use median
+            if len(nonzeros) >= 3:
+                # Convert to meters directly
+                depth = float(np.median(nonzeros)) * self._scale_factor
+                
+                # Validate range (simple bounds check)
+                if self._min_valid_depth < depth < self._max_valid_depth:
+                    return depth, len(nonzeros)
+            
+            # Fallback: Check just the immediate neighbors
+            # These are direct array accesses - extremely fast
+            radius = 2
+            values = []
+            for y in range(pixel_y-radius, pixel_y+radius+1):
+                for x in range(pixel_x-radius, pixel_x+radius+1):
+                    if 0 <= y < self.depth_array.shape[0] and 0 <= x < self.depth_array.shape[1]:
+                        val = int(self.depth_array[y, x])
+                        if val > 0:
+                            values.append(val * self._scale_factor)
+            
+            # If we found any valid neighbors
+            if values:
+                # Simple average - faster than median for small lists
+                depth = sum(values) / len(values)
+                if self._min_valid_depth < depth < self._max_valid_depth:
+                    return depth, len(values)
+                
+            # Ultimate fallback - use default
+            return 1.2, 0  # Default 1.2m depth
+                
+        except Exception:
+            return 1.2, 0  # Default on error
+    
+    def _get_3d_position(self, msg, source):
+        """Convert a 2D ball detection to a 3D position using depth data."""
         try:
             # Get 2D coordinates from detection
-            orig_x = float(detection_msg.point.x)
-            orig_y = float(detection_msg.point.y)
-            
-            if self.debug_mode:
-                self.get_logger().info(f"Processing {source} detection at ({orig_x:.2f}, {orig_y:.2f})")
+            orig_x = float(msg.point.x)
+            orig_y = float(msg.point.y)
             
             # Scale coordinates to depth image space
             pixel_x = int(round(orig_x * self.x_scale))
@@ -852,382 +643,234 @@ class TennisBall3DPositionEstimator(Node):
             
             # Constrain to valid image bounds with margin
             depth_height, depth_width = self.depth_array.shape
-            margin = 20 + 2  # Increased margin for adaptive sampling 
+            margin = 10
             
             pixel_x = max(margin, min(pixel_x, depth_width - margin - 1))
             pixel_y = max(margin, min(pixel_y, depth_height - margin - 1))
             
-            # Get raw depth at center pixel (debug only)
-            if self.debug_mode:
-                raw_depth = float(self.depth_array[pixel_y, pixel_x])
-                self.get_logger().info(
-                    f"Depth at pixel ({pixel_x}, {pixel_y}): raw={raw_depth}, "
-                    f"meters={(raw_depth * self._scale_factor):.3f}m"
-                )
+            # Get depth using fast estimation
+            median_depth, valid_points = self._ultra_fast_depth(pixel_x, pixel_y)
             
-            # Get depth using adaptive vectorized method
-            median_depth, reliability, valid_points = self._get_reliable_depth_vectorized(
-                self.depth_array, pixel_x, pixel_y)
-            
-            # If no reliable depth found even with adaptive sampling, try to estimate
-            if median_depth is None:
-                if self.debug_mode:
-                    self.get_logger().warning(f"No reliable depth found at ({pixel_x}, {pixel_y}), trying to estimate")
-                
-                # Check if we have recent position history
-                if source in self.detection_history and self.detection_history[source].get('latest_position'):
-                    prev_pos = self.detection_history[source]['latest_position']
-                    prev_time = self.detection_history[source]['last_time']
-                    current_time = TimeUtils.now_as_float()
-                    
-                    # Only use recent history (within 1 second)
-                    if current_time - prev_time < 1.0:
-                        # Use previous depth with estimated change
-                        x = float((pixel_x - self.cx) * prev_pos[2] / self.fx)
-                        y = float((pixel_y - self.cy) * prev_pos[2] / self.fy)
-                        z = float(prev_pos[2])  # Use previous depth
-                        
-                        if self.debug_mode:
-                            self.get_logger().info(f"Using previous depth: {z:.3f}m from {current_time - prev_time:.3f}s ago")
-                        
-                        # Skip forward to transform and publish step
-                        depth_is_estimated = True
-                    else:
-                        return False  # No recent history to use
-                else:
-                    return False  # No history for this source
-            else:
-                # Depth found successfully!
-                depth_is_estimated = False
-                
-                # Log depth information (debug only)
-                if self.debug_mode:
-                    self.get_logger().info(f"Reliable depth: {median_depth:.3f}m, valid points: {valid_points}")
-                
-                # Convert to 3D using the pinhole camera model
-                # Ensure all values are Python floats for ROS2 compatibility
-                x = float((pixel_x - self.cx) * median_depth / self.fx)
-                y = float((pixel_y - self.cy) * median_depth / self.fy)
-                z = float(median_depth)
-            
-            if self.debug_mode:
-                self.get_logger().info(f"3D coordinates (camera frame): x={x:.2f}, y={y:.2f}, z={z:.2f}")
+            # Convert to 3D using the pinhole camera model
+            x = float((pixel_x - self.cx) * median_depth / self.fx)
+            y = float((pixel_y - self.cy) * median_depth / self.fy)
+            z = float(median_depth)
             
             # Create the 3D position message in camera frame
             camera_position_msg = PointStamped()
-            
-            # Use current time for timestamp to avoid potential issues
             camera_position_msg.header.stamp = self.get_clock().now().to_msg()
-            
-            # Set the frame ID to camera frame
             camera_position_msg.header.frame_id = "camera_frame"
             camera_position_msg.point.x = x
             camera_position_msg.point.y = y
             camera_position_msg.point.z = z
             
             # Transform position to common reference frame
-            transformed_msg = self._transform_to_reference_frame(camera_position_msg)
+            transformed_msg = self._fast_transform(camera_position_msg)
             if transformed_msg is not None:
-                # Apply position filtering to smooth tracking
-                raw_position = (
-                    transformed_msg.point.x,
-                    transformed_msg.point.y, 
-                    transformed_msg.point.z
-                )
-                
-                # If depth was estimated, give less weight to this position
-                old_alpha = self.position_filter_alpha
-                if depth_is_estimated:
-                    self.position_filter_alpha = 0.2  # Lower alpha for estimated positions
-                
                 # Apply position filtering
-                filtered_position = self._apply_position_filter(raw_position, source)
-                
-                # Restore original alpha
-                if depth_is_estimated:
-                    self.position_filter_alpha = old_alpha
+                filtered_position = self._simple_position_filter(
+                    (transformed_msg.point.x, transformed_msg.point.y, transformed_msg.point.z))
                 
                 # Update the message with filtered position
-                transformed_msg.point.x = filtered_position[0]
-                transformed_msg.point.y = filtered_position[1]
-                transformed_msg.point.z = filtered_position[2]
+                filtered_msg = PointStamped()
+                filtered_msg.header = transformed_msg.header
+                filtered_msg.point.x = filtered_position[0]
+                filtered_msg.point.y = filtered_position[1]
+                filtered_msg.point.z = filtered_position[2]
                 
                 # Publish to source-specific topic
                 if source == "YOLO":
-                    self.yolo_3d_publisher.publish(transformed_msg)
+                    self.yolo_3d_publisher.publish(filtered_msg)
                 else:  # HSV
-                    self.hsv_3d_publisher.publish(transformed_msg)
+                    self.hsv_3d_publisher.publish(filtered_msg)
                 
                 # Also publish to combined topic
-                self.position_publisher.publish(transformed_msg)
+                self.position_publisher.publish(filtered_msg)
                 
-                # Update tracking stats
+                # Update cache - store both 2D and 3D positions
+                self.detection_cache[source]['detection_2d'] = msg         # Original 2D detection
+                self.detection_cache[source]['position_3d'] = filtered_msg  # Processed 3D result
+                self.detection_cache[source]['timestamp'] = time.time()
+                
+                # Count successful conversion
                 self.successful_conversions += 1
-                self.detection_history[source]['count'] += 1
-                self.detection_history[source]['latest_position'] = filtered_position
-                self.detection_history[source]['last_time'] = TimeUtils.now_as_float()
                 
-                # Store in cache for future reuse
-                self.position_cache[source]['3d_position'] = transformed_msg
-                
-                # Calculate FPS for occasional logging
-                elapsed = TimeUtils.now_as_float() - self.start_time
-                current_fps = self.successful_conversions / elapsed if elapsed > 0 else 0
-                if len(self.fps_history) < 10 or self.successful_conversions % 10 == 0:
-                    self.fps_history.append(current_fps)
-                
-                # Only log occasionally for reduced verbosity
-                if self.successful_conversions % 10 == 0:
+                # Log position every 50 successful conversions
+                if self.successful_conversions % 50 == 0:
+                    self._update_fps()
                     self.get_logger().info(
-                        f"3D position ({source}): ({filtered_position[0]:.2f}, "
-                        f"{filtered_position[1]:.2f}, {filtered_position[2]:.2f})m | "
-                        f"FPS: {current_fps:.1f}"
+                        f"3D position ({source}): "
+                        f"({filtered_position[0]:.2f}, {filtered_position[1]:.2f}, {filtered_position[2]:.2f})m | "
+                        f"FPS: {self.current_fps:.1f}"
                     )
                 
                 return True
             else:
-                if self.debug_mode:
-                    self.get_logger().warning("Transform to reference frame failed")
                 return False
-            
+                
         except Exception as e:
             self.log_error(f"Error in 3D conversion: {str(e)}")
-            if self.debug_mode:
-                import traceback
-                self.get_logger().error(f"Traceback: {traceback.format_exc()}")
             return False
     
-    def _transform_to_reference_frame(self, point_stamped):
-        """Transform with caching for efficiency."""
-        now = TimeUtils.now_as_float()
+    def _fast_transform(self, point_stamped):
+        """Optimized transform with aggressive caching."""
+        # Unique key for this transform
         frame_key = f"{self.reference_frame}_{point_stamped.header.frame_id}"
+        curr_time = time.time()
         
-        if self.debug_mode:
-            self.get_logger().info(f"Transforming from {point_stamped.header.frame_id} to {self.reference_frame}")
-        
-        # Check if we have this transform in cache and it's still valid
+        # Check cache first
         if frame_key in self.transform_cache:
             cached_time, cached_transform = self.transform_cache[frame_key]
-            if now - cached_time < self.transform_cache_lifetime:
+            
+            # Use cache if fresh (10 second validity)
+            if curr_time - cached_time < self.transform_cache_lifetime:
                 try:
-                    if self.debug_mode:
-                        self.get_logger().info("Using cached transform")
                     transformed = tf2_geometry_msgs.do_transform_point(point_stamped, cached_transform)
                     return transformed
-                except Exception as e:
-                    if self.debug_mode:
-                        self.get_logger().error(f"Error applying cached transform: {str(e)}")
-                    # If transform fails, remove from cache
+                except Exception:
+                    # If transform fails, remove from cache and try new lookup
                     del self.transform_cache[frame_key]
         
-        # Otherwise get a new transform
+        # Get new transform
         try:
-            if self.debug_mode:
-                self.get_logger().info("Looking up new transform")
             transform = self.tf_buffer.lookup_transform(
                 self.reference_frame,
                 point_stamped.header.frame_id,
                 rclpy.time.Time())
             
             # Cache it
-            self.transform_cache[frame_key] = (now, transform)
+            self.transform_cache[frame_key] = (curr_time, transform)
             
+            # Apply transform
             transformed = tf2_geometry_msgs.do_transform_point(point_stamped, transform)
-            
-            # Log transform result (debug only)
-            if self.debug_mode:
-                self.get_logger().info(
-                    f"Transform successful: ({point_stamped.point.x:.2f}, {point_stamped.point.y:.2f}, {point_stamped.point.z:.2f}) -> "
-                    f"({transformed.point.x:.2f}, {transformed.point.y:.2f}, {transformed.point.z:.2f})"
-                )
-            
             return transformed
         except Exception as e:
             if self.debug_mode:
                 self.get_logger().error(f"Transform lookup error: {str(e)}")
-                import traceback
-                self.get_logger().error(f"Transform traceback: {traceback.format_exc()}")
             return None
     
+    def _simple_position_filter(self, position):
+        """Simple position filter that smooths tracking without much overhead."""
+        # If this is first position, just use it
+        if self.last_position is None:
+            self.last_position = position
+            self.last_position_time = time.time()
+            return position
+        
+        # Apply simple exponential filter
+        alpha = self.position_filter_alpha
+        x, y, z = position
+        prev_x, prev_y, prev_z = self.last_position
+        
+        # Calculate filtered position
+        filtered_x = alpha * x + (1 - alpha) * prev_x
+        filtered_y = alpha * y + (1 - alpha) * prev_y
+        filtered_z = alpha * z + (1 - alpha) * prev_z
+        
+        # Create filtered position tuple
+        filtered_position = (float(filtered_x), float(filtered_y), float(filtered_z))
+        
+        # Update last position
+        self.last_position = filtered_position
+        self.last_position_time = time.time()
+        
+        return filtered_position
+    
+    def _update_fps(self):
+        """Update FPS calculation."""
+        curr_time = time.time()
+        
+        # Only update every second
+        if curr_time - self.last_fps_update > 1.0:
+            elapsed = curr_time - self.start_time
+            
+            if elapsed > 0:
+                self.current_fps = self.successful_conversions / elapsed
+                self.fps_history.append(self.current_fps)
+                
+            self.last_fps_update = curr_time
+    
     def _adjust_performance(self):
-        """
-        Enhanced adaptive performance adjustment based on CPU usage, ball distance,
-        and detection frequency. Optimized for basketball tracking.
-        """
-        cpu_usage = self.current_cpu_usage
-        old_frame_skip = self.process_every_n_frames
-        current_time = TimeUtils.now_as_float()
+        """Adaptive performance adjustment based on CPU usage and FPS."""
+        # Update FPS
+        self._update_fps()
         
-        # Track performance metrics
-        elapsed = current_time - self.start_time
-        current_fps = self.successful_conversions / elapsed if elapsed > 0 else 0
+        # Get current settings
+        old_skip = self.process_every_n_frames
+        cpu = self.current_cpu_usage
         
-        # CPU-based adjustments (more conservative to leave resources for other nodes)
-        if cpu_usage > 80:  # Very high CPU load
-            self.process_every_n_frames = min(15, self.process_every_n_frames + 2)
-        elif cpu_usage > 60:  # High CPU load
-            self.process_every_n_frames = min(10, self.process_every_n_frames + 1)
-        elif cpu_usage > 40:  # Medium CPU load 
-            self.process_every_n_frames = min(8, max(5, self.process_every_n_frames))
-        elif cpu_usage < 20 and current_fps < 3.0:  # Low CPU load and low frame rate
-            # Only decrease if we're not already processing at good rate
-            self.process_every_n_frames = max(3, self.process_every_n_frames - 1)
-            
-        # Analyze detection rates from YOLO and HSV
-        yolo_active = False
-        hsv_active = False
-        yolo_recent = False
-        hsv_recent = False
-        
-        if 'YOLO' in self.detection_history:
-            time_since_yolo = current_time - self.detection_history['YOLO'].get('last_time', 0)
-            yolo_active = time_since_yolo < 1.0  # Active in the last second
-            yolo_recent = time_since_yolo < 0.3  # Very recent detection
-            
-        if 'HSV' in self.detection_history:
-            time_since_hsv = current_time - self.detection_history['HSV'].get('last_time', 0)
-            hsv_active = time_since_hsv < 1.0  # Active in the last second
-            hsv_recent = time_since_hsv < 0.3  # Very recent detection
-            
-        # If both detectors are inactive, conserve resources
-        if not yolo_active and not hsv_active and self.process_every_n_frames < 10:
+        # Adjust based on CPU usage
+        if cpu > 90.0 and self.process_every_n_frames < 5:
+            # CPU too high, skip more frames
             self.process_every_n_frames += 1
-            
-        # If at least one detector is very active, ensure we're keeping up
-        if (yolo_recent or hsv_recent) and self.process_every_n_frames > 5:
+        elif cpu < 50.0 and self.current_fps < 3.0 and self.process_every_n_frames > 1:
+            # CPU has room and FPS is below target, process more frames
             self.process_every_n_frames -= 1
-            
-        # Distance-based processing adjustments
-        position_available = False
-        estimated_distance = None
         
-        # Check if we have a recent position from YOLO (preferred) or HSV
-        for source in ['YOLO', 'HSV']:
-            if source in self.detection_history:
-                time_since_detection = current_time - self.detection_history[source].get('last_time', 0)
-                if time_since_detection < 0.5 and self.detection_history[source].get('latest_position'):
-                    position = self.detection_history[source]['latest_position']
-                    # Calculate planar distance (ignoring height)
-                    estimated_distance = np.sqrt(position[0]**2 + position[2]**2)
-                    position_available = True
-                    break
+        # Constrain to valid range
+        self.process_every_n_frames = max(1, min(5, self.process_every_n_frames))
         
-        # Adjust based on distance if available
-        if position_available and estimated_distance is not None:
-            if estimated_distance < 1.0:  # Very close - prioritize depth camera
-                # Process more frames for better close range tracking (at least every 3rd)
-                self.process_every_n_frames = max(1, min(self.process_every_n_frames, 3))
-            elif estimated_distance > 4.0:  # Far - reduce depth camera processing
-                # Skip more frames to save resources (at most every 12th)
-                self.process_every_n_frames = min(12, max(self.process_every_n_frames, 6))
-        
-        # Constrain frame skip values to reasonable bounds
-        self.process_every_n_frames = max(1, min(15, self.process_every_n_frames))
-        
-        # Only log when changes occur
-        if old_frame_skip != self.process_every_n_frames:
+        # Log only if changed
+        if old_skip != self.process_every_n_frames:
             self.get_logger().info(
                 f"Adjusted processing: 1 in {self.process_every_n_frames} frames "
-                f"(CPU: {cpu_usage:.1f}%, FPS: {current_fps:.1f})"
+                f"(CPU: {cpu:.1f}%, FPS: {self.current_fps:.1f})"
             )
-            
-        # Force a log of key metrics periodically
-        if not hasattr(self, 'last_debug_log') or current_time - self.last_debug_log > 30.0:
-            self.last_debug_log = current_time
-            
-            # Format distance properly handling None
-            dist_str = f"{estimated_distance:.2f}m" if estimated_distance is not None else "None"
-            
-            # Only log in debug mode
-            if self.debug_mode:
-                self.get_logger().info(
-                    f"Status: position_avail={position_available}, "
-                    f"dist={dist_str}, "
-                    f"YOLO_active={yolo_active}, "
-                    f"HSV_active={hsv_active}, "
-                    f"FPS={current_fps:.1f}"
-                )
     
     def publish_system_diagnostics(self):
-        """Enhanced diagnostics with FPS metrics and velocity information."""
-        current_time = TimeUtils.now_as_float()
+        """Publish system diagnostics with minimal overhead."""
+        # Update FPS
+        self._update_fps()
         
-        # Only publish every LOG_INTERVAL seconds
-        if current_time - self.last_diag_log_time < LOG_INTERVAL:
-            return
-            
-        self.last_diag_log_time = current_time
+        # Calculate metrics
+        avg_fps = sum(self.fps_history) / len(self.fps_history) if self.fps_history else self.current_fps
+        frame_rate_pct = 100.0 / self.process_every_n_frames
+        cache_hit_rate = (self.cache_hits / max(1, self.total_attempts)) * 100.0 if self.total_attempts > 0 else 0.0
         
-        # Calculate FPS more reliably
-        elapsed = current_time - self.start_time
-        fps = self.successful_conversions / elapsed if elapsed > 0 else 0
-        
-        # Calculate average FPS from recent history
-        avg_fps = sum(self.fps_history) / len(self.fps_history) if self.fps_history else fps
-        
-        # Calculate frame processing rate as percentage
-        frame_rate_percentage = 100.0 / self.process_every_n_frames
-        
-        # Calculate cache hit rate
-        total_attempts = sum(self.attempt_counter.values())
-        total_hits = sum(self.cache_hits.values())
-        cache_hit_rate = (total_hits / total_attempts * 100) if total_attempts > 0 else 0
-        
-        # Get the latest position and velocity if available (YOLO preferred)
-        latest_pos = None
-        for source in ['YOLO', 'HSV']:
-            if source in self.detection_history and self.detection_history[source].get('latest_position'):
-                latest_pos = self.detection_history[source]['latest_position']
-                if source == 'YOLO':  # Prefer YOLO position if available
-                    break
-        
-        # Format position string if available
+        # Get latest position
         pos_str = ""
-        if latest_pos:
-            pos_str = f" | Pos: ({latest_pos[0]:.2f}, {latest_pos[1]:.2f}, {latest_pos[2]:.2f})m"
-            
-            # Add velocity data if available
-            if hasattr(self, 'velocity') and self.velocity[0] != 0:
-                vel_magnitude = (self.velocity[0]**2 + self.velocity[1]**2 + self.velocity[2]**2)**0.5
-                pos_str += f" | Vel: {vel_magnitude:.2f}m/s"
+        if self.last_position is not None:
+            pos_str = f" | Pos: ({self.last_position[0]:.2f}, {self.last_position[1]:.2f}, {self.last_position[2]:.2f})m"
         
-        # Log comprehensive status
+        # Log status
         self.get_logger().info(
-            f"Depth camera: {fps:.1f} FPS (avg: {avg_fps:.1f}), CPU: {self.current_cpu_usage:.1f}%, "
-            f"Frames: 1:{self.process_every_n_frames} ({frame_rate_percentage:.1f}%), "
+            f"Depth camera: {self.current_fps:.1f} FPS (avg: {avg_fps:.1f}), "
+            f"CPU: {self.current_cpu_usage:.1f}%, "
+            f"Frames: 1:{self.process_every_n_frames} ({frame_rate_pct:.1f}%), "
             f"Cache hits: {cache_hit_rate:.1f}%{pos_str}"
         )
         
-        # Publish detailed diagnostics message
+        # Publish diagnostics
         diag_msg = String()
         diag_data = {
-            "fps": fps,
+            "fps": self.current_fps,
             "avg_fps": avg_fps,
             "cpu": self.current_cpu_usage,
             "frame_skip": self.process_every_n_frames,
-            "frame_rate_pct": frame_rate_percentage,
+            "frame_rate_pct": frame_rate_pct,
             "cache_hit_rate": cache_hit_rate,
-            "positions": {
-                "YOLO": self.detection_history['YOLO'].get('latest_position'),
-                "HSV": self.detection_history['HSV'].get('latest_position')
-            },
-            "velocity": self.velocity if hasattr(self, 'velocity') else [0, 0, 0],
-            "timestamp": current_time
+            "last_position": self.last_position,
+            "timestamp": time.time()
         }
         diag_msg.data = str(diag_data)
         self.system_diagnostics_publisher.publish(diag_msg)
     
     def _handle_resource_alert(self, resource_type, value):
-        """Simple handler for resource alerts that updates CPU usage."""
+        """Fix CPU usage reporting."""
         if resource_type == 'cpu':
-            self.current_cpu_usage = value
-            
-            # Only log critical alerts once per minute
-            if value > 90.0:
-                current_time = TimeUtils.now_as_float()
-                if current_time - self.last_resource_alert_time > 60.0:
-                    self.last_resource_alert_time = current_time
-                    self.get_logger().warning(f"Critical CPU usage: {value:.1f}%")
+            # Ensure we get non-zero values
+            try:
+                cpu_value = float(value)
+                self.current_cpu_usage = max(0.1, cpu_value)
+                
+                # Log significant CPU changes
+                current_time = time.time()
+                if cpu_value > 90.0 and current_time - self.last_cpu_log > 30.0:
+                    self.get_logger().info(f"High CPU usage: {cpu_value:.1f}%")
+                    self.last_cpu_log = current_time
+            except (ValueError, TypeError):
+                # Default value if conversion fails
+                self.current_cpu_usage = 50.0
     
     def destroy_node(self):
         """Clean shutdown of the node."""
@@ -1253,23 +896,20 @@ def main(args=None):
     os.environ['RASPBERRY_PI'] = '1'
     
     # Create and initialize the node
-    node = TennisBall3DPositionEstimator()
+    node = OptimizedPositionEstimator()
     
-    # Use multiple threads
+    # Use multiple threads but not too many for Pi 5
     thread_count = DIAG_CONFIG.get("threads", 3)
     executor = MultiThreadedExecutor(num_threads=thread_count)
     executor.add_node(node)
     
     print("=================================================")
-    print("Optimized 3D Position Estimator for Basketball")
+    print("Ultra-Optimized Basketball Tracking")
     print("=================================================")
     print(f"Using {thread_count} threads on Raspberry Pi 5")
     
-    # Log startup message to ROS logger
-    node.get_logger().info(f"Starting with {thread_count} threads and process_every_n_frames={node.process_every_n_frames}")
-    
     try:
-        node.get_logger().info("3D Position Estimator running.")
+        node.get_logger().info(f"Starting with {thread_count} threads and process_every_n_frames={node.process_every_n_frames}")
         executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info("Stopped by user.")

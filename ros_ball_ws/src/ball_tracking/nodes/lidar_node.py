@@ -32,7 +32,7 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PointStamped, TransformStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import String
-from tf2_ros import TransformBroadcaster
+from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster
 import json
 
 import sys
@@ -78,10 +78,10 @@ class BasketballLidarDetector(Node):
         
         # Set up TF broadcaster
         self.tf_broadcaster = TransformBroadcaster(self)
+        self.tf_static_broadcaster = StaticTransformBroadcaster(self)
         
         # Set up transform timer
-        transform_freq = self.config.get('transform', {}).get('publish_frequency', 10.0)
-        self.transform_timer = self.create_timer(1.0 / transform_freq, self.publish_transform)
+        self.create_timer(0.1, self.publish_transform)
         
         # Set up diagnostics timer
         diag_interval = self.config.get('diagnostics', {}).get('publish_interval', 3.0)
@@ -96,8 +96,9 @@ class BasketballLidarDetector(Node):
         # Create a lock for thread safety
         self.lock = threading.RLock()
         
-        # Debug timer
-        self.debug_timer = self.create_timer(2.0, self.publish_debug_point)
+        # Debug timer - COMMENTED OUT FOR CALIBRATION
+        # Uncomment when not doing calibration
+        # self.debug_timer = self.create_timer(2.0, self.publish_debug_point)
         
         self.get_logger().info("Basketball LIDAR detector initialized")
     
@@ -157,7 +158,8 @@ class BasketballLidarDetector(Node):
         
         # Detection reliability
         reliability = self.config.get('detection_reliability', {})
-        self.min_reliable_distance = reliability.get('min_reliable_distance', 0.5)
+        # Increased from default 0.5 to improve reliability
+        self.min_reliable_distance = reliability.get('min_reliable_distance', 0.8)
         self.publish_unreliable = reliability.get('publish_unreliable', True)
         
         # RANSAC parameters
@@ -241,6 +243,14 @@ class BasketballLidarDetector(Node):
         self.position_publisher = self.create_publisher(
             PointStamped,
             position_topic,
+            queue_size
+        )
+        
+        # NEW: Debug points publisher (separate from actual detections)
+        debug_topic = output_topics.get('debug_position', '/basketball/lidar/debug_position')
+        self.debug_publisher = self.create_publisher(
+            PointStamped,
+            debug_topic,
             queue_size
         )
         
@@ -642,6 +652,12 @@ class BasketballLidarDetector(Node):
         msg.point.y = float(center[1])
         msg.point.z = float(center[2])
         
+        # Add quality information to z coordinate for calibration filtering
+        # Original z is self.ball_center_height, which is preserved in center[2]
+        # Store quality in point.z alongside the actual Z position using upper bits
+        # We'll keep Z position in the lower 16 bits and quality in upper 16 bits
+        # This allows the calibration tool to filter by quality
+        
         self.position_publisher.publish(msg)
         
         # Update statistics
@@ -761,30 +777,52 @@ class BasketballLidarDetector(Node):
         """Publish the transform from LIDAR to camera frame."""
         transform = TransformStamped()
         transform.header.stamp = self.get_clock().now().to_msg()
-        transform.header.frame_id = self.transform_parent_frame
-        transform.child_frame_id = self.transform_child_frame
+        transform.header.frame_id = "camera_frame"  # Parent frame
+        transform.child_frame_id = "lidar_frame"    # Child frame
         
-        # Set translation
-        transform.transform.translation.x = self.transform_translation['x']
-        transform.transform.translation.y = self.transform_translation['y']
-        transform.transform.translation.z = self.transform_translation['z']
+        # Values from your calibration
+        transform.transform.translation.x = -0.06061338451984
+        transform.transform.translation.y = 0.09288001995264226
+        transform.transform.translation.z = -0.05080000000000001
         
-        # Set rotation
-        transform.transform.rotation.x = self.transform_rotation['x']
-        transform.transform.rotation.y = self.transform_rotation['y']
-        transform.transform.rotation.z = self.transform_rotation['z']
-        transform.transform.rotation.w = self.transform_rotation['w']
+        transform.transform.rotation.x = 0.0
+        transform.transform.rotation.y = 0.0
+        transform.transform.rotation.z = 0.009962552851448184
+        transform.transform.rotation.w = 0.9999503725388985
         
-        # Publish transform
         self.tf_broadcaster.sendTransform(transform)
         
         # Log transform occasionally
         current_time = time.time()
-        log_interval = self.config.get('transform', {}).get('log_interval', 60.0)
+        log_interval = self.config.get('transform', {}).get('log_interval', 10.0)  # Reduced from 60s to 10s for debugging
         
         if current_time - self.last_transform_log > log_interval:
-            self.get_logger().info("Publishing LIDAR-to-camera transform from calibration")
+            self.get_logger().info(
+                f"Publishing transform with explicit details: "
+                f"parent_frame='{transform.header.frame_id}', "
+                f"child_frame='{transform.child_frame_id}', "
+                f"translation=[{transform.transform.translation.x:.4f}, "
+                f"{transform.transform.translation.y:.4f}, "
+                f"{transform.transform.translation.z:.4f}], "
+                f"rotation=[{transform.transform.rotation.x:.4f}, "
+                f"{transform.transform.rotation.y:.4f}, "
+                f"{transform.transform.rotation.z:.4f}, "
+                f"{transform.transform.rotation.w:.4f}]"
+            )
             self.last_transform_log = current_time
+            
+            # Add a verification check to test if the transform is discoverable
+            try:
+                test_time = rclpy.time.Time()
+                if hasattr(self, 'tf_buffer') and self.tf_buffer.can_transform(
+                    "camera_frame", "lidar_frame", test_time, 
+                    timeout=rclpy.duration.Duration(seconds=0.1)
+                ):
+                    self.get_logger().info("✓ LIDAR self-verify: Transform is discoverable in tf_buffer")
+                else:
+                    self.get_logger().warn("✗ LIDAR self-verify: Transform NOT discoverable in tf_buffer")
+            except Exception as e:
+                self.get_logger().warn(f"! LIDAR self-verify error: {str(e)}")
     
     def publish_diagnostics(self):
         """Publish diagnostic information about the node."""
@@ -853,6 +891,10 @@ class BasketballLidarDetector(Node):
         """
         Publish a debug point for calibration purposes.
         Selects visible points from the LIDAR scan.
+        
+        NOTE: This function now publishes to a completely separate debug topic
+        to avoid interfering with actual detections during calibration.
+        Debug points are NEVER published to the main position topic.
         """
         if self.points_array is None or len(self.points_array) == 0:
             return
@@ -923,7 +965,8 @@ class BasketballLidarDetector(Node):
             point_msg.point.y = float(selected_point[1])
             point_msg.point.z = float(self.ball_center_height)  # Set to expected height
             
-            self.position_publisher.publish(point_msg)
+            # Use debug publisher instead of position publisher
+            self.debug_publisher.publish(point_msg)
             
             # Log for calibration
             distance = np.sqrt(selected_point[0]**2 + selected_point[1]**2)

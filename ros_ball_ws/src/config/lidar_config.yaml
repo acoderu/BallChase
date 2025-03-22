@@ -19,14 +19,14 @@ transform:
   parent_frame: "camera_frame"
   child_frame: "lidar_frame"
   translation:
-    x: 0.0  # To be updated from calibration
-    y: 0.0  # To be updated from calibration
-    z: 0.0  # To be updated from calibration
+    x: -0.06061338451984  # To be updated from calibration
+    y: 0.0928800199526422  # To be updated from calibration
+    z: -0.05080000000000  # To be updated from calibration
   rotation:
     x: 0.0  # To be updated from calibration
     y: 0.0  # To be updated from calibration
-    z: 0.0  # To be updated from calibration
-    w: 1.0  # To be updated from calibration
+    z: 0.009962552851448184  # To be updated from calibration
+    w: 0.9999503725388985  # To be updated from calibration
   publish_frequency: 10.0  # How often to publish the transform (Hz)
   log_interval: 60.0       # How often to log transform info (seconds)
 

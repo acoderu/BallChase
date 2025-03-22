@@ -1,5 +1,11 @@
 # Configuration for the Kalman filter fusion node
 
+startup:
+  wait_for_transform: true
+  transform_retry_count: 60  # Increase retry count
+  transform_retry_delay: 1.0  # 1 second between retries
+  required_transforms: ['camera_frame', 'lidar_frame']
+  
 # Process noise: how much uncertainty to add during prediction steps
 process_noise:
   position: 0.1        # Position uncertainty per second squared
