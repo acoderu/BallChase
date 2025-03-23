@@ -18,6 +18,7 @@ import math
 import json
 import os
 import sys
+import copy
 
 # Import from config
 from ball_chase.config.config_loader import ConfigLoader
@@ -28,16 +29,19 @@ class SensorBuffer:
     Helps coordinate data from multiple sensors with different update rates.
     """
     
-    def __init__(self, max_time_diff=0.1):
+    def __init__(self, sensor_time_thresholds=None, max_time_diff=None):
         """
-        Initialize the sensor buffer.
+        Initialize the sensor buffer with per-sensor time thresholds.
         
         Args:
-            max_time_diff (float): Maximum time difference (in seconds) for measurements
-                to be considered synchronized
+            sensor_time_thresholds (dict): Dict of {sensor_name: max_time_diff}
+                for per-sensor synchronization thresholds
+            max_time_diff (float): Default maximum time difference for all sensors
         """
         self.buffers = {}
-        self.max_time_diff = max_time_diff
+        self.default_max_time_diff = max_time_diff if max_time_diff is not None else 0.1
+        # Store sensor-specific time thresholds
+        self.sensor_time_thresholds = sensor_time_thresholds or {}
     
     def add_sensor(self, sensor_name, buffer_size=20):
         """
@@ -75,13 +79,14 @@ class SensorBuffer:
             return self.buffers[sensor_name][-1][1]  # Return most recent data
         return None
     
-    def find_synchronized_measurements(self, min_sensors=1):
+    def find_synchronized_measurements(self, min_sensors=1, primary_sensor=None):
         """
         Find measurements from different sensors taken at approximately the same time.
         
         Args:
             min_sensors (int): Minimum number of synchronized sensors required
-            
+            primary_sensor (str): Optional sensor to use as time reference
+                
         Returns:
             dict: Dictionary of {sensor_name: measurement} for synchronized measurements
         """
@@ -90,61 +95,150 @@ class SensorBuffer:
         if len(sensors_with_data) < min_sensors:
             return {}
         
-        # Find the sensor with the least data (to minimize iterations)
-        min_sensor = None
-        min_length = float('inf')
-        for sensor, buffer in self.buffers.items():
-            if 0 < len(buffer) < min_length:
-                min_sensor = sensor
-                min_length = len(buffer)
+        # Find sensor to use as reference time
+        if primary_sensor and primary_sensor in sensors_with_data:
+            ref_sensor = primary_sensor
+        else:
+            # Prioritize 3D sensors over 2D if available
+            ref_sensor = next((s for s in sensors_with_data if not s.endswith('_2d')), None)
+            if ref_sensor is None:
+                ref_sensor = sensors_with_data[0]
         
-        if min_sensor is None:
-            return {}  # No data to synchronize
-        
-        # For each measurement from the minimal sensor, find closest from other sensors
         best_sync = {}
-        best_count = 0
+        best_score = 0.0
         
-        for ref_time, ref_data in self.buffers[min_sensor]:
-            current_sync = {min_sensor: ref_data}
+        # For each measurement from reference sensor
+        for ref_time, ref_data in self.buffers[ref_sensor]:
+            current_sync = {ref_sensor: ref_data}
+            current_score = 0.0
             
             # Check each other sensor
             for sensor in sensors_with_data:
-                if sensor == min_sensor:
+                if sensor == ref_sensor:
                     continue
                 
-                # Find the measurement closest to ref_time
-                closest_data = None
-                closest_time_diff = float('inf')
+                # Get sensor-specific time threshold
+                max_time_diff = self.sensor_time_thresholds.get(
+                    sensor, self.default_max_time_diff)
+                
+                best_match = None
+                best_match_diff = float('inf')
                 
                 for time_val, data in self.buffers[sensor]:
                     time_diff = abs(ref_time - time_val)
                     
-                    if time_diff < closest_time_diff:
-                        closest_time_diff = time_diff
-                        closest_data = data
+                    if time_diff < best_match_diff and time_diff <= max_time_diff:
+                        best_match_diff = time_diff
+                        best_match = (time_val, data)
                 
-                # If within time threshold, add to synchronized data
-                if closest_data is not None and closest_time_diff <= self.max_time_diff:
-                    current_sync[sensor] = closest_data
+                # If we found a match within threshold
+                if best_match:
+                    # Add to current synchronization set
+                    current_sync[sensor] = best_match[1]
+                    # Score is higher when time differences are smaller (perfect=1.0)
+                    match_score = 1.0 - (best_match_diff / max_time_diff)
+                    current_score += match_score
             
-            # Check if this is our best set yet
-            if len(current_sync) > best_count:
+            # Update best sync if this set is better
+            if len(current_sync) >= min_sensors and current_score > best_score:
                 best_sync = current_sync
-                best_count = len(current_sync)
+                best_score = current_score
                 
-                # If we have all sensors, we can return immediately
-                if best_count == len(sensors_with_data):
-                    return best_sync
-        
-        # Return the best synchronization if it meets minimum requirements
-        if best_count >= min_sensors:
-            return best_sync
-        return {}
+                # If we have all sensors, no need to keep searching
+                if len(current_sync) == len(sensors_with_data):
+                    break
+                    
+        return best_sync
     
     def _ros_time_to_float(self, timestamp):
         """Convert ROS timestamp to float seconds."""
         return timestamp.sec + timestamp.nanosec / 1e9
+
+    def interpolate_measurement(self, sensor, target_time):
+        """
+        Interpolate sensor measurement at the target time.
+        
+        Args:
+            sensor (str): Sensor name
+            target_time (float): Target timestamp for interpolation
+                
+        Returns:
+            tuple: (interpolated_data, quality) or (None, 0) if not possible
+        """
+        if sensor not in self.buffers or len(self.buffers[sensor]) < 2:
+            return None, 0.0
+        
+        # Find measurements before and after target time
+        before_data = None
+        after_data = None
+        before_time = 0
+        after_time = 0
+        
+        for time_val, data in self.buffers[sensor]:
+            if time_val <= target_time and (before_data is None or time_val > before_time):
+                before_data = data
+                before_time = time_val
+            if time_val >= target_time and (after_data is None or time_val < after_time):
+                after_data = data
+                after_time = time_val
+        
+        # If we don't have points on both sides, can't interpolate
+        if before_data is None or after_data is None:
+            return None, 0.0
+        
+        # Don't interpolate over large time gaps
+        max_interp_gap = 0.5  # Maximum time gap for interpolation in seconds
+        if after_time - before_time > max_interp_gap:
+            return None, 0.0
+        
+        # Calculate interpolation factor (0 to 1)
+        if after_time == before_time:  # Avoid division by zero
+            t = 0.0
+        else:
+            t = (target_time - before_time) / (after_time - before_time)
+        
+        # For PointStamped messages, linearly interpolate position
+        if hasattr(before_data, 'point') and hasattr(after_data, 'point'):
+            result = copy.deepcopy(before_data)
+            result.point.x = before_data.point.x + t * (after_data.point.x - before_data.point.x)
+            result.point.y = before_data.point.y + t * (after_data.point.y - before_data.point.y)
+            result.point.z = before_data.point.z + t * (after_data.point.z - before_data.point.z)
+            
+            # Quality is higher when we're closer to an actual measurement
+            quality = 1.0 - min(t, 1.0-t)  # 1.0 at measurements, 0.5 halfway between
+            return result, quality
+        
+        return None, 0.0
+
+    def calculate_adaptive_time_thresholds(self):
+        """
+        Dynamically calculate appropriate time thresholds based on observed sensor rates.
+        This adapts synchronization windows to actual sensor behaviors.
+        """
+        thresholds = {}
+        
+        # Calculate average time between measurements for each sensor
+        for sensor, buffer in self.buffers.items():
+            if len(buffer) < 2:
+                continue
+                
+            # Calculate average interval between measurements
+            timestamps = [t for t, _ in buffer]
+            intervals = []
+            for i in range(1, len(timestamps)):
+                intervals.append(timestamps[i] - timestamps[i-1])
+            
+            if intervals:
+                # Use larger of (2x average interval) or default threshold
+                # This ensures we can handle occasional doubled intervals
+                avg_interval = sum(intervals) / len(intervals)
+                thresholds[sensor] = max(2.0 * avg_interval, self.default_max_time_diff)
+        
+        # Update the sensor time thresholds
+        for sensor, threshold in thresholds.items():
+            self.sensor_time_thresholds[sensor] = threshold
+            
+        return thresholds
 
 
 class EnhancedFusionNode(Node):
@@ -193,6 +287,14 @@ class EnhancedFusionNode(Node):
         self.transform_check_timer = self.create_timer(1.0, self.check_and_activate)
         
         self.get_logger().info("Initialization complete - waiting for transform to become available")
+        
+        self.sync_quality_metrics = {
+            'success_rate': 0.0,
+            'avg_time_diff': 0.0,
+            'sensor_availability': {},
+            'sync_counts': 0,
+            'attempt_counts': 0
+        }
     
     def init_transform_system(self):
         """Initialize just the transform system."""
@@ -926,8 +1028,33 @@ class EnhancedFusionNode(Node):
         # For performance tracking
         update_start = time.time()
         
-        # Get synchronized measurements
-        sync_data = self.sensor_buffer.find_synchronized_measurements(min_sensors=1)
+        # Dynamically adjust which sensor is primary based on recency
+        current_time = time.time()
+        freshest_3d_sensor = None
+        newest_time = 0
+        
+        # Find the most recently updated 3D sensor
+        for sensor in ['lidar', 'hsv_3d', 'yolo_3d']:
+            last_time = self.last_detection_time.get(sensor, 0)
+            if last_time > newest_time:
+                newest_time = last_time
+                freshest_3d_sensor = sensor
+        
+        # Use that sensor as reference or fall back to any sensor
+
+        # Calculate adaptive time thresholds every 10 updates
+        if self.sync_quality_metrics['attempt_counts'] % 10 == 0:
+            thresholds = self.sensor_buffer.calculate_adaptive_time_thresholds()
+            if self.debug_level >= 2:
+                threshold_info = ", ".join([f"{s}: {t:.3f}s" for s, t in thresholds.items()])
+                self.get_logger().debug(f"Adaptive sync thresholds: {threshold_info}")
+
+        # Get synchronized measurements with the improved method
+        sync_data = self.sensor_buffer.find_synchronized_measurements(
+            min_sensors=1, 
+            primary_sensor=freshest_3d_sensor)
+        
+        self.sync_quality_metrics['attempt_counts'] += 1
         
         # Log whether synchronized measurements were found
         if sync_data:
@@ -952,6 +1079,27 @@ class EnhancedFusionNode(Node):
         
         # If we have synchronized data, use it
         if sync_data:
+            self.sync_quality_metrics['sync_counts'] += 1
+    
+            # Calculate average time difference between measurements
+            timestamps = []
+            for source, msg in sync_data.items():
+                if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
+                    timestamps.append(self._ros_time_to_float(msg.header.stamp))
+    
+            if len(timestamps) > 1:
+                max_diff = max(timestamps) - min(timestamps)
+                self.sync_quality_metrics['avg_time_diff'] = (
+                    0.9 * self.sync_quality_metrics['avg_time_diff'] + 
+                    0.1 * max_diff
+                )
+    
+            # Calculate success rate
+            self.sync_quality_metrics['success_rate'] = (
+                self.sync_quality_metrics['sync_counts'] / 
+                self.sync_quality_metrics['attempt_counts']
+            )
+    
             # Transform measurements to reference frame
             transformed_data = {}
             
@@ -1062,6 +1210,32 @@ class EnhancedFusionNode(Node):
         # Record processing time for diagnostics
         execution_time = (time.time() - update_start) * 1000  # milliseconds
         self.processing_times.append(execution_time)
+        
+        # After determining which sensors have fresh data
+        # Log when switching to 2D-only mode
+        fresh_3d_sensors = 0
+        fresh_2d_sensors = 0
+        
+        for sensor, last_time in self.last_detection_time.items():
+            if (current_time - last_time) < self.detection_timeout:
+                if sensor.endswith('_2d'):
+                    fresh_2d_sensors += 1
+                else:
+                    fresh_3d_sensors += 1
+
+        if fresh_3d_sensors == 0 and fresh_2d_sensors > 0:
+            # Only log this when we first switch to 2D-only mode
+            if not hasattr(self, '_last_mode') or self._last_mode != '2d_only':
+                self._last_mode = '2d_only'
+                self.get_logger().info("Switching to 2D-only tracking mode - using bounding box for distance estimation")
+                # Log which 2D sensors are active
+                active_2d = [s for s, t in self.last_detection_time.items() 
+                             if s.endswith('_2d') and (current_time - t) < self.detection_timeout]
+                self.get_logger().info(f"Active 2D sensors: {', '.join(active_2d)}")
+        elif fresh_3d_sensors > 0:
+            if not hasattr(self, '_last_mode') or self._last_mode != '3d':
+                self._last_mode = '3d'
+                self.get_logger().info("Using 3D tracking mode")
     
     def predict(self, dt):
         """
@@ -1075,11 +1249,14 @@ class EnhancedFusionNode(Node):
         self._F_matrix[1, 4] = dt  # y += vy*dt
         self._F_matrix[2, 5] = dt  # z += vz*dt
         
-        # Update process noise matrix Q
+        # Get adaptive process noise values based on motion state
+        adaptive_noise_pos, adaptive_noise_vel = self.update_adaptive_process_noise()
+        
+        # Update process noise matrix Q with adaptive values
         # Position noise grows with dt²
-        self._Q_matrix[0:3, 0:3] = np.eye(3) * self.process_noise_pos * dt**2
+        self._Q_matrix[0:3, 0:3] = np.eye(3) * adaptive_noise_pos * dt**2
         # Velocity noise grows with dt
-        self._Q_matrix[3:6, 3:6] = np.eye(3) * self.process_noise_vel * dt
+        self._Q_matrix[3:6, 3:6] = np.eye(3) * adaptive_noise_vel * dt
         
         # Predict state: x = Fx
         self.state = self._F_matrix @ self.state
@@ -1163,17 +1340,20 @@ class EnhancedFusionNode(Node):
         # Adjust parameters based on the source
         if source == 'yolo_2d':
             # YOLO provides more reliable boxes, so we use better parameters
-            # These parameters would be calibrated for the actual system
+            # Increase confidence in YOLO bbox-based distance estimates
             scale_factor = 45000.0
             min_distance = 0.3
             max_distance = 8.0
             min_box_area = 200  # Minimum reliable detection size
+            # Higher base confidence for YOLO detections
+            base_confidence = 0.8  # Increased from implicit 0.7
         else:  # hsv_2d
             # HSV detections might be less accurate
             scale_factor = 35000.0
             min_distance = 0.2
             max_distance = 6.0
-            min_box_area = 300  # HSV may need larger detections to be reliable
+            min_box_area = 300 
+            base_confidence = 0.7  # Default base confidence
         
         # Safety check for very small boxes (likely noise)
         if box_area < min_box_area:
@@ -1187,13 +1367,12 @@ class EnhancedFusionNode(Node):
         estimated_distance = max(min_distance, min(estimated_distance, max_distance))
         
         # Calculate confidence - higher for mid-range distances, lower for extremes
-        # This is because very close or very far estimations tend to be less reliable
         if estimated_distance < 1.0:
-            confidence = 0.7 * (estimated_distance / 1.0)
+            confidence = base_confidence * (estimated_distance / 1.0)
         elif estimated_distance > 5.0:
-            confidence = 0.7 * (1.0 - ((estimated_distance - 5.0) / 3.0))
+            confidence = base_confidence * (1.0 - ((estimated_distance - 5.0) / 3.0))
         else:
-            confidence = 0.7  # Maximum confidence for mid-range distances
+            confidence = base_confidence  # Use the source-specific base confidence
         
         self.get_logger().debug(
             f"Distance estimate from {source}: Box {bbox_width}x{bbox_height} (area={box_area}) "
@@ -1236,7 +1415,8 @@ class EnhancedFusionNode(Node):
                     )
                     
                     # If we have a reasonable distance estimate, do a full 3D update
-                    if distance_confidence > 0.2:  # Require minimum confidence in the distance
+                    # Lower the confidence threshold to use distance estimates more often
+                    if distance_confidence > 0.15:  # Reduced from 0.2 to use more distance estimates
                         # Create an estimated 3D position
                         # Use simple projective geometry to estimate z from x,y and distance
                         # This is a simplification - in a real scenario you'd use proper camera calibration
@@ -1273,6 +1453,15 @@ class EnhancedFusionNode(Node):
                         adjusted_noise_xy = base_noise * (1.0 + (1.0 - confidence))
                         adjusted_noise_z = base_noise * 3.0  # Much higher noise for estimated z
                         
+                        # For YOLO specifically, trust the distance estimates more
+                        if source == 'yolo_2d':
+                            # Reduce noise for YOLO distance estimates due to their reliability
+                            adjusted_noise_xy = base_noise * 0.9 * (1.0 + (1.0 - confidence))
+                            adjusted_noise_z = base_noise * 2.5  # Reduced from 3.0 for more trust
+                        else:
+                            adjusted_noise_xy = base_noise * (1.0 + (1.0 - confidence))
+                            adjusted_noise_z = base_noise * 3.0
+                        
                         # Measurement noise matrix - different noise for xy vs z
                         R = np.diag([adjusted_noise_xy, adjusted_noise_xy, adjusted_noise_z])
                         
@@ -1288,8 +1477,8 @@ class EnhancedFusionNode(Node):
                             self.innovation_history.append(mahalanobis_dist)
                             
                             # More permissive threshold for 2D measurements with estimated distance
-                            initial_threshold = 25.0  # Very permissive initially
-                            min_threshold = 8.0       # Still more permissive than regular 3D
+                            initial_threshold = 30.0  # Increased from 25.0 for more leniency
+                            min_threshold = 10.0      # Increased from 8.0
                             
                             # Adjust threshold based on consecutive updates
                             decay_factor = max(0.1, min(1.0, 10.0 / (self.consecutive_updates + 1)))
@@ -1612,7 +1801,8 @@ class EnhancedFusionNode(Node):
             target_health = 1.0
         elif fresh_2d_sensors >= 1 and self.allow_tracking_with_2d_only:
             # No 3D sensors but we have 2D sensors and allow 2D-only tracking
-            target_health = 0.6  # Lower health than with 3D sensors
+            # Increase health from 0.6 to 0.8 to show more confidence in 2D tracking
+            target_health = 0.8  # Increased from 0.6 for better 2D-only confidence
         else:
             target_health = 0.0  # Poor health - no usable sensors
         
@@ -1825,6 +2015,69 @@ class EnhancedFusionNode(Node):
             
             # Reduce filter health score temporarily
             self.filter_health = max(0.3, self.filter_health - 0.2)
+
+    def update_adaptive_process_noise(self):
+        """
+        Adapt process noise based on detected motion state (moving vs stationary).
+        Higher process noise when moving, lower when stationary to reduce jitter.
+        """
+        # Detect if the object is moving based on recent velocity estimates
+        is_moving = False
+        velocity_magnitude = np.linalg.norm(self.state[3:6])
+        
+        # Parameters for motion detection
+        velocity_threshold = 0.2  # m/s
+        stationary_noise_factor = 0.3  # Lower noise when stationary
+        moving_noise_factor = 1.5    # Higher noise when moving
+        
+        # Consider an object moving if velocity exceeds threshold
+        if velocity_magnitude > velocity_threshold:
+            is_moving = True
+            
+        # Also check recent velocity history if available
+        if len(self.velocity_history) >= 3:
+            recent_velocities = []
+            for vel in list(self.velocity_history)[-3:]:
+                recent_velocities.append(np.linalg.norm(vel))
+            
+            avg_recent_velocity = sum(recent_velocities) / len(recent_velocities)
+            if avg_recent_velocity > velocity_threshold:
+                is_moving = True
+        
+        # Compute target noise factors based on motion state
+        if is_moving:
+            target_pos_noise = self.process_noise_pos * moving_noise_factor
+            target_vel_noise = self.process_noise_vel * moving_noise_factor
+            motion_state = "moving"
+        else:
+            target_pos_noise = self.process_noise_pos * stationary_noise_factor
+            target_vel_noise = self.process_noise_vel * stationary_noise_factor
+            motion_state = "stationary"
+
+        # Smooth transitions between noise levels using exponential smoothing
+        alpha = 0.2  # Smoothing factor (0-1): higher means faster adaptation
+        
+        # If we haven't set adaptive noise values yet, initialize them
+        if not hasattr(self, 'adaptive_process_noise_pos'):
+            self.adaptive_process_noise_pos = self.process_noise_pos
+            self.adaptive_process_noise_vel = self.process_noise_vel
+        
+        # Update adaptive noise with smoothing
+        self.adaptive_process_noise_pos = (1-alpha) * self.adaptive_process_noise_pos + alpha * target_pos_noise
+        self.adaptive_process_noise_vel = (1-alpha) * self.adaptive_process_noise_vel + alpha * target_vel_noise
+        
+        # Log motion state occasionally
+        if self.debug_level >= 2 and self.sync_quality_metrics['attempt_counts'] % 20 == 0:
+            self.get_logger().debug(
+                f"Motion state: {motion_state} (v={velocity_magnitude:.2f}m/s), "
+                f"adaptive noise: pos={self.adaptive_process_noise_pos:.3f}, vel={self.adaptive_process_noise_vel:.3f}"
+            )
+        
+        return self.adaptive_process_noise_pos, self.adaptive_process_noise_vel
+
+    def _ros_time_to_float(self, timestamp):
+        """Convert ROS timestamp to float seconds."""
+        return timestamp.sec + timestamp.nanosec / 1e9
 
 def main(args=None):
     """Main function to start the node."""
