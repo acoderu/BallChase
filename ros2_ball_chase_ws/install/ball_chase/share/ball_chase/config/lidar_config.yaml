@@ -1,0 +1,103 @@
+# Configuration for the LIDAR node - Basketball tracking
+
+# Basketball physical properties
+basketball:
+  radius: 0.127      # Basketball radius in meters (10 inch diameter / 2)
+  expected_height: 0.127  # Expected height of ball center relative to ground (5 inches)
+  max_distance: 0.2    # Maximum distance for clustering points
+  min_points: 6        # Minimum points to consider a valid cluster
+  quality_threshold:   # Thresholds for circle quality assessment
+    low: 0.35          # Lower threshold for increased sensitivity
+    medium: 0.6
+    high: 0.8
+  detection_samples: 30 # Number of random starting points for clustering
+  same_ball_threshold: 2.0  # Multiple of radius to determine if it's the same ball
+
+# Calibrated transformation from LIDAR to camera 
+# To be updated by calibration tool
+transform:
+  parent_frame: "camera_frame"
+  child_frame: "lidar_frame"
+  translation:
+    x: -0.06061338451984  # To be updated from calibration
+    y: 0.0928800199526422  # To be updated from calibration
+    z: -0.05080000000000  # To be updated from calibration
+  rotation:
+    x: 0.0  # To be updated from calibration
+    y: 0.0  # To be updated from calibration
+    z: 0.009962552851448184  # To be updated from calibration
+    w: 0.9999503725388985  # To be updated from calibration
+  publish_frequency: 10.0  # How often to publish the transform (Hz)
+  log_interval: 60.0       # How often to log transform info (seconds)
+
+# LIDAR sensor configuration
+sensor:
+  height: 0.1524         # LIDAR height from ground (6 inches)
+  beam_intersection:     # Where the LIDAR beam intersects with the basketball
+    min_height: 0.02     # Minimum height above ground to consider points (meters)
+    max_height: 0.2      # Maximum height to consider (meters)
+    expected_height: 0.1 # Expected height of beam intersection with ball
+
+# Topic configuration
+topics:
+  input:
+    lidar_scan: "/scan_raw"
+    yolo_detection: "/basketball/yolo/position"
+    hsv_detection: "/basketball/hsv/position"
+  output:
+    ball_position: "/basketball/lidar/position"
+    visualization: "/basketball/lidar/visualization"
+    diagnostics: "/basketball/lidar/diagnostics"
+  queue_size: 10  # Default ROS2 queue size for all topics
+
+# Physical measurements
+physical_measurements:
+  lidar_height: 0.1524      # LIDAR height from ground (6 inches)
+  camera_height: 0.1016     # Camera height from ground (4 inches)
+  ball_radius: 0.127        # Basketball radius (5 inches)
+  ball_center_height: 0.127 # Basketball center height from ground (5 inches)
+
+# Detection reliability settings
+detection_reliability:
+  min_reliable_distance: 0.5    # Minimum distance for reliable detections in meters
+  publish_unreliable: true      # Always publish for calibration
+  confidence_scaling: true      # Apply confidence scaling based on distance
+
+# Visualization settings
+visualization:
+  marker_lifetime: 1.0  # Seconds to display markers
+  text_height_offset: 0.2  # Height above ball for text (meters)
+  text_size: 0.05  # Size of text markers
+  colors:
+    yolo:
+      r: 0.0
+      g: 1.0
+      b: 0.3
+      base_alpha: 0.5
+    hsv:
+      r: 1.0
+      g: 0.6
+      b: 0.0
+      base_alpha: 0.5
+    text:
+      r: 1.0
+      g: 1.0
+      b: 1.0
+      a: 1.0
+
+# Performance and diagnostics
+diagnostics:
+  publish_interval: 3.0  # How often to publish diagnostics (seconds)
+  debug_level: 1         # 0=minimal, 1=normal, 2=verbose
+  log_scan_interval: 20  # Log scan info every N scans
+  max_detection_times: 100  # Number of detection times to keep for averaging
+
+# RANSAC circle fitting parameters - optimized for basketball
+ransac:
+  enabled: true
+  max_iterations: 30     # Maximum RANSAC iterations (reduced for performance)
+  inlier_threshold: 0.02  # Distance threshold for inliers (meters)
+  min_inliers: 5         # Minimum inlier count for valid detection
+  quality_weight:
+    inlier_ratio: 0.6    # Weight for inlier ratio in quality calculation
+    radius_error: 0.4    # Weight for radius error in quality calculation

@@ -1,0 +1,35 @@
+# Configuration for HSV tennis ball detection node
+
+# Tennis ball detection configuration
+ball:
+  hsv_range:
+    lower: [27, 58, 77]       # Lower HSV boundary for tennis ball
+    upper: [45, 255, 255]     # Upper HSV boundary for tennis ball
+  size:
+    min_area: 100             # Minimum area in pixels for 320x320 image
+    max_area: 1500            # Maximum area in pixels for 320x320 image
+    ideal_area: 600           # Ideal area for confidence calculation
+  shape:
+    min_circularity: 0.5      # Minimum circularity (0.7 is a perfect circle)
+    max_circularity: 1.3      # Maximum circularity
+    ideal_circularity: 0.7    # Ideal circularity for confidence calculation
+
+# Topic configuration
+topics:
+  input:
+    camera: "/ascamera/camera_publisher/rgb0/image"
+  output:
+    position: "/basketball/hsv/position"
+
+# Display parameters
+display:
+  enable_visualization: false  # Whether to show detection visualization
+  window_width: 800           # Width of visualization window
+  window_height: 600          # Height of visualization window
+
+# Performance and diagnostics
+diagnostics:
+  target_width: 320           # Target width for processing
+  target_height: 320          # Target height for processing
+  debug_level: 1              # 0=errors only, 1=info, 2=debug
+  log_interval: 10            # Log every N frames for performance stats

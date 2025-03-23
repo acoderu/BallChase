@@ -1,0 +1,6 @@
+[console_scripts]
+depth_camera_node = ball_chase.nodes.depth_camera_node:main
+fusion_node = ball_chase.nodes.fusion_node:main
+hsv_ball_node = ball_chase.nodes.hsv_ball_node:main
+lidar_node = ball_chase.nodes.lidar_node:main
+yolo_ball_node = ball_chase.nodes.yolo_ball_node:main
