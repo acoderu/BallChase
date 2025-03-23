@@ -1,0 +1,28 @@
+[3.987s] Invoking command in '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/src/ball_chase': PYTHONPATH=/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/ball_chase build --build-base /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build install --record /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/install.log --single-version-externally-managed install_data
+[4.649s] Traceback (most recent call last):
+[4.649s]   File "/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/src/ball_chase/setup.py", line 6, in <module>
+[4.658s]     setup(
+[4.658s]   File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/__init__.py", line 103, in setup
+[4.665s]     return distutils.core.setup(**attrs)
+[4.665s]   File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/_distutils/core.py", line 171, in setup
+[4.665s]     ok = dist.parse_command_line()
+[4.668s]   File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 476, in parse_command_line
+[4.674s]     args = self._parse_command_opts(parser, args)
+[4.675s]   File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/dist.py", line 878, in _parse_command_opts
+[4.676s]     nargs = _Distribution._parse_command_opts(self, parser, args)
+[4.691s]   File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 535, in _parse_command_opts
+[4.703s]     cmd_class = self.get_command_class(command)
+[4.703s]   File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/dist.py", line 721, in get_command_class
+[4.727s]     eps = metadata.entry_points(group='distutils.commands', name=command)
+[4.728s]   File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 1021, in entry_points
+[4.749s]     return SelectableGroups.load(eps).select(**params)
+[4.749s]   File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 487, in select
+[4.749s]     return self._all.select(**params)
+[4.751s]   File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 359, in select
+[4.751s]     return EntryPoints(ep for ep in self if ep.matches(**params))
+[4.751s]   File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 359, in <genexpr>
+[4.751s]     return EntryPoints(ep for ep in self if ep.matches(**params))
+[4.751s]   File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 211, in matches
+[4.751s]     def matches(self, **params):
+[4.751s] KeyboardInterrupt
+[4.932s] Invoked command in '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/src/ball_chase' returned '-2': PYTHONPATH=/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/ball_chase build --build-base /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build install --record /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/install.log --single-version-externally-managed install_data

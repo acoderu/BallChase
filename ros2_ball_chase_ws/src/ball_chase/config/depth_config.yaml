@@ -1,0 +1,39 @@
+# Configuration for the depth camera node
+
+# Depth measurement parameters
+depth:
+  scale: 0.001           # Depth scale factor (converts raw depth to meters)
+  min_depth: 0.1         # Minimum valid depth in meters
+  max_depth: 8.0         # Maximum valid depth in meters
+  radius: 3              # Radius around detection point to sample depth values
+  min_valid_points: 5    # Minimum number of valid points required for reliable estimation
+  adaptive_radius: true  # Whether to try larger radius if not enough valid points
+  max_radius: 7          # Maximum radius to try when using adaptive sampling
+  calibration_file: "depth_camera_calibration.yaml"  # Path to calibration parameters
+  detection_resolution:  # Resolution of detection images (YOLO/HSV)
+    width: 320
+    height: 320
+
+# Topic configuration
+topics:
+  input:
+    camera_info: "/ascamera/camera_publisher/depth0/camera_info"
+    depth_image: "/ascamera/camera_publisher/depth0/image_raw"
+    yolo_detection: "/basketball/yolo/position"
+    hsv_detection: "/basketball/hsv/position"
+  output:
+    yolo_3d: "/basketball/yolo/position_3d"
+    hsv_3d: "/basketball/hsv/position_3d"
+    combined: "/basketball/detected_position"  # Legacy/combined topic
+
+# Performance and diagnostics
+diagnostics:
+  log_interval: 10.0      # How often to log performance stats (seconds)
+  debug_level: 0          # 0=minimal, 1=normal, 2=verbose
+  threads: 1              # Number of threads for parallel processing
+  error_history_size: 10  # Keep track of last 10 errors
+
+# Common reference frame
+frames:
+  reference_frame: "base_link"  # Common reference frame for all sensors
+  transform_timeout: 0.1        # Timeout for transform lookups in seconds

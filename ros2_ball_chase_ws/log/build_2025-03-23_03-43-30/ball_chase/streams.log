@@ -1,0 +1,61 @@
+[1.775s] Invoking command in '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/src/ball_chase': PYTHONPATH=/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/ball_chase build --build-base /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build install --record /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/install.log --single-version-externally-managed install_data
+[2.222s] running egg_info
+[2.262s] writing ../../build/ball_chase/ball_chase.egg-info/PKG-INFO
+[2.264s] writing dependency_links to ../../build/ball_chase/ball_chase.egg-info/dependency_links.txt
+[2.265s] writing entry points to ../../build/ball_chase/ball_chase.egg-info/entry_points.txt
+[2.265s] writing requirements to ../../build/ball_chase/ball_chase.egg-info/requires.txt
+[2.266s] writing top-level names to ../../build/ball_chase/ball_chase.egg-info/top_level.txt
+[2.498s] reading manifest file '../../build/ball_chase/ball_chase.egg-info/SOURCES.txt'
+[2.499s] writing manifest file '../../build/ball_chase/ball_chase.egg-info/SOURCES.txt'
+[2.499s] running build
+[2.499s] running build_py
+[2.500s] copying ball_chase/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase
+[2.500s] copying models/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/models
+[2.500s] copying ball_chase/nodes/diagnostics_visualizer_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.501s] copying ball_chase/nodes/diagnostics_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.501s] copying ball_chase/nodes/transform_receive.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.501s] copying ball_chase/nodes/yolo_ball_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.501s] copying ball_chase/nodes/fusion_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.501s] copying ball_chase/nodes/hsv_ball_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.502s] copying ball_chase/nodes/transform_test.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.502s] copying ball_chase/nodes/depth_camera_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.502s] copying ball_chase/nodes/lidar_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.502s] copying ball_chase/nodes/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+[2.502s] copying ball_chase/config/config_loader.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/config
+[2.503s] copying ball_chase/config/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/config
+[2.503s] copying ball_chase/utilities/resource_monitor.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.503s] copying ball_chase/utilities/depth_camera_calibrate.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.504s] copying ball_chase/utilities/time_utils.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.504s] copying ball_chase/utilities/synchronized_processor.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.504s] copying ball_chase/utilities/kalman_fusion_with_sync.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.504s] copying ball_chase/utilities/profile_test.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.504s] copying ball_chase/utilities/calibrate_lidar_vs_camera.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.504s] copying ball_chase/utilities/hsv_debugger.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.504s] copying ball_chase/utilities/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.504s] copying ball_chase/utilities/sensor_sync_buffer.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+[2.506s] running install
+[2.513s] running install_lib
+[2.557s] running install_data
+[2.558s] copying resource/ball_chase -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ament_index/resource_index/packages
+[2.558s] copying package.xml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase
+[2.558s] copying launch/ball_chase.launch.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/launch
+[2.559s] copying config/lidar_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config
+[2.559s] copying config/yolo_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config
+[2.560s] copying config/depth_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config
+[2.560s] copying config/fusion_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config
+[2.560s] copying config/hsv_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config
+[2.560s] copying models/yolo12n_640.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models
+[2.571s] copying models/yolo11n_320.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models
+[2.582s] copying models/yolo12s_320.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models
+[2.621s] copying models/yolo12n_320.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models
+[2.629s] running install_egg_info
+[2.676s] removing '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase-0.0.0-py3.10.egg-info' (and everything under it)
+[2.676s] Copying ../../build/ball_chase/ball_chase.egg-info to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase-0.0.0-py3.10.egg-info
+[2.679s] running install_scripts
+[2.753s] Installing depth_camera_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[2.755s] Installing fusion_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[2.755s] Installing hsv_ball_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[2.757s] Installing lidar_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[2.760s] Installing yolo_ball_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[2.761s] writing list of installed files to '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/install.log'
+[2.862s] Invoked command in '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/src/ball_chase' returned '0': PYTHONPATH=/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/ball_chase build --build-base /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build install --record /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/install.log --single-version-externally-managed install_data

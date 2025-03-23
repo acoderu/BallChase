@@ -36,8 +36,8 @@ import numpy as np
 from cv_bridge import CvBridge
 
 # Project utilities
-from utilities.resource_monitor import ResourceMonitor
-from utilities.time_utils import TimeUtils
+from ball_chase.utilities.resource_monitor import ResourceMonitor
+from ball_chase.utilities.time_utils import TimeUtils
 from ball_chase.config.config_loader import ConfigLoader
 #from config.config_loader import ConfigLoader
 

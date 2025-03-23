@@ -1,0 +1,54 @@
+running egg_info
+writing ../../build/ball_chase/ball_chase.egg-info/PKG-INFO
+writing dependency_links to ../../build/ball_chase/ball_chase.egg-info/dependency_links.txt
+writing entry points to ../../build/ball_chase/ball_chase.egg-info/entry_points.txt
+writing requirements to ../../build/ball_chase/ball_chase.egg-info/requires.txt
+writing top-level names to ../../build/ball_chase/ball_chase.egg-info/top_level.txt
+reading manifest file '../../build/ball_chase/ball_chase.egg-info/SOURCES.txt'
+writing manifest file '../../build/ball_chase/ball_chase.egg-info/SOURCES.txt'
+running build
+running build_py
+copying ball_chase/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase
+copying models/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/models
+copying ball_chase/nodes/diagnostics_visualizer_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+copying ball_chase/nodes/diagnostics_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+copying ball_chase/nodes/yolo_ball_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+copying ball_chase/nodes/fusion_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+copying ball_chase/nodes/hsv_ball_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+copying ball_chase/nodes/depth_camera_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+copying ball_chase/nodes/lidar_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+copying ball_chase/nodes/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes
+copying ball_chase/config/config_loader.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/config
+copying ball_chase/config/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/config
+copying ball_chase/utilities/resource_monitor.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+copying ball_chase/utilities/depth_camera_calibrate.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+copying ball_chase/utilities/time_utils.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+copying ball_chase/utilities/synchronized_processor.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+copying ball_chase/utilities/kalman_fusion_with_sync.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+copying ball_chase/utilities/profile_test.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+copying ball_chase/utilities/calibrate_lidar_vs_camera.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+copying ball_chase/utilities/hsv_debugger.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+copying ball_chase/utilities/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+copying ball_chase/utilities/sensor_sync_buffer.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities
+running install
+running install_lib
+copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes/yolo_ball_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes
+byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes/yolo_ball_node.py to yolo_ball_node.cpython-310.pyc
+running install_data
+copying resource/ball_chase -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ament_index/resource_index/packages
+copying package.xml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase
+copying launch/ball_chase.launch.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/launch
+copying models/yolo12n_640.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models
+copying models/yolo11n_320.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models
+copying models/yolo12s_320.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models
+copying models/yolo12n_320.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models
+running install_egg_info
+removing '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase-0.0.0-py3.10.egg-info' (and everything under it)
+Copying ../../build/ball_chase/ball_chase.egg-info to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase-0.0.0-py3.10.egg-info
+running install_scripts
+Installing depth_camera_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+Installing fusion_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+Installing hsv_ball_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+Installing lidar_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+Installing yolo_ball_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+writing list of installed files to '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/install.log'

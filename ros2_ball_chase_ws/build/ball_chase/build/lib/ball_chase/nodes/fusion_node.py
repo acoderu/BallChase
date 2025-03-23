@@ -1,187 +1,96 @@
 #!/usr/bin/env python3
 
 """
-Tennis Ball Tracking Robot - Sensor Fusion Node
-===============================================
-
-Project Overview:
-----------------
-This project involves a robotic car designed to autonomously track and follow a moving tennis ball.
-The system uses multiple sensing modalities which are combined in this fusion node:
-- YOLO neural network detection (fast but only 2D)
-- HSV color-based detection (very fast but only 2D)
-- LIDAR for depth sensing (accurate 3D but sparse)
-- Depth camera for additional depth information (dense 3D but slower)
-
-This Node's Purpose:
-------------------
-This sensor fusion node integrates data from all detection methods to create a single,
-reliable estimate of the tennis ball's 3D position and velocity. It uses a Kalman filter,
-which is a mathematical technique for estimating the true state of a system from noisy
-measurements.
-
-Key Concepts:
------------
-1. Kalman Filter: A recursive algorithm that uses:
-   - A process model (how we expect the ball to move)
-   - Measurements from various sensors
-   - Knowledge of noise/uncertainty in both
-   To produce an optimal estimate of the ball's position and velocity
-
-2. State Vector: What we're tracking with our Kalman filter
-   - [x, y, z, vx, vy, vz] = 3D position + 3D velocity
-
-3. Prediction Step: Predicts where the ball will be based on physics
-   - Uses constant velocity model: position += velocity * time
-   - Adds uncertainty based on how much time has passed
-
-4. Update Step: Incorporates new measurements
-   - Weighs measurements based on their reliability
-   - Updates both the estimated position/velocity and their uncertainty
-
-5. Covariance Matrix: Represents uncertainty in our estimates
-   - Diagonal elements: variance (uncertainty) of each state variable
-   - Off-diagonal elements: correlation between state variables
-
-Data Pipeline:
--------------
-1. Previous nodes publish to:
-   - '/tennis_ball/yolo/position' (2D from YOLO)
-   - '/tennis_ball/hsv/position' (2D from HSV)
-   - '/tennis_ball/yolo/position_3d' (3D from depth camera with YOLO)
-   - '/tennis_ball/hsv/position_3d' (3D from depth camera with HSV)
-   - '/tennis_ball/lidar/position' (3D from LIDAR)
-
-2. This fusion node:
-   - Subscribes to all these topics
-   - Maintains a Kalman filter to estimate the true ball state
-   - Publishes the fused 3D position and velocity
-   - Publishes diagnostic information and tracking reliability metrics
-
-3. Next in pipeline:
-   - State management node uses the fused position and tracking reliability 
-   - PID controller uses position and velocity for smooth following
-
-LIDAR Detection Reliability:
----------------------------
-This system accounts for a fundamental limitation of 2D LIDAR when detecting ground objects:
-
-1. Objects close to the robot (<1.0m) are often detected unreliably or missed entirely
-   due to the scanning plane geometry. At close distances, the LIDAR beam may pass
-   over small objects like tennis balls.
-
-2. Medium distances (1.2-3.0m) provide optimal detection conditions for the LIDAR.
-
-3. We implement a distance-based filtering approach:
-   - Detections closer than 1.0m are marked as unreliable
-   - Unreliable detections can be optionally filtered out or published with lower confidence
-   - The fusion system adjusts trust levels based on detection distance
-
-This approach ensures the system relies more on the depth camera for close-range detection
-while leveraging LIDAR data when it's most reliable.
+Enhanced Fusion Node - Building on Working Foundation
+This version starts with the working transform handling and adds advanced features.
 """
 
-import sys
-import os
-# Add the parent directory of 'config' to the Python path
-#sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-
-# Add the 'src' directory to the Python path
-#sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-
-
-import numpy as np
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PointStamped, TwistStamped
-from std_msgs.msg import String, Float32, Bool, Float64MultiArray
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
-import math
-from collections import deque
 import time
+import numpy as np
+from geometry_msgs.msg import PointStamped, TwistStamped, TransformStamped
+from std_msgs.msg import Float32, Bool, String
+from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
+from tf2_geometry_msgs import do_transform_point
+from collections import deque
+import math
 import json
-import os  # Add os import
-from scipy.linalg import block_diag  # Add block_diag import for covariance init
+import os
+import sys
 
-from utilities.resource_monitor import ResourceMonitor  # Add resource monitoring import
-from utilities.time_utils import TimeUtils  # Add TimeUtils import
-
-# Now you can import ConfigLoader
-#from config.config_loader import ConfigLoader  # Import ConfigLoader
-
+# Import from config
 from ball_chase.config.config_loader import ConfigLoader
 
-# Load configuration from file
-config_loader = ConfigLoader()
-fusion_config = config_loader.load_yaml('fusion_config.yaml')
-
-
-# Add startup configuration for transform waiting
-STARTUP_CONFIG = fusion_config.get('startup', {
-    'wait_for_transform': True,
-    # NEW: Increased retry count and delay for better reliability
-    'transform_retry_count': 40,  # Increased from 20
-    'transform_retry_delay': 2.0,  # Increased from 1.0 to 2.0 seconds
-    'required_transforms': ['camera_frame', 'lidar_frame']  # Parent frame first, child frame second, matching lidar publishing
-})
-
-# Topic configuration (ensures consistency with other nodes)
-TOPICS = fusion_config.get('topics', {
-    "input": {
-        "yolo_2d": "/basketball/yolo/position",
-        "hsv_2d": "/basketball/hsv/position",
-        "yolo_3d": "/basketball/yolo/position_3d",
-        "hsv_3d": "/basketball/hsv/position_3d",
-        "lidar": "/basketball/lidar/position"  # Note: This is already 3D
-    },
-    "output": {
-        "position": "/basketball/fused/position",
-        "velocity": "/basketball/fused/velocity",
-        "diagnostics": "/basketball/fusion/diagnostics",  # Updated to match diagnostics node expectations
-        "uncertainty": "/basketball/fused/position_uncertainty",
-        "tracking_status": "/basketball/fused/tracking_status"
-    }
-})
-
-# NEW: Configuration for diagnostics (extracted from error in original code)
-DIAG_CONFIG = fusion_config.get('diagnostics', {
-    'error_history_size': 10,
-    'publish_interval': 1.0,
-    'log_to_file': False
-})
-
-
-class SimpleSensorBuffer:
-    """A simple buffer class for storing sensor measurements with timestamps."""
+class SensorBuffer:
+    """
+    A buffer for storing and synchronizing sensor measurements.
+    Helps coordinate data from multiple sensors with different update rates.
+    """
     
-    def __init__(self, sensor_names, buffer_size, max_time_diff):
-        """Initialize buffers for each sensor."""
-        self.buffers = {name: deque(maxlen=buffer_size) for name in sensor_names}
+    def __init__(self, max_time_diff=0.1):
+        """
+        Initialize the sensor buffer.
+        
+        Args:
+            max_time_diff (float): Maximum time difference (in seconds) for measurements
+                to be considered synchronized
+        """
+        self.buffers = {}
         self.max_time_diff = max_time_diff
     
+    def add_sensor(self, sensor_name, buffer_size=20):
+        """
+        Register a new sensor to the synchronization system.
+        
+        Args:
+            sensor_name (str): Unique name of the sensor
+            buffer_size (int): Maximum number of measurements to keep
+        """
+        self.buffers[sensor_name] = deque(maxlen=buffer_size)
+    
     def add_measurement(self, sensor_name, data, timestamp):
-        """Add a measurement to the buffer."""
+        """
+        Add a new measurement from a sensor.
+        
+        Args:
+            sensor_name (str): Name of the sensor
+            data: The measurement data
+            timestamp: ROS timestamp of the measurement
+        """
         if sensor_name in self.buffers:
-            self.buffers[sensor_name].append((data, timestamp))
+            self.buffers[sensor_name].append((self._ros_time_to_float(timestamp), data))
     
     def get_latest_measurement(self, sensor_name):
-        """Get the most recent measurement for a sensor."""
+        """
+        Get the most recent measurement for a specific sensor.
+        
+        Args:
+            sensor_name (str): Name of the sensor
+            
+        Returns:
+            The most recent measurement or None if no measurements available
+        """
         if sensor_name in self.buffers and self.buffers[sensor_name]:
-            return self.buffers[sensor_name][-1][0]  # Return most recent data
+            return self.buffers[sensor_name][-1][1]  # Return most recent data
         return None
     
-    def find_synchronized_data(self):
+    def find_synchronized_measurements(self, min_sensors=1):
         """
-        Find measurements from different sensors that were taken at approximately the same time.
+        Find measurements from different sensors taken at approximately the same time.
         
+        Args:
+            min_sensors (int): Minimum number of synchronized sensors required
+            
         Returns:
-            dict: Dictionary of {sensor_name: data} for synchronized measurements
+            dict: Dictionary of {sensor_name: measurement} for synchronized measurements
         """
-        # Check if we have any data at all
-        if not any(self.buffers.values()):
+        # Check if we have enough sensors with data
+        sensors_with_data = [s for s, b in self.buffers.items() if len(b) > 0]
+        if len(sensors_with_data) < min_sensors:
             return {}
         
-        # Find sensor with least data (to minimize iterations)
+        # Find the sensor with the least data (to minimize iterations)
         min_sensor = None
         min_length = float('inf')
         for sensor, buffer in self.buffers.items():
@@ -193,19 +102,24 @@ class SimpleSensorBuffer:
             return {}  # No data to synchronize
         
         # For each measurement from the minimal sensor, find closest from other sensors
-        for base_data, base_timestamp in self.buffers[min_sensor]:
-            current_sync = {min_sensor: base_data}
+        best_sync = {}
+        best_count = 0
+        
+        for ref_time, ref_data in self.buffers[min_sensor]:
+            current_sync = {min_sensor: ref_data}
             
             # Check each other sensor
-            for sensor in self.buffers.keys():
+            for sensor in sensors_with_data:
                 if sensor == min_sensor:
                     continue
                 
-                # Find the measurement closest to base_timestamp
+                # Find the measurement closest to ref_time
                 closest_data = None
                 closest_time_diff = float('inf')
-                for data, timestamp in self.buffers[sensor]:
-                    time_diff = self._calc_time_diff(timestamp, base_timestamp)
+                
+                for time_val, data in self.buffers[sensor]:
+                    time_diff = abs(ref_time - time_val)
+                    
                     if time_diff < closest_time_diff:
                         closest_time_diff = time_diff
                         closest_data = data
@@ -214,2136 +128,1734 @@ class SimpleSensorBuffer:
                 if closest_data is not None and closest_time_diff <= self.max_time_diff:
                     current_sync[sensor] = closest_data
             
-            # Return the first set of synchronized data we find
-            if len(current_sync) > 1:  # At least two sensors
-                return current_sync
+            # Check if this is our best set yet
+            if len(current_sync) > best_count:
+                best_sync = current_sync
+                best_count = len(current_sync)
+                
+                # If we have all sensors, we can return immediately
+                if best_count == len(sensors_with_data):
+                    return best_sync
         
-        return {}  # No synchronized data found
+        # Return the best synchronization if it meets minimum requirements
+        if best_count >= min_sensors:
+            return best_sync
+        return {}
     
-    def _calc_time_diff(self, timestamp1, timestamp2):
-        """Calculate the time difference between two ROS timestamps."""
-        t1_secs = timestamp1.sec + timestamp1.nanosec / 1e9
-        t2_secs = timestamp2.sec + timestamp2.nanosec / 1e9
-        return abs(t1_secs - t2_secs)
+    def _ros_time_to_float(self, timestamp):
+        """Convert ROS timestamp to float seconds."""
+        return timestamp.sec + timestamp.nanosec / 1e9
 
 
-class KalmanFilterFusion(Node):
+class EnhancedFusionNode(Node):
     """
-    A ROS2 node that fuses multiple tennis ball detection sources using a Kalman filter.
-    
-    This node integrates data from:
-    1. HSV detection (2D)
-    2. YOLO detection (2D)
-    3. Depth camera with YOLO (3D)
-    4. Depth camera with HSV (3D)
-    5. LIDAR (3D)
-    
-    It maintains a Kalman filter to estimate the true 3D position and velocity of the tennis ball,
-    publishing a fused position estimate with confidence metrics.
-    
-    The node includes reliability metrics essential for state management, allowing the robot
-    to determine when to track the ball versus when to search for it.
+    Enhanced fusion node that builds on our working transform initialization design
+    while adding advanced features for better state estimation.
     """
     
     def __init__(self):
-        """Initialize the Kalman filter fusion node with all required components."""
-        super().__init__('kalman_filter_fusion')
+        super().__init__('enhanced_fusion_node')
         
-        # Add resource monitoring for Raspberry Pi
-        self.resource_monitor = ResourceMonitor(
-            node=self,
-            publish_interval=10.0,  # Less frequent updates to reduce overhead
-            enable_temperature=True
-        )
-        self.warnings = deque(maxlen=20)
-        self.errors = deque(maxlen=20)
-        self.resource_monitor.start()
+        self.get_logger().info("====== Enhanced Fusion Node Starting ======")
         
-        self.resource_monitor.add_alert_callback(self._handle_resource_alert)
-        self.resource_monitor.set_threshold('cpu', 85.0)  # Adjust thresholds for Raspberry Pi
-        self.resource_monitor.set_threshold('memory', 90.0)
-        
-        # Set up filter parameters
-        self._declare_parameters()
-        
-        # NEW: Initialize transform tracking variables
-        self.transform_checked = False
+        # Core tracking variables
+        self.start_time = time.time()
         self.transform_available = False
-        self.last_transform_check = 0.0
-        self.transform_retries = 0
-        self.transform_frames_seen = set()
+        self.transform_checks = 0
+        self.transform_successes = 0
+        self.transform_failures = 0
+        self.transform_confirmed = False  # Flag to track if transform is permanently confirmed
+        self.is_ready = False  # Flag to track if the node is ready for processing
         
-        # Add a ROS tf2 listener to transform coordinates between frames
-        self._setup_transform_listener()
+        # Use camera_frame as the reference coordinate system instead of map
+        self.reference_frame = "camera_frame"
+        self.get_logger().info(f"Using {self.reference_frame} as reference coordinate frame for fusion")
         
-        # NEW: Add a timer to periodically check transform availability
-        self.transform_check_timer = self.create_timer(5.0, self._check_transform_availability)
+        # PHASE 1: Initialize transform system ONLY
+        self.init_transform_system()
         
-        # Wait for required transforms to become available to avoid race conditions
-        if STARTUP_CONFIG['wait_for_transform']:
-            self._wait_for_transforms()
+        # PHASE 2: Load configuration
+        self.load_configuration()
         
-        # Create the synchronization buffer
-        # NEW: Add a flag to track buffer improvements
-        self.improved_buffer_initialized = False
-        self.sync_buffer = SimpleSensorBuffer(
-            sensor_names=['hsv_2d', 'yolo_2d', 'hsv_3d', 'yolo_3d', 'lidar'],
-            buffer_size=30,      # Keep 30 recent measurements per sensor
-            max_time_diff=self.max_time_diff  # Use parameter for time difference
-        )
+        # PHASE 3: Initialize state tracking and buffers
+        self.init_state_tracking()
+        self.init_sensor_synchronization()
         
-        # Set up subscriptions to receive data from all sensors
-        self._setup_subscriptions()
+        # PHASE 4: Set up publishers (these can be created immediately)
+        self.setup_publishers()
         
-        # Set up publishers to send out fused data
-        self._setup_publishers()
+        # PHASE 5: Initialize diagnostics
+        self.init_diagnostics()
         
-        # Initialize Kalman filter state and variables
-        self._init_kalman_filter()
+        # PHASE 6: Create a transform check timer to wait for transforms
+        # Check every 1 second up to 20 seconds total timeout
+        self.transform_wait_start = time.time()
+        self.transform_check_timer = self.create_timer(1.0, self.check_and_activate)
         
-        # Set up timers for periodic status updates and filter updates
-        self._setup_timers()
-        
-        # Set up visualization and debugging tools
-        self._init_debugging_tools()
-        
-        self.get_logger().info("Kalman Filter Fusion Node has started with synchronized input!")
-        self.get_logger().info("Using synchronization window of %.3f seconds", self.max_time_diff)
-        self.log_parameters()
-        
-        # Log topic connections for debugging
-        self._log_topic_connections()
-
-        # Flag to enable ground tracking mode (constraints Z to ground level)
-        self.ground_tracking_mode = True
-        self.ball_ground_height = 0.0381  # 1.5 inches in meters (ball center height)
-        self.get_logger().info(f"Ground tracking mode enabled: ball height constrained to {self.ball_ground_height}m")
-        
-        # Base measurement noise parameters
-        self.base_measurement_noise_hsv_2d = self.get_parameter('measurement_noise_hsv_2d').value
-        self.base_measurement_noise_yolo_2d = self.get_parameter('measurement_noise_yolo_2d').value
-        self.base_measurement_noise_hsv_3d = self.get_parameter('measurement_noise_hsv_3d').value
-        self.base_measurement_noise_yolo_3d = self.get_parameter('measurement_noise_yolo_3d').value
-        self.base_measurement_noise_lidar = self.get_parameter('measurement_noise_lidar').value
-        
-        # NEW: Initialize the time_history for tracking history
-        self.time_history = deque(maxlen=self.history_length)
-
-    def _wait_for_transforms(self):
-        """
-        Wait for required transforms to become available.
-        
-        This avoids race conditions on startup where transforms might not be
-        immediately available from other nodes like the LIDAR node.
-        """
-        required_transforms = STARTUP_CONFIG['required_transforms']
-        retry_count = STARTUP_CONFIG['transform_retry_count']
-        retry_delay = STARTUP_CONFIG['transform_retry_delay']
-        
-        # Get the first frame as parent, second as child (matching how tf2 publishes)
-        if len(required_transforms) >= 2:
-            parent_frame = required_transforms[0]
-            child_frame = required_transforms[1]
-            
-            # Note: tf_buffer.can_transform checks if we can transform from child TO parent
-            # This matches how transforms are published in lidar_node.py
-            self.get_logger().info(f"Waiting for transform from '{parent_frame}' to '{child_frame}'...")
-            
-            # Log available frames to help debug
-            self.get_logger().info(f"DEBUG: Printing available frames in tf_buffer...")
-            try:
-                frames = self.tf_buffer.all_frames_as_string()
-                self.get_logger().info(f"Available frames:\n{frames}")
-            except Exception as e:
-                self.get_logger().info(f"Could not get frames list: {str(e)}")
-            
-            # Try multiple times to get the transform
-            transform_available = False
-            
-            for attempt in range(retry_count):
-                try:
-                    self.get_logger().info(f"Attempt {attempt+1}/{retry_count}: Checking for transform from '{parent_frame}' to '{child_frame}'")
-                    
-                    # ENHANCED: Print all available frames and transforms for every attempt
-                    self.get_logger().info(f"=== Available transforms at attempt {attempt+1} ===")
-                    try:
-                        frames = self.tf_buffer.all_frames_as_string()
-                        self.get_logger().info(f"TF Tree:\n{frames}")
-                        
-                        # ADDED: Explicitly check for lidar and camera frames in any direction
-                        camera_frames = ['camera_frame', 'camera_link', 'camera_optical_frame']
-                        lidar_frames = ['lidar_frame', 'lidar_link']
-                        
-                        self.get_logger().info("Searching for specific transforms between lidar and camera:")
-                        for cam_frame in camera_frames:
-                            for lidar_frame in lidar_frames:
-                                # Try both directions
-                                lidar_to_cam = False
-                                cam_to_lidar = False
-                                try:
-                                    lidar_to_cam = self.tf_buffer.can_transform(
-                                        cam_frame, lidar_frame, rclpy.time.Time(),
-                                        timeout=rclpy.duration.Duration(seconds=0.05)
-                                    )
-                                except Exception:
-                                    pass
-                                
-                                try:
-                                    cam_to_lidar = self.tf_buffer.can_transform(
-                                        lidar_frame, cam_frame, rclpy.time.Time(),
-                                        timeout=rclpy.duration.Duration(seconds=0.05)
-                                    )
-                                except Exception:
-                                    pass
-                                
-                                if lidar_to_cam or cam_to_lidar:
-                                    self.get_logger().info(
-                                        f"✓ Found transform between '{lidar_frame}' and '{cam_frame}': "
-                                        f"lidar→camera={lidar_to_cam}, camera→lidar={cam_to_lidar}"
-                                    )
-                                    # If found, try to print the actual transform data
-                                    try:
-                                        if lidar_to_cam:
-                                            transform = self.tf_buffer.lookup_transform(
-                                                cam_frame, lidar_frame, rclpy.time.Time()
-                                            )
-                                            self.get_logger().info(
-                                                f"  lidar→camera transform: "
-                                                f"[{transform.transform.translation.x:.4f}, "
-                                                f"{transform.transform.translation.y:.4f}, "
-                                                f"{transform.transform.translation.z:.4f}]"
-                                            )
-                                    except Exception as e:
-                                        self.get_logger().warn(f"  Could not retrieve transform data: {str(e)}")
-                                else:
-                                    self.get_logger().warn(f"✗ No transform between '{lidar_frame}' and '{cam_frame}'")
-                    except Exception as e:
-                        self.get_logger().warn(f"Could not list transforms: {str(e)}")
-                    
-                    when = rclpy.time.Time()
-                    
-                    # NEW: Try to check for transform in either direction
-                    transform_available_forward = False
-                    transform_available_reverse = False
-                    
-                    # Check if transform exists in the correct direction
-                    try:
-                        transform_available_forward = self.tf_buffer.can_transform(
-                            parent_frame,  # Target frame (where we want to transform to)
-                            child_frame,   # Source frame (where we're transforming from)
-                            when,
-                            timeout=rclpy.duration.Duration(seconds=0.2)  # Increased timeout
-                        )
-                    except Exception as e:
-                        self.get_logger().warn(f"Error checking forward transform: {str(e)}")
-                    
-                    # Check reverse direction as well
-                    try:
-                        transform_available_reverse = self.tf_buffer.can_transform(
-                            child_frame,  # Reversed frames
-                            parent_frame,
-                            when,
-                            timeout=rclpy.duration.Duration(seconds=0.2)  # Increased timeout
-                        )
-                    except Exception as e:
-                        self.get_logger().warn(f"Error checking reverse transform: {str(e)}")
-                    
-                    # Accept either direction as valid
-                    transform_available = transform_available_forward or transform_available_reverse
-                    
-                    if transform_available:
-                        self.get_logger().info(
-                            f"✓ Transform available: "
-                            f"forward={transform_available_forward}, "
-                            f"reverse={transform_available_reverse}"
-                        )
-                        
-                        # Try to actually get the transform to verify it's really there
-                        try:
-                            # Try forward direction first
-                            if transform_available_forward:
-                                transform = self.tf_buffer.lookup_transform(
-                                    parent_frame,
-                                    child_frame,
-                                    when
-                                )
-                                self.get_logger().info(
-                                    f"✓ Successfully retrieved forward transform: "
-                                    f"translation=[{transform.transform.translation.x:.4f}, "
-                                    f"{transform.transform.translation.y:.4f}, "
-                                    f"{transform.transform.translation.z:.4f}]"
-                                )
-                            # Then try reverse direction
-                            elif transform_available_reverse:
-                                transform = self.tf_buffer.lookup_transform(
-                                    child_frame,
-                                    parent_frame,
-                                    when
-                                )
-                                self.get_logger().info(
-                                    f"✓ Successfully retrieved reverse transform: "
-                                    f"translation=[{transform.transform.translation.x:.4f}, "
-                                    f"{transform.transform.translation.y:.4f}, "
-                                    f"{transform.transform.translation.z:.4f}]"
-                                )
-                        except Exception as e:
-                            self.get_logger().error(f"! Could not retrieve transform despite can_transform success: {str(e)}")
-                        break
-                    else:
-                        self.get_logger().warn(f"✗ Transform not yet available, waiting... ({attempt+1}/{retry_count})")
-                        
-                except Exception as e:
-                    self.get_logger().warn(f"Error checking transform: {str(e)}")
-                
-                # NEW: Check all available frames and save frame IDs seen
-                try:
-                    available_frames = self.tf_buffer._buffer.all_frames_as_yaml().decode('utf-8')
-                    frame_list = []
-                    for line in available_frames.split('\n'):
-                        if line.strip().startswith('frame_id:'):
-                            frame_id = line.strip()[9:].strip()
-                            if frame_id:
-                                frame_list.append(frame_id)
-                                self.transform_frames_seen.add(frame_id)
-                    
-                    self.get_logger().info(f"Available frames (attempt {attempt+1}): {', '.join(frame_list)}")
-                except Exception as e:
-                    self.get_logger().warn(f"Could not parse available frames: {str(e)}")
-                
-                # ADDED: Check if the static transform broadcaster is working properly
-                if attempt == 0 or attempt == retry_count // 2:
-                    self.get_logger().info("Checking if transform broadcasters are initialized properly...")
-                    if hasattr(self, 'tf_static_broadcaster'):
-                        self.get_logger().info("✓ Static transform broadcaster is initialized")
-                    else:
-                        self.get_logger().error("✗ Static transform broadcaster is NOT initialized!")
-                
-                # Sleep before retrying
-                time.sleep(retry_delay)
-                
-                # Every few attempts, try to refresh the frame list
-                if attempt % 3 == 2:
-                    try:
-                        frames = self.tf_buffer.all_frames_as_string()
-                        self.get_logger().info(f"Updated frames list attempt {attempt+1}:\n{frames}")
-                    except Exception:
-                        pass
-            
-            # Final status with more detailed diagnostics
-            if transform_available:
-                self.get_logger().info("✓ All required transforms are available. Proceeding with initialization.")
-                self.transform_available = True
-            else:
-                self.get_logger().warn(
-                    "✗ Could not verify transform availability after multiple attempts. "
-                    "Will proceed anyway, but transforms might fail until all nodes are fully initialized."
-                )
-                self.get_logger().warn(
-                    "DEBUGGING TIP: Ensure lidar_node.py is running and publishing its transforms. "
-                    "Check that the transform parent/child frames match between nodes."
-                )
-                self.get_logger().warn(
-                    f"Required transform: from '{parent_frame}' to '{child_frame}'. "
-                    f"Check if these frame IDs match what's actually being published."
-                )
-                
-                # NEW: Try to identify any similar frame names that might be mismatched
-                frames_seen_list = list(self.transform_frames_seen)
-                if frames_seen_list:
-                    self.get_logger().info(f"Frames seen during startup: {', '.join(frames_seen_list)}")
-                    
-                    # Check for similar frame names
-                    similar_parent = [f for f in frames_seen_list if parent_frame.lower() in f.lower()]
-                    similar_child = [f for f in frames_seen_list if child_frame.lower() in f.lower()]
-                    
-                    if similar_parent and similar_parent[0] != parent_frame:
-                        self.get_logger().warn(
-                            f"Found similar parent frame: '{similar_parent[0]}', but expecting '{parent_frame}'"
-                        )
-                    
-                    if similar_child and similar_child[0] != child_frame:
-                        self.get_logger().warn(
-                            f"Found similar child frame: '{similar_child[0]}', but expecting '{child_frame}'"
-                        )
-        else:
-            self.get_logger().warn("No transform frames specified in config. Skipping transform check.")
-
-    def _setup_transform_listener(self):
-        """Set up tf2 listener for coordinate transformations between sensors."""
-        # Import tf2 modules here to avoid circular imports
-        from tf2_ros import Buffer, TransformListener
-        
-        # NEW: Create buffer with a longer cache time
-        self.tf_buffer = Buffer(cache_time=rclpy.duration.Duration(seconds=30.0))  # Increased from default 10s
+        self.get_logger().info("Initialization complete - waiting for transform to become available")
+    
+    def init_transform_system(self):
+        """Initialize just the transform system."""
+        # CRITICAL STEP: Set up transform system FIRST
+        self.tf_buffer = Buffer(cache_time=rclpy.duration.Duration(seconds=30.0))  # Increased cache time
         self.tf_listener = TransformListener(self.tf_buffer, self)
         
-        self.get_logger().info("Transform listener initialized for cross-sensor coordination")
-        
-        # NEW: Also try creating a static transform broadcaster just in case
-        # This might help with transform synchronization
-        from tf2_ros import StaticTransformBroadcaster
+        # Also create a static transform broadcaster in case we need to publish our own
         self.tf_static_broadcaster = StaticTransformBroadcaster(self)
         
-        # Create a timer to periodically check for transforms (helps debug)
-        self.transform_check_timer = self.create_timer(5.0, self._check_transform_availability)
-
-    def _check_transform_availability(self):
-        """Periodically check and log transform availability."""
-        if not hasattr(self, 'tf_buffer'):
-            return
-        
-        # Only check every 5 seconds to avoid excessive logging
-        current_time = time.time()
-        if current_time - self.last_transform_check < 5.0 and self.transform_checked:
-            return
-            
-        self.last_transform_check = current_time
-        self.transform_checked = True
-        self.transform_retries += 1
-            
-        parent_frame = STARTUP_CONFIG['required_transforms'][0]
-        child_frame = STARTUP_CONFIG['required_transforms'][1]
-        
-        try:
-            when = rclpy.time.Time()
-            
-            # Check forward transform
-            transform_available_forward = self.tf_buffer.can_transform(
-                parent_frame,
-                child_frame,
-                when,
-                timeout=rclpy.duration.Duration(seconds=0.2)
-            )
-            
-            # Check reverse transform
-            transform_available_reverse = self.tf_buffer.can_transform(
-                child_frame,
-                parent_frame,
-                when,
-                timeout=rclpy.duration.Duration(seconds=0.2)
-            )
-            
-            # Update availability status
-            self.transform_available = transform_available_forward or transform_available_reverse
-            
-            if self.transform_available:
-                if transform_available_forward:
-                    transform = self.tf_buffer.lookup_transform(
-                        parent_frame,
-                        child_frame,
-                        when
-                    )
-                    self.get_logger().info(
-                        f"Transform check: '{parent_frame}' to '{child_frame}' is AVAILABLE, "
-                        f"translation=[{transform.transform.translation.x:.4f}, "
-                        f"{transform.transform.translation.y:.4f}, "
-                        f"{transform.transform.translation.z:.4f}]"
-                    )
-                elif transform_available_reverse:
-                    transform = self.tf_buffer.lookup_transform(
-                        child_frame,
-                        parent_frame,
-                        when
-                    )
-                    self.get_logger().info(
-                        f"Transform check: '{child_frame}' to '{parent_frame}' is AVAILABLE, "
-                        f"translation=[{transform.transform.translation.x:.4f}, "
-                        f"{transform.transform.translation.y:.4f}, "
-                        f"{transform.transform.translation.z:.4f}]"
-                    )
-                
-                # NEW: Publish our own version of the transform if needed
-                if self.transform_retries > 0 and self.transform_retries % 10 == 0:
-                    self._publish_fallback_transform()
-            else:
-                self.get_logger().warn(
-                    f"Transform check: Neither '{parent_frame}' to '{child_frame}' "
-                    f"nor '{child_frame}' to '{parent_frame}' is available"
-                )
-                
-                # NEW: List all available frames
-                try:
-                    frames = self.tf_buffer.all_frames_as_string()
-                    self.get_logger().info(f"Current TF tree:\n{frames}")
-                except Exception as e:
-                    self.get_logger().warn(f"Could not get tf tree: {str(e)}")
-                
-                # NEW: Publish our own version of the transform if needed
-                self._publish_fallback_transform()
-        except Exception as e:
-            self.get_logger().error(f"Transform check error: {str(e)}")
+        self.get_logger().info("Transform system initialized - waiting for transforms")
     
-    def _publish_fallback_transform(self):
-        """Publish a fallback transform if the normal one isn't available."""
-        from geometry_msgs.msg import TransformStamped
+    def check_and_activate(self):
+        """Check if transform is available and activate subscriptions if it is."""
+        # Skip if already ready
+        if self.is_ready:
+            return
         
-        # Create a simple fallback transform
+        # Check how long we've been waiting
+        current_time = time.time()
+        wait_time = current_time - self.transform_wait_start
+        
+        # Check if transform is available
+        transform_available = self.check_transform_availability()
+        
+        # If transform is available, activate the node
+        if transform_available:
+            self.get_logger().info(f"Transform confirmed after {wait_time:.1f} seconds - activating sensor subscriptions")
+            
+            # Cancel the transform check timer
+            self.transform_check_timer.cancel()
+            
+            # Initialize subscribers now that transforms are available
+            self.setup_subscriptions()
+            
+            # Initialize filter with defaults
+            self.initialize_filter_with_defaults()
+            
+            # Set up processing timers
+            self.setup_timers()
+            
+            # Mark as ready
+            self.is_ready = True
+        else:
+            # Check for timeout (after 20 seconds)
+            if wait_time > 20.0:
+                self.get_logger().warn("Transform wait timeout exceeded (20 seconds) - activating with fallback static transform")
+                
+                # Publish our own static transform as a fallback
+                self.publish_fallback_transform()
+                
+                # Wait a bit for the transform to propagate
+                time.sleep(0.5)
+                
+                # Try one more check
+                if self.check_transform_availability():
+                    self.get_logger().info("Fallback transform worked - proceeding with activation")
+                else:
+                    self.get_logger().error("Transform still not available even with fallback - proceeding anyway")
+                
+                # Cancel the transform check timer
+                self.transform_check_timer.cancel()
+                
+                # Initialize subscribers
+                self.setup_subscriptions()
+                
+                # Initialize filter with defaults
+                self.initialize_filter_with_defaults()
+                
+                # Set up processing timers
+                self.setup_timers()
+                
+                # Mark as ready with warning
+                self.is_ready = True
+                self.get_logger().warn("Node activated but transforms may not be reliable")
+            else:
+                # Still waiting, log progress
+                self.get_logger().info(f"Still waiting for transform... ({wait_time:.1f}/20.0 seconds)")
+    
+    def publish_fallback_transform(self):
+        """Publish a fallback static transform if the normal one isn't available."""
+        # Create a simple fallback transform from camera to lidar
         transform = TransformStamped()
         transform.header.stamp = self.get_clock().now().to_msg()
         transform.header.frame_id = "camera_frame"  # Parent frame
         transform.child_frame_id = "lidar_frame"    # Child frame
         
-        # Use standard values from LIDAR calibration
-        transform.transform.translation.x = -0.06061338451984
-        transform.transform.translation.y = 0.09288001995264226
-        transform.transform.translation.z = -0.05080000000000001
+        # Use standard values for the transform (from logs)
+        transform.transform.translation.x = -0.0606
+        transform.transform.translation.y = 0.0929
+        transform.transform.translation.z = -0.0508
         
+        # Use identity rotation for simplicity
         transform.transform.rotation.x = 0.0
         transform.transform.rotation.y = 0.0
-        transform.transform.rotation.z = 0.009962552851448184
-        transform.transform.rotation.w = 0.9999503725388985
+        transform.transform.rotation.z = 0.0
+        transform.transform.rotation.w = 1.0
         
-        # Publish the transform with static broadcaster
+        # Publish the transform
         self.get_logger().info("Publishing fallback static transform from fusion node")
         self.tf_static_broadcaster.sendTransform([transform])
-        time.sleep(0.5)  # Short delay to let transform propagate
+    
+    def check_transform_availability(self):
+        """
+        Check if transform is available without trying to fix anything.
+        Returns True if transform is available, False otherwise.
+        """
+        self.transform_checks += 1
         
-        # Verify if it worked
         try:
+            # Set up check parameters
             when = rclpy.time.Time()
-            if self.tf_buffer.can_transform(
-                "camera_frame", "lidar_frame", when,
-                timeout=rclpy.duration.Duration(seconds=0.2)
-            ):
-                self.get_logger().info("✓ Fallback transform successfully published and verified")
+            timeout = rclpy.duration.Duration(seconds=0.5)  # Slightly longer timeout
+            parent_frame = "camera_frame"
+            child_frame = "lidar_frame"
+            
+            self.get_logger().info(f"Transform check #{self.transform_checks} at {time.time()-self.start_time:.1f}s")
+            
+            # Check both directions
+            forward_available = False
+            reverse_available = False
+            
+            try:
+                forward_available = self.tf_buffer.can_transform(
+                    parent_frame,
+                    child_frame,
+                    when,
+                    timeout=timeout
+                )
+            except Exception as e:
+                self.get_logger().warn(f"Forward transform check error: {str(e)}")
+            
+            try:
+                reverse_available = self.tf_buffer.can_transform(
+                    child_frame,
+                    parent_frame,
+                    when,
+                    timeout=timeout
+                )
+            except Exception as e:
+                self.get_logger().warn(f"Reverse transform check error: {str(e)}")
+            
+            # Consider transform available if either direction works
+            self.transform_available = forward_available or reverse_available
+            
+            if self.transform_available:
+                self.transform_successes += 1
+                self.get_logger().info(
+                    f"✓ Transform check #{self.transform_checks}: Transform available (Forward={forward_available}, Reverse={reverse_available})"
+                )
+                
+                # Display transform details
+                if forward_available:
+                    transform = self.tf_buffer.lookup_transform(
+                        parent_frame,
+                        child_frame,
+                        when
+                    )
+                    self.get_logger().info(
+                        f"Transform details: translation=[{transform.transform.translation.x:.4f}, "
+                        f"{transform.transform.translation.y:.4f}, {transform.transform.translation.z:.4f}]"
+                    )
+                
+                # Once we've confirmed the transform is available, we don't need to keep checking
+                if not self.transform_confirmed and self.transform_successes >= 2:
+                    self.transform_confirmed = True
+                    self.get_logger().info("Transform availability confirmed permanently")
             else:
-                self.get_logger().warn("✗ Fallback transform published but not verified")
+                self.transform_failures += 1
+                self.get_logger().warn(f"✗ Transform check #{self.transform_checks}: Transform NOT available")
+                
+                # List available frames
+                try:
+                    frames = self.tf_buffer.all_frames_as_string()
+                    if frames and frames.strip():
+                        self.get_logger().info(f"Available frames:\n{frames}")
+                    else:
+                        self.get_logger().info("No frames available in transform buffer")
+                except Exception as e:
+                    self.get_logger().error(f"Error listing frames: {str(e)}")
+            
+            return self.transform_available
+            
         except Exception as e:
-            self.get_logger().error(f"Error verifying fallback transform: {str(e)}")
-
-    def _declare_parameters(self):
-        """Declare and load all node parameters with descriptive comments."""
-        self.declare_parameters(
-            namespace='',
-            parameters=[
-                # Process noise: how much uncertainty to add during prediction steps
-                ('process_noise_pos', fusion_config.get('process_noise', {}).get('position', 0.1)),
-                ('process_noise_vel', fusion_config.get('process_noise', {}).get('velocity', 1.0)),
-                # Measurement noise: how much to trust each sensor type
-                ('measurement_noise_hsv_2d', fusion_config.get('measurement_noise', {}).get('hsv_2d', 50.0)),
-                ('measurement_noise_yolo_2d', fusion_config.get('measurement_noise', {}).get('yolo_2d', 30.0)),
-                ('measurement_noise_hsv_3d', fusion_config.get('measurement_noise', {}).get('hsv_3d', 0.05)),
-                ('measurement_noise_yolo_3d', fusion_config.get('measurement_noise', {}).get('yolo_3d', 0.04)),
-                ('measurement_noise_lidar', fusion_config.get('measurement_noise', {}).get('lidar', 0.03)),
-                # Filter tuning parameters
-                ('max_time_diff', fusion_config.get('filter', {}).get('max_time_diff', 0.2)),
-                ('min_confidence_threshold', fusion_config.get('filter', {}).get('min_confidence_threshold', 0.5)),
-                ('detection_timeout', fusion_config.get('filter', {}).get('detection_timeout', 0.5)),
-                # Tracking reliability thresholds
-                ('position_uncertainty_threshold', fusion_config.get('tracking', {}).get('position_uncertainty_threshold', 0.5)),
-                ('velocity_uncertainty_threshold', fusion_config.get('tracking', {}).get('velocity_uncertainty_threshold', 1.0)),
-                # Debugging and diagnostics
-                ('history_length', fusion_config.get('diagnostics', {}).get('history_length', 100)),
-                ('debug_level', fusion_config.get('diagnostics', {}).get('debug_level', 1)),
-                ('log_to_file', fusion_config.get('diagnostics', {}).get('log_to_file', False))
-            ]
-        )
+            self.get_logger().error(f"Error checking transform: {str(e)}")
+            return False
+    
+    def load_configuration(self):
+        """Load configuration from fusion_config.yaml."""
+        try:
+            config_loader = ConfigLoader()
+            fusion_config = config_loader.load_yaml('fusion_config.yaml')
+            
+            # Extract topic configuration
+            topics = fusion_config.get('topics', {})
+            input_topics = topics.get('input', {})
+            output_topics = topics.get('output', {})
+            
+            self.lidar_topic = input_topics.get('lidar', '/basketball/lidar/position')
+            self.hsv_3d_topic = input_topics.get('hsv_3d', '/basketball/hsv/position_3d')
+            self.yolo_3d_topic = input_topics.get('yolo_3d', '/basketball/yolo/position_3d')
+            self.hsv_2d_topic = input_topics.get('hsv_2d', '/basketball/hsv/position')
+            self.yolo_2d_topic = input_topics.get('yolo_2d', '/basketball/yolo/position')
+            
+            # 2D bounding box topics for distance estimation
+            self.hsv_bbox_topic = input_topics.get('hsv_bbox', '/basketball/hsv/bbox')
+            self.yolo_bbox_topic = input_topics.get('yolo_bbox', '/basketball/yolo/bbox')
+            
+            self.position_topic = output_topics.get('position', '/basketball/fused/position')
+            self.velocity_topic = output_topics.get('velocity', '/basketball/fused/velocity')
+            self.status_topic = output_topics.get('tracking_status', '/basketball/fused/tracking_status')
+            self.uncertainty_topic = output_topics.get('uncertainty', '/basketball/fused/position_uncertainty')
+            self.diagnostics_topic = output_topics.get('diagnostics', '/basketball/fusion/diagnostics')
+            
+            # Process noise parameters
+            self.process_noise_pos = fusion_config.get('process_noise', {}).get('position', 0.1)
+            self.process_noise_vel = fusion_config.get('process_noise', {}).get('velocity', 1.0)
+            
+            # Measurement noise parameters
+            measurement_noise = fusion_config.get('measurement_noise', {})
+            self.measurement_noise_lidar = measurement_noise.get('lidar', 0.03)
+            self.measurement_noise_hsv_3d = measurement_noise.get('hsv_3d', 0.05)
+            self.measurement_noise_yolo_3d = measurement_noise.get('yolo_3d', 0.04)
+            self.measurement_noise_hsv_2d = measurement_noise.get('hsv_2d', 50.0)
+            self.measurement_noise_yolo_2d = measurement_noise.get('yolo_2d', 30.0)
+            
+            # NEW: Add measurement noise for estimated 3D from 2D
+            self.measurement_noise_hsv_2d_est3d = measurement_noise.get('hsv_2d_est3d', 0.15)
+            self.measurement_noise_yolo_2d_est3d = measurement_noise.get('yolo_2d_est3d', 0.12)
+            
+            # Filter parameters
+            filter_params = fusion_config.get('filter', {})
+            self.max_time_diff = filter_params.get('max_time_diff', 0.2)
+            self.min_confidence_threshold = filter_params.get('min_confidence_threshold', 0.5)
+            self.detection_timeout = filter_params.get('detection_timeout', 0.5)
+            
+            # Tracking parameters
+            tracking_params = fusion_config.get('tracking', {})
+            self.position_uncertainty_threshold = tracking_params.get('position_uncertainty_threshold', 0.5)
+            self.velocity_uncertainty_threshold = tracking_params.get('velocity_uncertainty_threshold', 1.0)
+            
+            # Advanced features
+            advanced_features = fusion_config.get('advanced_features', {})
+            self.use_bbox_distance_estimation = advanced_features.get('use_bbox_distance_estimation', True)
+            self.allow_tracking_with_2d_only = advanced_features.get('allow_tracking_with_2d_only', True)
+            self.increased_uncertainty_mode = advanced_features.get('increased_uncertainty_mode', True)
+            
+            # Diagnostic parameters
+            diag_params = fusion_config.get('diagnostics', {})
+            self.history_length = diag_params.get('history_length', 100)
+            self.debug_level = diag_params.get('debug_level', 1)
+            
+            # Store base noise values for adaptive adjustment
+            self.base_measurement_noise_lidar = self.measurement_noise_lidar
+            self.base_measurement_noise_hsv_3d = self.measurement_noise_hsv_3d
+            self.base_measurement_noise_yolo_3d = self.measurement_noise_yolo_3d
+            self.base_measurement_noise_hsv_2d = self.measurement_noise_hsv_2d
+            self.base_measurement_noise_yolo_2d = self.measurement_noise_yolo_2d
+            self.base_measurement_noise_hsv_2d_est3d = self.measurement_noise_hsv_2d_est3d
+            self.base_measurement_noise_yolo_2d_est3d = self.measurement_noise_yolo_2d_est3d
+            
+            self.get_logger().info("Configuration loaded successfully")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error loading config: {str(e)}")
+            # Set reasonable defaults
+            self.lidar_topic = '/basketball/lidar/position'
+            self.hsv_3d_topic = '/basketball/hsv/position_3d'
+            self.yolo_3d_topic = '/basketball/yolo/position_3d'
+            self.hsv_2d_topic = '/basketball/hsv/position'
+            self.yolo_2d_topic = '/basketball/yolo/position'
+            self.hsv_bbox_topic = '/basketball/hsv/bbox'
+            self.yolo_bbox_topic = '/basketball/yolo/bbox'
+            
+            self.position_topic = '/basketball/fused/position'
+            self.velocity_topic = '/basketball/fused/velocity'
+            self.status_topic = '/basketball/fused/tracking_status'
+            self.uncertainty_topic = '/basketball/fused/position_uncertainty'
+            self.diagnostics_topic = '/basketball/fusion/diagnostics'
+            
+            self.process_noise_pos = 0.1
+            self.process_noise_vel = 1.0
+            self.measurement_noise_lidar = 0.03
+            self.measurement_noise_hsv_3d = 0.05
+            self.measurement_noise_yolo_3d = 0.04
+            self.measurement_noise_hsv_2d = 50.0
+            self.measurement_noise_yolo_2d = 30.0
+            self.measurement_noise_hsv_2d_est3d = 0.15
+            self.measurement_noise_yolo_2d_est3d = 0.12
+            
+            self.max_time_diff = 0.2
+            self.min_confidence_threshold = 0.5
+            self.detection_timeout = 0.5
+            self.position_uncertainty_threshold = 0.5
+            self.velocity_uncertainty_threshold = 1.0
+            self.use_bbox_distance_estimation = True
+            self.allow_tracking_with_2d_only = True
+            self.increased_uncertainty_mode = True
+            self.history_length = 100
+            self.debug_level = 1
+            
+            # Base noise (for adaptive adjustment)
+            self.base_measurement_noise_lidar = self.measurement_noise_lidar
+            self.base_measurement_noise_hsv_3d = self.measurement_noise_hsv_3d
+            self.base_measurement_noise_yolo_3d = self.measurement_noise_yolo_3d
+            self.base_measurement_noise_hsv_2d = self.measurement_noise_hsv_2d
+            self.base_measurement_noise_yolo_2d = self.measurement_noise_yolo_2d
+            self.base_measurement_noise_hsv_2d_est3d = self.measurement_noise_hsv_2d_est3d
+            self.base_measurement_noise_yolo_2d_est3d = self.measurement_noise_yolo_2d_est3d
+    
+    def init_state_tracking(self):
+        """Initialize state tracking variables."""
+        # Kalman filter state: [x, y, z, vx, vy, vz]
+        self.state = np.zeros(6)
         
-        # Get all parameters
-        self.process_noise_pos = self.get_parameter('process_noise_pos').value
-        self.process_noise_vel = self.get_parameter('process_noise_vel').value
-        self.measurement_noise_hsv_2d = self.get_parameter('measurement_noise_hsv_2d').value
-        self.measurement_noise_yolo_2d = self.get_parameter('measurement_noise_yolo_2d').value
-        self.measurement_noise_hsv_3d = self.get_parameter('measurement_noise_hsv_3d').value
-        self.measurement_noise_yolo_3d = self.get_parameter('measurement_noise_yolo_3d').value
-        self.measurement_noise_lidar = self.get_parameter('measurement_noise_lidar').value
-        # Increase Z component noise for LIDAR measurements due to constant Z limitation
-        self.lidar_z_noise_factor = 3.0  # Higher noise factor for Z component
-        self.max_time_diff = self.get_parameter('max_time_diff').value
-        self.min_confidence_threshold = self.get_parameter('min_confidence_threshold').value
-        self.detection_timeout = self.get_parameter('detection_timeout').value
-        self.position_uncertainty_threshold = self.get_parameter('position_uncertainty_threshold').value
-        self.velocity_uncertainty_threshold = self.get_parameter('velocity_uncertainty_threshold').value
-        self.history_length = self.get_parameter('history_length').value
-        self.debug_level = self.get_parameter('debug_level').value
-        self.log_to_file = self.get_parameter('log_to_file').value
-        # Base measurement noise parameters
-        self.base_measurement_noise_hsv_2d = self.get_parameter('measurement_noise_hsv_2d').value
-        self.base_measurement_noise_yolo_2d = self.get_parameter('measurement_noise_yolo_2d').value
-        self.base_measurement_noise_hsv_3d = self.get_parameter('measurement_noise_hsv_3d').value
-        self.base_measurement_noise_yolo_3d = self.get_parameter('measurement_noise_yolo_3d').value
-        self.base_measurement_noise_lidar = self.get_parameter('measurement_noise_lidar').value
-        # Current adaptive measurement noise values (will be updated dynamically)
-        self.measurement_noise_hsv_2d = self.base_measurement_noise_hsv_2d
-        self.measurement_noise_yolo_2d = self.base_measurement_noise_yolo_2d
-        self.measurement_noise_hsv_3d = self.base_measurement_noise_hsv_3d
-        self.measurement_noise_yolo_3d = self.base_measurement_noise_yolo_3d
-        self.measurement_noise_lidar = self.base_measurement_noise_lidar
-        # Add tracking of sensor reliability over time (higher is better)
+        # Create initial covariance matrix (uncertainty)
+        position_variance = 10.0
+        velocity_variance = 100.0
+        
+        self.covariance = np.eye(6)
+        self.covariance[0:3, 0:3] *= position_variance
+        self.covariance[3:6, 3:6] *= velocity_variance
+        
+        # State tracking flags
+        self.initialized = False
+        self.tracking_reliable = False
+        self.last_update_time = None
+        self.consecutive_updates = 0
+        
+        # Uncertainty metrics
+        self.position_uncertainty = float('inf')
+        self.velocity_uncertainty = float('inf')
+        
+        # Sensor health tracking
         self.sensor_reliability = {
-            'hsv_2d': 0.5,   # Start with neutral reliability
-            'yolo_2d': 0.5,
+            'lidar': 0.5,
             'hsv_3d': 0.5,
             'yolo_3d': 0.5,
-            'lidar': 0.5
+            'hsv_2d': 0.5,
+            'yolo_2d': 0.5
         }
-
-    def _setup_subscriptions(self):
-        """Set up all subscriptions for this node."""
-        # Create subscribers for all detection sources
-        # 2D detections (from camera)
-        self.hsv_2d_sub = self.create_subscription(
+        
+        # Pre-allocate filter matrices for efficiency
+        self._F_matrix = np.eye(6)  # State transition matrix
+        self._Q_matrix = np.zeros((6, 6))  # Process noise matrix
+        
+        # History collections
+        self.position_history = deque(maxlen=self.history_length)
+        self.velocity_history = deque(maxlen=self.history_length)
+        self.time_history = deque(maxlen=self.history_length)
+        self.innovation_history = deque(maxlen=self.history_length)
+        
+        self.get_logger().info("State tracking variables initialized")
+    
+    def init_sensor_synchronization(self):
+        """Initialize sensor synchronization system."""
+        # Create sensor buffer with increased time tolerance (0.5s instead of 0.1s)
+        self.sensor_buffer = SensorBuffer(max_time_diff=0.5)
+        
+        # Add sensors to the buffer
+        sensor_names = ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']
+        for sensor in sensor_names:
+            self.sensor_buffer.add_sensor(sensor, buffer_size=20)
+        
+        # Track last detection time for each sensor
+        self.last_detection_time = {sensor: 0.0 for sensor in sensor_names}
+        self.sensor_counts = {sensor: 0 for sensor in sensor_names}
+        
+        # Add sensor timing statistics for FPS calculation
+        self.sensor_frame_times = {sensor: deque(maxlen=30) for sensor in sensor_names}  # Store last 30 frame times
+        self.sensor_fps = {sensor: 0.0 for sensor in sensor_names}  # Calculated FPS for each sensor
+        
+        # Store bounding box information for distance estimation
+        self.bbox_data = {
+            'hsv_2d': {'width': 30, 'height': 30, 'timestamp': 0.0},
+            'yolo_2d': {'width': 30, 'height': 30, 'timestamp': 0.0}
+        }
+        
+        self.get_logger().info("Sensor synchronization system initialized")
+    
+    def init_diagnostics(self):
+        """Initialize diagnostic tracking."""
+        # Performance tracking
+        self.processing_times = deque(maxlen=100)
+        
+        # Error tracking
+        self.errors = deque(maxlen=20)
+        self.warnings = deque(maxlen=20)
+        
+        # Health metrics (0.0 to 1.0 scale)
+        self.filter_health = 1.0
+        self.transform_health = 0.0
+        self.sensor_health = 0.0
+        
+        # When filter was last updated
+        self.last_filter_update_time = 0.0
+        
+        self.get_logger().info("Diagnostic tracking initialized")
+    
+    def setup_publishers(self):
+        """Set up publishers (these can be created immediately)."""
+        # Fused 3D position
+        self.position_pub = self.create_publisher(
             PointStamped,
-            TOPICS["input"]["hsv_2d"],
-            lambda msg: self.sensor_callback(msg, 'hsv_2d'),
+            self.position_topic,
             10
         )
-        self.yolo_2d_sub = self.create_subscription(
-            PointStamped,
-            TOPICS["input"]["yolo_2d"],
-            lambda msg: self.sensor_callback(msg, 'yolo_2d'),
+        
+        # Velocity publisher
+        self.velocity_pub = self.create_publisher(
+            TwistStamped,
+            self.velocity_topic,
             10
         )
-        # 3D detections (from depth camera)
-        self.hsv_3d_sub = self.create_subscription(
-            PointStamped,
-            TOPICS["input"]["hsv_3d"],
-            lambda msg: self.sensor_callback(msg, 'hsv_3d'),
+        
+        # Status publisher
+        self.status_pub = self.create_publisher(
+            Bool,
+            self.status_topic,
             10
         )
-        self.yolo_3d_sub = self.create_subscription(
-            PointStamped,
-            TOPICS["input"]["yolo_3d"],
-            lambda msg: self.sensor_callback(msg, 'yolo_3d'),
+        
+        # Uncertainty publisher
+        self.uncertainty_pub = self.create_publisher(
+            Float32,
+            self.uncertainty_topic,
             10
         )
-        # LIDAR detections (already 3D)
+        
+        # Diagnostics publisher
+        self.diagnostics_pub = self.create_publisher(
+            String,
+            self.diagnostics_topic,
+            10
+        )
+        
+        self.get_logger().info("Publishers initialized")
+        self.get_logger().info(f"Publishing to: {self.position_topic}, {self.velocity_topic}, {self.status_topic}, {self.uncertainty_topic}, {self.diagnostics_topic}")
+    
+    def setup_subscriptions(self):
+        """Set up subscriptions (only called after transform is available)."""
+        # 3D detections
         self.lidar_sub = self.create_subscription(
             PointStamped,
-            TOPICS["input"]["lidar"],
+            self.lidar_topic,
             lambda msg: self.sensor_callback(msg, 'lidar'),
             10
         )
-
-    def _setup_publishers(self):
-        """Set up all publishers for this node."""
-        # Publisher for fused 3D position
-        self.position_publisher = self.create_publisher(
+        
+        self.hsv_3d_sub = self.create_subscription(
             PointStamped,
-            TOPICS["output"]["position"],
+            self.hsv_3d_topic,
+            lambda msg: self.sensor_callback(msg, 'hsv_3d'),
             10
         )
         
-        # Publisher for velocity (useful for PID)
-        self.velocity_publisher = self.create_publisher(
-            TwistStamped,
-            TOPICS["output"]["velocity"],
-            10
-        )
-        # Publisher for tracking reliability metrics (used by state manager)
-        self.diagnostics_publisher = self.create_publisher(
-            String,
-            TOPICS["output"]["diagnostics"],
+        self.yolo_3d_sub = self.create_subscription(
+            PointStamped,
+            self.yolo_3d_topic,
+            lambda msg: self.sensor_callback(msg, 'yolo_3d'),
             10
         )
         
-        # Publisher for position uncertainty (for visualization and debugging)
-        self.uncertainty_publisher = self.create_publisher(
-            Float32,
-            TOPICS["output"]["uncertainty"],
+        # 2D detections
+        self.hsv_2d_sub = self.create_subscription(
+            PointStamped,
+            self.hsv_2d_topic,
+            lambda msg: self.sensor_callback(msg, 'hsv_2d'),
             10
         )
         
-        # Publisher for tracking status (boolean indicating if tracking is reliable)
-        self.tracking_status_publisher = self.create_publisher(
-            Bool,
-            TOPICS["output"]["tracking_status"],
+        self.yolo_2d_sub = self.create_subscription(
+            PointStamped,
+            self.yolo_2d_topic,
+            lambda msg: self.sensor_callback(msg, 'yolo_2d'),
             10
         )
         
-        # Add a more comprehensive system diagnostics publisher for the central diagnostics node
-        self.system_diagnostics_publisher = self.create_publisher(
-            String,
-            TOPICS["output"]["diagnostics"],  # Use the configured diagnostics topic
-            10
+        # NEW: Bounding box subscriptions for distance estimation 
+        # Note: You'll need to import the appropriate message type for bounding boxes
+        # This is just a placeholder assuming BoundingBox message type
+        try:
+            from vision_msgs.msg import BoundingBox2D
+            
+            self.hsv_bbox_sub = self.create_subscription(
+                BoundingBox2D,
+                self.hsv_bbox_topic,
+                lambda msg: self.bbox_callback(msg, 'hsv_2d'),
+                10
+            )
+            
+            self.yolo_bbox_sub = self.create_subscription(
+                BoundingBox2D,
+                self.yolo_bbox_topic,
+                lambda msg: self.bbox_callback(msg, 'yolo_2d'),
+                10
+            )
+        except ImportError:
+            self.get_logger().warn("vision_msgs not available - bounding box processing disabled")
+            
+        self.get_logger().info("Subscriptions initialized")
+        self.get_logger().info(f"Subscribed to: {self.lidar_topic}, {self.hsv_3d_topic}, {self.yolo_3d_topic}, {self.hsv_2d_topic}, {self.yolo_2d_topic}")
+        
+        # Start fresh - we're subscribing only now, so messages received previously won't be processed
+        # Reset the "last seen" timestamps
+        current_time = time.time()
+        for sensor in self.last_detection_time:
+            self.last_detection_time[sensor] = current_time
+    
+    def publish_status(self):
+        """Publish and log brief status information."""
+        # Skip if not ready
+        if not self.is_ready:
+            self.get_logger().info(f"Status: Node not ready yet, waiting for transform (elapsed time: {time.time() - self.transform_wait_start:.1f}s)")
+            return
+            
+        # Calculate uptime
+        uptime = time.time() - self.start_time
+        current_time = time.time()
+        
+        # Publish tracking status
+        status_msg = Bool()
+        status_msg.data = bool(self.tracking_reliable)
+        self.status_pub.publish(status_msg)
+        
+        # Count active 2D and 3D sensors
+        active_3d = sum(1 for sensor, last_time in self.last_detection_time.items() 
+                        if not sensor.endswith('_2d') and current_time - last_time < 1.0)
+        active_2d = sum(1 for sensor, last_time in self.last_detection_time.items() 
+                        if sensor.endswith('_2d') and current_time - last_time < 1.0)
+        
+        # Determine operating mode
+        if active_3d >= 1:
+            mode = "3D tracking"
+        elif active_2d >= 1 and self.allow_tracking_with_2d_only:
+            mode = "2D-only tracking"
+        else:
+            mode = "Limited tracking"
+        
+        # Log basic status
+        transform_status = "Confirmed" if self.transform_confirmed else ("OK" if self.transform_available else "Missing")
+        self.get_logger().info(
+            f"Status: Uptime={uptime:.1f}s, Transform={transform_status}, "
+            f"Mode={mode}, 3D sensors={active_3d}, 2D sensors={active_2d}, "
+            f"Initialized={self.initialized}, Tracking={self.tracking_reliable}, "
+            f"Uncertainty={self.position_uncertainty:.3f}m"
         )
-
-    def _init_kalman_filter(self):
-        """Initialize the Kalman filter state and variables."""
-        # Kalman filter state: [x, y, z, vx, vy, vz] and variables
-        # x, y, z = 3D position coordinates
-        # vx, vy, vz = 3D velocity components
-        self.state = np.zeros(6)
         
-        # Create a more balanced initial covariance
-        # Position uncertainty (first 3 diagonal elements)
-        position_variance = 10.0  # Still high but not extreme
-        # Velocity uncertainty (next 3 diagonal elements)
-        velocity_variance = 100.0  # Higher uncertainty for initial velocity
-        # Create block diagonal covariance matrix
-        position_block = np.eye(3) * position_variance
-        velocity_block = np.eye(3) * velocity_variance
-        self.covariance = block_diag(position_block, velocity_block)
-        # Flag to track if filter has been initialized
-        self.initialized = False
+        # Add sensor timing information to status
+        active_sensors = []
+        for sensor in ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']:
+            if self.sensor_counts.get(sensor, 0) > 0:  # Only include if we've received data
+                delay = current_time - self.last_detection_time.get(sensor, 0)
+                fps = self.sensor_fps.get(sensor, 0.0)
+                count = self.sensor_counts.get(sensor, 0)
+                active_sensors.append(f"{sensor}: count={count}, {delay:.1f}s ago, {fps:.1f} FPS")
         
-        # Last update timestamp (as float seconds)        
-        self.last_update_time = None
+        if active_sensors:
+            self.get_logger().info(f"Sensor data: {' | '.join(active_sensors)}")
+        elif self.initialized:  # Only show warning if we're initialized
+            self.get_logger().warn("No sensor data received - check if sensor nodes are running")
+            
+    def setup_timers(self):
+        """Set up regular processing timers."""
+        # Status timer (1 Hz)
+        self.status_timer = self.create_timer(1.0, self.publish_status)
         
-        # History of states for analysis and debugging
-        self.state_history = deque(maxlen=self.history_length)
-        self.covariance_history = deque(maxlen=self.history_length)
-        self.measurement_history = deque(maxlen=self.history_length)
-        # Sensor statistics for diagnostics
-        self.sensor_counts = {
-            'hsv_2d': 0, 'yolo_2d': 0, 
-            'hsv_3d': 0, 'yolo_3d': 0, 
-            'lidar': 0
-        }
-        self.sensor_last_seen = {
-            'hsv_2d': 0, 'yolo_2d': 0, 
-            'hsv_3d': 0, 'yolo_3d': 0, 
-            'lidar': 0
-        }
-        
-        # Tracking reliability metrics
-        self.consecutive_updates = 0
-        self.position_uncertainty = float('inf')
-        self.velocity_uncertainty = float('inf')
-        self.tracking_reliable = False
-        # Start time for performance tracking
-        self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
-        self.updates_processed = 0
-
-        # Add error tracking for diagnostics - ensure all are bounded
-        self.error_history_size = DIAG_CONFIG.get('error_history_size', 10)
-        self.errors = deque(maxlen=self.error_history_size)
-        self.warnings = deque(maxlen=self.error_history_size)  # Add this line
-        self.last_error_time = 0 # Add this line
-        # Add health metrics
-        self.filter_health = 1.0  # 0.0 to 1.0 scale
-        self.tracking_health = 1.0
-        self.sensor_health = 1.0
-        # LIDAR reliability parameters
-        self.lidar_min_reliable_distance = 1.0  # Minimum distance for reliable LIDAR data (meters)
-        self.lidar_optimal_range = (1.2, 3.0)   # Range where LIDAR data is most reliable (meters)
-        self.lidar_max_range = 5.0              # Maximum effective range for LIDAR
-        
-        # NEW: Transform cache for optimization
-        self.transform_cache = {}
-        self.transform_cache_stats = {'hits': 0, 'misses': 0}
-        
-        # NEW: Create innovation history
-        self.innovation_history = deque(maxlen=20)
-        
-        # NEW: Add transform status tracking
-        self.transforms_successful = 0
-        self.transforms_failed = 0
-        self.transform_last_success_time = 0.0
-
-    def _setup_timers(self):
-        """Set up timer callbacks for periodic tasks."""
-        # Diagnostic timer (publishes detailed diagnostics every 1 second)
-        self.diagnostic_timer = self.create_timer(1.0, self.publish_diagnostics)
-        
-        # Fast status timer (publishes brief status updates at 10Hz)
-        self.status_timer = self.create_timer(0.1, self.publish_status)
-        
-        # Kalman filter update timer (runs at 20Hz)
+        # Kalman filter update timer (20 Hz)
         self.filter_timer = self.create_timer(0.05, self.filter_update)
-
-    def _init_debugging_tools(self):
-        """Initialize tools for debugging and visualization."""
-        # Keep track of timing for performance analysis
-        self.processing_times = deque(maxlen=50)
         
-        # Store innovation values for diagnostics
-        self.innovation_history = deque(maxlen=20)
+        # Diagnostics timer (1 Hz)
+        self.diagnostics_timer = self.create_timer(1.0, self.publish_diagnostics)
         
-        # Log file for detailed analysis (if enabled)
-        self.log_file = None
-        if self.log_to_file:
-            try:
-                self.log_file = open('/tmp/kalman_filter_log.csv', 'w')
-                self.log_file.write('time,x,y,z,vx,vy,vz,pos_uncertainty,vel_uncertainty,source\n')
-            except Exception as e:
-                self.get_logger().error(f"Failed to open log file: {str(e)}")
-                self.log_to_file = False
-
-    def _log_topic_connections(self):
-        """Log information about topics being subscribed to and published."""
-        self.get_logger().info("Topic connections:")
-        self.get_logger().info("Subscriptions:")
-        for name, topic in TOPICS["input"].items():
-            self.get_logger().info(f"  - {name:<10}: {topic}")
-        self.get_logger().info("Publications:")
-        for name, topic in TOPICS["output"].items():
-            self.get_logger().info(f"  - {name:<10}: {topic}")
-
-    def log_parameters(self):
-        """Log all the current parameter values for reference."""
-        self.get_logger().info("=== Kalman Filter Parameters ===")
-        self.get_logger().info("Process noise (how quickly uncertainty grows with time):")
-        self.get_logger().info(f"  Position noise: {self.process_noise_pos} m/s²")
-        self.get_logger().info(f"  Velocity noise: {self.process_noise_vel} m/s²")
-        self.get_logger().info("Measurement noise (lower = more trust in sensor):")
-        self.get_logger().info(f"  HSV 2D: {self.measurement_noise_hsv_2d} pixels")
-        self.get_logger().info(f"  YOLO 2D: {self.measurement_noise_yolo_2d} pixels")
-        self.get_logger().info(f"  HSV 3D: {self.measurement_noise_hsv_3d} meters")
-        self.get_logger().info(f"  YOLO 3D: {self.measurement_noise_yolo_3d} meters")
-        self.get_logger().info(f"  LIDAR: {self.measurement_noise_lidar} meters")
-        self.get_logger().info("Timing and thresholds:")
-        self.get_logger().info(f"  Max time difference: {self.max_time_diff} seconds")
-        self.get_logger().info(f"  Min confidence threshold: {self.min_confidence_threshold}")
-        self.get_logger().info(f"  Detection timeout: {self.detection_timeout} seconds")
-        self.get_logger().info("Tracking reliability thresholds:")
-        self.get_logger().info(f"  Position uncertainty threshold: {self.position_uncertainty_threshold} meters")
-        self.get_logger().info(f"  Velocity uncertainty threshold: {self.velocity_uncertainty_threshold} m/s")
-        self.get_logger().info("Debugging:")
-        self.get_logger().info(f"  Debug level: {self.debug_level}")
-        self.get_logger().info(f"  History length: {self.history_length} states")
-        self.get_logger().info(f"  Log to file: {self.log_to_file}")
-        self.get_logger().info("===============================")
-
-    def sensor_callback(self, msg, source):
-        """
-        Process measurements from any sensor and add to synchronization buffer.
-        
-        This unified callback adds all incoming measurements to the appropriate
-        buffer based on their source.
-        
-        Args:
-            msg (PointStamped): The incoming measurement
-            source (str): Which sensor it came from ('hsv_2d', 'yolo_2d', etc.)
-        """
-        # Add measurement to synchronization buffer
-        self.sync_buffer.add_measurement(
-            sensor_name=source, 
-            data=msg, 
-            timestamp=msg.header.stamp
-        )
-        
-        # Update sensor statistics
-        self.sensor_counts[source] += 1
-        self.sensor_last_seen[source] = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
-        
-        # Log incoming data if in debug mode
-        if self.debug_level >= 2:
-            self.get_logger().debug(
-                f"Received {source} measurement with timestamp: " + 
-                f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
-            )
-
-    def filter_update(self, event=None):
-        """
-        Update the Kalman filter with synchronized measurements.
-        
-        This is called regularly by our timer and uses the synchronization buffer
-        to get measurements from multiple sensors that were taken at approximately
-        the same time.
-        """
-        # For Raspberry Pi optimization: Track execution time
-        update_start = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
-        
-        if not self.initialized and not self._try_initialize():
-            self.get_logger().debug("Filter not yet initialized, waiting for 3D measurement...")
-            return
-        
-        # Ensure we're using the improved buffer
-        if not self.improved_buffer_initialized:
-            self.improve_sync_buffer()
-            self.improved_buffer_initialized = True
-
-        # Get synchronized measurements from the buffer
-        sync_data = self.sync_buffer.find_synchronized_data()
-        if not sync_data:
-            self.get_logger().debug("No synchronized measurements found")
-            return
-        
-        # Log additional details about synchronization quality
-        if self.debug_level >= 2:
-            timestamps = {}
-            for source, msg in sync_data.items():
-                if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
-                    timestamps[source] = TimeUtils.ros_time_to_float(msg.header.stamp)
-            if timestamps:
-                min_time = min(timestamps.values())
-                max_time = max(timestamps.values())
-                time_spread = max_time - min_time
-                self.get_logger().debug(
-                    f"Synchronized data time spread: {time_spread:.3f}s, "
-                    f"Sources: {list(timestamps.keys())}"
-                )
-        
-        # Log what sensors we have synchronized data from
-        available_sensors = list(sync_data.keys())
-        if self.debug_level >= 1:
-            self.get_logger().info(f"Found synchronized data from: {', '.join(available_sensors)}")
-        
-        # Calculate average timestamp of the synchronized measurements
-        total_time = 0.0
-        count = 0
-        for source, msg in sync_data.items():
-            ros_time = msg.header.stamp
-            timestamp = TimeUtils.ros_time_to_float(ros_time)  # Use TimeUtils for conversion
-            total_time += timestamp
-            count += 1
-        
-        if count == 0:
-            self.get_logger().warn("Found sync_data but no valid timestamps")
-            return
+        self.get_logger().info("Processing timers initialized")
+    
+    def initialize_filter_with_defaults(self):
+        """Initialize filter with default values."""
+        try:
+            # Set default state with zero position and velocity
+            self.state = np.zeros(6)
             
-        avg_time = total_time / count
-        
-        # If we have a last update time, calculate dt
-        if self.last_update_time is None:
-            dt = 0.033  # Default time step of ~30 Hz
-            self.get_logger().debug(f"First update, using default dt={dt}")
-        else:
-            dt = avg_time - self.last_update_time
-            self.get_logger().debug(f"Time since last update: {dt:.3f} seconds")
-        # Handle potential timing issues using TimeUtils
-        dt = TimeUtils.handle_time_jump(dt)
-        
-        # Predict state forward to the current time
-        self.predict(dt)
-        
-        # Transform all measurements to a common coordinate frame before updating
-        transformed_data = {}
-        
-        # Check if transform is available yet (it might take a moment after startup)
-        transform_available = self.transform_available
-        if transform_available:
-            self.get_logger().debug("Transform is available")
-        else:
-            # NEW: Check again just to be sure
-            try:
-                transform_available = self.tf_buffer.can_transform(
-                    "map", "lidar_frame", rclpy.time.Time(),
-                    timeout=rclpy.duration.Duration(seconds=0.1)
-                )
-                if transform_available:
-                    self.transform_available = True
-                    self.get_logger().info("✓ Transform just became available")
-                else:
-                    self.get_logger().warn("✗ Transform still unavailable - will use raw measurements")
-            except Exception as e:
-                self.get_logger().warn(f"Error checking transform availability: {str(e)}")
-        
-        # Try to transform all measurements to a common frame
-        for source, msg in sync_data.items():
-            transformed_msg = self._transform_point(msg, "map")
-            if transformed_msg:
-                transformed_data[source] = transformed_msg
-                self.transforms_successful += 1
-                self.transform_last_success_time = TimeUtils.now_as_float()
-            else:
-                # NEW: If transform fails, still use the original message in its original frame
-                # This ensures we can still fuse data even if transforms fail
-                self.get_logger().warn(f"Could not transform {source} measurement - using original frame")
-                transformed_data[source] = msg
-                self.transforms_failed += 1
-        
-        # Update with each transformed measurement
-        for source, msg in transformed_data.items():
-            if source.endswith('_2d'):
-                # 2D measurements only have x and y (no depth)
-                confidence = msg.point.z  # Usually contains confidence value
-                self.update_2d(msg, 
-                               getattr(self, f"measurement_noise_{source}"),
-                               source, confidence)
-            else:
-                # 3D measurements have full position
-                self.update_3d(msg, 
-                               getattr(self, f"measurement_noise_{source}"),
-                               source)
-        
-        # Update last update time
-        self.last_update_time = avg_time
-        
-        # Store state in history
-        self.state_history.append(np.copy(self.state))
-        self.time_history.append(avg_time)
-        
-        # Update tracking reliability metrics
-        self.update_tracking_reliability()
-        
-        # Publish the updated state
-        self.publish_state()
-        
-        # Update stats
-        self.updates_processed += 1
-        
-        # Measure execution time for performance monitoring
-        execution_time = (TimeUtils.now_as_float() - update_start) * 1000  # milliseconds
-        self.processing_times.append(execution_time)
-        
-        # Automatically adjust filter frequency based on execution time
-        # This prevents overloading the Raspberry Pi CPU
-        avg_execution = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
-        # If average execution time is more than 80% of our update interval,        
-        # we might want to slow down to prevent CPU overload
-        current_period = getattr(self.filter_timer, 'timer_period_ns', 50000000) / 1e9  # Convert ns to seconds
-        if avg_execution > (current_period * 1000 * 0.8):
-            new_period = current_period * 1.2  # Increase period by 20%
-            self.filter_timer.timer_period_ns = int(new_period * 1e9)
-            self.get_logger().warn(
-                f"High execution time ({avg_execution:.1f}ms), increasing filter period to {new_period:.3f}s"
-            )
-
-    def _try_initialize(self):
-        """
-        Try to initialize the Kalman filter with the best available 3D measurement.
-        
-        Returns:
-            bool: True if initialization succeeded, False otherwise
-        """
-        # Get the latest data from each sensor
-        best_source = None
-        best_measurement = None
-        
-        # First look for 3D sources in this priority order
-        for source in ['lidar', 'hsv_3d', 'yolo_3d']:
-            latest_data = self.sync_buffer.get_latest_measurement(source)
-            if latest_data is not None:
-                best_source = source
-                best_measurement = latest_data
-                break
-        
-        if best_source and best_measurement:
-            # Initialize state with this measurement
-            x, y, z = best_measurement.point.x, best_measurement.point.y, best_measurement.point.z
-            self.state[0:3] = [x, y, z]  # Position
-            self.state[3:6] = [0, 0, 0]  # Initial velocity = 0
-            
-            # Set last update time
-            self.last_update_time = TimeUtils.ros_time_to_float(best_measurement.header.stamp)
+            # Set initial covariance (high uncertainty since this is a guess)
+            self.covariance = np.eye(6)
+            self.covariance[0:3, 0:3] *= 1.0  # Position uncertainty
+            self.covariance[3:6, 3:6] *= 2.0  # Velocity uncertainty
             
             self.initialized = True
+            self.last_update_time = time.time()
+            
+            # Update uncertainty metrics
+            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:3, 0:3]) / 3.0)
+            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[3:6, 3:6]) / 3.0)
+            
             self.get_logger().info(
-                f"Kalman filter initialized with {best_source} measurement: "
-                f"({x:.2f}, {y:.2f}, {z:.2f}) m"
+                f"Filter initialized with default values. Beginning active tracking with higher uncertainty."
             )
+            
             return True
-        
-        return False
-
-    def predict(self, dt):
+        except Exception as e:
+            self.get_logger().error(f"Error during default filter initialization: {str(e)}")
+            return False
+    
+    def sensor_callback(self, msg, source):
         """
-        Predict the state forward in time (time update step of Kalman filter).
-        
-        This function implements the prediction step of the Kalman filter, which:
-        1. Predicts how the ball will move based on physics (constant velocity)
-        2. Updates the covariance matrix to reflect increased uncertainty
+        Common callback for all sensor measurements.
         
         Args:
-            dt (float): Time elapsed since last update in seconds
+            msg (PointStamped): The point measurement from sensor
+            source (str): Sensor source identifier
         """
-        if dt <= 0 or dt > 1.0:
-            self.get_logger().warn(f"Invalid dt: {dt}, using default")
-            dt = 0.033  # Use default time step
+        # Skip if not ready yet
+        if not self.is_ready:
+            self.get_logger().warn(f"Received {source} data before node was ready - ignoring")
+            return
+            
+        try:
+            # Get current time for timing statistics
+            current_time = time.time()
+            
+            # Update statistics
+            self.sensor_counts[source] += 1
+            self.last_detection_time[source] = current_time
+            
+            # Track frame time for FPS calculation
+            self.sensor_frame_times[source].append(current_time)
+            
+            # Calculate FPS based on recent frames
+            if len(self.sensor_frame_times[source]) >= 2:
+                # Use time difference between oldest and newest frame
+                time_span = current_time - self.sensor_frame_times[source][0]
+                if time_span > 0:
+                    # Calculate frames per second (number of frames - 1) / time span
+                    self.sensor_fps[source] = (len(self.sensor_frame_times[source]) - 1) / time_span
+            
+            # Log first few detections with more detail
+            if self.sensor_counts[source] <= 3:
+                self.get_logger().info(
+                    f"Received {source} detection #{self.sensor_counts[source]}: "
+                    f"({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame"
+                )
+            
+            # Add to synchronization buffer
+            self.sensor_buffer.add_measurement(source, msg, msg.header.stamp)
+            
+            # If this is a 3D source and we're not initialized yet, try initializing
+            if not self.initialized and not source.endswith('_2d'):
+                self.get_logger().info(f"Received {source} data - attempting initialization")
+                transformed = self.transform_point(msg, self.reference_frame, False)  # 3D data, so is_2d=False
+                if transformed:
+                    self.initialize_filter_with_measurement(transformed, source)
+                
+            if self.debug_level >= 2:
+                self.get_logger().debug(
+                    f"{source} detection: ({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame"
+                )
+                
+        except Exception as e:
+            self.log_error(f"Error in {source} callback: {str(e)}")
+
+    def bbox_callback(self, msg, source):
+        """
+        Callback for bounding box messages.
         
-        if not hasattr(self, '_F_matrix'):
-            # Pre-allocate matrices used in calculations
-            self._F_matrix = np.eye(6)
-            self._Q_matrix = np.zeros((6, 6))
+        Args:
+            msg (BoundingBox2D): The bounding box message
+            source (str): Source identifier (e.g., 'hsv_2d', 'yolo_2d')
+        """
+        # Skip if not ready yet
+        if not self.is_ready:
+            return
+            
+        try:
+            # Extract width and height from the bounding box message
+            # Note: Adjust this based on your actual message structure
+            width = msg.size_x  # Assuming these fields exist in your BoundingBox2D message
+            height = msg.size_y
+            
+            # Store the bounding box data with timestamp
+            if source in self.bbox_data:
+                self.bbox_data[source]['width'] = width
+                self.bbox_data[source]['height'] = height
+                self.bbox_data[source]['timestamp'] = time.time()
+                
+                if self.debug_level >= 2:
+                    self.get_logger().debug(f"Received {source} bbox: {width:.1f}x{height:.1f}")
+        except Exception as e:
+            self.log_error(f"Error in {source} bbox callback: {str(e)}")
+    
+    def initialize_filter_with_measurement(self, msg, source):
+        """Initialize the filter with a specific measurement."""
+        try:
+            # Initialize with this measurement
+            self.state[0:3] = [
+                msg.point.x,
+                msg.point.y,
+                msg.point.z
+            ]
+            self.state[3:6] = [0.0, 0.0, 0.0]  # Start with zero velocity
+            
+            # Reset covariance with reasonable values
+            self.covariance = np.eye(6)
+            self.covariance[0:3, 0:3] *= 0.1  # Position uncertainty
+            self.covariance[3:6, 3:6] *= 1.0  # Velocity uncertainty
+            
+            self.initialized = True
+            self.last_update_time = time.time()
+            
+            self.get_logger().info(
+                f"Filter initialized with {source} measurement: ({msg.point.x:.2f}, "
+                f"{msg.point.y:.2f}, {msg.point.z:.2f})"
+            )
+            
+            # Update position uncertainty for status tracking
+            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:3, 0:3]) / 3.0)
+            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[3:6, 3:6]) / 3.0)
+            
+            # Start active tracking
+            self.get_logger().info("Kalman filter initialized - beginning active tracking")
+            
+            return True
+        except Exception as e:
+            self.get_logger().error(f"Error during filter initialization: {str(e)}")
+            return False
+
+    def filter_update(self):
+        """Update the Kalman filter with synchronized measurements."""
+        # Skip if not ready
+        if not self.is_ready or not self.initialized:
+            return
         
-        # Update transition matrix F in-place
-        self._F_matrix[0, 3] = dt
-        self._F_matrix[1, 4] = dt
-        self._F_matrix[2, 5] = dt
+        # For performance tracking
+        update_start = time.time()
         
-        # Update process noise Q in-place
-        self._Q_matrix[0:3, 0:3] = np.eye(3) * self.process_noise_pos * dt**2
-        self._Q_matrix[3:6, 3:6] = np.eye(3) * self.process_noise_vel * dt
+        # Get synchronized measurements
+        sync_data = self.sensor_buffer.find_synchronized_measurements(min_sensors=1)
         
-        # Use pre-allocated matrices for prediction
-        self.state = self._F_matrix @ self.state
-        self.covariance = self._F_matrix @ self.covariance @ self._F_matrix.T + self._Q_matrix
+        # Log whether synchronized measurements were found
+        if sync_data:
+            self.get_logger().info(f"Found synchronized data from {len(sync_data)} sensors: {', '.join(sync_data.keys())}")
+        elif self.debug_level >= 1:
+            self.get_logger().debug("No synchronized measurements found")
         
-        # Update uncertainty metrics
+        # Calculate time since last update (even if no new data)
+        current_time = time.time()
+        if self.last_update_time is None:
+            dt = 0.05  # Default time step (20 Hz)
+        else:
+            dt = current_time - self.last_update_time
+        
+        # Clamp dt to reasonable range
+        dt = max(0.01, min(dt, 0.2))
+        
+        # Predict step (move state forward in time) - always do this
+        self.predict(dt)
+        
+        processed_measurements = False
+        
+        # If we have synchronized data, use it
+        if sync_data:
+            # Transform measurements to reference frame
+            transformed_data = {}
+            
+            for source, msg in sync_data.items():
+                is_2d = source.endswith('_2d')  # Check if this is a 2D source
+                
+                # Skip transformation if already in reference frame
+                if msg.header.frame_id == self.reference_frame:
+                    transformed_data[source] = msg
+                    self.get_logger().debug(f"{source} data already in {self.reference_frame} - no transform needed")
+                else:
+                    transformed = self.transform_point(msg, self.reference_frame, is_2d)
+                    if transformed:
+                        transformed_data[source] = transformed
+            
+            # Process measurements
+            measurements_processed = self.process_measurements(transformed_data)
+            processed_measurements = measurements_processed > 0
+        
+        # Fallback: If no synchronized data or processing failed, try using latest individual measurements
+        if not processed_measurements and current_time - self.last_filter_update_time > 0.5:
+            self.get_logger().info("Trying fallback with latest individual measurements")
+            # Try to process the most recent measurement from each sensor
+            latest_data = {}
+            
+            # Create sensor status string with timing info
+            current_time = time.time()
+            sensor_status = []
+            for source in ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']:
+                if self.sensor_counts.get(source, 0) > 0:  # Only include if we've received data
+                    time_since_last = current_time - self.last_detection_time.get(source, 0)
+                    fps = self.sensor_fps.get(source, 0.0)
+                    sensor_status.append(f"{source}: {time_since_last:.1f}s ago ({fps:.1f} FPS)")
+                
+                # Try to process the most recent measurement from each sensor
+                msg = self.sensor_buffer.get_latest_measurement(source)
+                if msg is not None and current_time - self.last_detection_time.get(source, 0) < 1.0:
+                    is_2d = source.endswith('_2d')  # Check if this is a 2D source
+                    
+                    # Skip transformation if already in reference frame
+                    if msg.header.frame_id == self.reference_frame:
+                        latest_data[source] = msg
+                    else:
+                        transformed = self.transform_point(msg, self.reference_frame, is_2d)
+                        if transformed:
+                            latest_data[source] = transformed
+            
+            # Log sensor status alongside fallback attempts
+            if sensor_status:
+                self.get_logger().info(f"Sensor timing: {', '.join(sensor_status)}")
+            else:
+                self.get_logger().info("No sensor data received yet")
+            
+            if latest_data:
+                self.get_logger().info(f"Processing latest data from {len(latest_data)} sensors")
+                measurements_processed = self.process_measurements(latest_data)
+                processed_measurements = measurements_processed > 0
+        
+        # If no measurements were processed, increase uncertainty
+        if not processed_measurements:
+            # If no measurements, increment covariance slightly to show increasing uncertainty
+            uncertainty_factor = 1.05
+            self.covariance[0:3, 0:3] *= uncertainty_factor
+            
+            # Log occasionally if we're going a long time without measurements
+            if current_time - self.last_filter_update_time > 5.0:
+                # Create a detailed sensor status string for debugging
+                sensor_details = []
+                for sensor in ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']:
+                    if self.sensor_counts.get(sensor, 0) > 0:  # Only include if we've received data
+                        time_since_last = current_time - self.last_detection_time.get(sensor, 0)
+                        fps = self.sensor_fps.get(sensor, 0.0)
+                        count = self.sensor_counts.get(sensor, 0)
+                        sensor_details.append(f"{sensor}: count={count}, {time_since_last:.1f}s ago, {fps:.1f} FPS")
+                
+                if sensor_details:
+                    self.get_logger().warn(
+                        f"No measurements processed for {current_time - self.last_filter_update_time:.1f} seconds. "
+                        f"Check if sensors are publishing data. Sensor details: {', '.join(sensor_details)}"
+                    )
+                else:
+                    self.get_logger().warn(
+                        f"No measurements processed for {current_time - self.last_filter_update_time:.1f} seconds. "
+                        f"No sensor data has been received."
+                    )
+        else:
+            # If measurements were processed, update the last update time
+            self.last_filter_update_time = current_time
+        
+        # Update timing
+        self.last_update_time = current_time
+        
+        # Calculate uncertainties
+        self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:3, 0:3]) / 3.0)
+        self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[3:6, 3:6]) / 3.0)
+        
+        # Update tracking reliability
         self.update_tracking_reliability()
         
-        # Gradually improve filter health during successful predictions
-        if hasattr(self, 'filter_health'):
-            self.filter_health = min(1.0, self.filter_health + 0.01)
+        # Store state in history
+        self.position_history.append(np.copy(self.state[0:3]))
+        self.velocity_history.append(np.copy(self.state[3:6]))
+        self.time_history.append(current_time)
         
-        if self.debug_level >= 2:
-            self.get_logger().debug(
-                f"Predicted: dt={dt:.3f}s, "
-                f"pos=({self.state[0]:.2f}, {self.state[1]:.2f}, {self.state[2]:.2f}) m, "
-                f"vel=({self.state[3]:.2f}, {self.state[4]:.2f}, {self.state[5]:.2f}) m/s"
-            )
-
-    def update_2d(self, msg, noise_level, source, confidence):
+        # Publish updated state
+        self.publish_state()
+        
+        # Record processing time for diagnostics
+        execution_time = (time.time() - update_start) * 1000  # milliseconds
+        self.processing_times.append(execution_time)
+    
+    def predict(self, dt):
         """
-        Update the filter with a 2D measurement (x,y only).
-        
-        This implements the update step of the Kalman filter for 2D measurements,
-        which corrects our predicted state based on new observations.
+        Predict the state forward in time.
         
         Args:
-            msg (PointStamped): 2D position measurement
-            noise_level (float): Base measurement noise level
-            source (str): Source of measurement (for logging)
-            confidence (float): Confidence value (0-1) to adjust noise
+            dt (float): Time step in seconds
         """
-        # Extract position from message
+        # Update state transition matrix F
+        self._F_matrix[0, 3] = dt  # x += vx*dt
+        self._F_matrix[1, 4] = dt  # y += vy*dt
+        self._F_matrix[2, 5] = dt  # z += vz*dt
+        
+        # Update process noise matrix Q
+        # Position noise grows with dt²
+        self._Q_matrix[0:3, 0:3] = np.eye(3) * self.process_noise_pos * dt**2
+        # Velocity noise grows with dt
+        self._Q_matrix[3:6, 3:6] = np.eye(3) * self.process_noise_vel * dt
+        
+        # Predict state: x = Fx
+        self.state = self._F_matrix @ self.state
+        
+        # Predict covariance: P = FPF' + Q
+        self.covariance = self._F_matrix @ self.covariance @ self._F_matrix.T + self._Q_matrix
+    
+    def process_measurements(self, measurements):
+        """
+        Process multiple measurements from different sensors.
+        
+        Args:
+            measurements (dict): Dictionary of {sensor_name: measurement}
+            
+        Returns:
+            int: Number of measurements successfully processed
+        """
+        if not measurements:
+            return 0
+            
+        processed_count = 0
+        
+        # Sort measurements to prioritize 3D sensors (more accurate)
+        # Process in this order: lidar, 3D vision sensors, 2D sensors
+        priority_order = ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']
+        
+        sorted_measurements = sorted(
+            measurements.items(),
+            key=lambda x: priority_order.index(x[0]) if x[0] in priority_order else 999
+        )
+        
+        for source, msg in sorted_measurements:
+            try:
+                success = False
+                
+                # Check if this is a 2D source
+                if source.endswith('_2d'):
+                    # For 2D measurements, use the confidence (z) to filter low confidence detections
+                    confidence = float(msg.point.z)
+                    if confidence >= self.min_confidence_threshold:
+                        success = self.update_2d(msg, source)
+                    else:
+                        self.get_logger().debug(f"Skipping low confidence {source} measurement: {confidence:.2f} < {self.min_confidence_threshold:.2f}")
+                else:
+                    # For 3D measurements, always process
+                    success = self.update_3d(msg, source)
+                
+                if success:
+                    processed_count += 1
+                    
+                    # If we get a successful update, update the consecutive updates counter
+                    self.consecutive_updates += 1
+                
+            except Exception as e:
+                self.log_error(f"Error processing {source} measurement: {str(e)}")
+        
+        # If no measurements were successfully processed, reset consecutive updates counter
+        if processed_count == 0 and self.consecutive_updates > 0:
+            self.consecutive_updates = 0
+            self.get_logger().debug("No measurements processed - resetting consecutive updates counter")
+        
+        return processed_count
+
+    def estimate_distance_from_bbox(self, bbox_width, bbox_height, source):
+        """
+        Estimate distance to the ball based on 2D bounding box size.
+        Uses a simple inverse relationship between distance and size.
+        
+        Args:
+            bbox_width (float): Width of the bounding box in pixels
+            bbox_height (float): Height of the bounding box in pixels
+            source (str): Source of the detection ('yolo_2d' or 'hsv_2d')
+            
+        Returns:
+            float: Estimated distance in meters
+            float: Confidence of the estimate (0.0-1.0)
+        """
+        # Use the area of the box (width * height) for better distance estimation
+        box_area = bbox_width * bbox_height
+        
+        # Adjust parameters based on the source
+        if source == 'yolo_2d':
+            # YOLO provides more reliable boxes, so we use better parameters
+            # These parameters would be calibrated for the actual system
+            scale_factor = 45000.0
+            min_distance = 0.3
+            max_distance = 8.0
+            min_box_area = 200  # Minimum reliable detection size
+        else:  # hsv_2d
+            # HSV detections might be less accurate
+            scale_factor = 35000.0
+            min_distance = 0.2
+            max_distance = 6.0
+            min_box_area = 300  # HSV may need larger detections to be reliable
+        
+        # Safety check for very small boxes (likely noise)
+        if box_area < min_box_area:
+            return max_distance, 0.1  # Low confidence for very small boxes
+        
+        # Calculate distance using inverse relationship with area
+        # Distance ∝ 1/√(area) for a spherical object like a ball
+        estimated_distance = scale_factor / box_area
+        
+        # Clamp distance to reasonable range
+        estimated_distance = max(min_distance, min(estimated_distance, max_distance))
+        
+        # Calculate confidence - higher for mid-range distances, lower for extremes
+        # This is because very close or very far estimations tend to be less reliable
+        if estimated_distance < 1.0:
+            confidence = 0.7 * (estimated_distance / 1.0)
+        elif estimated_distance > 5.0:
+            confidence = 0.7 * (1.0 - ((estimated_distance - 5.0) / 3.0))
+        else:
+            confidence = 0.7  # Maximum confidence for mid-range distances
+        
+        self.get_logger().debug(
+            f"Distance estimate from {source}: Box {bbox_width}x{bbox_height} (area={box_area}) "
+            f"-> distance={estimated_distance:.2f}m, confidence={confidence:.2f}"
+        )
+        
+        return estimated_distance, confidence
+
+    def update_2d(self, msg, source):
+        """
+        Update the filter with a 2D measurement (x,y and optional distance estimation).
+        
+        Args:
+            msg (PointStamped): The 2D measurement
+            source (str): Sensor source identifier ('yolo_2d' or 'hsv_2d')
+                
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        # Extract position and confidence
+        x_meas = float(msg.point.x)
+        y_meas = float(msg.point.y)
+        confidence = float(msg.point.z)
+        
+        # Check if we should attempt a 3D update with estimated distance
+        if self.use_bbox_distance_estimation and source in self.bbox_data:
+            try:
+                # Get the bounding box data
+                bbox_data = self.bbox_data[source]
+                bbox_width = bbox_data['width']
+                bbox_height = bbox_data['height']
+                bbox_timestamp = bbox_data['timestamp']
+                
+                # Check if the bounding box data is fresh enough (within 0.5 seconds)
+                current_time = time.time()
+                if current_time - bbox_timestamp < 0.5:
+                    # Get distance estimate
+                    distance, distance_confidence = self.estimate_distance_from_bbox(
+                        bbox_width, bbox_height, source
+                    )
+                    
+                    # If we have a reasonable distance estimate, do a full 3D update
+                    if distance_confidence > 0.2:  # Require minimum confidence in the distance
+                        # Create an estimated 3D position
+                        # Use simple projective geometry to estimate z from x,y and distance
+                        # This is a simplification - in a real scenario you'd use proper camera calibration
+                        
+                        # Estimate z position
+                        # For simplicity, we assume the ball is on the ground or at a fixed height
+                        # In reality, you might use more sophisticated projection methods
+                        z_meas = 0.3  # Default height (e.g., ball radius above ground)
+                        
+                        # Check if we can use current state's z as a starting point
+                        if self.initialized:
+                            # Mix current state's z with a small default value
+                            z_meas = 0.8 * self.state[2] + 0.2 * 0.3
+                        
+                        # Create measurement matrix for 3D update
+                        H = np.zeros((3, 6))
+                        H[0, 0] = 1.0  # x position
+                        H[1, 1] = 1.0  # y position
+                        H[2, 2] = 1.0  # z position
+                        
+                        # Measurement vector
+                        z = np.array([x_meas, y_meas, z_meas])
+                        
+                        # Expected measurement based on current state
+                        z_pred = H @ self.state
+                        
+                        # Innovation (measurement - prediction)
+                        innovation = z - z_pred
+                        
+                        # Get base noise level for this estimated 3D from 2D sensor
+                        base_noise = getattr(self, f"measurement_noise_{source}_est3d")
+                        
+                        # Adjust noise based on confidence and distance estimation uncertainty
+                        adjusted_noise_xy = base_noise * (1.0 + (1.0 - confidence))
+                        adjusted_noise_z = base_noise * 3.0  # Much higher noise for estimated z
+                        
+                        # Measurement noise matrix - different noise for xy vs z
+                        R = np.diag([adjusted_noise_xy, adjusted_noise_xy, adjusted_noise_z])
+                        
+                        # Innovation covariance
+                        S = H @ self.covariance @ H.T + R
+                        
+                        try:
+                            # Compute Mahalanobis distance for outlier detection
+                            S_inv = np.linalg.inv(S)
+                            mahalanobis_dist = math.sqrt(innovation.T @ S_inv @ innovation)
+                            
+                            # Store for diagnostics
+                            self.innovation_history.append(mahalanobis_dist)
+                            
+                            # More permissive threshold for 2D measurements with estimated distance
+                            initial_threshold = 25.0  # Very permissive initially
+                            min_threshold = 8.0       # Still more permissive than regular 3D
+                            
+                            # Adjust threshold based on consecutive updates
+                            decay_factor = max(0.1, min(1.0, 10.0 / (self.consecutive_updates + 1)))
+                            threshold = min_threshold + (initial_threshold - min_threshold) * decay_factor
+                            
+                            # Reject obvious outliers, but log for diagnostics
+                            if mahalanobis_dist > threshold:
+                                self.get_logger().info(
+                                    f"Rejecting {source} estimated 3D update: innovation distance {mahalanobis_dist:.2f} > threshold {threshold:.2f}. "
+                                    f"Confidence {confidence:.2f}, measurement [{x_meas:.2f}, {y_meas:.2f}, {z_meas:.2f}], "
+                                    f"distance estimate: {distance:.2f}m (confidence: {distance_confidence:.2f})"
+                                )
+                                # Fall back to regular 2D update
+                                return self._update_2d_only(msg, source, confidence)
+                                
+                            # Debug logging for accepted measurements
+                            self.get_logger().info(
+                                f"Accepting {source} estimated 3D update: innovation distance {mahalanobis_dist:.2f} < threshold {threshold:.2f}. "
+                                f"Confidence {confidence:.2f}, measurement [{x_meas:.2f}, {y_meas:.2f}, {z_meas:.2f}], "
+                                f"distance estimate: {distance:.2f}m (confidence: {distance_confidence:.2f})"
+                            )
+                            
+                            # Kalman gain
+                            K = self.covariance @ H.T @ S_inv
+                            
+                            # Update state
+                            self.state = self.state + K @ innovation
+                            
+                            # Update covariance (Joseph form for better numerical stability)
+                            I = np.eye(6)
+                            self.covariance = (I - K @ H) @ self.covariance @ (I - K @ H).T + K @ R @ K.T
+                            
+                            # Update sensor reliability
+                            reliability_factor = 1.0 - min(1.0, mahalanobis_dist / threshold)
+                            # Scale by distance confidence
+                            reliability_factor *= distance_confidence
+                            self.sensor_reliability[source] = 0.9 * self.sensor_reliability[source] + 0.1 * reliability_factor
+                            
+                            return True
+                            
+                        except np.linalg.LinAlgError as e:
+                            self.log_error(f"Matrix inversion error in update_2d 3D estimation mode for {source}: {str(e)}")
+                            # Fall back to regular 2D update
+                            return self._update_2d_only(msg, source, confidence)
+                else:
+                    # Bounding box data is too old
+                    if self.debug_level >= 2:
+                        self.get_logger().debug(
+                            f"Bounding box data for {source} is too old: {current_time - bbox_timestamp:.2f}s > 0.5s. Using 2D-only update."
+                        )
+                    return self._update_2d_only(msg, source, confidence)
+                    
+            except Exception as e:
+                self.log_error(f"Error in 3D estimation from {source} 2D data: {str(e)}")
+                # Fall back to regular 2D update
+                return self._update_2d_only(msg, source, confidence)
+        
+        # Default case: use 2D-only update
+        return self._update_2d_only(msg, source, confidence)
+
+    def _update_2d_only(self, msg, source, confidence):
+        """
+        Original 2D update method (xy only).
+        
+        Args:
+            msg (PointStamped): The 2D measurement
+            source (str): Sensor source identifier
+            confidence (float): Detection confidence
+                
+        Returns:
+            bool: True if update was successful, False otherwise
+        """
+        # Extract position
         x_meas = float(msg.point.x)
         y_meas = float(msg.point.y)
         
         # For 2D, we only measure x and y position
-        # Measurement model H maps state to expected measurement
         H = np.zeros((2, 6))
         H[0, 0] = 1.0  # x position
         H[1, 1] = 1.0  # y position
         
-        # Measurement vector (what we actually observed)
+        # Measurement vector
         z = np.array([x_meas, y_meas])
         
         # Expected measurement based on current state
-        expected_z = H @ self.state
+        z_pred = H @ self.state
         
-        # Innovation (difference between observation and prediction)
-        innovation = z - expected_z
+        # Innovation (measurement - prediction)
+        innovation = z - z_pred
         
-        # Scale noise by inverse of confidence (higher confidence = lower noise)
-        adjusted_noise = noise_level / (confidence + 0.1)
+        # Get base noise level for this sensor
+        base_noise = getattr(self, f"measurement_noise_{source}")
         
-        # Measurement noise covariance matrix
+        # Adjust noise based on confidence (higher confidence = lower noise)
+        adjusted_noise = base_noise * (1.0 + (1.0 - confidence))
+        
+        # Measurement noise matrix
         R = np.eye(2) * adjusted_noise
         
-        # Innovation covariance (uncertainty in the innovation)
+        # Innovation covariance
         S = H @ self.covariance @ H.T + R
         
-        # Check if innovation is reasonable using Mahalanobis distance        
-        # This measures how many standard deviations away the measurement is
         try:
+            # Compute Mahalanobis distance for outlier detection
             S_inv = np.linalg.inv(S)
-            innovation_magnitude = np.sqrt(innovation.T @ S_inv @ innovation)
+            mahalanobis_dist = math.sqrt(innovation.T @ S_inv @ innovation)
+            
             # Store for diagnostics
-            self.innovation_history.append(innovation_magnitude)
-            # Skip updates that are too far from prediction (outliers)
-            if innovation_magnitude > 10.0:
-                self.log_error(
-                    f"Rejecting {source} update - too far from prediction "
-                    f"({innovation_magnitude:.2f} sigma)",
-                    True  # This is a warning, not a critical error
+            self.innovation_history.append(mahalanobis_dist)
+            
+            # More permissive threshold for 2D measurements (they're less precise)
+            initial_threshold = 20.0  # Very permissive at first for 2D
+            min_threshold = 5.0       # Still more permissive than 3D after convergence
+            
+            # Adjust threshold based on consecutive updates
+            decay_factor = max(0.1, min(1.0, 10.0 / (self.consecutive_updates + 1)))
+            threshold = min_threshold + (initial_threshold - min_threshold) * decay_factor
+            
+            # Reject obvious outliers, but log for diagnostics
+            if mahalanobis_dist > threshold:
+                self.get_logger().info(
+                    f"Rejecting {source} 2D update: innovation distance {mahalanobis_dist:.2f} > threshold {threshold:.2f}. "
+                    f"Confidence {confidence:.2f}, measurement [{x_meas:.2f}, {y_meas:.2f}]"
                 )
-                return
-        except np.linalg.LinAlgError:
-            self.get_logger().error(f"Error computing innovation covariance inverse for {source}")
-            return
-        
-        # Kalman gain (how much to trust this measurement vs. our prediction)
-        K = self.covariance @ H.T @ S_inv
-        
-        # Update state: x = x + K*y
-        self.state = self.state + K @ innovation
-        
-        # Update covariance: P = (I - K*H)*P
-        I = np.eye(6)
-        self.covariance = (I - K @ H) @ self.covariance
-        
-        # Update tracking reliability
-        self.consecutive_updates += 1
-        self.update_tracking_reliability()
-        
-        # Update tracking health after successful update
-        if hasattr(self, 'tracking_health'):
-            self.tracking_health = min(1.0, self.tracking_health + 0.02)
-        
-        if self.debug_level >= 2:
-            self.get_logger().debug(
-                f"Updated with {source} 2D: "
-                f"measured=({x_meas:.2f}, {y_meas:.2f}), "
-                f"innovation=({innovation[0]:.2f}, {innovation[1]:.2f}), "
-                f"magnitude={innovation_magnitude:.2f}"
+                return False
+                
+            # Debug logging for accepted measurements
+            self.get_logger().info(
+                f"Accepting {source} 2D update: innovation distance {mahalanobis_dist:.2f} < threshold {threshold:.2f}. "
+                f"Confidence {confidence:.2f}, measurement [{x_meas:.2f}, {y_meas:.2f}]"
             )
+            
+            # Kalman gain
+            K = self.covariance @ H.T @ S_inv
+            
+            # Update state
+            self.state = self.state + K @ innovation
+            
+            # Update covariance (Joseph form for better numerical stability)
+            I = np.eye(6)
+            self.covariance = (I - K @ H) @ self.covariance @ (I - K @ H).T + K @ R @ K.T
+            
+            # Update sensor reliability
+            reliability_factor = 1.0 - min(1.0, mahalanobis_dist / threshold)
+            self.sensor_reliability[source] = 0.9 * self.sensor_reliability[source] + 0.1 * reliability_factor
+            
+            return True
+            
+        except np.linalg.LinAlgError as e:
+            self.log_error(f"Matrix inversion error in _update_2d_only for {source}: {str(e)}")
+            return False
 
-    def adjust_sensor_noise(self, source, position):
+    def update_3d(self, msg, source):
         """
-        Dynamically adjust sensor noise based on position and source.
+        Update the filter with a 3D measurement.
         
         Args:
-            source (str): Sensor source ('lidar', 'hsv_3d', etc.)
-            position (numpy.ndarray): 3D position measurement
-        
+            msg (PointStamped): The 3D measurement
+            source (str): Sensor source identifier
+            
         Returns:
-            float: Adjusted noise level
+            bool: True if update was successful, False otherwise
         """
-        base_noise = getattr(self, f"base_measurement_noise_{source}")
-        
-        # For LIDAR, apply special distance-based adjustment
-        if source == 'lidar':
-            # Calculate distance from sensor origin
-            distance = np.sqrt(position[0]**2 + position[1]**2)
-            # Apply distance-based adjustment for ground-level tennis ball    
-            if distance < 0.5:  # <0.5m - very unreliable (beam passes over ball)
-                return base_noise * 10.0  # Essentially ignore LIDAR at very close range
-            elif distance < 1.0:  # 0.5-1.0m - becoming reliable
-                # Linear transition from very unreliable to moderately reliable
-                reliability_factor = (distance - 0.5) / 0.5  # 0 at 0.5m, 1 at 1.0m
-                return base_noise * (10.0 - reliability_factor * 7.0)
-            elif distance < 3.0:  # 1.0-3.0m - optimal range
-                # Peak reliability in mid-range
-                reliability_factor = 1.0 - ((distance - 1.0) / 2.0)  # 1 at 1.0m, 0 at 3.0m
-                return base_noise * (0.5 + 0.5 * (1.0 - reliability_factor))
-            else:  # >3.0m - decreasing reliability
-                return base_noise * (1.0 + 0.5 * (distance - 3.0))
-        
-        # For depth camera, adjust based on known performance characteristics
-        elif source.endswith('_3d'):
-            distance = np.sqrt(position[0]**2 + position[1]**2)
-            # Most depth cameras work well at close-to-medium ranges
-            if distance < 1.0:  # <1m - highly reliable
-                return base_noise * 0.7
-            elif distance < 3.0:  # 1-3m - still reliable
-                return base_noise * (0.7 + 0.3 * (distance - 1.0) / 2.0)
-            else:  # >3m - decreasing reliability
-                return base_noise * (1.0 + 0.5 * (distance - 3.0))
-        
-        # Return base noise for other sources
-        return base_noise
-
-    def update_3d(self, msg, noise_level, source):
-        """
-        Update the filter with a 3D measurement, applying ground constraints for tennis ball.
-        
-        Args:
-            msg (PointStamped): 3D position measurement
-            noise_level (float): Measurement noise level
-            source (str): Source of measurement ('lidar', 'hsv_3d', etc.)
-        """
-        # Extract position from message
+        # Extract position
         x_meas = float(msg.point.x)
         y_meas = float(msg.point.y)
         z_meas = float(msg.point.z)
         
-        # Apply ground constraint in ground tracking mode
-        if self.ground_tracking_mode:
-            z_meas = self.ball_ground_height
-        
-        # Get dynamically adjusted noise
-        position = np.array([x_meas, y_meas, z_meas])
-        adjusted_noise = self.adjust_sensor_noise(source, position)
-        
         # For 3D, we measure x, y, and z position
-        # Measurement model H maps state to expected measurement
         H = np.zeros((3, 6))
         H[0, 0] = 1.0  # x position
         H[1, 1] = 1.0  # y position
         H[2, 2] = 1.0  # z position
         
-        # Measurement vector (what we actually observed)
+        # Measurement vector
         z = np.array([x_meas, y_meas, z_meas])
         
         # Expected measurement based on current state
-        expected_z = H @ self.state
+        z_pred = H @ self.state
         
-        # Innovation (difference between observation and prediction)
-        innovation = z - expected_z
+        # Innovation (measurement - prediction)
+        innovation = z - z_pred
         
-        # Create custom noise matrix with stronger Z constraint in ground tracking mode
+        # Get base noise for this sensor
+        base_noise = getattr(self, f"measurement_noise_{source}")
+        
+        # Adjust noise based on distance and sensor characteristics
+        adjusted_noise = self.adjust_measurement_noise(source, z, base_noise)
+        
+        # Measurement noise matrix
         R = np.eye(3) * adjusted_noise
-        if self.ground_tracking_mode:
-            # Much lower uncertainty in Z (we know it's on the ground)
-            R[2, 2] = adjusted_noise * 0.1
         
-        # If this is LIDAR data, increase the Z component noise due to 2D LIDAR limitations
-        if source == 'lidar':
-            R[2, 2] *= self.lidar_z_noise_factor  # Apply higher uncertainty to Z component
-        
-        # Calculate innovation covariance (uncertainty in the innovation)
+        # Innovation covariance
         S = H @ self.covariance @ H.T + R
         
-        # Robust Mahalanobis distance computation
         try:
-            # Check if S is positive definite and condition number is reasonable
-            S_eigenvals = np.linalg.eigvalsh(S)
-            min_eigenval = np.min(S_eigenvals)
-            condition_number = np.max(S_eigenvals) / max(min_eigenval, 1e-10)
-            if min_eigenval <= 0 or condition_number > 1e6:
-                # If poorly conditioned, regularize the matrix
-                self.get_logger().warn(
-                    f"Regularizing innovation covariance matrix: "
-                    f"min_eig={min_eigenval:.2e}, condition={condition_number:.2e}"
-                )
-                # Add small value to diagonal for regularization
-                S_reg = S + np.eye(S.shape[0]) * (abs(min_eigenval) + 1e-6)
-                S_inv = np.linalg.inv(S_reg)
-            else:
-                # Matrix is well-conditioned, proceed normally
-                S_inv = np.linalg.inv(S)
-            # Compute Mahalanobis distance (how many standard deviations the measurement is from prediction)
-            innovation_magnitude = np.sqrt(innovation.T @ S_inv @ innovation)
+            # Compute Mahalanobis distance for outlier detection
+            S_inv = np.linalg.inv(S)
+            mahalanobis_dist = math.sqrt(innovation.T @ S_inv @ innovation)
+            
             # Store for diagnostics
-            self.innovation_history.append(innovation_magnitude)
-            # Adaptive rejection threshold based on moving average of past innovations
-            if len(self.innovation_history) > 3:
-                recent_innovations = list(self.innovation_history)[-10:]
-                mean_innovation = np.mean(recent_innovations)
-                std_innovation = np.std(recent_innovations) + 1e-6  # Avoid division by zero
-                # Set threshold to mean + 3*std, but at least 3.0 and at most 10.0
+            self.innovation_history.append(mahalanobis_dist)
+            
+            # Use a more permissive threshold initially, then tighten as we get more data
+            initial_threshold = 15.0  # Very permissive at first
+            min_threshold = 3.0      # Minimum threshold after convergence
+            
+            # Adaptively adjust rejection threshold based on recent history and filter health
+            if len(self.innovation_history) > 5:
+                mean_innovation = np.mean(list(self.innovation_history)[-10:])
+                std_innovation = max(np.std(list(self.innovation_history)[-10:]), 0.1)
                 adaptive_threshold = mean_innovation + 3.0 * std_innovation
-                adaptive_threshold = max(3.0, min(10.0, adaptive_threshold))
-            else:
-                # Use fixed threshold for first few measurements
-                adaptive_threshold = 5.0
-            # Update sensor reliability based on innovation
-            reliability_factor = max(0.0, 1.0 - (innovation_magnitude / adaptive_threshold))
-            self.sensor_reliability[source] = 0.9 * self.sensor_reliability[source] + 0.1 * reliability_factor
-            # Skip updates that are too far from prediction (outliers)
-            if innovation_magnitude > adaptive_threshold:
-                self.log_error(
-                    f"Rejecting {source} update - too far from prediction: "
-                    f"{innovation_magnitude:.2f} sigma (threshold: {adaptive_threshold:.2f})",
-                    True
-                )
-                return
-            # Log when we're close to threshold
-            elif innovation_magnitude > adaptive_threshold * 0.8:
-                self.get_logger().warn(
-                    f"High innovation for {source}: {innovation_magnitude:.2f} sigma "
-                    f"(threshold: {adaptive_threshold:.2f})"
-                )
                 
+                # Cap threshold between min and initial values
+                threshold = max(min_threshold, min(adaptive_threshold, initial_threshold))
+                
+                # Decrease threshold as we get more consecutive updates
+                decay_factor = max(0.1, min(1.0, 10.0 / (self.consecutive_updates + 1)))
+                threshold = min_threshold + (threshold - min_threshold) * decay_factor
+            else:
+                threshold = initial_threshold  # Default threshold
+            
+            # Reject outliers, but log for diagnostics
+            if mahalanobis_dist > threshold:
+                self.get_logger().info(
+                    f"Rejecting {source} update: innovation distance {mahalanobis_dist:.2f} > threshold {threshold:.2f}. "
+                    f"Measurement {z}, prediction {z_pred}, distance={np.linalg.norm(innovation):.2f}m"
+                )
+                return False
+                
+            # Debug logging for accepted measurements
+            self.get_logger().info(
+                f"Accepting {source} update: innovation distance {mahalanobis_dist:.2f} < threshold {threshold:.2f}. "
+                f"Measurement [{x_meas:.2f}, {y_meas:.2f}, {z_meas:.2f}]"
+            )
+            
+            # Kalman gain
+            K = self.covariance @ H.T @ S_inv
+            
+            # Update state
+            self.state = self.state + K @ innovation
+            
+            # Update covariance (Joseph form for better numerical stability)
+            I = np.eye(6)
+            self.covariance = (I - K @ H) @ self.covariance @ (I - K @ H).T + K @ R @ K.T
+            
+            # Ensure covariance remains positive definite
+            min_variance = 1e-6
+            for i in range(6):
+                if self.covariance[i, i] < min_variance:
+                    self.covariance[i, i] = min_variance
+            
+            # Update sensor reliability
+            reliability_factor = 1.0 - min(1.0, mahalanobis_dist / threshold)
+            self.sensor_reliability[source] = 0.9 * self.sensor_reliability[source] + 0.1 * reliability_factor
+            
+            return True
+            
         except np.linalg.LinAlgError as e:
-            self.get_logger().error(f"Error computing innovation covariance inverse for {source}: {str(e)}")
-            # Fall back to a simpler distance check in case of numerical issues
-            max_position_change = 0.5  # meters
-            if source.endswith('_3d') or source == 'lidar':
-                # Extract position from measurement
-                measured_position = z
-                # Compare with current position estimate
-                current_position = self.state[0:3]
-                position_change = np.linalg.norm(measured_position - current_position)
-                if position_change > max_position_change:
-                    self.get_logger().warn(
-                        f"Rejecting {source} update using fallback check: "
-                        f"position change {position_change:.2f}m > {max_position_change:.2f}m"
-                    )
-                    return
-            else:
-                # Can't do fallback check for 2D measurements
-                return
+            self.log_error(f"Matrix inversion error in update_3d for {source}: {str(e)}")
+            return False
+    
+    def adjust_measurement_noise(self, source, position, base_noise):
+        """
+        Dynamically adjust measurement noise based on position and sensor.
         
-        # Kalman gain (how much to trust this measurement vs. our prediction)
-        K = self.covariance @ H.T @ S_inv
+        Args:
+            source (str): Sensor source identifier
+            position (numpy.ndarray): 3D position measurement
+            base_noise (float): Base noise level for this sensor
+            
+        Returns:
+            float: Adjusted noise value
+        """
+        # Calculate distance from origin (typical sensor location)
+        distance = np.linalg.norm(position)
         
-        # Update state: x = x + K*y
-        updated_state = self.state + K @ innovation
+        # For LIDAR, adjust based on distance
+        if source == 'lidar':
+            if distance < 1.0:  # Too close
+                return base_noise * 2.0
+            elif distance < 3.0:  # Optimal range
+                return base_noise
+            else:  # Getting too far
+                return base_noise * (1.0 + 0.2 * (distance - 3.0))
         
-        # Add physical plausibility checks
-        # 1. Position constraints (limit to plausible arena size if specified)
-        arena_limit = 10.0  # Maximum distance in meters from origin
-        for i in range(3):  # x, y, z position
-            if abs(updated_state[i]) > arena_limit:
-                self.get_logger().warn(
-                    f"Position constraint violated: component {i} = {updated_state[i]:.2f}m, "
-                    f"clamping to {arena_limit}m"
-                )
-                updated_state[i] = np.sign(updated_state[i]) * arena_limit
-
-        # 2. Velocity constraints (limit to physically reasonable speeds)
-        max_velocity = 5.0  # Maximum velocity in m/s for tennis ball
-        velocity_magnitude = np.linalg.norm(updated_state[3:6])
-        if velocity_magnitude > max_velocity:
-            # Scale down velocity vector
-            scale_factor = max_velocity / velocity_magnitude
-            updated_state[3:6] = updated_state[3:6] * scale_factor
-            self.get_logger().debug(
-                f"Velocity constraint applied: {velocity_magnitude:.2f} m/s exceeds limit, "
-                f"scaling to {max_velocity:.2f} m/s"
-            )
-
-        # Apply validated state update
-        self.state = updated_state
+        # For depth cameras (3D vision)
+        elif source.endswith('_3d'):
+            if distance < 0.5:  # Too close
+                return base_noise * 3.0
+            elif distance < 2.0:  # Good range
+                return base_noise * 0.8
+            elif distance < 4.0:  # Decent range
+                return base_noise
+            else:  # Far range
+                return base_noise * (1.0 + 0.3 * (distance - 4.0))
         
-        # Update covariance: P = (I - K*H)*P
-        I = np.eye(6)
-        self.covariance = (I - K @ H) @ self.covariance
-        
-        # Ensure covariance stays positive definite (numerical stability)
-        # Add small epsilon to diagonal if needed
-        min_variance = 1e-6
-        for i in range(6):
-            if self.covariance[i, i] < min_variance:
-                self.covariance[i, i] = min_variance
-        
-        # Update tracking reliability
-        self.consecutive_updates += 1
-        self.update_tracking_reliability()
-        
-        # Update tracking health after successful update
-        if hasattr(self, 'tracking_health'):
-            self.tracking_health = min(1.0, self.tracking_health + 0.02)
-        
-        if self.debug_level >= 1:
-            self.get_logger().debug(
-                f"Updated with {source} 3D: "
-                f"measured=({x_meas:.2f}, {y_meas:.2f}, {z_meas:.2f}), "
-                f"inno_mag={innovation_magnitude:.2f}"
-            )
-
+        # Default case
+        return base_noise
+    
     def update_tracking_reliability(self):
-        """
-        Update metrics for tracking reliability.
-        
-        This calculates and updates metrics that help the state manager decide
-        when tracking is reliable versus when to search for the ball.
-        
-        Key metrics:
-        - Position uncertainty: How certain we are about the ball's position
-        - Velocity uncertainty: How certain we are about the ball's velocity
-        - Fresh sensor data: Whether we've seen recent measurements
-        - Consecutive updates: How many successful updates we've had
-        """
-        # Calculate position and velocity uncertainty from covariance matrix diagonal
-        # Taking the square root of the trace divided by dimension gives RMS uncertainty
-        self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:3, 0:3]) / 3.0)
-        self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[3:6, 3:6]) / 3.0)
-        
+        """Update tracking reliability metrics based on current state."""
         # Check if we have fresh data from enough sensors
-        current_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
+        current_time = time.time()
         
-        # Count number of sensors with recent data
-        fresh_sensors = 0
-        for sensor, last_seen in self.sensor_last_seen.items():
-            if (current_time - last_seen) < self.detection_timeout:
-                fresh_sensors += 1
+        # Count recent sensors by type
+        fresh_3d_sensors = 0
+        fresh_2d_sensors = 0
         
-        # Update sensor health based on fresh sensors
-        if hasattr(self, 'sensor_health'):
-            target_health = 0.3  # Base health
-            if fresh_sensors >= 3:
-                target_health = 1.0  # Excellent health with 3+ sensors
-            elif fresh_sensors == 2:
-                target_health = 0.8  # Good health with 2 sensors
-            elif fresh_sensors == 1:
-                target_health = 0.5  # Mediocre health with 1 sensor
-            # Move sensor_health toward target gradually
-            if self.sensor_health < target_health:
-                self.sensor_health = min(target_health, self.sensor_health + 0.05)
-            else:
-                self.sensor_health = max(target_health, self.sensor_health - 0.05)
+        for sensor, last_time in self.last_detection_time.items():
+            if (current_time - last_time) < self.detection_timeout:
+                if sensor.endswith('_2d'):
+                    fresh_2d_sensors += 1
+                else:
+                    fresh_3d_sensors += 1
         
-        # Determine if tracking is reliable based on multiple criteria
+        # Update sensor health based on fresh data
+        if fresh_3d_sensors >= 1:
+            # We have at least one 3D sensor - great!
+            target_health = 1.0
+        elif fresh_2d_sensors >= 1 and self.allow_tracking_with_2d_only:
+            # No 3D sensors but we have 2D sensors and allow 2D-only tracking
+            target_health = 0.6  # Lower health than with 3D sensors
+        else:
+            target_health = 0.0  # Poor health - no usable sensors
+        
+        # Smoothly adjust health
+        self.sensor_health = 0.9 * self.sensor_health + 0.1 * target_health
+        
+        # Update transform health based on success rate
+        if self.transform_checks > 0:
+            success_rate = self.transform_successes / self.transform_checks
+            self.transform_health = success_rate
+        
+        # Use more lenient uncertainty threshold initially, tightening over time
+        # Start with 3.0m threshold, decrease to position_uncertainty_threshold over time
+        time_since_init = current_time - self.last_update_time if self.last_update_time else 0
+        adaptive_threshold = self.position_uncertainty_threshold + 2.5 * math.exp(-time_since_init / 30.0)
+        
+        # Allow for increased uncertainty when using 2D-only data
+        if fresh_3d_sensors == 0 and fresh_2d_sensors > 0 and self.increased_uncertainty_mode:
+            # Increase the allowable uncertainty if we only have 2D data
+            adaptive_threshold *= 1.5
+            self.get_logger().debug(f"2D-only mode: increasing allowable uncertainty to {adaptive_threshold:.2f}m")
+        
+        # Determine reliability based on uncertainty and available sensors
         self.tracking_reliable = (
-            # Position uncertainty is below threshold
-            self.position_uncertainty < self.position_uncertainty_threshold and
-            # Velocity uncertainty is below threshold
-            self.velocity_uncertainty < self.velocity_uncertainty_threshold and
-            # At least two sensors with recent data
-            fresh_sensors >= 2 and
-            # At least three consecutive successful updates
-            self.consecutive_updates >= 3
+            self.position_uncertainty < adaptive_threshold and
+            self.velocity_uncertainty < self.velocity_uncertainty_threshold * 2.0 and  # More lenient velocity threshold
+            ((fresh_3d_sensors >= 1) or                                               # Either have 3D sensors
+             (fresh_2d_sensors >= 1 and self.allow_tracking_with_2d_only)) and        # Or have 2D sensors and allow 2D-only
+            self.consecutive_updates >= 1  # Only need one consecutive update
         )
         
-        # Reset consecutive updates if tracking becomes unreliable after being reliable
-        if not self.tracking_reliable and self.consecutive_updates > 10:
-            self.consecutive_updates = 0
-            self.get_logger().info("Tracking reliability lost - resetting consecutive update counter")
-
-    def publish_state(self, timestamp=None):
-        """
-        Publish the current state estimate for the PID controller.
-        
-        Args:
-            timestamp (Time, optional): Timestamp to use for the message.
-                If None, current time will be used.
-        """
-        # Use current time if no timestamp provided
-        if timestamp is None:
-            timestamp = TimeUtils.now_as_ros_time()  # Use TimeUtils instead of self.get_clock().now().to_msg()
-        
-        # Create and publish position message    
-        pos_msg = PointStamped()
-        pos_msg.header.stamp = timestamp
-        pos_msg.header.frame_id = "map"  # Assuming map frame for global coordinates
-        pos_msg.point.x = float(self.state[0])
-        pos_msg.point.y = float(self.state[1])
-        pos_msg.point.z = float(self.state[2])
-        
-        self.position_publisher.publish(pos_msg)
-        
-        # Create and publish velocity message (useful for PID)
-        vel_msg = TwistStamped()
-        vel_msg.header.stamp = timestamp
-        vel_msg.header.frame_id = "map"
-        
-        vel_msg.twist.linear.x = float(self.state[3])
-        vel_msg.twist.linear.y = float(self.state[4])
-        vel_msg.twist.linear.z = float(self.state[5])
-        
-        self.velocity_publisher.publish(vel_msg)
-        
-        # Publish position uncertainty
-        uncertainty_msg = Float32()
-        uncertainty_msg.data = float(self.position_uncertainty)
-        self.uncertainty_publisher.publish(uncertainty_msg)
-
-    def publish_status(self):
-        """
-        Publish a quick status update (high frequency) for state management.
-        
-        This is called frequently (10Hz) to provide the state management node
-        with the current tracking status.
-        """
-        if not self.initialized:
-            return
-        
-        # Publish tracking status
-        status_msg = Bool()
-        status_msg.data = self.tracking_reliable
-        self.tracking_status_publisher.publish(status_msg)
-
-    def publish_diagnostics(self):
-        """
-        Publish comprehensive diagnostic information about filter performance
-        and tracking reliability.
-        
-        This is called periodically (1Hz) to provide detailed diagnostic information
-        about the filter's performance and current state.
-        """
-        if not self.initialized:
-            self.get_logger().info("Kalman filter not yet initialized")
-            return
-            
-        # Calculate time since last update from each sensor
-        current_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
-        sensor_ages = {}
-        for sensor, last_seen in self.sensor_last_seen.items():
-            if last_seen > 0:
-                sensor_ages[sensor] = current_time - last_seen
-            else:
-                sensor_ages[sensor] = float('inf')
-        
-        # Calculate velocity magnitude
-        vel_mag = math.sqrt(self.state[3]**2 + self.state[4]**2 + self.state[5]**2)
-        
-        # Log diagnostic information
-        self.get_logger().info("=== Kalman Filter Diagnostics ===")
-        self.get_logger().info(f"Position: ({self.state[0]:.2f}, {self.state[1]:.2f}, {self.state[2]:.2f}) m")
-        self.get_logger().info(
-            f"Velocity: ({self.state[3]:.2f}, {self.state[4]:.2f}, {self.state[5]:.2f}) m/s, "
-            f"magnitude: {vel_mag:.2f} m/s"
-        )
-        self.get_logger().info(f"Position uncertainty: {self.position_uncertainty:.3f} m")
-        self.get_logger().info(f"Velocity uncertainty: {self.velocity_uncertainty:.3f} m/s")
-        self.get_logger().info(f"Tracking reliable: {self.tracking_reliable}")
-        self.get_logger().info(f"Consecutive updates: {self.consecutive_updates}")
-        # Sensor update counts
-        self.get_logger().info("Sensor updates:")
-        for sensor, count in self.sensor_counts.items():
-            self.get_logger().info(f"  - {sensor}: {count} updates, last seen {sensor_ages[sensor]:.1f}s ago")
-        # Check for sensor issues and log warnings
-        recent_sensors = sum(1 for age in sensor_ages.values() if age < 1.0)
-        if recent_sensors < 2:
-            self.get_logger().warning(
-                f"Only {recent_sensors} sensor(s) with recent data - tracking may be unreliable"
-            )
-        
-        # Calculate update rate
-        elapsed = current_time - self.start_time
-        rate = self.updates_processed / elapsed if elapsed > 0 else 0
-        avg_processing = np.mean(self.processing_times) if self.processing_times else 0
-        
-        self.get_logger().info(f"Update rate: {rate:.1f} Hz, Avg processing time: {avg_processing:.1f} ms")
-        
-        # Publish structured diagnostics for state manager as a JSON string for parsing
-        diag_data = {
-            "timestamp": current_time,
-            "position": {
-                "x": float(self.state[0]),
-                "y": float(self.state[1]),
-                "z": float(self.state[2]),
-                "uncertainty": float(self.position_uncertainty)
-            },
-            "velocity": {
-                "x": float(self.state[3]),
-                "y": float(self.state[4]),
-                "z": float(self.state[5]),
-                "magnitude": float(vel_mag),
-                "uncertainty": float(self.velocity_uncertainty)
-            },
-            "tracking": {
-                "reliable": bool(self.tracking_reliable),
-                "consecutive_updates": int(self.consecutive_updates)
-            },
-            "sensors": {
-                sensor: {
-                    "count": int(count),
-                    "age": float(sensor_ages[sensor])
-                } for sensor, count in self.sensor_counts.items()
-            },
-            "performance": {
-                "update_rate": float(rate),
-                "avg_processing_time_ms": float(avg_processing)
-            },
-            # NEW: Add transform statistics
-            "transforms": {
-                "success_count": self.transforms_successful,
-                "fail_count": self.transforms_failed,
-                "available": self.transform_available
-            }
-        }
-        
-        diag_msg = String()
-        diag_msg.data = json.dumps(diag_data)
-        self.diagnostics_publisher.publish(diag_msg)
-        
-        # Publish enhanced system-wide diagnostics
-        self.publish_system_diagnostics(diag_data, sensor_ages, recent_sensors)
-
-    def publish_system_diagnostics(self, diag_data, sensor_ages, recent_sensors):
-        """Publish enhanced diagnostics for the system-wide diagnostics node"""
-        # Get system resource information
-        try:
-            import psutil
-            cpu_percent = psutil.cpu_percent(interval=None)
-            mem_percent = psutil.virtual_memory().percent
-            
-            # Get temperature if available (especially on Raspberry Pi)
-            temp = None
-            if hasattr(psutil, "sensors_temperatures") and callable(getattr(psutil, "sensors_temperatures")):
-                temps = psutil.sensors_temperatures()
-                if temps and 'cpu_thermal' in temps:
-                    temp = temps['cpu_thermal'][0].current
-                elif temps and 'coretemp' in temps:
-                    temp = temps['coretemp'][0].current
-        except ImportError:
-            cpu_percent = None
-            mem_percent = None
-            temp = None
-        
-        # Identify any errors or warnings
-        errors = []
-        warnings = []
-        
-        # Check for sensor issues
-        if recent_sensors < 2:
-            warnings.append(f"Only {recent_sensors} sensor(s) with recent data - tracking may be unreliable")
-        
-        # Check for high uncertainties
-        if self.position_uncertainty > self.position_uncertainty_threshold * 2:
-            warnings.append(f"Very high position uncertainty: {self.position_uncertainty:.3f}m")
-        
-        # Check for sensor timeouts
-        for sensor, age in sensor_ages.items():
-            if age > self.detection_timeout * 2:
-                warnings.append(f"Sensor {sensor} not seen for {age:.1f}s")
-        
-        # Calculate innovation statistics if available
-        innovation_stats = {}
-        if hasattr(self, 'innovation_history') and self.innovation_history:
-            innovations = list(self.innovation_history)
-            innovation_stats = {
-                "mean": float(np.mean(innovations)),
-                "max": float(np.max(innovations)),
-                "latest": float(innovations[-1]) if innovations else 0.0
-            }
-            
-            # Check for consistently high innovations (could indicate model problems)
-            if innovation_stats["mean"] > 2.0:
-                warnings.append(f"High average innovation: {innovation_stats['mean']:.2f} sigma")
-        
-        # Add any tracked errors and warnings
-        current_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
-        for error in self.errors:
-            if current_time - error["timestamp"] < 300:  # Last 5 minutes
-                errors.append(error["message"])
-        for warning in self.warnings:
-            if current_time - warning["timestamp"] < 300:  # Last 5 minutes
-                warnings.append(warning["message"])
-        
-        # Health recovery over time (errors become less relevant)
-        time_since_last_error = current_time - self.last_error_time
-        if time_since_last_error > 30.0:  # After 30 seconds with no errors
-            self.filter_health = min(1.0, self.filter_health + 0.05)  # Gradually recover
-        
-        # Calculate overall health (weighted average)
-        overall_health = (
-            self.filter_health * 0.4 +
-            self.tracking_health * 0.4 +
-            self.sensor_health * 0.2
-        )
-        
-        # Determine status based on overall health and tracking
-        status = "active" if self.tracking_reliable else "searching"
-        if errors:
-            status = "error"
-        elif warnings:
-            status = "warning"
-        
-        # Format diagnostics message to match expected structure
-        system_diag_data = {
-            "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time()
-            "node": "fusion",
-            "uptime_seconds": TimeUtils.now_as_float() - self.start_time,  # Use TimeUtils instead of time.time()
-            "status": status,
-            "health": {
-                "filter_health": float(self.filter_health),
-                "tracking_health": float(self.tracking_health),
-                "sensor_health": float(self.sensor_health),
-                "overall": float(overall_health)
-            },
-            "tracking": {
-                "reliable": bool(self.tracking_reliable),
-                "consecutive_updates": int(self.consecutive_updates),
-                "position": {
-                    "x": float(self.state[0]),
-                    "y": float(self.state[1]),
-                    "z": float(self.state[2]),
-                    "uncertainty": float(self.position_uncertainty)
-                },
-                "velocity": {
-                    "x": float(self.state[3]),
-                    "y": float(self.state[4]),
-                    "z": float(self.state[5]),
-                    "uncertainty": float(self.velocity_uncertainty),
-                    "magnitude": float(np.linalg.norm(self.state[3:6]))
-                }
-            },
-            "sensors": {
-                sensor: {
-                    "online": age < self.detection_timeout,
-                    "count": int(self.sensor_counts[sensor]),
-                    "age_seconds": float(age)
-                } for sensor, age in sensor_ages.items()
-            },
-            "metrics": {
-                "update_rate_hz": float(diag_data["performance"]["update_rate"]),
-                "processing_time_ms": float(diag_data["performance"]["avg_processing_time_ms"]),
-                "recent_sensors": int(recent_sensors),
-                "innovation": innovation_stats
-            },
-            "resources": {
-                "cpu_percent": getattr(self.resource_monitor, 'cpu_percent', 0),
-                "memory_percent": getattr(self.resource_monitor, 'mem_percent', 0),
-                "temperature": getattr(self.resource_monitor, 'temperature', 0)
-            },
-            "transforms": {
-                "successful": self.transforms_successful,
-                "failed": self.transforms_failed,
-                "available": self.transform_available,
-                "cache_stats": {
-                    "hits": self.transform_cache_stats['hits'],
-                    "misses": self.transform_cache_stats['misses']
-                }
-            },
-            "errors": errors,
-            "warnings": warnings
-        }
-        
-        # Publish to system-wide diagnostics
-        system_diag_msg = String()
-        system_diag_msg.data = json.dumps(system_diag_data)
-        self.system_diagnostics_publisher.publish(system_diag_msg)
-        
-        # Log a summary to console
-        self.get_logger().info(
-            f"Fusion status: {status}, Health: {overall_health:.2f}, "
-            f"Tracking: {self.tracking_reliable}, "
-            f"Sensors: {recent_sensors}/5"
-        )
-
-    def log_filter_state(self):
-        """
-        Log detailed information about the current filter state.
-        
-        This provides a snapshot of the current state and uncertainty,
-        which is useful for debugging and understanding the filter's behavior.
-        """
-        self.get_logger().debug("--- Kalman Filter State ---")
-        self.get_logger().debug(f"Position: ({self.state[0]:.3f}, {self.state[1]:.3f}, {self.state[2]:.3f}) m")
-        self.get_logger().debug(f"Velocity: ({self.state[3]:.3f}, {self.state[4]:.3f}, {self.state[5]:.3f}) m/s")
-        # Calculate and log standard deviations for each state variable
-        pos_std = [math.sqrt(self.covariance[i,i]) for i in range(3)]
-        vel_std = [math.sqrt(self.covariance[i+3,i+3]) for i in range(3)]
-        self.get_logger().debug(
-            f"Position std dev: ({pos_std[0]:.3f}, {pos_std[1]:.3f}, {pos_std[2]:.3f}) m"
-        )
-        self.get_logger().debug(
-            f"Velocity std dev: ({vel_std[0]:.3f}, {vel_std[1]:.3f}, {vel_std[2]:.3f}) m/s"
-        )
-        
-        # Log recent innovation magnitudes
-        if self.innovation_history:
-            recent_innovations = list(self.innovation_history)[-5:]
+        # Log adaptive thresholds occasionally
+        if self.debug_level >= 1 and current_time % 10 < 0.1:
             self.get_logger().debug(
-                f"Recent innovation magnitudes: {[f'{i:.2f}' for i in recent_innovations]}"
+                f"Adaptive threshold: position={adaptive_threshold:.2f}m, "
+                f"velocity={self.velocity_uncertainty_threshold * 2.0:.2f}m/s, "
+                f"3D sensors: {fresh_3d_sensors}, 2D sensors: {fresh_2d_sensors}"
             )
-
-    def log_to_file_csv(self, timestamp, source):
-        """
-        Log detailed state information to a CSV file.
-        
-        This provides data for offline analysis, visualizations, and debugging.
-        
-        Args:
-            timestamp (float): Current timestamp
-            source (str): Source of the update
-        """
-        if self.log_file:
-            try:
-                # Format: time,x,y,z,vx,vy,vz,pos_uncertainty,vel_uncertainty,source
-                self.log_file.write(
-                    f"{timestamp:.6f},"
-                    f"{self.state[0]:.6f},{self.state[1]:.6f},{self.state[2]:.6f},"
-                    f"{self.state[3]:.6f},{self.state[4]:.6f},{self.state[5]:.6f},"
-                    f"{self.position_uncertainty:.6f},{self.velocity_uncertainty:.6f},"
-                    f"{source}\n"
-                )
-                self.log_file.flush()  # Ensure data is written immediately
-            except Exception as e:
-                self.get_logger().error(f"Error writing to log file: {str(e)}")
-
-    def _transform_point(self, point_msg, target_frame):
+    
+    def transform_point(self, point_msg, target_frame, is_2d=False):
         """
         Transform a point from its original frame to the target frame.
         
         Args:
-            point_msg (PointStamped): Point to transform
-            target_frame (str): Target frame ID
-        
+            point_msg (PointStamped): The point to transform
+            target_frame (str): Target coordinate frame
+            is_2d (bool): Whether this is a 2D point with confidence in z
+            
         Returns:
             PointStamped: Transformed point or None if transformation failed
         """
         if point_msg.header.frame_id == target_frame:
             return point_msg  # Already in the right frame
         
-        # Store frame key for caching
-        now = TimeUtils.now_as_float()
-        frame_key = f"{target_frame}_{point_msg.header.frame_id}"
-        
-        # Special handling for dynamic frames that might change frequently
-        is_dynamic_frame = False
-        dynamic_frames = ['base_link', 'odom', 'map']  # Add any frames that might move
-        if point_msg.header.frame_id in dynamic_frames or target_frame in dynamic_frames:
-            is_dynamic_frame = True
-            
-        # For dynamic transforms, use a shorter cache lifetime
-        dynamic_cache_lifetime = 0.05  # 50ms for dynamic frames
-        static_cache_lifetime = 0.5   # 500ms for static frames
-        effective_lifetime = dynamic_cache_lifetime if is_dynamic_frame else static_cache_lifetime
-        
-        # Check if we have this transform in cache and it's still valid
-        cache_valid = False
-        if hasattr(self, 'transform_cache') and frame_key in self.transform_cache:
-            cached_time, cached_transform = self.transform_cache[frame_key]
-            cache_valid = (now - cached_time < effective_lifetime)
-            # Use cached transform if valid
-            if cache_valid:
-                try:
-                    from tf2_geometry_msgs import do_transform_point
-                    transformed_point = do_transform_point(point_msg, cached_transform)
-                    self.transform_cache_stats['hits'] += 1
-                    return transformed_point
-                except Exception as e:
-                    self.get_logger().debug(f"Error using cached transform: {str(e)}")
-                    # Continue to fetch a new transform
-        
-        # Initialize cache and statistics if not already done
-        if not hasattr(self, 'transform_cache'):
-            self.transform_cache = {}
-            self.transform_cache_stats = {'hits': 0, 'misses': 0}
-        
         try:
-            # Wait for transform to be available with shorter timeout now that we've
-            # already waited during initialization
-            when = rclpy.time.Time()
-            self.tf_buffer.can_transform(
-                target_frame,
-                point_msg.header.frame_id,
-                when,
-                timeout=rclpy.duration.Duration(seconds=0.05)  # Shorter timeout for runtime checks
-            )
+            # For 2D points, save the confidence value before transform
+            confidence = None
+            if is_2d:
+                confidence = point_msg.point.z
             
-            # Transform the point
-            from geometry_msgs.msg import TransformStamped
-            from tf2_geometry_msgs import do_transform_point
-            
-            # Try to use the message timestamp for more accurate transforms
-            when = point_msg.header.stamp
-            
-            # If the timestamp is in the future or too old, use current time instead
-            current_ros_time = self.get_clock().now()
-            if not TimeUtils.is_timestamp_valid(when) or \
-               (hasattr(when, 'nanosecs') and hasattr(current_ros_time, 'nanoseconds') and \
-                when.nanosecs > current_ros_time.nanoseconds):
-                when = current_ros_time
-            
+            # Get the transform
             transform = self.tf_buffer.lookup_transform(
                 target_frame,
                 point_msg.header.frame_id,
-                when
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.1)
             )
             
-            # Cache it with the appropriate lifetime
-            self.transform_cache[frame_key] = (now, transform)
-            
-            # Count cache hit/miss for diagnostics
-            if not cache_valid:
-                self.transform_cache_stats['misses'] += 1
-            
+            # Apply the transform
             transformed_point = do_transform_point(point_msg, transform)
+            
+            # Restore confidence value for 2D points
+            if is_2d and confidence is not None:
+                transformed_point.point.z = confidence
+            
+            # Debug logging (only log occasionally to avoid flooding)
+            if self.sensor_counts.get(point_msg.header.frame_id, 0) % 10 == 0:  # Log every 10th message
+                self.get_logger().info(
+                    f"Transform successful: {point_msg.header.frame_id}→{target_frame}: "
+                    f"({point_msg.point.x:.2f},{point_msg.point.y:.2f},{point_msg.point.z:.2f}) → "
+                    f"({transformed_point.point.x:.2f},{transformed_point.point.y:.2f},{transformed_point.point.z:.2f})"
+                    f"{' (preserving confidence)' if is_2d else ''}"
+                )
+            
             return transformed_point
             
         except Exception as e:
-            self.get_logger().warn(
-                f"Failed to transform from {point_msg.header.frame_id} to {target_frame}: {str(e)}"
-            )
-            
-            # NEW: Try the reverse direction as a fallback
-            try:
-                self.get_logger().info(f"Attempting reverse transform as fallback...")
-                # Try reverse transform (might work in some cases)
-                transform = self.tf_buffer.lookup_transform(
-                    point_msg.header.frame_id,
-                    target_frame,
-                    when
-                )
-                
-                # Invert the transform
-                from tf2_ros import TransformStamped
-                inverted_transform = TransformStamped()
-                inverted_transform.header = transform.header
-                inverted_transform.header.frame_id = transform.child_frame_id
-                inverted_transform.child_frame_id = transform.header.frame_id
-                
-                # Invert rotation (negate quaternion x,y,z)
-                inverted_transform.transform.rotation.x = -transform.transform.rotation.x
-                inverted_transform.transform.rotation.y = -transform.transform.rotation.y
-                inverted_transform.transform.rotation.z = -transform.transform.rotation.z
-                inverted_transform.transform.rotation.w = transform.transform.rotation.w
-                
-                # Invert translation (more complex, would need the full rotation matrix)
-                # This is a simplification and may not work perfectly for all transforms
-                inverted_transform.transform.translation.x = -transform.transform.translation.x
-                inverted_transform.transform.translation.y = -transform.transform.translation.y
-                inverted_transform.transform.translation.z = -transform.transform.translation.z
-                
-                # Apply inverted transform
-                from tf2_geometry_msgs import do_transform_point
-                transformed_point = do_transform_point(point_msg, inverted_transform)
-                
-                self.get_logger().info(f"Successfully applied reverse transform as fallback")
-                return transformed_point
-            except Exception as e_reverse:
-                self.get_logger().warn(f"Reverse transform also failed: {str(e_reverse)}")
-            
+            self.get_logger().warn(f"Transform error {point_msg.header.frame_id}→{target_frame}: {str(e)}")
             return None
-
-    def _handle_resource_alert(self, resource_type, value):
-        """Handle resource alerts by logging warnings and potentially reducing workload."""
-        self.log_error(f"Resource alert: {resource_type.upper()} at {value:.1f}% - performance may be affected", True)
-        # If CPU usage is critically high, try to reduce workload
-        if resource_type == 'cpu' and value > 95.0:
-            self.log_error("Critical CPU usage detected - reducing update frequency", True)
-            # Adjust filter update frequency if CPU usage is too high
-            if hasattr(self, 'filter_timer') and self.filter_timer:
-                # Get current period and increase it to reduce CPU load
-                current_period = 1.0 / 20.0  # Default 20Hz
-                new_period = current_period * 1.5  # Reduce rate by 33%
-                self.filter_timer.cancel()
-                self.filter_timer = self.create_timer(new_period, self.filter_update)
-                self.get_logger().warn(f"Reduced update rate to {1.0/new_period:.1f} Hz")
-                # Also report this in next system diagnostics  
-                if not hasattr(self, 'resource_warnings'):
-                    self.resource_warnings = deque(maxlen=20)  # Keep only last 20 warnings
-                self.resource_warnings.append({
-                    "timestamp": TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time()
-                    "type": resource_type,
-                    "value": value,
-                    "action": f"Reduced update rate to {1.0/new_period:.1f} Hz"
-                })
-
-    def destroy_node(self):
-        """Clean shutdown of the node, stopping all resources."""
-        if hasattr(self, 'resource_monitor'):
-            self.resource_monitor.stop()
+    
+    def publish_state(self):
+        """Publish the current state estimate."""
+        # Generate timestamp
+        timestamp = self.get_clock().now().to_msg()
         
-        # Clear large numpy arrays
-        if hasattr(self, 'state'):
-            self.state = None
-        if hasattr(self, 'covariance'):
-            self.covariance = None
+        # Position message
+        pos_msg = PointStamped()
+        pos_msg.header.frame_id = self.reference_frame
+        pos_msg.header.stamp = timestamp
+        pos_msg.point.x = float(self.state[0])
+        pos_msg.point.y = float(self.state[1])
+        pos_msg.point.z = float(self.state[2])
+        self.position_pub.publish(pos_msg)
         
-        # Clear history collections
-        if hasattr(self, 'state_history'):
-            self.state_history.clear()
-        if hasattr(self, 'covariance_history'):
-            self.covariance_history.clear()
-        if hasattr(self, 'measurement_history'):
-            self.measurement_history.clear()
+        # Velocity message
+        vel_msg = TwistStamped()
+        vel_msg.header.frame_id = self.reference_frame
+        vel_msg.header.stamp = timestamp
+        vel_msg.twist.linear.x = float(self.state[3])
+        vel_msg.twist.linear.y = float(self.state[4])
+        vel_msg.twist.linear.z = float(self.state[5])
+        self.velocity_pub.publish(vel_msg)
         
-        super().destroy_node()
-
-    def log_error(self, error_message, is_warning=False):
-        """Log an error or warning and add it to history for diagnostics."""
+        # Uncertainty message
+        unc_msg = Float32()
+        unc_msg.data = float(self.position_uncertainty)
+        self.uncertainty_pub.publish(unc_msg)
+    
+    def publish_diagnostics(self):
+        """Publish detailed diagnostic information."""
+        current_time = time.time()
+        
+        # Calculate velocities
+        vel_mag = 0.0
+        if self.initialized:
+            vel_mag = math.sqrt(self.state[3]**2 + self.state[4]**2 + self.state[5]**2)
+        
+        # Create diagnostic message
+        diagnostics = {
+            "timestamp": current_time,
+            "uptime": current_time - self.start_time,
+            "node_state": {
+                "is_ready": self.is_ready,
+                "transform_available": self.transform_available,
+                "transform_confirmed": self.transform_confirmed
+            },
+            "transform": {
+                "available": self.transform_available,
+                "success_rate": self.transform_successes / max(1, self.transform_checks),
+                "health": self.transform_health
+            },
+            "filter": {
+                "initialized": self.initialized,
+                "tracking": self.tracking_reliable,
+                "position_uncertainty": float(self.position_uncertainty),
+                "velocity_uncertainty": float(self.velocity_uncertainty),
+                "position": [float(self.state[0]), float(self.state[1]), float(self.state[2])],
+                "velocity": [float(self.state[3]), float(self.state[4]), float(self.state[5])],
+                "velocity_magnitude": float(vel_mag),
+                "consecutive_updates": self.consecutive_updates,
+                "health": self.filter_health
+            },
+            "sensors": {
+                sensor: {
+                    "count": count,
+                    "age": current_time - self.last_detection_time.get(sensor, 0),
+                    "reliability": self.sensor_reliability.get(sensor, 0.0),
+                    "fps": self.sensor_fps.get(sensor, 0.0)
+                } for sensor, count in self.sensor_counts.items()
+            },
+            "performance": {
+                "avg_process_time": np.mean(self.processing_times) if self.processing_times else 0.0,
+                "max_process_time": np.max(self.processing_times) if self.processing_times else 0.0
+            },
+            "mode": {
+                "using_2d_only": not any(current_time - self.last_detection_time.get(s, 0) < 1.0 
+                                        for s in ['lidar', 'hsv_3d', 'yolo_3d']),
+                "using_bbox_distance": self.use_bbox_distance_estimation,
+                "increased_uncertainty": self.increased_uncertainty_mode
+            }
+        }
+        
+        # Publish as JSON string
+        diag_msg = String()
+        diag_msg.data = json.dumps(diagnostics)
+        self.diagnostics_pub.publish(diag_msg)
+        
+        # Also log a summary of the current state
+        if self.initialized and self.debug_level >= 1:
+            pos = self.state[0:3]
+            vel = self.state[3:6]
+            self.get_logger().info(
+                f"State: pos=[{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}]m, "
+                f"vel=[{vel[0]:.2f}, {vel[1]:.2f}, {vel[2]:.2f}]m/s, "
+                f"uncertainty={self.position_uncertainty:.3f}m"
+            )
+    
+    def log_error(self, message, is_warning=False):
+        """
+        Log an error or warning with timestamp.
+        
+        Args:
+            message (str): The error message
+            is_warning (bool): True if this is a warning, False for error
+        """
+        timestamp = time.time()
+        
         if is_warning:
-            self.get_logger().warning(f"FUSION: {error_message}")
-            # Add to warning list for diagnostics
+            self.get_logger().warn(message)
             self.warnings.append({
-                "timestamp": TimeUtils.now_as_float(),
-                "message": error_message
+                "timestamp": timestamp,
+                "message": message
             })
         else:
-            self.get_logger().error(f"FUSION: {error_message}")
-            # Add to error list for diagnostics
+            self.get_logger().error(message)
             self.errors.append({
-                "timestamp": TimeUtils.now_as_float(),
-                "message": error_message
+                "timestamp": timestamp,
+                "message": message
             })
             
-            # Update health based on error frequency
-            self.last_error_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
-            # Reduce filter health score temporarily after an error
+            # Reduce filter health score temporarily
             self.filter_health = max(0.3, self.filter_health - 0.2)
 
-
-    def improve_sync_buffer(self):
-        """Enhance the synchronization buffer with better timestamp handling."""
-        # Replace the existing SimpleBuffer with an improved version
-        class ImprovedSensorBuffer:
-            def __init__(self, sensor_names, buffer_size, max_time_diff):
-                self.buffers = {name: deque(maxlen=buffer_size) for name in sensor_names}
-                self.max_time_diff = max_time_diff
-                
-            def add_measurement(self, sensor_name, data, timestamp):
-                """Add a measurement to the buffer with its timestamp."""
-                if sensor_name in self.buffers:
-                    # Convert ROS timestamp to float for easier comparison
-                    time_float = TimeUtils.ros_time_to_float(timestamp)
-                    self.buffers[sensor_name].append((data, time_float))
-                    
-            def get_latest_measurement(self, sensor_name):
-                """Get the most recent measurement for a sensor."""
-                if sensor_name in self.buffers and self.buffers[sensor_name]:
-                    return self.buffers[sensor_name][-1][0]  # Return most recent data
-                return None
-                    
-            def find_synchronized_data(self):
-                """Find measurements from different sensors that were taken at approximately the same time."""
-                # 1. Find the sensor with the least data (to minimize iterations)
-                min_sensor = None
-                min_length = float('inf')
-                for sensor, buffer in self.buffers.items():
-                    if 0 < len(buffer) < min_length:
-                        min_sensor = sensor
-                        min_length = len(buffer)
-                        
-                if min_sensor is None:
-                    return {}  # No data to synchronize
-                
-                # 2. For each measurement from the minimal sensor, find closest from other sensors                    
-                best_sync_data = {}
-                best_time_range = float('inf')
-                for base_data, base_time in self.buffers[min_sensor]:
-                    # Try to find synchronized data around this timestamp
-                    current_sync = {min_sensor: base_data}
-                    min_time = base_time
-                    max_time = base_time
-                    # Check each other sensor
-                    for sensor in self.buffers.keys():
-                        if sensor == min_sensor:
-                            continue
-                        
-                        # Find the measurement closest to base_time 
-                        closest_data = None
-                        closest_time_diff = float('inf')
-                        for data, time_float in self.buffers[sensor]:
-                            time_diff = abs(base_time - time_float)
-                            if time_diff < closest_time_diff:
-                                closest_time_diff = time_diff
-                                closest_data = data
-                                
-                        # If within time threshold, add to synchronized data                            
-                        if closest_data is not None and closest_time_diff <= self.max_time_diff:
-                            current_sync[sensor] = closest_data
-                            min_time = min(min_time, base_time - closest_time_diff)
-                            max_time = max(max_time, base_time + closest_time_diff)
-                    # If we found data from all sensors, check if it's better than previous best
-                    time_range = max_time - min_time
-                    if len(current_sync) == len(self.buffers) and time_range < best_time_range:
-                        best_sync_data = current_sync
-                        best_time_range = time_range
-                return best_sync_data
-        
-        # Create the improved buffer if needed
-        if not hasattr(self, 'sync_buffer') or not self.sync_buffer:
-            self.sync_buffer = ImprovedSensorBuffer(
-                sensor_names=['hsv_2d', 'yolo_2d', 'hsv_3d', 'yolo_3d', 'lidar'],
-                buffer_size=30,
-                max_time_diff=self.max_time_diff
-            )
-        else:
-            # Get existing data
-            old_buffer = self.sync_buffer
-            # Create new buffer
-            new_buffer = ImprovedSensorBuffer(
-                sensor_names=['hsv_2d', 'yolo_2d', 'hsv_3d', 'yolo_3d', 'lidar'],
-                buffer_size=30,
-                max_time_diff=self.max_time_diff
-            )
-            
-            # Transfer any existing data
-            for sensor_name in ['hsv_2d', 'yolo_2d', 'hsv_3d', 'yolo_3d', 'lidar']:
-                latest = old_buffer.get_latest_measurement(sensor_name)
-                if latest is not None:
-                    new_buffer.add_measurement(
-                        sensor_name=sensor_name,
-                        data=latest,
-                        timestamp=latest.header.stamp
-                    )
-            
-            # Replace the buffer
-            self.sync_buffer = new_buffer
-            self.get_logger().info("Enhanced synchronization buffer initialized")
-
-
 def main(args=None):
-    """Main function to initialize and run the fusion node."""
-    # Initialize ROS
+    """Main function to start the node."""
     rclpy.init(args=args)
     
-    # Create Kalman filter fusion node    
-    node = KalmanFilterFusion()
-    
-    # Welcome message
     print("=================================================")
-    print("Tennis Ball Tracking - Kalman Filter Fusion Node")
-    print("=================================================")
-    print("This node fuses multiple sensor inputs to track a tennis ball in 3D")
-    print("")
-    print("Subscriptions:")
-    for name, topic in TOPICS["input"].items():
-        print(f"  - {name:<10}: {topic}")
-    print("")
-    print("Publications:")
-    for name, topic in TOPICS["output"].items():
-        print(f"  - {name:<10}: {topic}")
-    print("")
-    print("Press Ctrl+C to stop")
+    print("Enhanced Fusion Node - Building on Working Foundation")
     print("=================================================")
     
     try:
-        import psutil  # For process priority
+        # Create and start the node
+        node = EnhancedFusionNode()
         
-        # On Linux (Raspberry Pi), try to set higher process priority
-        try:
-            process = psutil.Process(os.getpid())
-            process.nice(-10)  # Higher priority (needs appropriate permissions)
-            print("Set fusion node to higher process priority")
-        except:
-            print("Could not increase process priority - requires root permissions")
-            
-        # Run the node
+        # Print initial startup message
+        print("Fusion node initialized, beginning spin...")
+        
+        # Spin the node to process callbacks (this is blocking)
         rclpy.spin(node)
     except KeyboardInterrupt:
-        print("Stopping Kalman Filter Fusion Node (Ctrl+C pressed)")
+        print("Stopping node (Ctrl+C)")
     except Exception as e:
         print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
     finally:
-        # Close log file if open
-        if node.log_to_file and node.log_file:
-            node.log_file.close()
-        
         # Clean shutdown
-        node.destroy_node()
+        if 'node' in locals():
+            node.get_logger().info("Shutting down fusion node...")
+            node.destroy_node()
         rclpy.shutdown()
-        print("Kalman Filter Fusion Node has been shut down.")
+        print("Fusion node shutdown complete")
 
 if __name__ == '__main__':
     main()

@@ -296,12 +296,13 @@ class TennisBallDetector(Node):
         """
         try:
             # Get model filename from the path in config
+            # Get model filename from the path in config
             model_filename = os.path.basename(MODEL_CONFIG["path"])
             
-            # Build absolute path to the model file
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            model_dir = os.path.join(script_dir, '..', 'models')
-            model_path = os.path.join(model_dir, model_filename)
+            # Use get_package_share_directory to find the model path
+            from ament_index_python.packages import get_package_share_directory
+            package_share_dir = get_package_share_directory('ball_chase')
+            model_path = os.path.join(package_share_dir, 'models', model_filename)
             
             self.get_logger().info(f"Loading model from {model_path}...")
             
@@ -309,7 +310,6 @@ class TennisBallDetector(Node):
             if not os.path.exists(model_path):
                 self.get_logger().error(f"Model not found at {model_path}")
                 raise FileNotFoundError(f"Model file not found: {model_path}")
-            
             # Initialize MNN runtime manager with our configuration
             self.runtime_manager = MNN.nn.create_runtime_manager((config,))
             

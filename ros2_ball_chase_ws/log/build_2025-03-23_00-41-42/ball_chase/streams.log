@@ -1,0 +1,25 @@
+[1.813s] Invoking command in '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase': PYTHONPATH=/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build --no-deps symlink_data --force
+[2.516s] running develop
+[2.924s] running egg_info
+[2.965s] writing ball_chase.egg-info/PKG-INFO
+[2.966s] writing dependency_links to ball_chase.egg-info/dependency_links.txt
+[2.967s] writing entry points to ball_chase.egg-info/entry_points.txt
+[2.968s] writing requirements to ball_chase.egg-info/requires.txt
+[2.968s] writing top-level names to ball_chase.egg-info/top_level.txt
+[3.024s] reading manifest file 'ball_chase.egg-info/SOURCES.txt'
+[3.026s] writing manifest file 'ball_chase.egg-info/SOURCES.txt'
+[3.100s] running build_ext
+[3.101s] Creating /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball-chase.egg-link (link to .)
+[3.101s] Installing depth_camera_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[3.102s] Installing fusion_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[3.102s] Installing hsv_ball_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[3.102s] Installing lidar_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[3.102s] Installing yolo_ball_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase
+[3.103s] 
+[3.103s] Installed /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase
+[3.103s] running symlink_data
+[3.103s] symbolically linking /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/resource/ball_chase -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ament_index/resource_index/packages
+[3.103s] symbolically linking /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/package.xml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase
+[3.103s] symbolically linking /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/launch/ball_chase.launch.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/launch
+[3.104s] error: [Errno 2] No such file or directory: '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config/lidar_config.yaml'
+[3.236s] Invoked command in '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase' returned '1': PYTHONPATH=/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build --no-deps symlink_data --force

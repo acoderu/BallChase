@@ -1,0 +1,26 @@
+Traceback (most recent call last):
+  File "/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/src/ball_chase/setup.py", line 6, in <module>
+    setup(
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/__init__.py", line 103, in setup
+    return distutils.core.setup(**attrs)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/_distutils/core.py", line 171, in setup
+    ok = dist.parse_command_line()
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 476, in parse_command_line
+    args = self._parse_command_opts(parser, args)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/dist.py", line 878, in _parse_command_opts
+    nargs = _Distribution._parse_command_opts(self, parser, args)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 535, in _parse_command_opts
+    cmd_class = self.get_command_class(command)
+  File "/home/ubuntu/.local/lib/python3.10/site-packages/setuptools/dist.py", line 721, in get_command_class
+    eps = metadata.entry_points(group='distutils.commands', name=command)
+  File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 1021, in entry_points
+    return SelectableGroups.load(eps).select(**params)
+  File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 487, in select
+    return self._all.select(**params)
+  File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 359, in select
+    return EntryPoints(ep for ep in self if ep.matches(**params))
+  File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 359, in <genexpr>
+    return EntryPoints(ep for ep in self if ep.matches(**params))
+  File "/usr/lib/python3.10/importlib/metadata/__init__.py", line 211, in matches
+    def matches(self, **params):
+KeyboardInterrupt

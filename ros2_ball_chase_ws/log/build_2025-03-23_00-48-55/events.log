@@ -1,0 +1,157 @@
+[0.000000] (-) TimerEvent: {}
+[0.000464] (ball_chase) JobQueued: {'identifier': 'ball_chase', 'dependencies': OrderedDict()}
+[0.000941] (ball_chase) JobStarted: {'identifier': 'ball_chase'}
+[0.099805] (-) TimerEvent: {}
+[0.203147] (-) TimerEvent: {}
+[0.303610] (-) TimerEvent: {}
+[0.403962] (-) TimerEvent: {}
+[0.504406] (-) TimerEvent: {}
+[0.605004] (-) TimerEvent: {}
+[0.705375] (-) TimerEvent: {}
+[0.805822] (-) TimerEvent: {}
+[0.906145] (-) TimerEvent: {}
+[1.006479] (-) TimerEvent: {}
+[1.106830] (-) TimerEvent: {}
+[1.207507] (-) TimerEvent: {}
+[1.307860] (-) TimerEvent: {}
+[1.408243] (-) TimerEvent: {}
+[1.508900] (-) TimerEvent: {}
+[1.609582] (-) TimerEvent: {}
+[1.709985] (-) TimerEvent: {}
+[1.810707] (-) TimerEvent: {}
+[1.814255] (ball_chase) Command: {'cmd': ['/usr/bin/python3', '-W', 'ignore:setup.py install is deprecated', '-W', 'ignore:easy_install command is deprecated', 'setup.py', 'develop', '--uninstall', '--editable', '--build-directory', '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build'], 'cwd': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase', 'env': {'HOSTNAME': '4dadb3692f69', 'SHLVL': '1', 'LD_LIBRARY_PATH': '/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib', 'HOME': '/home/ubuntu', 'OLDPWD': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/src', 'NVM_BIN': '/home/ubuntu/.nvm/versions/node/v20.11.1/bin', 'NVM_INC': '/home/ubuntu/.nvm/versions/node/v20.11.1/include/node', 'ROS_PYTHON_VERSION': '3', 'LC_CTYPE': 'C.UTF-8', 'NVM_DIR': '/home/ubuntu/.nvm', 'COLCON_PREFIX_PATH': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install:/home/ubuntu/dev/ros_uq_ws/install:/home/ubuntu/dev/BallChase/ros_ball_ws/install', 'ROS_DISTRO': 'humble', '_': '/usr/bin/colcon', 'ROS_VERSION': '2', 'TERM': 'xterm', 'ROS_LOCALHOST_ONLY': '0', 'PATH': '/home/ubuntu/dev/BallChase/ros_ball_ws/install/ball_tracking/bin:/home/ubuntu/.local/bin:/opt/ros/humble/bin:/home/ubuntu/.nvm/versions/node/v20.11.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'VK_ICD_FILENAMES': '/etc/vulkan/icd.d/', 'XDG_RUNTIME_DIR': '/tmp', 'DISPLAY': ':0', 'LS_COLORS': 'rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:mi=00:su=37;41:sg=30;43:ca=30;41:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.arc=01;31:*.arj=01;31:*.taz=01;31:*.lha=01;31:*.lz4=01;31:*.lzh=01;31:*.lzma=01;31:*.tlz=01;31:*.txz=01;31:*.tzo=01;31:*.t7z=01;31:*.zip=01;31:*.z=01;31:*.dz=01;31:*.gz=01;31:*.lrz=01;31:*.lz=01;31:*.lzo=01;31:*.xz=01;31:*.zst=01;31:*.tzst=01;31:*.bz2=01;31:*.bz=01;31:*.tbz=01;31:*.tbz2=01;31:*.tz=01;31:*.deb=01;31:*.rpm=01;31:*.jar=01;31:*.war=01;31:*.ear=01;31:*.sar=01;31:*.rar=01;31:*.alz=01;31:*.ace=01;31:*.zoo=01;31:*.cpio=01;31:*.7z=01;31:*.rz=01;31:*.cab=01;31:*.wim=01;31:*.swm=01;31:*.dwm=01;31:*.esd=01;31:*.jpg=01;35:*.jpeg=01;35:*.mjpg=01;35:*.mjpeg=01;35:*.gif=01;35:*.bmp=01;35:*.pbm=01;35:*.pgm=01;35:*.ppm=01;35:*.tga=01;35:*.xbm=01;35:*.xpm=01;35:*.tif=01;35:*.tiff=01;35:*.png=01;35:*.svg=01;35:*.svgz=01;35:*.mng=01;35:*.pcx=01;35:*.mov=01;35:*.mpg=01;35:*.mpeg=01;35:*.m2v=01;35:*.mkv=01;35:*.webm=01;35:*.webp=01;35:*.ogm=01;35:*.mp4=01;35:*.m4v=01;35:*.mp4v=01;35:*.vob=01;35:*.qt=01;35:*.nuv=01;35:*.wmv=01;35:*.asf=01;35:*.rm=01;35:*.rmvb=01;35:*.flc=01;35:*.avi=01;35:*.fli=01;35:*.flv=01;35:*.gl=01;35:*.dl=01;35:*.xcf=01;35:*.xwd=01;35:*.yuv=01;35:*.cgm=01;35:*.emf=01;35:*.ogv=01;35:*.ogx=01;35:*.aac=00;36:*.au=00;36:*.flac=00;36:*.m4a=00;36:*.mid=00;36:*.midi=00;36:*.mka=00;36:*.mp3=00;36:*.mpc=00;36:*.ogg=00;36:*.ra=00;36:*.wav=00;36:*.oga=00;36:*.opus=00;36:*.spx=00;36:*.xspf=00;36:', 'AMENT_PREFIX_PATH': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase:/home/ubuntu/dev/BallChase/ros_ball_ws/install/ball_tracking:/home/ubuntu/dev/ros_uq_ws/install/my_robot_pkg:/opt/ros/humble', 'VK_LAYER_PATH': '/etc/vulkan/layer.d/', 'PWD': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase', 'NVM_CD_FLAGS': '', 'PYTHONPATH': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:/home/ubuntu/dev/BallChase/ros_ball_ws/install/ball_tracking/lib/python3.10/site-packages:/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages', 'COLCON': '1', 'CMAKE_PREFIX_PATH': '/home/ubuntu/dev/BallChase/ros_ball_ws/install/my_robot_pkg:/home/ubuntu/dev/ros_uq_ws/install/my_robot_pkg'}, 'shell': False}
+[1.910802] (-) TimerEvent: {}
+[2.011416] (-) TimerEvent: {}
+[2.111825] (-) TimerEvent: {}
+[2.212214] (-) TimerEvent: {}
+[2.312582] (-) TimerEvent: {}
+[2.391514] (ball_chase) StdoutLine: {'line': b'running develop\n'}
+[2.412689] (-) TimerEvent: {}
+[2.513190] (-) TimerEvent: {}
+[2.613912] (-) TimerEvent: {}
+[2.714317] (-) TimerEvent: {}
+[2.794368] (ball_chase) StdoutLine: {'line': b'Removing /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball-chase.egg-link (link to .)\n'}
+[2.814455] (-) TimerEvent: {}
+[2.915437] (-) TimerEvent: {}
+[2.923655] (ball_chase) CommandEnded: {'returncode': 0}
+[2.924888] (ball_chase) Command: {'cmd': ['/usr/bin/python3', '-W', 'ignore:setup.py install is deprecated', '-W', 'ignore:easy_install command is deprecated', 'setup.py', 'egg_info', '--egg-base', '../../build/ball_chase', 'build', '--build-base', '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build', 'install', '--record', '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/install.log', '--single-version-externally-managed', 'install_data', '--force'], 'cwd': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/src/ball_chase', 'env': {'HOSTNAME': '4dadb3692f69', 'SHLVL': '1', 'LD_LIBRARY_PATH': '/opt/ros/humble/opt/rviz_ogre_vendor/lib:/opt/ros/humble/lib/aarch64-linux-gnu:/opt/ros/humble/lib', 'HOME': '/home/ubuntu', 'OLDPWD': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/src', 'NVM_BIN': '/home/ubuntu/.nvm/versions/node/v20.11.1/bin', 'NVM_INC': '/home/ubuntu/.nvm/versions/node/v20.11.1/include/node', 'ROS_PYTHON_VERSION': '3', 'LC_CTYPE': 'C.UTF-8', 'NVM_DIR': '/home/ubuntu/.nvm', 'COLCON_PREFIX_PATH': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install:/home/ubuntu/dev/ros_uq_ws/install:/home/ubuntu/dev/BallChase/ros_ball_ws/install', 'ROS_DISTRO': 'humble', '_': '/usr/bin/colcon', 'ROS_VERSION': '2', 'TERM': 'xterm', 'ROS_LOCALHOST_ONLY': '0', 'PATH': '/home/ubuntu/dev/BallChase/ros_ball_ws/install/ball_tracking/bin:/home/ubuntu/.local/bin:/opt/ros/humble/bin:/home/ubuntu/.nvm/versions/node/v20.11.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'VK_ICD_FILENAMES': '/etc/vulkan/icd.d/', 'XDG_RUNTIME_DIR': '/tmp', 'DISPLAY': ':0', 'LS_COLORS': 'rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:mi=00:su=37;41:sg=30;43:ca=30;41:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.arc=01;31:*.arj=01;31:*.taz=01;31:*.lha=01;31:*.lz4=01;31:*.lzh=01;31:*.lzma=01;31:*.tlz=01;31:*.txz=01;31:*.tzo=01;31:*.t7z=01;31:*.zip=01;31:*.z=01;31:*.dz=01;31:*.gz=01;31:*.lrz=01;31:*.lz=01;31:*.lzo=01;31:*.xz=01;31:*.zst=01;31:*.tzst=01;31:*.bz2=01;31:*.bz=01;31:*.tbz=01;31:*.tbz2=01;31:*.tz=01;31:*.deb=01;31:*.rpm=01;31:*.jar=01;31:*.war=01;31:*.ear=01;31:*.sar=01;31:*.rar=01;31:*.alz=01;31:*.ace=01;31:*.zoo=01;31:*.cpio=01;31:*.7z=01;31:*.rz=01;31:*.cab=01;31:*.wim=01;31:*.swm=01;31:*.dwm=01;31:*.esd=01;31:*.jpg=01;35:*.jpeg=01;35:*.mjpg=01;35:*.mjpeg=01;35:*.gif=01;35:*.bmp=01;35:*.pbm=01;35:*.pgm=01;35:*.ppm=01;35:*.tga=01;35:*.xbm=01;35:*.xpm=01;35:*.tif=01;35:*.tiff=01;35:*.png=01;35:*.svg=01;35:*.svgz=01;35:*.mng=01;35:*.pcx=01;35:*.mov=01;35:*.mpg=01;35:*.mpeg=01;35:*.m2v=01;35:*.mkv=01;35:*.webm=01;35:*.webp=01;35:*.ogm=01;35:*.mp4=01;35:*.m4v=01;35:*.mp4v=01;35:*.vob=01;35:*.qt=01;35:*.nuv=01;35:*.wmv=01;35:*.asf=01;35:*.rm=01;35:*.rmvb=01;35:*.flc=01;35:*.avi=01;35:*.fli=01;35:*.flv=01;35:*.gl=01;35:*.dl=01;35:*.xcf=01;35:*.xwd=01;35:*.yuv=01;35:*.cgm=01;35:*.emf=01;35:*.ogv=01;35:*.ogx=01;35:*.aac=00;36:*.au=00;36:*.flac=00;36:*.m4a=00;36:*.mid=00;36:*.midi=00;36:*.mka=00;36:*.mp3=00;36:*.mpc=00;36:*.ogg=00;36:*.ra=00;36:*.wav=00;36:*.oga=00;36:*.opus=00;36:*.spx=00;36:*.xspf=00;36:', 'AMENT_PREFIX_PATH': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase:/home/ubuntu/dev/BallChase/ros_ball_ws/install/ball_tracking:/home/ubuntu/dev/ros_uq_ws/install/my_robot_pkg:/opt/ros/humble', 'VK_LAYER_PATH': '/etc/vulkan/layer.d/', 'PWD': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase', 'NVM_CD_FLAGS': '', 'PYTHONPATH': '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages:/home/ubuntu/dev/BallChase/ros_ball_ws/install/ball_tracking/lib/python3.10/site-packages:/opt/ros/humble/lib/python3.10/site-packages:/opt/ros/humble/local/lib/python3.10/dist-packages', 'COLCON': '1', 'CMAKE_PREFIX_PATH': '/home/ubuntu/dev/BallChase/ros_ball_ws/install/my_robot_pkg:/home/ubuntu/dev/ros_uq_ws/install/my_robot_pkg'}, 'shell': False}
+[3.015530] (-) TimerEvent: {}
+[3.115942] (-) TimerEvent: {}
+[3.216534] (-) TimerEvent: {}
+[3.317331] (-) TimerEvent: {}
+[3.408275] (ball_chase) StdoutLine: {'line': b'running egg_info\n'}
+[3.417432] (-) TimerEvent: {}
+[3.431572] (ball_chase) StdoutLine: {'line': b'writing ../../build/ball_chase/ball_chase.egg-info/PKG-INFO\n'}
+[3.432018] (ball_chase) StdoutLine: {'line': b'writing dependency_links to ../../build/ball_chase/ball_chase.egg-info/dependency_links.txt\n'}
+[3.432870] (ball_chase) StdoutLine: {'line': b'writing entry points to ../../build/ball_chase/ball_chase.egg-info/entry_points.txt\n'}
+[3.433736] (ball_chase) StdoutLine: {'line': b'writing requirements to ../../build/ball_chase/ball_chase.egg-info/requires.txt\n'}
+[3.434427] (ball_chase) StdoutLine: {'line': b'writing top-level names to ../../build/ball_chase/ball_chase.egg-info/top_level.txt\n'}
+[3.517525] (-) TimerEvent: {}
+[3.617835] (-) TimerEvent: {}
+[3.692416] (ball_chase) StdoutLine: {'line': b"reading manifest file '../../build/ball_chase/ball_chase.egg-info/SOURCES.txt'\n"}
+[3.694952] (ball_chase) StdoutLine: {'line': b"writing manifest file '../../build/ball_chase/ball_chase.egg-info/SOURCES.txt'\n"}
+[3.695123] (ball_chase) StdoutLine: {'line': b'running build\n'}
+[3.695197] (ball_chase) StdoutLine: {'line': b'running build_py\n'}
+[3.695262] (ball_chase) StdoutLine: {'line': b'copying ball_chase/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase\n'}
+[3.695387] (ball_chase) StdoutLine: {'line': b'copying models/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/models\n'}
+[3.695470] (ball_chase) StdoutLine: {'line': b'copying ball_chase/nodes/diagnostics_visualizer_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes\n'}
+[3.695569] (ball_chase) StdoutLine: {'line': b'copying ball_chase/nodes/diagnostics_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes\n'}
+[3.695715] (ball_chase) StdoutLine: {'line': b'copying ball_chase/nodes/yolo_ball_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes\n'}
+[3.695811] (ball_chase) StdoutLine: {'line': b'copying ball_chase/nodes/fusion_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes\n'}
+[3.696019] (ball_chase) StdoutLine: {'line': b'copying ball_chase/nodes/hsv_ball_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes\n'}
+[3.696203] (ball_chase) StdoutLine: {'line': b'copying ball_chase/nodes/depth_camera_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes\n'}
+[3.696386] (ball_chase) StdoutLine: {'line': b'copying ball_chase/nodes/lidar_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes\n'}
+[3.696574] (ball_chase) StdoutLine: {'line': b'copying ball_chase/nodes/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes\n'}
+[3.696816] (ball_chase) StdoutLine: {'line': b'copying ball_chase/config/config_loader.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/config\n'}
+[3.697010] (ball_chase) StdoutLine: {'line': b'copying ball_chase/config/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/config\n'}
+[3.697302] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/resource_monitor.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.697468] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/depth_camera_calibrate.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.697665] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/time_utils.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.697935] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/synchronized_processor.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.698185] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/kalman_fusion_with_sync.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.698334] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/profile_test.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.698474] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/calibrate_lidar_vs_camera.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.698739] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/hsv_debugger.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.698975] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.699111] (ball_chase) StdoutLine: {'line': b'copying ball_chase/utilities/sensor_sync_buffer.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities\n'}
+[3.700147] (ball_chase) StdoutLine: {'line': b'running install\n'}
+[3.707286] (ball_chase) StdoutLine: {'line': b'running install_lib\n'}
+[3.717927] (-) TimerEvent: {}
+[3.730892] (ball_chase) StdoutLine: {'line': b'creating /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase\n'}
+[3.731422] (ball_chase) StdoutLine: {'line': b'creating /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes\n'}
+[3.731542] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes/diagnostics_visualizer_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes\n'}
+[3.731616] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes/diagnostics_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes\n'}
+[3.731739] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes/yolo_ball_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes\n'}
+[3.731825] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes/fusion_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes\n'}
+[3.731918] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes/hsv_ball_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes\n'}
+[3.732520] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes/depth_camera_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes\n'}
+[3.732617] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes/lidar_node.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes\n'}
+[3.732681] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/nodes/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes\n'}
+[3.732740] (ball_chase) StdoutLine: {'line': b'creating /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/config\n'}
+[3.732837] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/config/config_loader.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/config\n'}
+[3.732902] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/config/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/config\n'}
+[3.732991] (ball_chase) StdoutLine: {'line': b'creating /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.733090] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/resource_monitor.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.733250] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/depth_camera_calibrate.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.733339] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/time_utils.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.734419] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/synchronized_processor.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.734518] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/kalman_fusion_with_sync.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.734580] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/profile_test.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.734646] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/calibrate_lidar_vs_camera.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.734707] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/hsv_debugger.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.734762] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.734931] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/utilities/sensor_sync_buffer.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities\n'}
+[3.735125] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/ball_chase/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase\n'}
+[3.735201] (ball_chase) StdoutLine: {'line': b'creating /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/models\n'}
+[3.735271] (ball_chase) StdoutLine: {'line': b'copying /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/build/lib/models/__init__.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/models\n'}
+[3.735462] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes/diagnostics_visualizer_node.py to diagnostics_visualizer_node.cpython-310.pyc\n'}
+[3.740218] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes/diagnostics_node.py to diagnostics_node.cpython-310.pyc\n'}
+[3.743516] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes/yolo_ball_node.py to yolo_ball_node.cpython-310.pyc\n'}
+[3.766442] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes/fusion_node.py to fusion_node.cpython-310.pyc\n'}
+[3.786800] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes/hsv_ball_node.py to hsv_ball_node.cpython-310.pyc\n'}
+[3.796024] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes/depth_camera_node.py to depth_camera_node.cpython-310.pyc\n'}
+[3.801692] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes/lidar_node.py to lidar_node.cpython-310.pyc\n'}
+[3.809123] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/nodes/__init__.py to __init__.cpython-310.pyc\n'}
+[3.809418] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/config/config_loader.py to config_loader.cpython-310.pyc\n'}
+[3.809952] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/config/__init__.py to __init__.cpython-310.pyc\n'}
+[3.810147] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/resource_monitor.py to resource_monitor.cpython-310.pyc\n'}
+[3.812219] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/depth_camera_calibrate.py to depth_camera_calibrate.cpython-310.pyc\n'}
+[3.815185] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/time_utils.py to time_utils.cpython-310.pyc\n'}
+[3.816487] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/synchronized_processor.py to synchronized_processor.cpython-310.pyc\n'}
+[3.817097] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/kalman_fusion_with_sync.py to kalman_fusion_with_sync.cpython-310.pyc\n'}
+[3.817982] (-) TimerEvent: {}
+[3.818149] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/profile_test.py to profile_test.cpython-310.pyc\n'}
+[3.818491] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/calibrate_lidar_vs_camera.py to calibrate_lidar_vs_camera.cpython-310.pyc\n'}
+[3.825469] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/hsv_debugger.py to hsv_debugger.cpython-310.pyc\n'}
+[3.827324] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/__init__.py to __init__.cpython-310.pyc\n'}
+[3.827657] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/utilities/sensor_sync_buffer.py to sensor_sync_buffer.cpython-310.pyc\n'}
+[3.829610] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase/__init__.py to __init__.cpython-310.pyc\n'}
+[3.829807] (ball_chase) StdoutLine: {'line': b'byte-compiling /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/models/__init__.py to __init__.cpython-310.pyc\n'}
+[3.829960] (ball_chase) StdoutLine: {'line': b'running install_data\n'}
+[3.830084] (ball_chase) StdoutLine: {'line': b'copying resource/ball_chase -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ament_index/resource_index/packages\n'}
+[3.830267] (ball_chase) StdoutLine: {'line': b'copying package.xml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase\n'}
+[3.830433] (ball_chase) StdoutLine: {'line': b'copying launch/ball_chase.launch.py -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/launch\n'}
+[3.830613] (ball_chase) StdoutLine: {'line': b'copying config/lidar_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config\n'}
+[3.830726] (ball_chase) StdoutLine: {'line': b'copying config/yolo_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config\n'}
+[3.830887] (ball_chase) StdoutLine: {'line': b'copying config/depth_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config\n'}
+[3.831028] (ball_chase) StdoutLine: {'line': b'copying config/fusion_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config\n'}
+[3.831196] (ball_chase) StdoutLine: {'line': b'copying config/hsv_config.yaml -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/config\n'}
+[3.831328] (ball_chase) StdoutLine: {'line': b'copying models/yolo12n_640.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models\n'}
+[3.841164] (ball_chase) StdoutLine: {'line': b'copying models/yolo11n_320.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models\n'}
+[3.871084] (ball_chase) StdoutLine: {'line': b'copying models/yolo12s_320.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models\n'}
+[3.915233] (ball_chase) StdoutLine: {'line': b'copying models/yolo12n_320.mnn -> /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/share/ball_chase/models\n'}
+[3.918292] (-) TimerEvent: {}
+[3.931769] (ball_chase) StdoutLine: {'line': b'running install_egg_info\n'}
+[3.976118] (ball_chase) StdoutLine: {'line': b'Copying ../../build/ball_chase/ball_chase.egg-info to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/python3.10/site-packages/ball_chase-0.0.0-py3.10.egg-info\n'}
+[3.977272] (ball_chase) StdoutLine: {'line': b'running install_scripts\n'}
+[4.018342] (-) TimerEvent: {}
+[4.039072] (ball_chase) StdoutLine: {'line': b'Installing depth_camera_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase\n'}
+[4.039389] (ball_chase) StdoutLine: {'line': b'Installing fusion_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase\n'}
+[4.040756] (ball_chase) StdoutLine: {'line': b'Installing hsv_ball_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase\n'}
+[4.042789] (ball_chase) StdoutLine: {'line': b'Installing lidar_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase\n'}
+[4.044057] (ball_chase) StdoutLine: {'line': b'Installing yolo_ball_node script to /home/ubuntu/dev/BallChase/ros2_ball_chase_ws/install/ball_chase/lib/ball_chase\n'}
+[4.053281] (ball_chase) StdoutLine: {'line': b"writing list of installed files to '/home/ubuntu/dev/BallChase/ros2_ball_chase_ws/build/ball_chase/install.log'\n"}
+[4.119016] (-) TimerEvent: {}
+[4.192253] (ball_chase) CommandEnded: {'returncode': 0}
+[4.210864] (ball_chase) JobEnded: {'identifier': 'ball_chase', 'rc': 0}
+[4.212103] (-) EventReactorShutdown: {}

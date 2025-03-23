@@ -1,0 +1,15 @@
+
+cd ~/dev/BallChase/ros2_ball_chase_ws
+colcon build --packages-select ball_chase
+colcon build --symlink-install
+source install/setup.bash
+
+ros2 run ball_chase yolo_ball_node
+
+"Optimize Sensor Synchronization: Allow for more flexibility in temporal alignment of measurements when sensor rates are inconsistent." 
+
+Optimize Sensor Synchronization: Allow for more flexibility in temporal alignment of measurements when sensor rates are inconsistent.
+
+Tune Process Noise Parameters: The process noise may need adjustment to better track moving objects, as the velocity estimates remain near zero.
+
+Enable 2D-Only Tracking: Consider making the system less strict about requiring 3D sensors for tracking status when only 2D sensors are delivering fresh data.
