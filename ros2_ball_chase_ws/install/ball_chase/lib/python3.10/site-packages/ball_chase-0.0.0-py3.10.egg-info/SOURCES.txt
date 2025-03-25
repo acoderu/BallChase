@@ -11,6 +11,9 @@ setup.py
 ball_chase/__init__.py
 ball_chase/config/__init__.py
 ball_chase/config/config_loader.py
+ball_chase/nodes/A.py
+ball_chase/nodes/B.py
+ball_chase/nodes/C.py
 ball_chase/nodes/__init__.py
 ball_chase/nodes/depth_camera_node.py
 ball_chase/nodes/diagnostics_node.py

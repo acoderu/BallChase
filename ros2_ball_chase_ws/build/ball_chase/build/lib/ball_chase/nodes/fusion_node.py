@@ -4,7 +4,7 @@
 Enhanced Fusion Node - Building on Working Foundation
 This version starts with the working transform handling and adds advanced features.
 """
-
+import threading
 import rclpy
 from rclpy.node import Node
 import time
@@ -19,9 +19,10 @@ import json
 import os
 import sys
 import copy
-
+from rclpy.executors import MultiThreadedExecutor
 # Import from config
 from ball_chase.config.config_loader import ConfigLoader
+
 
 class SensorBuffer:
     """
@@ -42,6 +43,8 @@ class SensorBuffer:
         self.default_max_time_diff = max_time_diff if max_time_diff is not None else 0.1
         # Store sensor-specific time thresholds
         self.sensor_time_thresholds = sensor_time_thresholds or {}
+        # Reference to parent node for motion state access
+        self.parent_node = None
     
     def add_sensor(self, sensor_name, buffer_size=20):
         """
@@ -234,6 +237,22 @@ class SensorBuffer:
                 avg_interval = sum(intervals) / len(intervals)
                 thresholds[sensor] = max(2.0 * avg_interval, self.default_max_time_diff)
         
+        # ENHANCEMENT 8: Adjust thresholds based on motion state
+        if hasattr(self, 'parent_node') and hasattr(self.parent_node, 'detect_motion_state'):
+            motion_state = self.parent_node.detect_motion_state()
+            
+            adjusted_thresholds = {}
+            for sensor, threshold in thresholds.items():
+                # For fast motion, use tighter synchronization for better accuracy
+                if motion_state == "medium_fast":
+                    adjusted_thresholds[sensor] = threshold * 0.8  # Tighter window
+                elif motion_state == "stationary":
+                    adjusted_thresholds[sensor] = threshold * 1.5  # Wider window
+                else:  # small_movement or unknown
+                    adjusted_thresholds[sensor] = threshold
+            
+            thresholds = adjusted_thresholds
+            
         # Update the sensor time thresholds
         for sensor, threshold in thresholds.items():
             self.sensor_time_thresholds[sensor] = threshold
@@ -250,7 +269,8 @@ class EnhancedFusionNode(Node):
     def __init__(self):
         super().__init__('enhanced_fusion_node')
         
-        self.get_logger().info("====== Enhanced Fusion Node Starting ======")
+        self.get_logger().info("======xxxxx Enhanced Fusion Node Starting ======")
+        
         
         # Core tracking variables
         self.start_time = time.time()
@@ -265,8 +285,12 @@ class EnhancedFusionNode(Node):
         self.reference_frame = "camera_frame"
         self.get_logger().info(f"Using {self.reference_frame} as reference coordinate frame for fusion")
         
-        # PHASE 1: Initialize transform system ONLY
+        # PHASE 1: Initialize transform system FIRST before anything else
         self.init_transform_system()
+        
+        time.sleep(3)
+        # PHASE 1.5: Wait for transform synchronously before proceeding
+        self.get_logger().info("Waiting for transform to be available (camera_frame -> lidar_frame)...")
         
         # PHASE 2: Load configuration
         self.load_configuration()
@@ -275,19 +299,9 @@ class EnhancedFusionNode(Node):
         self.init_state_tracking()
         self.init_sensor_synchronization()
         
-        # PHASE 4: Set up publishers (these can be created immediately)
-        self.setup_publishers()
+        self.transform_check_timer = self.create_timer(5.0, self.check_transform_availability)
         
-        # PHASE 5: Initialize diagnostics
-        self.init_diagnostics()
-        
-        # PHASE 6: Create a transform check timer to wait for transforms
-        # Check every 1 second up to 20 seconds total timeout
-        self.transform_wait_start = time.time()
-        self.transform_check_timer = self.create_timer(1.0, self.check_and_activate)
-        
-        self.get_logger().info("Initialization complete - waiting for transform to become available")
-        
+                
         self.sync_quality_metrics = {
             'success_rate': 0.0,
             'avg_time_diff': 0.0,
@@ -295,11 +309,32 @@ class EnhancedFusionNode(Node):
             'sync_counts': 0,
             'attempt_counts': 0
         }
+        
+        # ENHANCEMENT 1: Initialize motion state tracking
+        self.motion_state = "unknown"
+        self.prev_motion_state = "unknown"
+        self.motion_state_counts = {
+            "stationary": 0,
+            "small_movement": 0,
+            "medium_fast": 0,
+            "unknown": 0
+        }
+        
+        # ENHANCEMENT 4: Initialize flat ground tracking
+        self.flat_ground_detected = False
+        self.flat_ground_count = 0
+        
+        # ENHANCEMENT 5: Initialize sensor recovery tracking
+        self.sensor_gap_detection = {}
+        
+        # ENHANCEMENT 6: Initialize reliability buffer
+        self.reliability_buffer = deque([False] * 3, maxlen=5)
+        self.last_tracking_state = False
     
     def init_transform_system(self):
         """Initialize just the transform system."""
         # CRITICAL STEP: Set up transform system FIRST
-        self.tf_buffer = Buffer(cache_time=rclpy.duration.Duration(seconds=30.0))  # Increased cache time
+        self.tf_buffer = Buffer()  
         self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # Also create a static transform broadcaster in case we need to publish our own
@@ -307,107 +342,34 @@ class EnhancedFusionNode(Node):
         
         self.get_logger().info("Transform system initialized - waiting for transforms")
     
-    def check_and_activate(self):
-        """Check if transform is available and activate subscriptions if it is."""
-        # Skip if already ready
-        if self.is_ready:
-            return
-        
-        # Check how long we've been waiting
-        current_time = time.time()
-        wait_time = current_time - self.transform_wait_start
-        
-        # Check if transform is available
-        transform_available = self.check_transform_availability()
-        
-        # If transform is available, activate the node
-        if transform_available:
-            self.get_logger().info(f"Transform confirmed after {wait_time:.1f} seconds - activating sensor subscriptions")
-            
-            # Cancel the transform check timer
-            self.transform_check_timer.cancel()
-            
-            # Initialize subscribers now that transforms are available
-            self.setup_subscriptions()
-            
-            # Initialize filter with defaults
-            self.initialize_filter_with_defaults()
-            
-            # Set up processing timers
-            self.setup_timers()
-            
-            # Mark as ready
-            self.is_ready = True
-        else:
-            # Check for timeout (after 20 seconds)
-            if wait_time > 20.0:
-                self.get_logger().warn("Transform wait timeout exceeded (20 seconds) - activating with fallback static transform")
-                
-                # Publish our own static transform as a fallback
-                self.publish_fallback_transform()
-                
-                # Wait a bit for the transform to propagate
-                time.sleep(0.5)
-                
-                # Try one more check
-                if self.check_transform_availability():
-                    self.get_logger().info("Fallback transform worked - proceeding with activation")
-                else:
-                    self.get_logger().error("Transform still not available even with fallback - proceeding anyway")
-                
-                # Cancel the transform check timer
-                self.transform_check_timer.cancel()
-                
-                # Initialize subscribers
-                self.setup_subscriptions()
-                
-                # Initialize filter with defaults
-                self.initialize_filter_with_defaults()
-                
-                # Set up processing timers
-                self.setup_timers()
-                
-                # Mark as ready with warning
-                self.is_ready = True
-                self.get_logger().warn("Node activated but transforms may not be reliable")
-            else:
-                # Still waiting, log progress
-                self.get_logger().info(f"Still waiting for transform... ({wait_time:.1f}/20.0 seconds)")
-    
-    def publish_fallback_transform(self):
-        """Publish a fallback static transform if the normal one isn't available."""
-        # Create a simple fallback transform from camera to lidar
-        transform = TransformStamped()
-        transform.header.stamp = self.get_clock().now().to_msg()
-        transform.header.frame_id = "camera_frame"  # Parent frame
-        transform.child_frame_id = "lidar_frame"    # Child frame
-        
-        # Use standard values for the transform (from logs)
-        transform.transform.translation.x = -0.0606
-        transform.transform.translation.y = 0.0929
-        transform.transform.translation.z = -0.0508
-        
-        # Use identity rotation for simplicity
-        transform.transform.rotation.x = 0.0
-        transform.transform.rotation.y = 0.0
-        transform.transform.rotation.z = 0.0
-        transform.transform.rotation.w = 1.0
-        
-        # Publish the transform
-        self.get_logger().info("Publishing fallback static transform from fusion node")
-        self.tf_static_broadcaster.sendTransform([transform])
-    
     def check_transform_availability(self):
         """
         Check if transform is available without trying to fix anything.
         Returns True if transform is available, False otherwise.
         """
         self.transform_checks += 1
-        
+        print ("aaaa")
         try:
+
+            transform = TransformStamped()
+            transform.header.stamp = self.get_clock().now().to_msg()
+            transform.header.frame_id = "testA"
+            transform.child_frame_id = "testB"
+                
+            # Values from configuration
+            transform.transform.translation.x = 1.0
+            transform.transform.rotation.x = 1.0
+                
+            # Clear any existing transforms with the same parent/child frames
+            # This is not directly supported in tf2_ros, but we can ensure a fresh transform
+                
+            # THIS IS CRITICAL: StaticTransformBroadcaster.sendTransform expects a LIST of transforms
+            self.tf_static_broadcaster.sendTransform([transform])
+            time.sleep(1)
+
             # Set up check parameters
             when = rclpy.time.Time()
-            timeout = rclpy.duration.Duration(seconds=0.5)  # Slightly longer timeout
+            timeoutP = rclpy.duration.Duration(seconds=0.1)  # Slightly longer timeout
             parent_frame = "camera_frame"
             child_frame = "lidar_frame"
             
@@ -422,7 +384,7 @@ class EnhancedFusionNode(Node):
                     parent_frame,
                     child_frame,
                     when,
-                    timeout=timeout
+                    timeout=timeoutP
                 )
             except Exception as e:
                 self.get_logger().warn(f"Forward transform check error: {str(e)}")
@@ -432,7 +394,7 @@ class EnhancedFusionNode(Node):
                     child_frame,
                     parent_frame,
                     when,
-                    timeout=timeout
+                    timeout=timeoutP
                 )
             except Exception as e:
                 self.get_logger().warn(f"Reverse transform check error: {str(e)}")
@@ -451,7 +413,8 @@ class EnhancedFusionNode(Node):
                     transform = self.tf_buffer.lookup_transform(
                         parent_frame,
                         child_frame,
-                        when
+                        rclpy.time.Time(),
+                        rclpy.duration.Duration(seconds=1.0)
                     )
                     self.get_logger().info(
                         f"Transform details: translation=[{transform.transform.translation.x:.4f}, "
@@ -465,7 +428,7 @@ class EnhancedFusionNode(Node):
             else:
                 self.transform_failures += 1
                 self.get_logger().warn(f"✗ Transform check #{self.transform_checks}: Transform NOT available")
-                
+                                
                 # List available frames
                 try:
                     frames = self.tf_buffer.all_frames_as_string()
@@ -476,8 +439,9 @@ class EnhancedFusionNode(Node):
                 except Exception as e:
                     self.get_logger().error(f"Error listing frames: {str(e)}")
             
+            if self.transform_confirmed:
+                self.transform_check_timer.cancel()
             return self.transform_available
-            
         except Exception as e:
             self.get_logger().error(f"Error checking transform: {str(e)}")
             return False
@@ -653,6 +617,8 @@ class EnhancedFusionNode(Node):
         """Initialize sensor synchronization system."""
         # Create sensor buffer with increased time tolerance (0.5s instead of 0.1s)
         self.sensor_buffer = SensorBuffer(max_time_diff=0.5)
+        # ENHANCEMENT 8: Add parent reference for motion state access
+        self.sensor_buffer.parent_node = self
         
         # Add sensors to the buffer
         sensor_names = ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']
@@ -840,7 +806,8 @@ class EnhancedFusionNode(Node):
             f"Status: Uptime={uptime:.1f}s, Transform={transform_status}, "
             f"Mode={mode}, 3D sensors={active_3d}, 2D sensors={active_2d}, "
             f"Initialized={self.initialized}, Tracking={self.tracking_reliable}, "
-            f"Uncertainty={self.position_uncertainty:.3f}m"
+            f"Uncertainty={self.position_uncertainty:.3f}m, "
+            f"Motion={self.motion_state}"  # Added motion state to status log
         )
         
         # Add sensor timing information to status
@@ -962,6 +929,7 @@ class EnhancedFusionNode(Node):
             msg (BoundingBox2D): The bounding box message
             source (str): Source identifier (e.g., 'hsv_2d', 'yolo_2d')
         """
+        print ("YOLO CBBBB")
         # Skip if not ready yet
         if not self.is_ready:
             return
@@ -1019,6 +987,197 @@ class EnhancedFusionNode(Node):
             self.get_logger().error(f"Error during filter initialization: {str(e)}")
             return False
 
+    # ENHANCEMENT 1: Motion State Detection System
+    def detect_motion_state(self):
+        """
+        Detect the current motion state of the object based on recent velocity history.
+        
+        Returns:
+            str: One of "stationary", "small_movement", "medium_fast", or "unknown"
+        """
+        # If not initialized or insufficient velocity history, return unknown
+        if not self.initialized or len(self.velocity_history) < 5:
+            return "unknown"
+        
+        # Get the most recent velocity estimates
+        recent_velocities = list(self.velocity_history)[-5:]
+        
+        # Calculate the average magnitude of these velocities
+        avg_velocity = 0.0
+        for vel in recent_velocities:
+            avg_velocity += np.linalg.norm(vel)
+        avg_velocity /= len(recent_velocities)
+        
+        # Classify based on thresholds
+        if avg_velocity < 0.03:
+            motion_state = "stationary"
+        elif avg_velocity < 0.25:
+            motion_state = "small_movement"
+        else:
+            motion_state = "medium_fast"
+        
+        # Update motion state counts for stability
+        self.motion_state_counts[motion_state] += 1
+        for state in self.motion_state_counts:
+            if state != motion_state:
+                self.motion_state_counts[state] = max(0, self.motion_state_counts[state] - 1)
+        
+        # Get the most frequent state for stability
+        dominant_state = max(self.motion_state_counts, key=self.motion_state_counts.get)
+        
+        # Log if motion state changes
+        if dominant_state != self.motion_state:
+            self.prev_motion_state = self.motion_state
+            self.motion_state = dominant_state
+            self.get_logger().info(f"Motion state changed: {self.prev_motion_state} -> {self.motion_state} (velocity={avg_velocity:.3f}m/s)")
+        
+        return self.motion_state
+
+    # ENHANCEMENT 3: Dynamic Measurement Validation
+    def get_innovation_threshold(self, source, motion_state):
+        """
+        Get adaptive innovation threshold based on sensor type and motion state.
+        
+        Args:
+            source (str): Sensor source identifier
+            motion_state (str): Current motion state
+                
+        Returns:
+            float: Innovation threshold for measurement validation
+        """
+        # Determine sensor type
+        if source == 'lidar':
+            sensor_type = "lidar"
+        elif source.endswith('_3d'):
+            sensor_type = "3d_vision"
+        else:
+            sensor_type = "2d"
+        
+        # Base thresholds for each sensor type and motion state
+        base_thresholds = {
+            "lidar": {
+                "stationary": (3.0, 1.5),  # (initial_threshold, min_threshold)
+                "small_movement": (5.0, 2.0),
+                "medium_fast": (8.0, 3.0),
+                "unknown": (10.0, 3.0)
+            },
+            "3d_vision": {
+                "stationary": (6.0, 2.0),
+                "small_movement": (9.0, 3.0),
+                "medium_fast": (12.0, 4.0),
+                "unknown": (15.0, 5.0)
+            },
+            "2d": {
+                "stationary": (10.0, 3.0),
+                "small_movement": (15.0, 5.0),
+                "medium_fast": (20.0, 8.0),
+                "unknown": (25.0, 10.0)
+            }
+        }
+        
+        # Get thresholds for this state and sensor type
+        initial, minimum = base_thresholds[sensor_type][motion_state]
+        
+        # Decay toward minimum with consecutive successful updates
+        decay_factor = max(0.1, min(1.0, 8.0 / (self.consecutive_updates + 1)))
+        threshold = minimum + (initial - minimum) * decay_factor
+        
+        # Apply additional adjustments
+        if motion_state == "medium_fast" and source == "lidar":
+            threshold *= 1.2  # Extra permissiveness for primary sensor during fast motion
+        
+        return threshold
+
+    # ENHANCEMENT 4: Flat Ground Movement Handling
+    def apply_flat_ground_constraints(self):
+        """
+        Apply gentle constraints based on detected flat ground movement.
+        """
+        # Need sufficient history to determine flat ground movement
+        if not self.initialized or len(self.position_history) < 10:
+            self.flat_ground_detected = False
+            self.flat_ground_count = 0
+            return
+        
+        # Analyze recent z-dimension behavior
+        recent_z_values = [pos[2] for pos in list(self.position_history)[-10:]]
+        z_variance = np.var(recent_z_values)
+        z_range = max(recent_z_values) - min(recent_z_values)
+        
+        # Use motion-aware thresholds to detect flat ground movement
+        motion_state = self.detect_motion_state()
+        z_variance_threshold = 0.0005 if motion_state == "stationary" else 0.002
+        
+        # Detect flat ground movement
+        flat_ground = z_variance < z_variance_threshold and z_range < 0.05
+        
+        # Update counter and detection state
+        if flat_ground:
+            self.flat_ground_count = min(self.flat_ground_count + 1, 20)
+        else:
+            self.flat_ground_count = max(self.flat_ground_count - 1, 0)
+            
+        self.flat_ground_detected = self.flat_ground_count > 5
+        
+        # Apply gentle constraints when flat ground movement is detected
+        if self.flat_ground_detected:
+            # Dampen vertical velocity
+            self.state[5] *= 0.7
+            
+            # Apply mild constraint toward average height
+            if motion_state != "medium_fast":  # Don't constrain during fast motion
+                avg_z = sum(recent_z_values) / len(recent_z_values)
+                z_diff = avg_z - self.state[2]
+                self.state[2] += z_diff * 0.1  # Gentle pull toward average
+                
+            if self.debug_level >= 2 and self.sync_quality_metrics['attempt_counts'] % 20 == 0:
+                self.get_logger().debug(
+                    f"Flat ground movement detected (count={self.flat_ground_count}). "
+                    f"z_variance={z_variance:.6f}, z_range={z_range:.3f}, avg_z={avg_z:.3f}"
+                )
+
+    # ENHANCEMENT 5: Smart Sensor Recovery
+    def handle_sensor_recovery(self):
+        """
+        Monitor sensor availability patterns and handle recovery after gaps.
+        """
+        current_time = time.time()
+        
+        for sensor in ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']:
+            # Skip sensors we haven't seen yet
+            if self.sensor_counts.get(sensor, 0) == 0:
+                continue
+                
+            last_time = self.last_detection_time.get(sensor, 0)
+            gap_duration = current_time - last_time
+            
+            # Initialize recovery tracking if needed
+            if sensor not in self.sensor_gap_detection:
+                self.sensor_gap_detection[sensor] = {
+                    'gap_detected': False,
+                    'gap_start_time': 0.0
+                }
+            
+            # Check if sensor just recovered after a gap
+            if self.sensor_gap_detection[sensor]['gap_detected']:
+                # Get newest measurement
+                msg = self.sensor_buffer.get_latest_measurement(sensor)
+                if msg is not None and current_time - last_time < 0.5:  # Fresh data
+                    total_gap = current_time - self.sensor_gap_detection[sensor]['gap_start_time']
+                    self.get_logger().info(f"{sensor} recovered after {total_gap:.1f}s gap")
+                    
+                    # Temporarily increase covariance for more measurement acceptance
+                    self.covariance[0:3, 0:3] *= 1.5
+                    
+                    # Clear gap flag
+                    self.sensor_gap_detection[sensor]['gap_detected'] = False
+            
+            # Set gap flag if sensor has been quiet for too long
+            elif gap_duration > 2.0 and not self.sensor_gap_detection[sensor]['gap_detected']:
+                self.sensor_gap_detection[sensor]['gap_detected'] = True
+                self.sensor_gap_detection[sensor]['gap_start_time'] = current_time
+                self.get_logger().warn(f"{sensor} data gap detected: {gap_duration:.1f}s")
+
     def filter_update(self):
         """Update the Kalman filter with synchronized measurements."""
         # Skip if not ready
@@ -1027,6 +1186,12 @@ class EnhancedFusionNode(Node):
         
         # For performance tracking
         update_start = time.time()
+        
+        # ENHANCEMENT 1: Update motion state
+        motion_state = self.detect_motion_state()
+        
+        # ENHANCEMENT 5: Handle sensor recovery
+        self.handle_sensor_recovery()
         
         # Dynamically adjust which sensor is primary based on recency
         current_time = time.time()
@@ -1040,8 +1205,6 @@ class EnhancedFusionNode(Node):
                 newest_time = last_time
                 freshest_3d_sensor = sensor
         
-        # Use that sensor as reference or fall back to any sensor
-
         # Calculate adaptive time thresholds every 10 updates
         if self.sync_quality_metrics['attempt_counts'] % 10 == 0:
             thresholds = self.sensor_buffer.calculate_adaptive_time_thresholds()
@@ -1189,6 +1352,9 @@ class EnhancedFusionNode(Node):
             # If measurements were processed, update the last update time
             self.last_filter_update_time = current_time
         
+        # ENHANCEMENT 4: Apply flat ground constraints
+        self.apply_flat_ground_constraints()
+        
         # Update timing
         self.last_update_time = current_time
         
@@ -1279,6 +1445,9 @@ class EnhancedFusionNode(Node):
             
         processed_count = 0
         
+        # ENHANCEMENT 1: Get current motion state
+        motion_state = self.detect_motion_state()
+        
         # Sort measurements to prioritize 3D sensors (more accurate)
         # Process in this order: lidar, 3D vision sensors, 2D sensors
         priority_order = ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']
@@ -1297,12 +1466,12 @@ class EnhancedFusionNode(Node):
                     # For 2D measurements, use the confidence (z) to filter low confidence detections
                     confidence = float(msg.point.z)
                     if confidence >= self.min_confidence_threshold:
-                        success = self.update_2d(msg, source)
+                        success = self.update_2d(msg, source, motion_state)
                     else:
                         self.get_logger().debug(f"Skipping low confidence {source} measurement: {confidence:.2f} < {self.min_confidence_threshold:.2f}")
                 else:
                     # For 3D measurements, always process
-                    success = self.update_3d(msg, source)
+                    success = self.update_3d(msg, source, motion_state)
                 
                 if success:
                     processed_count += 1
@@ -1381,13 +1550,14 @@ class EnhancedFusionNode(Node):
         
         return estimated_distance, confidence
 
-    def update_2d(self, msg, source):
+    def update_2d(self, msg, source, motion_state="unknown"):
         """
         Update the filter with a 2D measurement (x,y and optional distance estimation).
         
         Args:
             msg (PointStamped): The 2D measurement
             source (str): Sensor source identifier ('yolo_2d' or 'hsv_2d')
+            motion_state (str): Current motion state
                 
         Returns:
             bool: True if update was successful, False otherwise
@@ -1476,13 +1646,8 @@ class EnhancedFusionNode(Node):
                             # Store for diagnostics
                             self.innovation_history.append(mahalanobis_dist)
                             
-                            # More permissive threshold for 2D measurements with estimated distance
-                            initial_threshold = 30.0  # Increased from 25.0 for more leniency
-                            min_threshold = 10.0      # Increased from 8.0
-                            
-                            # Adjust threshold based on consecutive updates
-                            decay_factor = max(0.1, min(1.0, 10.0 / (self.consecutive_updates + 1)))
-                            threshold = min_threshold + (initial_threshold - min_threshold) * decay_factor
+                            # ENHANCEMENT 3: Get dynamic threshold based on motion state and sensor
+                            threshold = self.get_innovation_threshold(source, motion_state)
                             
                             # Reject obvious outliers, but log for diagnostics
                             if mahalanobis_dist > threshold:
@@ -1492,7 +1657,7 @@ class EnhancedFusionNode(Node):
                                     f"distance estimate: {distance:.2f}m (confidence: {distance_confidence:.2f})"
                                 )
                                 # Fall back to regular 2D update
-                                return self._update_2d_only(msg, source, confidence)
+                                return self._update_2d_only(msg, source, confidence, motion_state)
                                 
                             # Debug logging for accepted measurements
                             self.get_logger().info(
@@ -1522,24 +1687,24 @@ class EnhancedFusionNode(Node):
                         except np.linalg.LinAlgError as e:
                             self.log_error(f"Matrix inversion error in update_2d 3D estimation mode for {source}: {str(e)}")
                             # Fall back to regular 2D update
-                            return self._update_2d_only(msg, source, confidence)
+                            return self._update_2d_only(msg, source, confidence, motion_state)
                 else:
                     # Bounding box data is too old
                     if self.debug_level >= 2:
                         self.get_logger().debug(
                             f"Bounding box data for {source} is too old: {current_time - bbox_timestamp:.2f}s > 0.5s. Using 2D-only update."
                         )
-                    return self._update_2d_only(msg, source, confidence)
+                    return self._update_2d_only(msg, source, confidence, motion_state)
                     
             except Exception as e:
                 self.log_error(f"Error in 3D estimation from {source} 2D data: {str(e)}")
                 # Fall back to regular 2D update
-                return self._update_2d_only(msg, source, confidence)
+                return self._update_2d_only(msg, source, confidence, motion_state)
         
         # Default case: use 2D-only update
-        return self._update_2d_only(msg, source, confidence)
+        return self._update_2d_only(msg, source, confidence, motion_state)
 
-    def _update_2d_only(self, msg, source, confidence):
+    def _update_2d_only(self, msg, source, confidence, motion_state="unknown"):
         """
         Original 2D update method (xy only).
         
@@ -1547,6 +1712,7 @@ class EnhancedFusionNode(Node):
             msg (PointStamped): The 2D measurement
             source (str): Sensor source identifier
             confidence (float): Detection confidence
+            motion_state (str): Current motion state
                 
         Returns:
             bool: True if update was successful, False otherwise
@@ -1589,13 +1755,8 @@ class EnhancedFusionNode(Node):
             # Store for diagnostics
             self.innovation_history.append(mahalanobis_dist)
             
-            # More permissive threshold for 2D measurements (they're less precise)
-            initial_threshold = 20.0  # Very permissive at first for 2D
-            min_threshold = 5.0       # Still more permissive than 3D after convergence
-            
-            # Adjust threshold based on consecutive updates
-            decay_factor = max(0.1, min(1.0, 10.0 / (self.consecutive_updates + 1)))
-            threshold = min_threshold + (initial_threshold - min_threshold) * decay_factor
+            # ENHANCEMENT 3: Get dynamic threshold based on motion state and sensor
+            threshold = self.get_innovation_threshold(source, motion_state)
             
             # Reject obvious outliers, but log for diagnostics
             if mahalanobis_dist > threshold:
@@ -1631,13 +1792,14 @@ class EnhancedFusionNode(Node):
             self.log_error(f"Matrix inversion error in _update_2d_only for {source}: {str(e)}")
             return False
 
-    def update_3d(self, msg, source):
+    def update_3d(self, msg, source, motion_state="unknown"):
         """
         Update the filter with a 3D measurement.
         
         Args:
             msg (PointStamped): The 3D measurement
             source (str): Sensor source identifier
+            motion_state (str): Current motion state
             
         Returns:
             bool: True if update was successful, False otherwise
@@ -1682,24 +1844,8 @@ class EnhancedFusionNode(Node):
             # Store for diagnostics
             self.innovation_history.append(mahalanobis_dist)
             
-            # Use a more permissive threshold initially, then tighten as we get more data
-            initial_threshold = 15.0  # Very permissive at first
-            min_threshold = 3.0      # Minimum threshold after convergence
-            
-            # Adaptively adjust rejection threshold based on recent history and filter health
-            if len(self.innovation_history) > 5:
-                mean_innovation = np.mean(list(self.innovation_history)[-10:])
-                std_innovation = max(np.std(list(self.innovation_history)[-10:]), 0.1)
-                adaptive_threshold = mean_innovation + 3.0 * std_innovation
-                
-                # Cap threshold between min and initial values
-                threshold = max(min_threshold, min(adaptive_threshold, initial_threshold))
-                
-                # Decrease threshold as we get more consecutive updates
-                decay_factor = max(0.1, min(1.0, 10.0 / (self.consecutive_updates + 1)))
-                threshold = min_threshold + (threshold - min_threshold) * decay_factor
-            else:
-                threshold = initial_threshold  # Default threshold
+            # ENHANCEMENT 3: Get dynamic threshold based on motion state and sensor
+            threshold = self.get_innovation_threshold(source, motion_state)
             
             # Reject outliers, but log for diagnostics
             if mahalanobis_dist > threshold:
@@ -1779,8 +1925,9 @@ class EnhancedFusionNode(Node):
         # Default case
         return base_noise
     
+    # ENHANCEMENT 6: Mode Transition Stabilization
     def update_tracking_reliability(self):
-        """Update tracking reliability metrics based on current state."""
+        """Update tracking reliability metrics based on current state.""" 
         # Check if we have fresh data from enough sensors
         current_time = time.time()
         
@@ -1825,14 +1972,39 @@ class EnhancedFusionNode(Node):
             adaptive_threshold *= 1.5
             self.get_logger().debug(f"2D-only mode: increasing allowable uncertainty to {adaptive_threshold:.2f}m")
         
-        # Determine reliability based on uncertainty and available sensors
-        self.tracking_reliable = (
+        # Get current motion state
+        motion_state = self.detect_motion_state()
+        
+        # Determine raw reliability based on uncertainty and available sensors
+        raw_reliable = (
             self.position_uncertainty < adaptive_threshold and
             self.velocity_uncertainty < self.velocity_uncertainty_threshold * 2.0 and  # More lenient velocity threshold
             ((fresh_3d_sensors >= 1) or                                               # Either have 3D sensors
              (fresh_2d_sensors >= 1 and self.allow_tracking_with_2d_only)) and        # Or have 2D sensors and allow 2D-only
             self.consecutive_updates >= 1  # Only need one consecutive update
         )
+        
+        # ENHANCEMENT 6: Apply hysteresis buffer for stability
+        # Add current state to reliability buffer
+        self.reliability_buffer.append(raw_reliable)
+        
+        # Count true states in the buffer
+        true_count = sum(1 for state in self.reliability_buffer if state)
+        
+        # Need strong evidence to change state
+        if true_count >= 3:  # 3+ out of 5 = reliable
+            self.tracking_reliable = True
+        elif true_count <= 1:  # 0-1 out of 5 = unreliable
+            self.tracking_reliable = False
+        # If 2 out of 5, maintain previous state (hysteresis)
+        
+        # Log state transitions
+        if hasattr(self, 'last_tracking_state') and self.last_tracking_state != self.tracking_reliable:
+            self.get_logger().info(
+                f"Tracking state changed to {self.tracking_reliable}, "
+                f"motion_state={motion_state}, uncertainty={self.position_uncertainty:.3f}m"
+            )
+        self.last_tracking_state = self.tracking_reliable
         
         # Log adaptive thresholds occasionally
         if self.debug_level >= 1 and current_time % 10 < 0.1:
@@ -1868,7 +2040,7 @@ class EnhancedFusionNode(Node):
                 target_frame,
                 point_msg.header.frame_id,
                 rclpy.time.Time(),
-                rclpy.duration.Duration(seconds=0.1)
+                rclpy.duration.Duration(seconds=1.0)
             )
             
             # Apply the transform
@@ -1892,6 +2064,10 @@ class EnhancedFusionNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Transform error {point_msg.header.frame_id}→{target_frame}: {str(e)}")
             return None
+
+        if not self.tf_buffer.can_transform(target_frame, source_frame, rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=1.0)):
+            self.get_logger().warn("Transform not available yet, skipping...")
+            return
     
     def publish_state(self):
         """Publish the current state estimate."""
@@ -1921,6 +2097,29 @@ class EnhancedFusionNode(Node):
         unc_msg.data = float(self.position_uncertainty)
         self.uncertainty_pub.publish(unc_msg)
     
+    # ENHANCEMENT 7: Comprehensive Motion Analytics
+    def _calculate_distance_traveled(self, num_positions=20):
+        """
+        Calculate total distance traveled over last n positions.
+        
+        Args:
+            num_positions (int): Number of recent positions to consider
+            
+        Returns:
+            float: Total distance traveled
+        """
+        if not hasattr(self, 'position_history') or len(self.position_history) < 2:
+            return 0.0
+            
+        positions = list(self.position_history)[-min(num_positions, len(self.position_history)):]
+        
+        total_distance = 0.0
+        for i in range(1, len(positions)):
+            total_distance += np.linalg.norm(positions[i] - positions[i-1])
+            
+        return total_distance
+    
+    # ENHANCEMENT 7: Enhanced Diagnostics with Motion Analytics
     def publish_diagnostics(self):
         """Publish detailed diagnostic information."""
         current_time = time.time()
@@ -1929,6 +2128,27 @@ class EnhancedFusionNode(Node):
         vel_mag = 0.0
         if self.initialized:
             vel_mag = math.sqrt(self.state[3]**2 + self.state[4]**2 + self.state[5]**2)
+        
+        # ENHANCEMENT 7: Calculate comprehensive motion metrics
+        acceleration = 0.0
+        avg_velocity = 0.0
+        max_velocity = 0.0
+        
+        if self.initialized and len(self.velocity_history) > 10:
+            # Calculate statistics on recent movement
+            recent_velocities = [np.linalg.norm(v) for v in list(self.velocity_history)[-20:]]
+            avg_velocity = sum(recent_velocities) / len(recent_velocities)
+            max_velocity = max(recent_velocities)
+            
+            # Calculate acceleration
+            if len(self.velocity_history) >= 3 and len(self.time_history) >= 3:
+                v1 = self.velocity_history[-3]
+                v2 = self.velocity_history[-1]
+                t1 = self.time_history[-3]
+                t2 = self.time_history[-1]
+                
+                if t2 > t1:
+                    acceleration = np.linalg.norm(v2 - v1) / (t2 - t1)
         
         # Create diagnostic message
         diagnostics = {
@@ -1972,6 +2192,16 @@ class EnhancedFusionNode(Node):
                                         for s in ['lidar', 'hsv_3d', 'yolo_3d']),
                 "using_bbox_distance": self.use_bbox_distance_estimation,
                 "increased_uncertainty": self.increased_uncertainty_mode
+            },
+            # ENHANCEMENT 7: Add motion analysis metrics
+            "motion_analysis": {
+                "state": self.motion_state,
+                "avg_velocity": float(avg_velocity),
+                "max_velocity": float(max_velocity),
+                "acceleration": float(acceleration),
+                "flat_ground_movement": getattr(self, 'flat_ground_detected', False),
+                "z_variance": float(np.var([pos[2] for pos in list(self.position_history)[-10:]]) if len(self.position_history) >= 10 else 0.0),
+                "distance_traveled": float(self._calculate_distance_traveled(20))
             }
         }
         
@@ -1987,7 +2217,8 @@ class EnhancedFusionNode(Node):
             self.get_logger().info(
                 f"State: pos=[{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}]m, "
                 f"vel=[{vel[0]:.2f}, {vel[1]:.2f}, {vel[2]:.2f}]m/s, "
-                f"uncertainty={self.position_uncertainty:.3f}m"
+                f"uncertainty={self.position_uncertainty:.3f}m, "
+                f"motion={self.motion_state}"  # Added motion state to log
             )
     
     def log_error(self, message, is_warning=False):
@@ -2016,60 +2247,56 @@ class EnhancedFusionNode(Node):
             # Reduce filter health score temporarily
             self.filter_health = max(0.3, self.filter_health - 0.2)
 
+    # ENHANCEMENT 2: Adaptive Process Noise Model
     def update_adaptive_process_noise(self):
         """
         Adapt process noise based on detected motion state (moving vs stationary).
         Higher process noise when moving, lower when stationary to reduce jitter.
         """
-        # Detect if the object is moving based on recent velocity estimates
-        is_moving = False
-        velocity_magnitude = np.linalg.norm(self.state[3:6])
+        # Get current motion state
+        motion_state = self.detect_motion_state()
         
-        # Parameters for motion detection
-        velocity_threshold = 0.2  # m/s
-        stationary_noise_factor = 0.3  # Lower noise when stationary
-        moving_noise_factor = 1.5    # Higher noise when moving
+        # Set noise factors based on motion state
+        if motion_state == "stationary":
+            position_noise_factor = 0.3
+            velocity_noise_factor = 0.2
+        elif motion_state == "small_movement":
+            position_noise_factor = 0.8
+            velocity_noise_factor = 1.0
+        elif motion_state == "medium_fast":
+            position_noise_factor = 1.5
+            velocity_noise_factor = 2.0
+        else:  # unknown
+            position_noise_factor = 1.0
+            velocity_noise_factor = 1.0
         
-        # Consider an object moving if velocity exceeds threshold
-        if velocity_magnitude > velocity_threshold:
-            is_moving = True
-            
-        # Also check recent velocity history if available
-        if len(self.velocity_history) >= 3:
-            recent_velocities = []
-            for vel in list(self.velocity_history)[-3:]:
-                recent_velocities.append(np.linalg.norm(vel))
-            
-            avg_recent_velocity = sum(recent_velocities) / len(recent_velocities)
-            if avg_recent_velocity > velocity_threshold:
-                is_moving = True
+        # Calculate target noise values
+        target_pos_noise = self.process_noise_pos * position_noise_factor
+        target_vel_noise = self.process_noise_vel * velocity_noise_factor
         
-        # Compute target noise factors based on motion state
-        if is_moving:
-            target_pos_noise = self.process_noise_pos * moving_noise_factor
-            target_vel_noise = self.process_noise_vel * moving_noise_factor
-            motion_state = "moving"
+        # Implement asymmetric smoothing for transitions
+        prev_state = getattr(self, 'prev_motion_state', 'unknown')
+        
+        # Faster adaptation when transitioning to higher speeds
+        if (prev_state == "stationary" and motion_state != "stationary") or \
+           (prev_state == "small_movement" and motion_state == "medium_fast"):
+            alpha = 0.4  # Faster adaptation
         else:
-            target_pos_noise = self.process_noise_pos * stationary_noise_factor
-            target_vel_noise = self.process_noise_vel * stationary_noise_factor
-            motion_state = "stationary"
-
-        # Smooth transitions between noise levels using exponential smoothing
-        alpha = 0.2  # Smoothing factor (0-1): higher means faster adaptation
+            alpha = 0.2  # Normal adaptation
         
-        # If we haven't set adaptive noise values yet, initialize them
+        # Initialize adaptive noise if needed
         if not hasattr(self, 'adaptive_process_noise_pos'):
             self.adaptive_process_noise_pos = self.process_noise_pos
             self.adaptive_process_noise_vel = self.process_noise_vel
         
-        # Update adaptive noise with smoothing
+        # Apply exponential smoothing with asymmetric adaptation
         self.adaptive_process_noise_pos = (1-alpha) * self.adaptive_process_noise_pos + alpha * target_pos_noise
         self.adaptive_process_noise_vel = (1-alpha) * self.adaptive_process_noise_vel + alpha * target_vel_noise
         
         # Log motion state occasionally
         if self.debug_level >= 2 and self.sync_quality_metrics['attempt_counts'] % 20 == 0:
             self.get_logger().debug(
-                f"Motion state: {motion_state} (v={velocity_magnitude:.2f}m/s), "
+                f"Motion state: {motion_state} (prev={prev_state}), "
                 f"adaptive noise: pos={self.adaptive_process_noise_pos:.3f}, vel={self.adaptive_process_noise_vel:.3f}"
             )
         
@@ -2079,36 +2306,56 @@ class EnhancedFusionNode(Node):
         """Convert ROS timestamp to float seconds."""
         return timestamp.sec + timestamp.nanosec / 1e9
 
+    def wait_subscribers_until_transform(self):
+        time.sleep(5)
+        reTry = 0        
+        while reTry < 10:
+            if self.transform_confirmed:
+                break
+            time.sleep(5)
+            reTry = reTry + 1
+
+                
+        if self.transform_confirmed:
+            self.get_logger().info("✓ Transform confirmed - proceeding with initialization")            
+            #only subscribe if transform is good
+            self.setup_subscriptions()
+        else:
+            # This should never happen since we exit on timeout, but just in case
+            self.get_logger().error("✗ Transform unexpectedly unavailable - exiting")
+            self.destroy_node()
+            rclpy.shutdown()
+            sys.exit(1)
+
+         # PHASE 4: Set up publishers (these can be created immediately)
+        self.setup_publishers()
+        
+        # PHASE 5: Initialize diagnostics
+        self.init_diagnostics()
+        
+        # PHASE 7: Initialize filter with defaults
+        self.initialize_filter_with_defaults()
+        
+        # PHASE 8: Set up processing timers
+        self.setup_timers()
+        # Mark as ready
+        self.is_ready = True
+
+        self.get_logger().info("Initialization complete - node is ready")
+
+
 def main(args=None):
     """Main function to start the node."""
     rclpy.init(args=args)
+    node = EnhancedFusionNode()
     
-    print("=================================================")
-    print("Enhanced Fusion Node - Building on Working Foundation")
-    print("=================================================")
-    
-    try:
-        # Create and start the node
-        node = EnhancedFusionNode()
-        
-        # Print initial startup message
-        print("Fusion node initialized, beginning spin...")
-        
-        # Spin the node to process callbacks (this is blocking)
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        print("Stopping node (Ctrl+C)")
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        # Clean shutdown
-        if 'node' in locals():
-            node.get_logger().info("Shutting down fusion node...")
-            node.destroy_node()
-        rclpy.shutdown()
-        print("Fusion node shutdown complete")
+    # Schedule my_method to run once after 5 seconds
+    threading.Timer(5.0, node.wait_subscribers_until_transform).start()
 
-if __name__ == '__main__':
-    main()
+    try:
+        rclpy.spin(node)
+    except Exception as e:
+        node.get_logger().error(f"Error: {str(e)}")
+    finally:        
+        node.destroy_node()
+        rclpy.shutdown()

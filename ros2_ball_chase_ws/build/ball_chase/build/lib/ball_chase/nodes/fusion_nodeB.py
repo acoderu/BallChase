@@ -4,7 +4,7 @@
 Enhanced Fusion Node - Building on Working Foundation
 This version starts with the working transform handling and adds advanced features.
 """
-import threading
+
 import rclpy
 from rclpy.node import Node
 import time
@@ -19,7 +19,7 @@ import json
 import os
 import sys
 import copy
-from rclpy.executors import MultiThreadedExecutor
+
 # Import from config
 from ball_chase.config.config_loader import ConfigLoader
 
@@ -269,8 +269,7 @@ class EnhancedFusionNode(Node):
     def __init__(self):
         super().__init__('enhanced_fusion_node')
         
-        self.get_logger().info("======xxxxx Enhanced Fusion Node Starting ======")
-        
+        self.get_logger().info("====== Enhanced Fusion Node Starting ======")
         
         # Core tracking variables
         self.start_time = time.time()
@@ -288,10 +287,44 @@ class EnhancedFusionNode(Node):
         # PHASE 1: Initialize transform system FIRST before anything else
         self.init_transform_system()
         
-        time.sleep(3)
         # PHASE 1.5: Wait for transform synchronously before proceeding
         self.get_logger().info("Waiting for transform to be available (camera_frame -> lidar_frame)...")
+        transform_wait_start = time.time()
+        transform_ready = False
         
+        # Block and wait for transform - this must be completed before proceeding
+        while not transform_ready:
+            transform_ready = self.check_transform_availability()
+            
+            # Check if we've waited too long (30 seconds)
+            current_wait = time.time() - transform_wait_start
+            if current_wait > 30.0:
+                self.get_logger().error("CRITICAL ERROR: Transform wait timeout (30 seconds)")
+                self.get_logger().error("Required transforms not available. Check that camera_frame -> lidar_frame transform is being published.")
+                self.get_logger().error("Exiting fusion node...")
+                
+                # Clean up and exit
+                self.destroy_node()
+                rclpy.shutdown()
+                sys.exit(1)  # Exit with error code 1
+                
+            # If transform isn't ready yet, wait a bit and try again
+            if not transform_ready:
+                self.get_logger().warn(f"Transform not ready, waited {current_wait:.1f}/30.0 seconds... trying again")
+                time.sleep(1.0)  # Check every second
+                
+        # Final check after waiting
+        transform_ready = self.check_transform_availability()
+        if transform_ready:
+            self.get_logger().info("✓ Transform confirmed - proceeding with initialization")
+            self.transform_confirmed = True
+        else:
+            # This should never happen since we exit on timeout, but just in case
+            self.get_logger().error("✗ Transform unexpectedly unavailable - exiting")
+            self.destroy_node()
+            rclpy.shutdown()
+            sys.exit(1)
+            
         # PHASE 2: Load configuration
         self.load_configuration()
         
@@ -299,9 +332,31 @@ class EnhancedFusionNode(Node):
         self.init_state_tracking()
         self.init_sensor_synchronization()
         
-        self.transform_check_timer = self.create_timer(5.0, self.check_transform_availability)
+        # PHASE 4: Set up publishers (these can be created immediately)
+        self.setup_publishers()
         
-                
+        # PHASE 5: Initialize diagnostics
+        self.init_diagnostics()
+        
+        # PHASE 6: Now that transform is checked, set up subscriptions
+        if transform_ready:
+            self.get_logger().info("Setting up sensor subscriptions now that transform is confirmed")
+        else:
+            self.get_logger().warn("Setting up sensor subscriptions despite missing transform - expect problems")
+        
+        self.setup_subscriptions()
+        
+        # PHASE 7: Initialize filter with defaults
+        self.initialize_filter_with_defaults()
+        
+        # PHASE 8: Set up processing timers
+        self.setup_timers()
+        
+        # Mark as ready
+        self.is_ready = True
+        
+        self.get_logger().info("Initialization complete - node is ready")
+        
         self.sync_quality_metrics = {
             'success_rate': 0.0,
             'avg_time_diff': 0.0,
@@ -334,7 +389,7 @@ class EnhancedFusionNode(Node):
     def init_transform_system(self):
         """Initialize just the transform system."""
         # CRITICAL STEP: Set up transform system FIRST
-        self.tf_buffer = Buffer()  
+        self.tf_buffer = Buffer(cache_time=rclpy.duration.Duration(seconds=30.0))  # Increased cache time
         self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # Also create a static transform broadcaster in case we need to publish our own
@@ -348,28 +403,11 @@ class EnhancedFusionNode(Node):
         Returns True if transform is available, False otherwise.
         """
         self.transform_checks += 1
-        print ("aaaa")
+        
         try:
-
-            transform = TransformStamped()
-            transform.header.stamp = self.get_clock().now().to_msg()
-            transform.header.frame_id = "testA"
-            transform.child_frame_id = "testB"
-                
-            # Values from configuration
-            transform.transform.translation.x = 1.0
-            transform.transform.rotation.x = 1.0
-                
-            # Clear any existing transforms with the same parent/child frames
-            # This is not directly supported in tf2_ros, but we can ensure a fresh transform
-                
-            # THIS IS CRITICAL: StaticTransformBroadcaster.sendTransform expects a LIST of transforms
-            self.tf_static_broadcaster.sendTransform([transform])
-            time.sleep(1)
-
             # Set up check parameters
             when = rclpy.time.Time()
-            timeoutP = rclpy.duration.Duration(seconds=0.1)  # Slightly longer timeout
+            timeout = rclpy.duration.Duration(seconds=0.5)  # Slightly longer timeout
             parent_frame = "camera_frame"
             child_frame = "lidar_frame"
             
@@ -384,7 +422,7 @@ class EnhancedFusionNode(Node):
                     parent_frame,
                     child_frame,
                     when,
-                    timeout=timeoutP
+                    timeout=timeout
                 )
             except Exception as e:
                 self.get_logger().warn(f"Forward transform check error: {str(e)}")
@@ -394,7 +432,7 @@ class EnhancedFusionNode(Node):
                     child_frame,
                     parent_frame,
                     when,
-                    timeout=timeoutP
+                    timeout=timeout
                 )
             except Exception as e:
                 self.get_logger().warn(f"Reverse transform check error: {str(e)}")
@@ -413,8 +451,7 @@ class EnhancedFusionNode(Node):
                     transform = self.tf_buffer.lookup_transform(
                         parent_frame,
                         child_frame,
-                        rclpy.time.Time(),
-                        rclpy.duration.Duration(seconds=1.0)
+                        when
                     )
                     self.get_logger().info(
                         f"Transform details: translation=[{transform.transform.translation.x:.4f}, "
@@ -428,7 +465,7 @@ class EnhancedFusionNode(Node):
             else:
                 self.transform_failures += 1
                 self.get_logger().warn(f"✗ Transform check #{self.transform_checks}: Transform NOT available")
-                                
+                
                 # List available frames
                 try:
                     frames = self.tf_buffer.all_frames_as_string()
@@ -439,9 +476,8 @@ class EnhancedFusionNode(Node):
                 except Exception as e:
                     self.get_logger().error(f"Error listing frames: {str(e)}")
             
-            if self.transform_confirmed:
-                self.transform_check_timer.cancel()
             return self.transform_available
+            
         except Exception as e:
             self.get_logger().error(f"Error checking transform: {str(e)}")
             return False
@@ -929,7 +965,6 @@ class EnhancedFusionNode(Node):
             msg (BoundingBox2D): The bounding box message
             source (str): Source identifier (e.g., 'hsv_2d', 'yolo_2d')
         """
-        print ("YOLO CBBBB")
         # Skip if not ready yet
         if not self.is_ready:
             return
@@ -2040,7 +2075,7 @@ class EnhancedFusionNode(Node):
                 target_frame,
                 point_msg.header.frame_id,
                 rclpy.time.Time(),
-                rclpy.duration.Duration(seconds=1.0)
+                rclpy.duration.Duration(seconds=0.1)
             )
             
             # Apply the transform
@@ -2064,10 +2099,6 @@ class EnhancedFusionNode(Node):
         except Exception as e:
             self.get_logger().warn(f"Transform error {point_msg.header.frame_id}→{target_frame}: {str(e)}")
             return None
-
-        if not self.tf_buffer.can_transform(target_frame, source_frame, rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=1.0)):
-            self.get_logger().warn("Transform not available yet, skipping...")
-            return
     
     def publish_state(self):
         """Publish the current state estimate."""
@@ -2306,56 +2337,38 @@ class EnhancedFusionNode(Node):
         """Convert ROS timestamp to float seconds."""
         return timestamp.sec + timestamp.nanosec / 1e9
 
-    def wait_subscribers_until_transform(self):
-        time.sleep(5)
-        reTry = 0        
-        while reTry < 10:
-            if self.transform_confirmed:
-                break
-            time.sleep(5)
-            reTry = reTry + 1
-
-                
-        if self.transform_confirmed:
-            self.get_logger().info("✓ Transform confirmed - proceeding with initialization")            
-            #only subscribe if transform is good
-            self.setup_subscriptions()
-        else:
-            # This should never happen since we exit on timeout, but just in case
-            self.get_logger().error("✗ Transform unexpectedly unavailable - exiting")
-            self.destroy_node()
-            rclpy.shutdown()
-            sys.exit(1)
-
-         # PHASE 4: Set up publishers (these can be created immediately)
-        self.setup_publishers()
-        
-        # PHASE 5: Initialize diagnostics
-        self.init_diagnostics()
-        
-        # PHASE 7: Initialize filter with defaults
-        self.initialize_filter_with_defaults()
-        
-        # PHASE 8: Set up processing timers
-        self.setup_timers()
-        # Mark as ready
-        self.is_ready = True
-
-        self.get_logger().info("Initialization complete - node is ready")
-
 
 def main(args=None):
     """Main function to start the node."""
     rclpy.init(args=args)
-    node = EnhancedFusionNode()
     
-    # Schedule my_method to run once after 5 seconds
-    threading.Timer(5.0, node.wait_subscribers_until_transform).start()
-
+    print("=================================================")
+    print("Enhanced Fusion Node - Building on Working Foundation")
+    print("=================================================")
+    
     try:
+        # Create and start the node
+        node = EnhancedFusionNode()
+        
+        # Print initial startup message
+        print("Fusion node initialized, beginning spin...")
+        
+        # Spin the node to process callbacks (this is blocking)
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        print("Stopping node (Ctrl+C)")
     except Exception as e:
-        node.get_logger().error(f"Error: {str(e)}")
-    finally:        
-        node.destroy_node()
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Clean shutdown
+        if 'node' in locals():
+            node.get_logger().info("Shutting down fusion node...")
+            node.destroy_node()
         rclpy.shutdown()
+        print("Fusion node shutdown complete")
+
+
+if __name__ == '__main__':
+    main()
