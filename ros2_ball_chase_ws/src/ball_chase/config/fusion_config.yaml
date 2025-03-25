@@ -18,6 +18,9 @@ measurement_noise:
   hsv_3d: 0.05         # Meters - from depth camera with HSV
   yolo_3d: 0.04        # Meters - from depth camera with YOLO
   lidar: 0.03          # Meters - most accurate for 3D
+  # Distance estimation from 2D
+  hsv_2d_est3d: 0.15   # Meters - estimated 3D from HSV 2D
+  yolo_2d_est3d: 0.12  # Meters - estimated 3D from YOLO 2D
 
 # Filter tuning parameters
 filter:
@@ -51,3 +54,32 @@ physical_measurements:
   camera_height: 0.1016     # Camera height from ground (4 inches)
   ball_center_height: 0.0381 # Tennis ball center height from ground (1.5 inches)
   ball_radius: 0.03429      # Tennis ball radius in meters (1.35 inches)
+
+# New: Pi 5 resource management settings
+resource_management:
+  enable_resource_monitoring: true     # Enable monitoring of CPU, memory, temperature
+  adaptive_update_rate: true           # Enable adaptive update rate based on system load
+  base_update_rate: 20.0               # Base filter update rate (Hz)
+  min_update_rate: 5.0                 # Minimum update rate during high system load (Hz)
+  cpu_check_interval: 5.0              # Check CPU usage every N seconds
+  memory_check_interval: 30.0          # Check memory usage every N seconds
+  temperature_check_interval: 10.0     # Check system temperature every N seconds
+  high_cpu_threshold: 75               # High CPU usage threshold (%)
+  critical_cpu_threshold: 90           # Critical CPU usage threshold (%)
+  high_memory_threshold: 80            # High memory usage threshold (%)
+  high_temperature_threshold: 75.0     # High temperature threshold (°C)
+  critical_temperature_threshold: 82.0 # Critical temperature threshold (°C)
+  
+# Motion state detection thresholds - now configurable
+motion_state_thresholds:
+  stationary_max_velocity: 0.03        # Maximum velocity for stationary state (m/s)
+  small_movement_max_velocity: 0.25    # Maximum velocity for small movement state (m/s)
+  auto_calibrate: true                 # Enable auto-calibration of thresholds
+  
+# Consensus initialization settings for more robust startup
+initialization:
+  require_consensus: true              # Require multiple measurements for initialization
+  min_measurements: 2                   # Minimum number of measurements required
+  max_initialization_time: 5.0         # Maximum time to wait for initialization (seconds)
+  position_variance_initial: 10.0      # Initial position variance (meters²)
+  velocity_variance_initial: 100.0     # Initial velocity variance (m/s)²

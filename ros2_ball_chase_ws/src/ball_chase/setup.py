@@ -30,7 +30,8 @@ setup(
             'hsv_ball_node = ball_chase.nodes.hsv_ball_node:main',
             'depth_camera_node = ball_chase.nodes.depth_camera_node:main',
             'fusion_node = ball_chase.nodes.fusion_node:main',         
-            'enhanced_fusion_node = enhanced_fusion.enhanced_fusion_node:main',        
+            'state_fusion_node = ball_chase.nodes.state_aware_fusion_node:main', 
+            'base_link_fusion_node = ball_chase.nodes.base_link_fusion_node:main',
        ],
     },   
 )

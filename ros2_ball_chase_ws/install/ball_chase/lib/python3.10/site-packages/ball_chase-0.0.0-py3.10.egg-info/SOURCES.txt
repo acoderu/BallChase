@@ -11,9 +11,6 @@ setup.py
 ball_chase/__init__.py
 ball_chase/config/__init__.py
 ball_chase/config/config_loader.py
-ball_chase/nodes/A.py
-ball_chase/nodes/B.py
-ball_chase/nodes/C.py
 ball_chase/nodes/__init__.py
 ball_chase/nodes/depth_camera_node.py
 ball_chase/nodes/diagnostics_node.py
@@ -21,6 +18,7 @@ ball_chase/nodes/diagnostics_visualizer_node.py
 ball_chase/nodes/fusion_node.py
 ball_chase/nodes/hsv_ball_node.py
 ball_chase/nodes/lidar_node.py
+ball_chase/nodes/state_aware_fusion_node.py
 ball_chase/nodes/transform_receive.py
 ball_chase/nodes/transform_test.py
 ball_chase/nodes/yolo_ball_node.py
