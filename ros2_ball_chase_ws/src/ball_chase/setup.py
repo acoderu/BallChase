@@ -29,9 +29,9 @@ setup(
             'yolo_ball_node = ball_chase.nodes.yolo_ball_node:main',
             'hsv_ball_node = ball_chase.nodes.hsv_ball_node:main',
             'depth_camera_node = ball_chase.nodes.depth_camera_node:main',
-            'fusion_node = ball_chase.nodes.fusion_node:main',            
-        ],
-    },
-    
+            'fusion_node = ball_chase.nodes.fusion_node:main',         
+            'enhanced_fusion_node = enhanced_fusion.enhanced_fusion_node:main',        
+       ],
+    },   
 )
 
