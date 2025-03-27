@@ -5,7 +5,25 @@ startup:
   transform_retry_count: 60  # Increase retry count
   transform_retry_delay: 1.0  # 1 second between retries
   required_transforms: ['camera_frame', 'lidar_frame']
-  
+
+# Fusion Node Configuration
+
+topics:
+  input:
+    lidar: '/basketball/lidar/position'
+    hsv_3d: '/basketball/hsv/position_3d'
+    yolo_3d: '/basketball/yolo/position_3d'
+    hsv_2d: '/basketball/hsv/position'
+    yolo_2d: '/basketball/yolo/position'
+    hsv_bbox: '/basketball/hsv/bbox'
+    yolo_bbox: '/basketball/yolo/bbox'
+  output:
+    position: '/basketball/fused/position'
+    velocity: '/basketball/fused/velocity'
+    tracking_status: '/basketball/fused/tracking_status'
+    uncertainty: '/basketball/fused/position_uncertainty'
+    diagnostics: '/basketball/fusion/diagnostics'
+
 # Process noise: how much uncertainty to add during prediction steps
 process_noise:
   position: 0.1        # Position uncertainty per second squared
@@ -18,6 +36,8 @@ measurement_noise:
   hsv_3d: 0.05         # Meters - from depth camera with HSV
   yolo_3d: 0.04        # Meters - from depth camera with YOLO
   lidar: 0.03          # Meters - most accurate for 3D
+  hsv_2d_est3d: 0.15   # Meters - estimated 3D from 2D HSV
+  yolo_2d_est3d: 0.12  # Meters - estimated 3D from 2D YOLO
 
 # Filter tuning parameters
 filter:
@@ -51,3 +71,25 @@ physical_measurements:
   camera_height: 0.1016     # Camera height from ground (4 inches)
   ball_center_height: 0.0381 # Tennis ball center height from ground (1.5 inches)
   ball_radius: 0.03429      # Tennis ball radius in meters (1.35 inches)
+
+# Advanced features
+advanced_features:
+  use_bbox_distance_estimation: true
+  allow_tracking_with_2d_only: true
+  increased_uncertainty_mode: true
+
+# Performance optimization settings for Raspberry Pi
+performance:
+  enable_visualization: false  # Set to true when visualization needed
+  adaptive_processing: true    # Adjust processing based on system load
+  processing_priority: high    # high, normal, low
+  transform_check_frequency: 3.0  # Seconds between transform checks
+  skip_processing_threshold: 85  # CPU % to start skipping processing
+  garbage_collection_interval: 120  # Seconds between forced GC
+  process_niceness: -10  # Process priority (-20 to 19, lower is higher priority)
+  selective_sensor_processing: true  # Enable dropping sensor data under load
+
+# Diagnostics settings
+diagnostics:
+  history_length: 100
+  debug_level: 1

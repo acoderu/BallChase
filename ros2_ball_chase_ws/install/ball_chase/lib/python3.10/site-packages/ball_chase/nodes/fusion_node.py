@@ -10,7 +10,7 @@ from rclpy.node import Node
 import time
 import numpy as np
 from geometry_msgs.msg import PointStamped, TwistStamped, TransformStamped
-from std_msgs.msg import Float32, Bool, String
+from std_msgs.msg import Float32, Bool, String, Int8
 from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
 from tf2_geometry_msgs import do_transform_point
 from collections import deque
@@ -19,9 +19,24 @@ import json
 import os
 import sys
 import copy
+import psutil
 from rclpy.executors import MultiThreadedExecutor
 # Import from config
 from ball_chase.config.config_loader import ConfigLoader
+
+# Performance optimization imports
+from functools import lru_cache
+import gc
+import threading
+
+# Performance measurement
+PERF_MONITORING = True
+PERF_MONITORING_INTERVAL = 30  # seconds between performance reports
+
+# CPU Load thresholds for adaptive performance
+CPU_THRESHOLD_HIGH = 80.0  # percentage
+CPU_THRESHOLD_MEDIUM = 50.0  # percentage
+MEMORY_THRESHOLD_HIGH = 85.0  # percentage
 
 
 class SensorBuffer:
@@ -282,7 +297,7 @@ class EnhancedFusionNode(Node):
         self.is_ready = False  # Flag to track if the node is ready for processing
         
         # Use camera_frame as the reference coordinate system instead of map
-        self.reference_frame = "camera_frame"
+        self.reference_frame = "base_link"
         self.get_logger().info(f"Using {self.reference_frame} as reference coordinate frame for fusion")
         
         # PHASE 1: Initialize transform system FIRST before anything else
@@ -330,6 +345,9 @@ class EnhancedFusionNode(Node):
         # ENHANCEMENT 6: Initialize reliability buffer
         self.reliability_buffer = deque([False] * 3, maxlen=5)
         self.last_tracking_state = False
+
+        # PHASE 6: Set up performance management
+        self.setup_performance_management()
     
     def init_transform_system(self):
         """Initialize just the transform system."""
@@ -337,115 +355,80 @@ class EnhancedFusionNode(Node):
         self.tf_buffer = Buffer()  
         self.tf_listener = TransformListener(self.tf_buffer, self)
         
-        # Also create a static transform broadcaster in case we need to publish our own
-        self.tf_static_broadcaster = StaticTransformBroadcaster(self)
-        
         self.get_logger().info("Transform system initialized - waiting for transforms")
     
     def check_transform_availability(self):
         """
-        Check if transform is available without trying to fix anything.
+        Check if transforms are available and verify that test transforms are properly received.
         Returns True if transform is available, False otherwise.
         """
         self.transform_checks += 1
-        print ("aaaa")
-        try:
-
-            transform = TransformStamped()
-            transform.header.stamp = self.get_clock().now().to_msg()
-            transform.header.frame_id = "testA"
-            transform.child_frame_id = "testB"
-                
-            # Values from configuration
-            transform.transform.translation.x = 1.0
-            transform.transform.rotation.x = 1.0
-                
-            # Clear any existing transforms with the same parent/child frames
-            # This is not directly supported in tf2_ros, but we can ensure a fresh transform
-                
-            # THIS IS CRITICAL: StaticTransformBroadcaster.sendTransform expects a LIST of transforms
-            self.tf_static_broadcaster.sendTransform([transform])
-            time.sleep(1)
-
-            # Set up check parameters
-            when = rclpy.time.Time()
-            timeoutP = rclpy.duration.Duration(seconds=0.1)  # Slightly longer timeout
-            parent_frame = "camera_frame"
-            child_frame = "lidar_frame"
-            
-            self.get_logger().info(f"Transform check #{self.transform_checks} at {time.time()-self.start_time:.1f}s")
-            
-            # Check both directions
-            forward_available = False
-            reverse_available = False
-            
+        
+        # Define the sensor frames we need to check
+        sensor_frames = [
+            "lidar_frame",
+            "ascamera_color_0",  # For both depth and RGB camera
+        ]
+        
+        transforms_available = True
+        for frame in sensor_frames:
             try:
-                forward_available = self.tf_buffer.can_transform(
-                    parent_frame,
-                    child_frame,
-                    when,
-                    timeout=timeoutP
-                )
+                when = rclpy.time.Time()
+                timeoutP = rclpy.duration.Duration(seconds=0.1)
+                
+                # Check if transform exists
+                if self.tf_buffer.can_transform(
+                    self.reference_frame, frame, when, timeout=timeoutP
+                ):
+                    self.get_logger().debug(f"Transform {frame} → {self.reference_frame} is available")
+                    
+                    # Log actual transform details occasionally
+                    if self.transform_successes % 10 == 0:
+                        transform = self.tf_buffer.lookup_transform(
+                            self.reference_frame, frame, when, timeout=timeoutP
+                        )
+                        self.get_logger().info(
+                            f"Transform details for {frame}: translation=[{transform.transform.translation.x:.4f}, "
+                            f"{transform.transform.translation.y:.4f}, {transform.transform.translation.z:.4f}]"
+                        )
+                else:
+                    self.get_logger().warn(f"Transform {frame} → {self.reference_frame} is NOT available")
+                    transforms_available = False
             except Exception as e:
-                self.get_logger().warn(f"Forward transform check error: {str(e)}")
+                self.get_logger().error(f"Error checking transform {frame}: {str(e)}")
+                transforms_available = False
+                
+        # Set transform availability based on all required transforms
+        self.transform_available = transforms_available
+        
+        if self.transform_available:
+            self.transform_successes += 1
+            self.get_logger().info(
+                f"✓ Transform check #{self.transform_checks}: All transforms available"
+            )
             
+            # Once we've confirmed the transform is available, we don't need to keep checking
+            if not self.transform_confirmed and self.transform_successes >= 2:
+                self.transform_confirmed = True
+                self.get_logger().info("Transform availability confirmed permanently")
+        else:
+            self.transform_failures += 1
+            self.get_logger().warn(f"✗ Transform check #{self.transform_checks}: Some transforms NOT available")
+                            
+            # List available frames
             try:
-                reverse_available = self.tf_buffer.can_transform(
-                    child_frame,
-                    parent_frame,
-                    when,
-                    timeout=timeoutP
-                )
+                frames = self.tf_buffer.all_frames_as_string()
+                if frames and frames.strip():
+                    self.get_logger().info(f"Available frames:\n{frames}")
+                else:
+                    self.get_logger().info("No frames available in transform buffer")
             except Exception as e:
-                self.get_logger().warn(f"Reverse transform check error: {str(e)}")
-            
-            # Consider transform available if either direction works
-            self.transform_available = forward_available or reverse_available
-            
-            if self.transform_available:
-                self.transform_successes += 1
-                self.get_logger().info(
-                    f"✓ Transform check #{self.transform_checks}: Transform available (Forward={forward_available}, Reverse={reverse_available})"
-                )
-                
-                # Display transform details
-                if forward_available:
-                    transform = self.tf_buffer.lookup_transform(
-                        parent_frame,
-                        child_frame,
-                        rclpy.time.Time(),
-                        rclpy.duration.Duration(seconds=1.0)
-                    )
-                    self.get_logger().info(
-                        f"Transform details: translation=[{transform.transform.translation.x:.4f}, "
-                        f"{transform.transform.translation.y:.4f}, {transform.transform.translation.z:.4f}]"
-                    )
-                
-                # Once we've confirmed the transform is available, we don't need to keep checking
-                if not self.transform_confirmed and self.transform_successes >= 2:
-                    self.transform_confirmed = True
-                    self.get_logger().info("Transform availability confirmed permanently")
-            else:
-                self.transform_failures += 1
-                self.get_logger().warn(f"✗ Transform check #{self.transform_checks}: Transform NOT available")
-                                
-                # List available frames
-                try:
-                    frames = self.tf_buffer.all_frames_as_string()
-                    if frames and frames.strip():
-                        self.get_logger().info(f"Available frames:\n{frames}")
-                    else:
-                        self.get_logger().info("No frames available in transform buffer")
-                except Exception as e:
-                    self.get_logger().error(f"Error listing frames: {str(e)}")
-            
-            if self.transform_confirmed:
-                self.transform_check_timer.cancel()
-            return self.transform_available
-        except Exception as e:
-            self.get_logger().error(f"Error checking transform: {str(e)}")
-            return False
-    
+                self.get_logger().error(f"Error listing frames: {str(e)}")
+        
+        if self.transform_confirmed:
+            self.transform_check_timer.cancel()
+        return self.transform_available
+        
     def load_configuration(self):
         """Load configuration from fusion_config.yaml."""
         try:
@@ -876,6 +859,14 @@ class EnhancedFusionNode(Node):
         if not self.is_ready:
             self.get_logger().warn(f"Received {source} data before node was ready - ignoring")
             return
+
+        # Check if we should skip processing due to high system load
+        if self.should_skip_processing():
+            return
+
+        # Check if we should process this sensor's data under current load
+        if not self._should_process_sensor_data(source):
+            return
             
         try:
             # Get current time for timing statistics
@@ -929,7 +920,6 @@ class EnhancedFusionNode(Node):
             msg (BoundingBox2D): The bounding box message
             source (str): Source identifier (e.g., 'hsv_2d', 'yolo_2d')
         """
-        print ("YOLO CBBBB")
         # Skip if not ready yet
         if not self.is_ready:
             return
@@ -2065,10 +2055,6 @@ class EnhancedFusionNode(Node):
             self.get_logger().warn(f"Transform error {point_msg.header.frame_id}→{target_frame}: {str(e)}")
             return None
 
-        if not self.tf_buffer.can_transform(target_frame, source_frame, rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=1.0)):
-            self.get_logger().warn("Transform not available yet, skipping...")
-            return
-    
     def publish_state(self):
         """Publish the current state estimate."""
         # Generate timestamp
@@ -2342,6 +2328,283 @@ class EnhancedFusionNode(Node):
         self.is_ready = True
 
         self.get_logger().info("Initialization complete - node is ready")
+
+    def setup_performance_management(self):
+        """Set up performance management system for resource-constrained environments."""
+        try:
+            # Load performance config
+            self.perf_config = {
+                'enable_visualization': False,
+                'adaptive_processing': True,
+                'processing_priority': 'high',
+                'transform_check_frequency': 3.0,
+                'skip_processing_threshold': 85,
+                'garbage_collection_interval': 120,
+                'process_niceness': -10,
+                'selective_sensor_processing': True
+            }
+            
+            # Try to get from config
+            config_loader = ConfigLoader()
+            fusion_config = config_loader.load_yaml('fusion_config.yaml')
+            if fusion_config and 'performance' in fusion_config:
+                self.perf_config.update(fusion_config['performance'])
+                self.get_logger().info(f"Loaded performance settings from config")
+                
+            # Set up performance monitoring variables
+            self.last_gc_time = time.time()
+            self.cpu_load_history = deque(maxlen=10)
+            self.memory_load_history = deque(maxlen=10)
+            self.last_perf_check_time = time.time()
+            self.skipped_processing_count = 0
+            self.total_processing_attempts = 0
+            
+            # Set up performance monitoring timer (check every 10 seconds)
+            self.perf_monitor_timer = self.create_timer(10.0, self.monitor_system_performance)
+            
+            # Apply process niceness if specified for better real-time performance
+            if self.perf_config.get('process_niceness') is not None:
+                try:
+                    import os
+                    niceness = self.perf_config['process_niceness']
+                    os.nice(niceness)
+                    self.get_logger().info(f"Set process niceness to {niceness}")
+                except Exception as e:
+                    self.get_logger().warn(f"Failed to set process niceness: {e}")
+            
+            # Adjust transform check frequency based on config
+            if hasattr(self, 'transform_check_timer') and self.transform_check_timer:
+                self.transform_check_timer.cancel()
+                freq = self.perf_config.get('transform_check_frequency', 3.0)
+                self.transform_check_timer = self.create_timer(freq, self.check_transform_availability)
+                self.get_logger().info(f"Set transform check frequency to {freq}s")
+            
+            self.get_logger().info("Performance management system initialized")
+            
+            # Log initial configuration
+            viz_status = "enabled" if self.perf_config.get('enable_visualization', False) else "disabled"
+            self.get_logger().info(f"Visualization is {viz_status}")
+            self.get_logger().info(f"Adaptive processing is {'enabled' if self.perf_config.get('adaptive_processing', True) else 'disabled'}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error setting up performance management: {e}")
+            # Fall back to basic config
+            self.perf_config = {
+                'enable_visualization': False,
+                'adaptive_processing': True,
+                'skip_processing_threshold': 85
+            }
+
+    def monitor_system_performance(self):
+        """Monitor system resources and adapt processing accordingly."""
+        try:
+            # Get current CPU and memory usage
+            cpu_percent = psutil.cpu_percent()
+            memory_percent = psutil.virtual_memory().percent
+            
+            # Store in history
+            self.cpu_load_history.append(cpu_percent)
+            self.memory_load_history.append(memory_percent)
+            
+            # Calculate average load
+            avg_cpu = sum(self.cpu_load_history) / len(self.cpu_load_history) if self.cpu_load_history else cpu_percent
+            avg_memory = sum(self.memory_load_history) / len(self.memory_load_history) if self.memory_load_history else memory_percent
+            
+            # Calculate time since last performance check
+            current_time = time.time()
+            time_since_last_check = current_time - self.last_perf_check_time
+            self.last_perf_check_time = current_time
+            
+            # Report system load every 30 seconds
+            if PERF_MONITORING and current_time % PERF_MONITORING_INTERVAL < time_since_last_check:
+                # Calculate processing skip rate
+                skip_rate = self.skipped_processing_count / max(1, self.total_processing_attempts)
+                
+                self.get_logger().info(
+                    f"System performance: CPU={avg_cpu:.1f}%, Memory={avg_memory:.1f}%, "
+                    f"Processing skip rate={skip_rate:.2f}, "
+                    f"Processing time={np.mean(self.processing_times):.1f}ms"
+                )
+                
+                # Reset counters periodically to get fresh rates
+                self.skipped_processing_count = 0
+                self.total_processing_attempts = 0
+            
+            # Check if garbage collection is needed
+            if current_time - self.last_gc_time > self.perf_config.get('garbage_collection_interval', 120):
+                self.last_gc_time = current_time
+                # Force garbage collection
+                gc.collect()
+                self.get_logger().debug("Performed garbage collection")
+                
+            # Update filter performance parameters based on system load
+            self._adapt_to_system_load(avg_cpu, avg_memory)
+            
+        except Exception as e:
+            self.get_logger().error(f"Error in performance monitoring: {e}")
+
+    def _adapt_to_system_load(self, cpu_percent, memory_percent):
+        """
+        Adapt processing parameters based on system load.
+        
+        Args:
+            cpu_percent (float): CPU usage percentage
+            memory_percent (float): Memory usage percentage
+        """
+        # Skip if adaptive processing is disabled
+        if not self.perf_config.get('adaptive_processing', True):
+            return
+            
+        # Determine load level
+        if cpu_percent > CPU_THRESHOLD_HIGH or memory_percent > MEMORY_THRESHOLD_HIGH:
+            load_level = "high"
+        elif cpu_percent > CPU_THRESHOLD_MEDIUM:
+            load_level = "medium"
+        else:
+            load_level = "low"
+            
+        # Store current load level for reference in other methods
+        self.current_system_load = load_level
+        
+        # Adjust parameters based on load level
+        if load_level == "high":
+            # Under high load, adjust for minimal processing
+            self.max_time_diff = min(0.5, self.max_time_diff * 1.5)  # More lenient time sync
+            
+            # Increase noise to accept more measurements
+            self.measurement_noise_lidar = self.base_measurement_noise_lidar * 1.2
+            self.measurement_noise_hsv_3d = self.base_measurement_noise_hsv_3d * 1.2
+            self.measurement_noise_yolo_3d = self.base_measurement_noise_yolo_3d * 1.2
+            
+            # Reduce tracking update frequency
+            if hasattr(self, 'filter_timer') and self.filter_timer:
+                # Check if we need to modify the timer interval
+                current_period = self.filter_timer.timer_period_ns / 1e9
+                if current_period < 0.1:  # Less than 100ms
+                    self.filter_timer.cancel()
+                    self.filter_timer = self.create_timer(0.1, self.filter_update)  # 10Hz instead of 20Hz
+                    self.get_logger().info("Reduced update frequency to 10Hz due to high system load")
+                    
+        elif load_level == "medium":
+            # Under medium load, balance performance and accuracy
+            self.max_time_diff = 0.3  # Default
+            
+            # Slightly adjust noise parameters
+            self.measurement_noise_lidar = self.base_measurement_noise_lidar * 1.1
+            self.measurement_noise_hsv_3d = self.base_measurement_noise_hsv_3d * 1.1
+            self.measurement_noise_yolo_3d = self.base_measurement_noise_yolo_3d * 1.1
+            
+            # Standard tracking update frequency
+            if hasattr(self, 'filter_timer') and self.filter_timer:
+                current_period = self.filter_timer.timer_period_ns / 1e9
+                if current_period > 0.075:  # If we're at reduced frequency
+                    self.filter_timer.cancel()
+                    self.filter_timer = self.create_timer(0.075, self.filter_update)  # ~13Hz
+                    self.get_logger().info("Set update frequency to 13Hz for balanced performance")
+                    
+        else:  # low load
+            # Under low load, optimize for accuracy
+            self.max_time_diff = 0.2  # Stricter time sync
+            
+            # Use base noise values for maximum accuracy
+            self.measurement_noise_lidar = self.base_measurement_noise_lidar
+            self.measurement_noise_hsv_3d = self.base_measurement_noise_hsv_3d
+            self.measurement_noise_yolo_3d = self.base_measurement_noise_yolo_3d
+            
+            # Higher tracking update frequency
+            if hasattr(self, 'filter_timer') and self.filter_timer:
+                current_period = self.filter_timer.timer_period_ns / 1e9
+                if current_period > 0.05:  # If we're not at full frequency
+                    self.filter_timer.cancel()
+                    self.filter_timer = self.create_timer(0.05, self.filter_update)  # 20Hz
+                    self.get_logger().info("Restored update frequency to 20Hz under low system load")
+            
+        # Log adaptation only on changes
+        if not hasattr(self, '_last_load_level') or self._last_load_level != load_level:
+            self.get_logger().info(f"Adapting to {load_level} system load (CPU={cpu_percent:.1f}%, Memory={memory_percent:.1f}%)")
+            self._last_load_level = load_level
+
+    def should_skip_processing(self):
+        """
+        Check if processing should be skipped due to high system load.
+        
+        Returns:
+            bool: True if processing should be skipped
+        """
+        self.total_processing_attempts += 1
+        
+        # Skip check if adaptive processing is disabled
+        if not self.perf_config.get('adaptive_processing', True):
+            return False
+            
+        # Get current CPU usage
+        cpu_percent = psutil.cpu_percent(interval=None)  # Non-blocking check
+        
+        # Determine if we should skip processing
+        skip_threshold = self.perf_config.get('skip_processing_threshold', 85)
+        should_skip = cpu_percent > skip_threshold
+        
+        if should_skip:
+            self.skipped_processing_count += 1
+            
+            # Log skips occasionally
+            if self.skipped_processing_count % 10 == 1:
+                self.get_logger().warn(
+                    f"Skipping processing due to high CPU load: {cpu_percent:.1f}% > {skip_threshold}% "
+                    f"(skipped {self.skipped_processing_count}/{self.total_processing_attempts} cycles)"
+                )
+        
+        return should_skip
+
+    def _should_process_sensor_data(self, source):
+        """
+        Determine if data from a specific sensor should be processed under current load.
+        
+        Args:
+            source (str): Sensor source identifier
+            
+        Returns:
+            bool: True if the sensor data should be processed
+        """
+        # Always process if selective processing is disabled
+        if not self.perf_config.get('selective_sensor_processing', True):
+            return True
+            
+        # Check current system load level
+        if not hasattr(self, 'current_system_load'):
+            return True
+            
+        # Always process LiDAR (highest priority sensor)
+        if source == 'lidar':
+            return True
+            
+        # Under high load, filter out some sensor data
+        if self.current_system_load == "high":
+            # Process only one 3D vision sensor under high load
+            if source in ['hsv_3d', 'yolo_3d']:
+                # Choose the most reliable or most recently updated 3D sensor
+                best_3d = max(['hsv_3d', 'yolo_3d'], 
+                              key=lambda s: self.sensor_reliability.get(s, 0.5))
+                return source == best_3d
+                
+            # Under high load, skip 2D sensors if we have any 3D data
+            if source in ['hsv_2d', 'yolo_2d']:
+                have_recent_3d = any(
+                    time.time() - self.last_detection_time.get(s, 0) < 0.5
+                    for s in ['lidar', 'hsv_3d', 'yolo_3d']
+                )
+                return not have_recent_3d
+                
+        # Under medium load, be more selective with 2D only
+        elif self.current_system_load == "medium":
+            if source in ['hsv_2d', 'yolo_2d']:
+                # Process only the most reliable 2D source
+                best_2d = max(['hsv_2d', 'yolo_2d'],
+                             key=lambda s: self.sensor_reliability.get(s, 0.5))
+                return source == best_2d
+        
+        # Default is to process
+        return True
 
 
 def main(args=None):

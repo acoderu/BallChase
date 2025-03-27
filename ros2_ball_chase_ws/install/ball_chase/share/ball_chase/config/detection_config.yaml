@@ -1,0 +1,56 @@
+# Basketball detection configuration - Updated for basketball (10-inch diameter)
+
+# Camera settings
+camera:
+  resolution:
+    width: 640
+    height: 480
+  fps: 30
+  brightness: 30
+  exposure: -3
+  auto_exposure: false
+
+# Object detection using YOLO
+yolo:
+  model_path: "/model/yolov5s-basketball.pt"
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  device: "cpu"  # Use "cpu" for CPU inference, "cuda:0" for GPU if available
+  classes:
+    - "basketball"
+  size: 320  # Input size for YOLO model
+  optimize: true  # Enable model optimization
+  enable_quantized: true  # Use quantized model where available
+  max_batch_size: 1  # Only process one frame at a time
+
+# HSV color detection backup
+hsv:
+  enabled: true
+  lower_hsv: [0, 140, 110]  # HSV lower bound for basketball (orange)
+  upper_hsv: [20, 255, 255]  # HSV upper bound for basketball (orange)
+  min_radius: 20  # Minimum radius in pixels for basketball (increased from 10)
+  max_radius: 200  # Maximum radius in pixels for basketball (increased from 100)
+  blur_kernel_size: 9  # Gaussian blur kernel size
+  min_area: 400  # Minimum contour area in pixels (increased from 100)
+  dilate_iterations: 1  # Number of dilation iterations
+  erode_iterations: 1  # Number of erosion iterations
+  circularity_threshold: 0.7  # Minimum circularity (0-1) for contour to be considered a basketball
+
+# Post-processing and tracking
+tracking:
+  max_lost_frames: 60  # Maximum frames to track a lost object
+  min_track_points: 5  # Minimum points for establishing a track
+  min_confidence: 0.3  # Minimum confidence value to accept detection
+  position_alpha: 0.7  # Position smoothing factor (0-1)
+  basketball_size: 0.254  # Basketball diameter in meters (10 inches)
+  distance_threshold: 0.3  # Maximum position change between frames (meters)
+  enabled: true
+
+# Detection ROS parameters
+ros:
+  detect_topic: "/basketball/detected"
+  position_topic: "/basketball/position"
+  yolo_topic: "/basketball/yolo/position"
+  hsv_topic: "/basketball/hsv/position"
+  viz_topic: "/basketball/visualization"
+  diagnostics_topic: "/basketball/diagnostics"

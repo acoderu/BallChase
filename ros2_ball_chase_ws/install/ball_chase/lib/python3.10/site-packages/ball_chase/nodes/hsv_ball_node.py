@@ -48,20 +48,18 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PointStamped
-from std_msgs.msg import String  # Add import for String message type
+from std_msgs.msg import String, Float32  # Added Float32 for CPU load publishing
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import time
-import psutil  # Move this import to the top with other imports
+import psutil
 import json
-from collections import deque  # Add import for deque
+from collections import deque
+from functools import lru_cache  # Added for caching expensive operations
 
-from utilities.resource_monitor import ResourceMonitor  # Add resource monitoring import
-from utilities.time_utils import TimeUtils  # Add TimeUtils import
-
-# Now you can import ConfigLoader
-#from config.config_loader import ConfigLoader  # Import ConfigLoader
+from utilities.resource_monitor import ResourceMonitor
+from utilities.time_utils import TimeUtils
 
 # Load configuration from file
 from ball_chase.config.config_loader import ConfigLoader
@@ -114,6 +112,22 @@ DIAG_CONFIG = config.get('diagnostics', {
     "log_interval": 10             # Log every N frames for performance stats
 })
 
+# New performance configuration
+PERF_CONFIG = config.get('performance', {
+    # CPU thresholds for reducing processing
+    "cpu_high_threshold": 85.0,       # Above this threshold, reduce processing dramatically
+    "cpu_medium_threshold": 70.0,     # Above this threshold, start reducing processing
+    "cpu_low_threshold": 60.0,        # Below this threshold, process at full quality
+    
+    # Resolution downscaling factors for different CPU loads
+    "high_load_scale": 0.5,           # Scale down to 50% resolution in high load
+    "medium_load_scale": 0.75,        # Scale down to 75% resolution in medium load
+    
+    # Processing frequency control
+    "min_processing_interval": 0.05,  # At least 50ms between frames in high load
+    "cpu_check_interval": 1.0         # Check CPU usage every 1 second
+})
+
 class HSVTennisBallTracker(Node):
     """
     A ROS2 node that uses HSV color filtering to detect a yellow tennis ball
@@ -164,10 +178,60 @@ class HSVTennisBallTracker(Node):
         self.errors = deque(maxlen=50)
         self.warnings = deque(maxlen=50)
         
+        # Initialize adaptive processing variables
+        self.last_frame_time = 0.0
+        self.current_scale_factor = 1.0
+        self.current_cpu_usage = 0.0
+        self.last_cpu_check_time = 0.0
+        self.skip_count = 0
+        
+        # Create a CPU usage publisher
+        self.cpu_usage_publisher = self.create_publisher(
+            Float32,
+            '/system/resources/cpu_load',
+            10
+        )
+        
+        # Add timer to check CPU and adjust processing rate/quality
+        self.cpu_check_timer = self.create_timer(
+            PERF_CONFIG.get('cpu_check_interval', 1.0),  # Check CPU every 1 second by default
+            self._check_cpu_and_adjust_processing
+        )
+        
+        # Pre-allocate memory for image operations
+        self._init_image_buffers()
+        
         self.get_logger().info("HSV Tennis Ball Tracker has started!")
         self.get_logger().info(f"Processing images at {self.target_width}x{self.target_height} to match YOLO")
         self.get_logger().info(f"Looking for balls with area between {self.min_ball_area} and {self.max_ball_area} pixels")
         self.get_logger().info(f"HSV color range: Lower={BALL_CONFIG['hsv_range']['lower']}, Upper={BALL_CONFIG['hsv_range']['upper']}")
+        self.get_logger().info(f"CPU adaptivity enabled: high={PERF_CONFIG.get('cpu_high_threshold')}%, medium={PERF_CONFIG.get('cpu_medium_threshold')}%")
+
+    def _init_image_buffers(self):
+        """Pre-allocate memory for image operations to avoid frequent allocations."""
+        # Pre-allocate buffers for image processing
+        self.target_width = DIAG_CONFIG["target_width"]
+        self.target_height = DIAG_CONFIG["target_height"]
+        
+        # Pre-allocate buffers for different scales
+        self.image_buffers = {}
+        for scale in [1.0, PERF_CONFIG.get('medium_load_scale', 0.75), PERF_CONFIG.get('high_load_scale', 0.5)]:
+            width = int(self.target_width * scale)
+            height = int(self.target_height * scale)
+            # Only create if sensible dimensions (at least 32x32)
+            if width >= 32 and height >= 32:
+                self.image_buffers[scale] = {
+                    'bgr': np.zeros((height, width, 3), dtype=np.uint8),
+                    'hsv': np.zeros((height, width, 3), dtype=np.uint8),
+                    'mask': np.zeros((height, width), dtype=np.uint8)
+                }
+        
+        # Create morphological kernels at startup to avoid runtime creation
+        self.morph_kernels = {
+            'small': cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+            'medium': cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+            'large': cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        }
 
     def _declare_parameters(self):
         """Declare and get all node parameters."""
@@ -187,6 +251,14 @@ class HSVTennisBallTracker(Node):
         self.min_circularity = BALL_CONFIG['shape']['min_circularity']
         self.max_circularity = BALL_CONFIG['shape']['max_circularity']
         self.ideal_circularity = BALL_CONFIG['shape']['ideal_circularity']
+        
+        # Add performance parameters
+        self.cpu_high_threshold = PERF_CONFIG.get('cpu_high_threshold', 85.0)
+        self.cpu_medium_threshold = PERF_CONFIG.get('cpu_medium_threshold', 70.0)
+        self.cpu_low_threshold = PERF_CONFIG.get('cpu_low_threshold', 60.0)
+        self.high_load_scale = PERF_CONFIG.get('high_load_scale', 0.5) 
+        self.medium_load_scale = PERF_CONFIG.get('medium_load_scale', 0.75)
+        self.min_processing_interval = PERF_CONFIG.get('min_processing_interval', 0.05)
 
     def _setup_communication(self):
         """Set up all subscriptions and publishers."""
@@ -211,7 +283,7 @@ class HSVTennisBallTracker(Node):
         # Create a publisher for system diagnostics
         self.system_diagnostics_publisher = self.create_publisher(
             String, 
-            "/tennis_ball/hsv/diagnostics",  # Changed from "/system/diagnostics/hsv"
+            "/tennis_ball/hsv/diagnostics",  
             10
         )
         
@@ -221,18 +293,18 @@ class HSVTennisBallTracker(Node):
     def _init_state_variables(self):
         """Initialize all state tracking variables."""
         # Performance tracking
-        self.start_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
+        self.start_time = TimeUtils.now_as_float()
         self.frame_count = 0
         self.no_detection_count = 0
         self.last_detection_time = None
         
         # Detection statistics - replace unbounded lists with deque
         self.detection_count = 0
-        self.detection_sizes = deque(maxlen=50)  # Limit to last 50 detections
-        self.detection_confidences = deque(maxlen=50)  # Limit to last 50 detections
+        self.detection_sizes = deque(maxlen=50)
+        self.detection_confidences = deque(maxlen=50)
         
         # Processing timing
-        self.processing_times = deque(maxlen=50)  # Limit to last 50 times
+        self.processing_times = deque(maxlen=50)
         
         # Initialize diagnostic metrics
         self.diagnostic_metrics = {
@@ -243,9 +315,14 @@ class HSVTennisBallTracker(Node):
             'last_detection_time': 0.0,
             'total_frames': 0,
             'missed_frames': 0,
-            'errors': deque(maxlen=10),  # Limit error history
-            'warnings': deque(maxlen=10)  # Limit warning history
+            'errors': deque(maxlen=10),
+            'warnings': deque(maxlen=10),
+            'adaptations': deque(maxlen=20)  # Track adaptive processing changes
         }
+        
+        # Track CPU usage over time for trends
+        self.cpu_history = deque(maxlen=30)  # Track last 30 seconds
+        self.adaptation_history = deque(maxlen=20)  # Track adaptation changes
 
     def _setup_visualization(self):
         """Set up visualization windows if enabled."""
@@ -270,211 +347,260 @@ class HSVTennisBallTracker(Node):
                 # Enable more advanced detection features that use more RAM but give better results
                 self.use_enhanced_detection = True
                 
+                # Use full-sized images when CPU allows
+                self.default_scale_factor = 1.0
+                
                 self.get_logger().info(f"Using enhanced detection features (high RAM mode)")
             else:
                 # Standard settings for lower memory systems
                 self.morphology_kernel = np.ones((5, 5), np.uint8)  # Simple kernel
                 self.use_enhanced_detection = False
+                
+                # Use slightly smaller images by default to conserve RAM
+                self.default_scale_factor = 0.75
+                
+                self.get_logger().info(f"Using standard detection features (limited RAM mode)")
         except Exception as e:
             # Default settings if we can't check memory
             self.morphology_kernel = np.ones((5, 5), np.uint8)
             self.use_enhanced_detection = False
+            self.default_scale_factor = 0.75
             self.get_logger().warn(f"Could not determine system memory. Using default settings: {e}")
+        
+        # Initialize current scale to default
+        self.current_scale_factor = self.default_scale_factor
         
         # Number of frames to skip in low power mode (0 means no skipping)
         self.low_power_skip_frames = 0
+
+    def _check_cpu_and_adjust_processing(self):
+        """Check CPU usage and adjust processing quality/rate accordingly."""
+        try:
+            # Get current CPU usage
+            cpu_usage = psutil.cpu_percent(interval=0.1)  # Quick sampling
+            self.current_cpu_usage = cpu_usage
+            
+            # Add to history
+            self.cpu_history.append((TimeUtils.now_as_float(), cpu_usage))
+            
+            # Publish CPU usage
+            cpu_msg = Float32()
+            cpu_msg.data = float(cpu_usage)
+            self.cpu_usage_publisher.publish(cpu_msg)
+            
+            # Current scale and skip settings before adjustments
+            old_scale = self.current_scale_factor
+            old_skip = self.low_power_skip_frames
+            
+            # Adjust processing based on CPU load
+            if cpu_usage > self.cpu_high_threshold:
+                # Very high CPU - dramatic reduction
+                self.current_scale_factor = self.high_load_scale
+                self.low_power_skip_frames = 2  # Process only 1 in 3 frames
+                
+                if old_scale != self.current_scale_factor or old_skip != self.low_power_skip_frames:
+                    self.get_logger().warn(
+                        f"CPU usage very high ({cpu_usage:.1f}%): reducing resolution to "
+                        f"{int(100*self.current_scale_factor)}% and processing 1 in {self.low_power_skip_frames+1} frames"
+                    )
+                    
+                    # Record adaptation
+                    self.adaptation_history.append({
+                        'time': TimeUtils.now_as_float(),
+                        'cpu': cpu_usage,
+                        'action': 'high_reduction',
+                        'scale': self.current_scale_factor,
+                        'skip': self.low_power_skip_frames
+                    })
+                    
+            elif cpu_usage > self.cpu_medium_threshold:
+                # Moderately high CPU - medium reduction
+                self.current_scale_factor = self.medium_load_scale
+                self.low_power_skip_frames = 1  # Process every other frame
+                
+                if old_scale != self.current_scale_factor or old_skip != self.low_power_skip_frames:
+                    self.get_logger().info(
+                        f"CPU usage high ({cpu_usage:.1f}%): reducing resolution to "
+                        f"{int(100*self.current_scale_factor)}% and processing every other frame"
+                    )
+                    
+                    # Record adaptation
+                    self.adaptation_history.append({
+                        'time': TimeUtils.now_as_float(),
+                        'cpu': cpu_usage,
+                        'action': 'medium_reduction',
+                        'scale': self.current_scale_factor,
+                        'skip': self.low_power_skip_frames
+                    })
+                    
+            elif cpu_usage < self.cpu_low_threshold:
+                # Low CPU - restore full processing if we were reducing
+                if self.current_scale_factor < 1.0 or self.low_power_skip_frames > 0:
+                    self.current_scale_factor = self.default_scale_factor
+                    self.low_power_skip_frames = 0  # Process all frames
+                    
+                    self.get_logger().info(
+                        f"CPU usage normal ({cpu_usage:.1f}%): restoring normal processing "
+                        f"at {int(100*self.current_scale_factor)}% resolution"
+                    )
+                    
+                    # Record adaptation
+                    self.adaptation_history.append({
+                        'time': TimeUtils.now_as_float(),
+                        'cpu': cpu_usage,
+                        'action': 'restore_normal',
+                        'scale': self.current_scale_factor,
+                        'skip': self.low_power_skip_frames
+                    })
+            
+            # Update diagnostic metrics with current CPU usage and adaptations
+            if hasattr(self, 'diagnostic_metrics'):
+                # Store current settings
+                self.diagnostic_metrics['current_cpu'] = cpu_usage
+                self.diagnostic_metrics['current_scale'] = self.current_scale_factor
+                self.diagnostic_metrics['frame_skip'] = self.low_power_skip_frames
+                
+                # Record adaptation if changed
+                if old_scale != self.current_scale_factor or old_skip != self.low_power_skip_frames:
+                    self.diagnostic_metrics['adaptations'].append({
+                        'timestamp': TimeUtils.now_as_float(),
+                        'cpu': cpu_usage,
+                        'old_scale': old_scale,
+                        'new_scale': self.current_scale_factor,
+                        'old_skip': old_skip,
+                        'new_skip': self.low_power_skip_frames
+                    })
+            
+        except Exception as e:
+            self.get_logger().error(f"Error in CPU monitoring: {e}")
 
     def _handle_resource_alert(self, resource_type, value):
         """Handle resource alerts by adjusting processing behavior."""
         self.get_logger().warn(f"Resource alert: {resource_type.upper()} at {value:.1f}%")
         
-        # If CPU usage is critically high, start skipping frames
-        if resource_type == 'cpu' and value > 90.0:
+        # If CPU usage is critically high, implement more aggressive measures
+        if resource_type == 'cpu' and value > 95.0:  # Extremely high CPU
             old_skip = self.low_power_skip_frames
-            self.low_power_skip_frames = 1  # Skip every other frame
-            self.get_logger().warn(f"CPU usage high: changing frame skip from {old_skip} to {self.low_power_skip_frames}")
+            old_scale = self.current_scale_factor
+            
+            # Emergency measures - very low resolution and high frame skipping
+            self.low_power_skip_frames = 3  # Skip 3 frames, process 1
+            self.current_scale_factor = 0.4  # 40% of original resolution
+            
+            self.get_logger().warn(
+                f"CRITICAL CPU USAGE: Emergency reduction to {int(100*self.current_scale_factor)}% "
+                f"resolution and 1 in {self.low_power_skip_frames+1} frames"
+            )
             
             # Record for diagnostics
             if hasattr(self, 'diagnostic_metrics'):
-                if 'adaptations' not in self.diagnostic_metrics:
-                    self.diagnostic_metrics['adaptations'] = []
-                    
                 self.diagnostic_metrics['adaptations'].append({
-                    'timestamp': TimeUtils.now_as_float(),  # Use TimeUtils instead of time.time()
+                    'timestamp': TimeUtils.now_as_float(),
                     'resource_type': resource_type,
                     'value': value,
-                    'action': f'Increased frame skip to {self.low_power_skip_frames}'
+                    'action': 'emergency_reduction',
+                    'old_scale': old_scale,
+                    'new_scale': self.current_scale_factor,
+                    'old_skip': old_skip,
+                    'new_skip': self.low_power_skip_frames
                 })
 
     def _configure_logging(self, log_config):
-        """Configure logging levels and behaviors."""
-        # Map string log levels to rclpy.logging.LoggingSeverity values
-        level_map = {
-            'debug': rclpy.logging.LoggingSeverity.DEBUG,
-            'info': rclpy.logging.LoggingSeverity.INFO,
-            'warn': rclpy.logging.LoggingSeverity.WARN,
-            'error': rclpy.logging.LoggingSeverity.ERROR
-        }
-        
-        # Get console log level from config or use default
-        console_level = log_config.get('console_level', 'info').lower()
-        log_level = level_map.get(console_level, rclpy.logging.LoggingSeverity.INFO)
-        
-        # Set the logger level
-        self.get_logger().set_level(log_level)
-        
-        # Store config values
-        self.log_interval = log_config.get('log_interval', 10)
-        self.debug_level = log_config.get('debug_level', 1)
-        
-        self.get_logger().info(f"Logger configured with level: {console_level.upper()}")
+        # ...existing code...
+        pass
 
     def _log(self, level, context, message, data=None):
-        """
-        Unified logging with consistent formatting and context.
-        
-        Args:
-            level (str): 'debug', 'info', 'warn', or 'error'
-            context (str): Component or subsystem generating the log
-            message (str): Main log message
-            data (dict, optional): Additional structured data
-        """
-        # Format with context
-        formatted_message = f"[{context}] {message}"
-        
-        # Log at appropriate level
-        if level == 'debug':
-            self.get_logger().debug(formatted_message)
-        elif level == 'info':
-            self.get_logger().info(formatted_message)
-        elif level == 'warn':
-            self.get_logger().warn(formatted_message)
-        elif level == 'error':
-            self.get_logger().error(formatted_message)
-            # Add to error history
-            if hasattr(self, 'errors'):
-                self.errors.append({
-                    'timestamp': TimeUtils.now_as_float(),
-                    'context': context,
-                    'message': message,
-                    'data': data
-                })
-        
-        # Store structured data for diagnostics if provided
-        if data and hasattr(self, 'diagnostic_metrics'):
-            if f'{level}_data' not in self.diagnostic_metrics:
-                self.diagnostic_metrics[f'{level}_data'] = deque(maxlen=20)
-            self.diagnostic_metrics[f'{level}_data'].append({
-                'timestamp': TimeUtils.now_as_float(),
-                'context': context,
-                'message': message,
-                'data': data
-            })
+        # ...existing code...
+        pass
 
     def _generate_trace_id(self):
-        """Generate a unique trace ID for correlating log events."""
-        if not hasattr(self, '_trace_counter'):
-            self._trace_counter = 0
-        self._trace_counter += 1
-        return f"hsv-{self._trace_counter}"
+        # ...existing code...
+        pass
 
     def _init_log_file(self):
-        """Initialize file-based logging if configured."""
-        # Check if file logging is configured
-        log_file = config.get('logging', {}).get('log_file')
-        if not log_file:
-            return
-            
-        try:
-            import logging
-            
-            # Create log directory if needed
-            log_dir = os.path.dirname(log_file)
-            if log_dir and not os.path.exists(log_dir):
-                os.makedirs(log_dir)
-                
-            # Set up file handler with rotation
-            max_bytes = config.get('logging', {}).get('max_file_size_mb', 10) * 1024 * 1024
-            backup_count = config.get('logging', {}).get('backup_count', 3)
-            
-            from logging.handlers import RotatingFileHandler
-            handler = RotatingFileHandler(
-                log_file, maxBytes=max_bytes, backupCount=backup_count
-            )
-            
-            # Set formatter
-            formatter = logging.Formatter(
-                '%(asctime)s - [%(name)s] [%(levelname)s] %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
-            )
-            handler.setFormatter(formatter)
-            
-            # Get the underlying logger used by rclpy
-            logger_name = self.get_name()
-            logger = logging.getLogger(logger_name)
-            logger.addHandler(handler)
-            
-            # Set file logging level
-            file_level_name = config.get('logging', {}).get('file_level', 'DEBUG')
-            file_level = getattr(logging, file_level_name)
-            handler.setLevel(file_level)
-            
-            self.get_logger().info(f"Log file initialized: {log_file}")
-            
-        except Exception as e:
-            self.get_logger().error(f"Failed to initialize log file: {str(e)}")
+        # ...existing code...
+        pass
 
     def image_callback(self, msg):
         """
         Process each incoming camera image to detect tennis balls.
         
         This method:
-        1. Converts the ROS image to OpenCV format
-        2. Resizes to match YOLO's input size
-        3. Filters the image to isolate yellow pixels (HSV color space)
-        4. Finds contours in the filtered image
-        5. Evaluates each contour to find the best tennis ball candidate
-        6. Publishes the position of the detected ball
+        1. Checks if we should process this frame based on CPU load
+        2. Converts the ROS image to OpenCV format
+        3. Resizes to appropriate scale for CPU load
+        4. Applies optimized HSV detection pipeline
+        5. Publishes the position of the detected ball if found
         
         Args:
             msg (Image): The incoming camera image from ROS
         """
-        # Skip frames if needed to reduce CPU usage
+        # Check if we need to skip this frame based on CPU load
         if self.low_power_skip_frames > 0:
             if not hasattr(self, 'frame_skip_counter'):
                 self.frame_skip_counter = 0
             
             self.frame_skip_counter += 1
             if (self.frame_skip_counter % (self.low_power_skip_frames + 1)) != 0:
-                # Skip this frame
+                # Skip this frame - just count it but don't process
+                self.frame_count += 1  # Still count it for metrics
+                self.skip_count += 1
                 return
         
+        # Check minimum time between frames for rate limiting
+        current_time = TimeUtils.now_as_float()
+        time_since_last_frame = current_time - self.last_frame_time
+        
+        if time_since_last_frame < self.min_processing_interval:
+            # Too soon since last frame - enforce minimum interval
+            self.skip_count += 1
+            return
+            
+        # Update last frame time
+        self.last_frame_time = current_time
+        
         # Start timing for performance metrics
-        processing_start = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
+        processing_start = TimeUtils.now_as_float()
         self.frame_count += 1
         
         trace_id = self._generate_trace_id()
-        self._log('debug', 'FRAME', f"Processing frame {self.frame_count}", {'trace_id': trace_id})
+        if self.debug_level >= 2:  # Only log at debug level 2+
+            self._log('debug', 'FRAME', f"Processing frame {self.frame_count}", {'trace_id': trace_id})
 
         try:
-            # Step 1: Convert ROS image to OpenCV format - remove dst parameter
+            # STEP 1: Convert ROS image to OpenCV format efficiently
+            # Use direct array reference when possible instead of copy
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             
-            # Step 2: Resize to target resolution (320x320 to match YOLO)
-            original_height, original_width = frame.shape[:2]
-            frame = cv2.resize(frame, (self.target_width, self.target_height))
+            # STEP 2: Apply resolution scaling based on CPU load
+            # Scale the image based on current CPU load factor
+            width = int(self.target_width * self.current_scale_factor)
+            height = int(self.target_height * self.current_scale_factor)
             
-            # Create a copy for visualization if enabled
+            # Use pre-allocated buffer if available
+            if self.current_scale_factor in self.image_buffers:
+                # Resize directly into pre-allocated buffer
+                cv2.resize(frame, (width, height), dst=self.image_buffers[self.current_scale_factor]['bgr'])
+                frame = self.image_buffers[self.current_scale_factor]['bgr']
+            else:
+                # Fallback - create a new buffer
+                frame = cv2.resize(frame, (width, height))
+            
+            # Create a copy for visualization if enabled (only when needed)
             if self.enable_visualization:
                 display_frame = frame.copy()
             
-            # Step 3: Apply HSV color filtering to detect the tennis ball
-            # Pass the trace_id to the _detect_ball_in_frame method
+            # STEP 3: Apply HSV color filtering with optimized pipeline
+            # Pass current scale factor to adjust detection parameters
             detected_ball = self._detect_ball_in_frame(frame, msg.header, trace_id)
             
-            # Step 4: Update visualization if enabled
+            # STEP 4: Update visualization if enabled
             if self.enable_visualization:
                 self._update_visualization(frame, detected_ball, processing_start)
+            
+            # Record processing time
+            processing_time = TimeUtils.now_as_float() - processing_start
+            self.processing_times.append(processing_time)
             
             # Log performance metrics occasionally
             if self.frame_count % self.log_interval == 0:
@@ -487,7 +613,7 @@ class HSVTennisBallTracker(Node):
 
     def _detect_ball_in_frame(self, frame, header, trace_id=None):
         """
-        Apply HSV color filtering to detect a tennis ball in the frame.
+        Apply optimized HSV color filtering to detect a tennis ball in the frame.
         
         Args:
             frame (numpy.ndarray): OpenCV image in BGR format
@@ -497,30 +623,74 @@ class HSVTennisBallTracker(Node):
         Returns:
             dict: Detection information or None if no ball found
         """
-        # Create a copy for visualization
+        # Get current scale factor for adjusting parameters
+        scale_factor = self.current_scale_factor
+        
+        # Create a copy for visualization if enabled
         if self.enable_visualization:
             display_frame = frame.copy()
         
-        # Step 1: Convert from BGR to HSV color space
-        # HSV is better for color detection than RGB
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # STEP 1: Convert from BGR to HSV color space efficiently
+        # Use pre-allocated buffer if available
+        if scale_factor in self.image_buffers:
+            cv2.cvtColor(frame, cv2.COLOR_BGR2HSV, dst=self.image_buffers[scale_factor]['hsv'])
+            hsv = self.image_buffers[scale_factor]['hsv']
+        else:
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
-        # Step 2: Create a mask that only shows yellow pixels
-        mask = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
+        # STEP 2: Create a mask that only shows yellow pixels (optimized)
+        # Use pre-allocated buffer if available
+        if scale_factor in self.image_buffers:
+            cv2.inRange(hsv, self.lower_yellow, self.upper_yellow, dst=self.image_buffers[scale_factor]['mask'])
+            mask = self.image_buffers[scale_factor]['mask']
+        else:
+            mask = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
         
-        # Step 3: Clean up the mask with morphological operations
-        # Remove noise and fill small holes
-        # Use precomputed kernel for better performance
-        mask = cv2.erode(mask, self.morphology_kernel, iterations=1)
-        mask = cv2.dilate(mask, self.morphology_kernel, iterations=2)
+        # STEP 3: Clean up the mask with morphological operations
+        # Use smaller kernel size for lower resolutions
+        if scale_factor < 0.6:  # Very small images
+            kernel = self.morph_kernels['small']  # Use 3x3 kernel
+        elif scale_factor < 0.8:
+            kernel = self.morph_kernels['medium']  # Use 5x5 kernel
+        else:
+            kernel = self.morph_kernels['medium']  # Use 5x5 kernel for full resolution
+            
+        # Apply morphology in-place to avoid allocations
+        cv2.erode(mask, kernel, dst=mask, iterations=1)
+        cv2.dilate(mask, kernel, dst=mask, iterations=2)
         
         # Save the processed mask for visualization
         if self.enable_visualization:
             display_mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
         
-        # Step 4: Find contours (outlines) of yellow objects
-        contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # STEP 4: Find contours efficiently
+        # Use CHAIN_APPROX_SIMPLE to reduce points
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
+        # Skip processing if no significant contours
+        if not contours or len(contours) == 0:
+            self.no_detection_count += 1
+            return None
+        
+        # STEP 5: Filter the contours efficiently 
+        # Scale area thresholds based on current resolution
+        area_scale = scale_factor * scale_factor  # Area scales with square of linear dimension
+        min_area = self.min_ball_area * area_scale
+        max_area = self.max_ball_area * area_scale
+        ideal_area = self.ideal_area * area_scale
+        
+        # Pre-filter tiny contours before detailed analysis
+        filtered_contours = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area >= min_area * 0.5:  # Use 50% of min as pre-filter
+                filtered_contours.append((cnt, area))
+        
+        # If no contours pass pre-filtering, return early
+        if not filtered_contours:
+            self.no_detection_count += 1
+            return None
+            
         # Variables to track the best ball candidate
         best_contour = None
         best_radius = 0.0
@@ -529,15 +699,12 @@ class HSVTennisBallTracker(Node):
         best_area = 0.0
         best_circularity = 0.0
         
-        # Step 5: Check each yellow object to see if it's a tennis ball
-        for cnt in contours:
-            # Calculate area of the contour
-            area = cv2.contourArea(cnt)
-            
-            # Skip tiny contours (noise)
-            if area < 20:  # Adjusted for 320x320
+        # STEP 6: Find the best ball candidate
+        for cnt, area in filtered_contours:
+            # Skip contours outside our area range
+            if area < min_area or area > max_area:
                 continue
-            
+                
             # Find the smallest circle that can enclose the contour
             (cx, cy), radius = cv2.minEnclosingCircle(cnt)
             
@@ -546,101 +713,135 @@ class HSVTennisBallTracker(Node):
             circle_area = np.pi * (radius ** 2) if radius > 0 else 1
             circularity = area / circle_area
             
-            # Draw all contours on the visualization
+            # Skip if circularity is outside acceptable range
+            if circularity < self.min_circularity or circularity > self.max_circularity:
+                continue
+            
+            # Draw contour on visualization if enabled
             if self.enable_visualization:
-                # Draw contour in blue
                 cv2.drawContours(display_frame, [cnt], -1, (255, 0, 0), 1)
-                
-                # Add area text
                 cv2.putText(display_frame, f"{area:.0f}", (int(cx), int(cy)), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
             
-            # Check if this contour matches our criteria for a tennis ball
-            if (self.min_ball_area <= area <= self.max_ball_area and 
-                self.min_circularity <= circularity <= self.max_circularity):
-                
-                # Calculate a confidence score based on how well it matches ideal parameters
-                circularity_score = 1.0 - min(abs(circularity - self.ideal_circularity) / 
-                                             self.ideal_circularity, 1.0)
-                size_score = 1.0 - (abs(area - self.ideal_area) / self.ideal_area)
-                
-                # Combined confidence score (weighted average)
-                confidence = (circularity_score * 0.7) + (size_score * 0.3)
-                
-                # Keep the highest confidence match
-                if confidence > best_confidence:
-                    best_contour = cnt
-                    best_radius = radius
-                    best_confidence = confidence
-                    best_center = (cx, cy)
-                    best_area = area
-                    best_circularity = circularity
-        
-        # For Pi 5 with 16GB, we can use more advanced detection techniques
-        if hasattr(self, 'use_enhanced_detection') and self.use_enhanced_detection:
-            # Enhance circle detection with Hough Circles if we have contours
-            if len(contours) > 0 and np.any(mask):
-                try:
-                    # Only attempt circle detection on significant segments
-                    largest_contour = max(contours, key=cv2.contourArea)
-                    if cv2.contourArea(largest_contour) > 50:  # Skip tiny regions
-                        # Create a mask with just the largest contour
-                        largest_mask = np.zeros_like(mask)
-                        cv2.drawContours(largest_mask, [largest_contour], 0, 255, -1)
-                        
-                        # Apply Hough Circle detection with adaptive parameters
-                        detected_circles = cv2.HoughCircles(
-                            mask, cv2.HOUGH_GRADIENT, dp=1, minDist=20,
-                            param1=50, param2=10, 
-                            minRadius=int(np.sqrt(self.min_ball_area/np.pi)),
-                            maxRadius=int(np.sqrt(self.max_ball_area/np.pi))
-                        )
-                        
-                        # If circles are found, consider them in the detection
-                        if detected_circles is not None:
-                            detected_circles = np.round(detected_circles[0, :]).astype(int)
-                            for (x, y, r) in detected_circles:
-                                # Calculate approximate contour quality based on the circle
-                                circle_area = np.pi * r * r
-                                circle_matches = True
-                                # Rest of Hough circle processing...
-                except Exception as e:
-                    # Ignore errors in enhanced detection - fall back to standard
-                    if self.debug_level >= 2:
-                        self.get_logger().debug(f"Enhanced detection error: {e}")
-        
-        # Step 6: Process the best match if found
-        if best_contour is not None:
-            # Unpack the center coordinates
-            center_x, center_y = best_center
+            # Calculate optimized confidence score
+            circularity_score = 1.0 - min(abs(circularity - self.ideal_circularity) / 
+                                         self.ideal_circularity, 1.0)
+            size_score = 1.0 - min(abs(area - ideal_area) / ideal_area, 1.0)
             
-            # Log the detection
-            if self.debug_level >= 1:
+            # Combined confidence score (weighted average)
+            confidence = (circularity_score * 0.7) + (size_score * 0.3)
+            
+            # Keep the highest confidence match
+            if confidence > best_confidence:
+                best_contour = cnt
+                best_radius = radius
+                best_confidence = confidence
+                best_center = (cx, cy)
+                best_area = area
+                best_circularity = circularity
+        
+        # Optional enhanced detection for Pi 5 with 16GB
+        # Only run if we have enough CPU resources (not in high load)
+        if (hasattr(self, 'use_enhanced_detection') and 
+            self.use_enhanced_detection and 
+            self.current_cpu_usage < self.cpu_high_threshold and
+            len(filtered_contours) > 0):
+            
+            try:
+                # Get the largest contour by area for enhanced processing
+                largest_cnt, largest_area = max(filtered_contours, key=lambda x: x[1])
+                
+                # Only attempt circle detection if we have a significant contour
+                if largest_area > min_area and largest_area < max_area:
+                    # Create a mask with just the largest contour
+                    largest_mask = np.zeros_like(mask)
+                    cv2.drawContours(largest_mask, [largest_cnt], 0, 255, -1)
+                    
+                    # Apply Hough Circle detection with adaptive parameters based on scale
+                    min_radius = int(np.sqrt(min_area/np.pi))
+                    max_radius = int(np.sqrt(max_area/np.pi))
+                    
+                    # Only run HoughCircles if we have a valid contour
+                    detected_circles = cv2.HoughCircles(
+                        mask, cv2.HOUGH_GRADIENT, dp=1, minDist=20,
+                        param1=50, param2=10, 
+                        minRadius=min_radius,
+                        maxRadius=max_radius
+                    )
+                    
+                    # If circles are found, incorporate into detection
+                    if detected_circles is not None:
+                        # Convert circles to integer coordinates
+                        detected_circles = np.round(detected_circles[0, :]).astype(int)
+                        
+                        # Find the best circle (most confident based on HoughCircles)
+                        for (x, y, r) in detected_circles:
+                            # Calculate how well circle matches contour
+                            circle_center = (float(x), float(y))
+                            circle_radius = float(r)
+                            circle_area = np.pi * r * r
+                            
+                            # Only consider if better than current best
+                            if circle_area > min_area and circle_area < max_area:
+                                # Check if this circle improves detection
+                                if best_confidence < 0.7:  # Only replace if current confidence is low
+                                    circle_confidence = 0.8  # Default confidence from HoughCircles
+                                    
+                                    # Use the circle instead of contour if it's more reliable
+                                    best_center = circle_center
+                                    best_radius = circle_radius
+                                    best_area = circle_area
+                                    best_confidence = max(best_confidence, circle_confidence)
+                                    
+                                    # Don't update best_contour - keep original
+                                    
+                                    if self.debug_level >= 2:
+                                        self.get_logger().debug("Enhanced detection improved result")
+                                    break
+            except Exception as e:
+                # Ignore errors in enhanced detection - fall back to standard
+                if self.debug_level >= 2:
+                    self.get_logger().debug(f"Enhanced detection error: {e}")
+        
+        # STEP 7: Process the best match if found
+        if best_contour is not None:
+            # Scale coordinates back to original resolution (320x320) for consistent reporting
+            scale_back = 1.0 / scale_factor
+            
+            # Unpack the center coordinates and scale back
+            center_x, center_y = best_center
+            center_x *= scale_back
+            center_y *= scale_back
+            
+            # Log the detection (less frequently when CPU is high)
+            log_this_detection = self.debug_level >= 1 and (
+                self.current_cpu_usage < self.cpu_medium_threshold or 
+                self.frame_count % 10 == 0  # Less logging in high CPU
+            )
+            
+            if log_this_detection:
                 self.get_logger().info(
                     f"FOUND BALL at ({center_x:.1f}, {center_y:.1f}) "
-                    f"radius: {best_radius:.1f}, area: {best_area:.1f}, "
-                    f"circularity: {best_circularity:.2f}, confidence: {best_confidence:.2f}"
+                    f"radius: {best_radius*scale_back:.1f}, area: {best_area*scale_back*scale_back:.1f}, "
+                    f"confidence: {best_confidence:.2f}, scale: {scale_factor:.2f}"
                 )
             
             # Create and publish the position message
             position_msg = PointStamped()
             
-            # IMPORTANT: Use the original image timestamp
-            # Validate timestamp before using it
+            # Use original image timestamp for synchronization
             if TimeUtils.is_timestamp_valid(header.stamp):
                 position_msg.header.stamp = header.stamp
-                self.get_logger().debug(f"Using original timestamp for synchronization")
             else:
                 position_msg.header.stamp = TimeUtils.now_as_ros_time()
-                self.get_logger().debug(f"Using current time as timestamp (invalid original timestamp)")
+                if self.debug_level >= 2:
+                    self.get_logger().debug("Using current time (invalid original timestamp)")
                 
-            position_msg.header.frame_id = "camera_frame"  # Use consistent frame ID
+            position_msg.header.frame_id = "ascamera_color_0"  # Camera frame
             
             position_msg.point.x = float(center_x)
             position_msg.point.y = float(center_y)
             position_msg.point.z = float(best_confidence)  # Use z for confidence
-            
-            self.get_logger().debug(f"Publishing 2D position with timestamp for synchronization")
             
             # Publish the ball position
             self.ball_publisher.publish(position_msg)
@@ -648,33 +849,26 @@ class HSVTennisBallTracker(Node):
             # Reset no detection counter and update statistics
             self.no_detection_count = 0
             self.detection_count += 1
-            self.last_detection_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
+            self.last_detection_time = TimeUtils.now_as_float()
             
-            # Store for statistics (keep last 50) - REPLACE THIS SECTION
-            self.detection_sizes.append(best_area)
+            # Store detection metrics for statistics
+            self.detection_sizes.append(best_area * scale_back * scale_back)  # Scale back area
             self.detection_confidences.append(best_confidence)
-            # No need for manual size checking as deque handles it automatically
             
             # Store for diagnostics
             if hasattr(self, 'diagnostic_metrics'):
                 self.diagnostic_metrics['last_detection_position'] = (center_x, center_y)
                 self.diagnostic_metrics['last_detection_time'] = TimeUtils.now_as_float()
-                
-            # Use the trace_id if provided, otherwise use 'unknown'
-            trace_info = {'confidence': best_confidence}
-            if trace_id is not None:
-                trace_info['trace_id'] = trace_id
-                
-            self._log('info', 'DETECTION', f"Ball detected at ({center_x:.1f}, {center_y:.1f})", trace_info)
-
+            
             # Return detection information
             return {
-                'center': best_center,
-                'radius': best_radius,
-                'area': best_area,
+                'center': (center_x, center_y),
+                'radius': best_radius * scale_back,
+                'area': best_area * scale_back * scale_back,
                 'circularity': best_circularity,
                 'confidence': best_confidence,
-                'contour': best_contour
+                'contour': best_contour,
+                'scale_factor': scale_factor
             }
         else:
             # No ball found
@@ -684,37 +878,47 @@ class HSVTennisBallTracker(Node):
             if hasattr(self, 'diagnostic_metrics'):
                 self.diagnostic_metrics['missed_frames'] += 1
                 
-            # Log "no ball found" at specified intervals
-            if self.no_detection_count % self.log_interval == 0:
+            # Log "no ball found" at specified intervals (less frequently when CPU is high)
+            if self.no_detection_count % (self.log_interval * (1 + int(self.current_cpu_usage > 70))) == 0:
                 self._log_no_detection_info(contours)
             
             return None
 
     def _log_no_detection_info(self, contours):
-        """
-        Log detailed information about why no ball was detected.
-        
-        Args:
-            contours (list): List of detected contours
-        """
+        """Log detailed information about why no ball was detected."""
+        # Only log detailed info if CPU isn't too high
+        if self.current_cpu_usage > self.cpu_high_threshold:
+            # Just brief logging at high CPU
+            if self.no_detection_count % 20 == 0:  # Very occasional logging
+                self.get_logger().info(f"No ball detected for {self.no_detection_count} frames (high CPU mode)")
+            return
+            
+        # Normal detailed logging
         self.get_logger().info(f"NO BALL FOUND (for {self.no_detection_count} consecutive frames)")
         
+        # Get scaled area thresholds
+        scale_factor = self.current_scale_factor
+        area_scale = scale_factor * scale_factor
+        min_area = self.min_ball_area * area_scale
+        max_area = self.max_ball_area * area_scale
+        
         # If there were yellow objects, explain why they weren't detected as balls
-        if len(contours) > 0:
+        if contours and len(contours) > 0:
+            # Find largest contour
             largest_contour = max(contours, key=cv2.contourArea)
             largest_area = cv2.contourArea(largest_contour)
             
-            if largest_area > 20:  # Only report significant blobs (adjusted for 320x320)
+            if largest_area > 20 * area_scale:  # Only report significant blobs
                 (cx, cy), radius = cv2.minEnclosingCircle(largest_contour)
                 circle_area = np.pi * (radius ** 2) if radius > 0 else 1
                 circularity = largest_area / circle_area
                 
                 # Explain why it was rejected
                 reason = "unknown reason"
-                if largest_area < self.min_ball_area:
-                    reason = f"too small (area={largest_area:.0f}, min={self.min_ball_area})"
-                elif largest_area > self.max_ball_area:
-                    reason = f"too large (area={largest_area:.0f}, max={self.max_ball_area})"
+                if largest_area < min_area:
+                    reason = f"too small (area={largest_area:.0f}, min={min_area:.0f})"
+                elif largest_area > max_area:
+                    reason = f"too large (area={largest_area:.0f}, max={max_area:.0f})"
                 elif circularity < self.min_circularity:
                     reason = f"not circular enough (circularity={circularity:.2f}, min={self.min_circularity})"
                 elif circularity > self.max_circularity:
@@ -723,130 +927,19 @@ class HSVTennisBallTracker(Node):
                 self.get_logger().info(f"Largest yellow object rejected because: {reason}")
 
     def _update_visualization(self, frame, detected_ball, processing_start):
-        """
-        Update the visualization window with detection results.
-        
-        Args:
-            frame (numpy.ndarray): Original frame
-            detected_ball (dict): Detection information or None if no ball found
-            processing_start (float): When processing started for timing
-        """
-        if not self.enable_visualization:
-            return
-            
-        # Create display frame and mask
-        display_frame = frame.copy()
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
-        display_mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-            
-        # Draw the detected ball if found
-        if detected_ball:
-            # Unpack values
-            center_x, center_y = detected_ball['center']
-            radius = detected_ball['radius']
-            area = detected_ball['area']
-            circularity = detected_ball['circularity']
-            confidence = detected_ball['confidence']
-            contour = detected_ball['contour']
-            
-            # Draw the best contour in green
-            cv2.drawContours(display_frame, [contour], -1, (0, 255, 0), 2)
-            
-            # Draw the circle and center point
-            cv2.circle(display_frame, (int(center_x), int(center_y)), 
-                      int(radius), (0, 255, 0), 2)
-            cv2.circle(display_frame, (int(center_x), int(center_y)), 
-                      5, (0, 0, 255), -1)
-            
-            # Add text with ball info
-            cv2.putText(display_frame, 
-                       f"Tennis Ball: ({center_x:.0f}, {center_y:.0f})", 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(display_frame, 
-                       f"Area: {area:.0f} px, Circ: {circularity:.2f}, Conf: {confidence:.2f}", 
-                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        
-        # Combine the original frame and mask side by side
-        h, w = frame.shape[:2]
-        combined = np.zeros((h, w*2, 3), dtype=np.uint8)
-        combined[:, :w] = display_frame
-        combined[:, w:] = display_mask
-        
-        # Add resolution and FPS counter
-        processing_time = (TimeUtils.now_as_float() - processing_start) * 1000
-        elapsed_time = TimeUtils.now_as_float() - self.start_time
-        fps = self.frame_count / elapsed_time if elapsed_time > 0 else 0
-        
-        cv2.putText(combined, f"{self.target_width}x{self.target_height}", 
-                   (10, h-30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                   
-        cv2.putText(combined, f"FPS: {fps:.1f}, Time: {processing_time:.1f}ms", 
-                   (10, h-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # Show the combined view
-        cv2.imshow("Tennis Ball Detector", combined)
-        cv2.waitKey(1)
+        # ...existing code...
+        pass
 
     def _log_performance_metrics(self, processing_start):
-        """
-        Log detailed performance metrics.
-        
-        Args:
-            processing_start (float): When processing started for timing
-        """
-        # Calculate timing metrics
-        processing_time = (TimeUtils.now_as_float() - processing_start) * 1000  # Use TimeUtils
-        self.processing_times.append(processing_time)
-            
-        avg_processing_time = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
-        
-        # Calculate overall performance
-        elapsed_time = TimeUtils.now_as_float() - self.start_time  # Use TimeUtils
-        fps = self.frame_count / elapsed_time if elapsed_time > 0 else 0
-        detection_rate = self.detection_count / self.frame_count if self.frame_count > 0 else 0
-        
-        # Log basic metrics
-        self.get_logger().info(
-            f"PERFORMANCE: Processing: {processing_time:.1f}ms (avg: {avg_processing_time:.1f}ms), "
-            f"FPS: {fps:.1f}, Detection rate: {detection_rate*100:.1f}%"
-        )
-        
-        # Log detection statistics if we have them
-        if self.detection_sizes and self.debug_level >= 2:
-            avg_size = sum(self.detection_sizes) / len(self.detection_sizes)
-            avg_confidence = sum(self.detection_confidences) / len(self.detection_confidences)
-            self.get_logger().info(
-                f"DETECTION STATS: Avg size: {avg_size:.1f}px, "
-                f"Avg confidence: {avg_confidence:.2f}"
-            )
-        
-        # Store metrics for system diagnostics
-        if not hasattr(self, 'diagnostic_metrics'):
-            self.diagnostic_metrics = {
-                'fps_history': deque(maxlen=10),
-                'processing_time_history': deque(maxlen=10),
-                'detection_rate_history': deque(maxlen=10),
-                'last_detection_position': None,
-                'last_detection_time': 0.0,
-                'total_frames': 0,
-                'missed_frames': 0,
-                'errors': [],
-                'warnings': []
-            }
-        
-        # Update metrics
-        self.diagnostic_metrics['fps_history'].append(fps)
-        self.diagnostic_metrics['processing_time_history'].append(processing_time)
-        self.diagnostic_metrics['detection_rate_history'].append(detection_rate)
-        self.diagnostic_metrics['total_frames'] = self.frame_count
+        # ...existing code...
+        pass
 
     def publish_system_diagnostics(self):
-        """Publish comprehensive system diagnostics for the diagnostics node."""
+        """Publish comprehensive system diagnostics including adaptive processing info."""
         if not hasattr(self, 'diagnostic_metrics'):
             return  # Not enough data collected yet
             
-        current_time = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
+        current_time = TimeUtils.now_as_float()
         elapsed_time = current_time - self.start_time
         
         # Calculate average metrics
@@ -879,11 +972,11 @@ class HSVTennisBallTracker(Node):
         if avg_detection_rate < 0.1 and elapsed_time > 10.0:  # Less than 10% detection rate
             errors.append(f"Very low detection rate: {avg_detection_rate*100:.1f}%")
         
-        # System resources - no try/except for import needed now
+        # System resources
         system_resources = {}
         try:
             system_resources = {
-                'cpu_percent': psutil.cpu_percent(interval=None),
+                'cpu_percent': self.current_cpu_usage,  # Use stored value
                 'memory_percent': psutil.virtual_memory().percent
             }
             
@@ -893,27 +986,30 @@ class HSVTennisBallTracker(Node):
                 
             # Add temperature if available
             if hasattr(psutil, 'sensors_temperatures'):
-                temps = psutil.sensors_temperatures()
-                if temps and 'cpu_thermal' in temps:
-                    system_resources['temperature'] = temps['cpu_thermal'][0].current
+                try:
+                    temps = psutil.sensors_temperatures()
+                    if temps and 'cpu_thermal' in temps:
+                        system_resources['temperature'] = temps['cpu_thermal'][0].current
+                except:
+                    # Temperature reading can fail silently
+                    pass
         except Exception as e:
             # Handle any errors accessing system metrics
             self.get_logger().warn(f"Error getting system resources: {e}")
         
         # Build diagnostics data structure
         diag_data = {
-            "node": "hsv",  # Changed from "node_name": "hsv_ball_node"
+            "node": "hsv",
             "timestamp": current_time,
             "uptime_seconds": elapsed_time,
-            "status": "error" if errors else ("warning" if warnings else "active"),  # Changed "ok" to "active"
+            "status": "error" if errors else ("warning" if warnings else "active"),
             "health": {
-                # Add proper health metrics for consistency
                 "camera_health": 1.0 - (len(warnings) * 0.1),
                 "detection_health": avg_detection_rate if avg_detection_rate > 0 else 0.5,
                 "processing_health": 1.0 - (avg_processing_time / 100.0) if avg_processing_time < 100.0 else 0.0,
                 "overall": 1.0 - (len(errors) * 0.3) - (len(warnings) * 0.1)
             },
-            "metrics": {  # Changed from "performance"
+            "metrics": {
                 "fps": avg_fps,
                 "processing_time_ms": avg_processing_time,
                 "total_frames": self.diagnostic_metrics['total_frames'],
@@ -933,7 +1029,17 @@ class HSVTennisBallTracker(Node):
                 "area_range": [self.min_ball_area, self.max_ball_area],
                 "circularity_range": [self.min_circularity, self.max_circularity]
             },
-            "resources": system_resources,  # Changed from "system_resources"
+            "resources": system_resources,
+            "adaptive_processing": {
+                "current_scale_factor": self.current_scale_factor,
+                "frame_skip_count": self.low_power_skip_frames,
+                "skipped_frames": self.skip_count,
+                "cpu_thresholds": {
+                    "high": self.cpu_high_threshold,
+                    "medium": self.cpu_medium_threshold,
+                    "low": self.cpu_low_threshold
+                }
+            },
             "errors": errors,
             "warnings": warnings
         }
@@ -943,42 +1049,36 @@ class HSVTennisBallTracker(Node):
         msg.data = json.dumps(diag_data)
         self.system_diagnostics_publisher.publish(msg)
         
-        # Also log to console
-        self.get_logger().info(
-            f"HSV diagnostics: {avg_fps:.1f} FPS, {avg_detection_rate*100:.1f}% detection rate, "
-            f"Status: {diag_data['status']}"
-        )
+        # Also log to console (condensed in high CPU)
+        if self.current_cpu_usage < self.cpu_medium_threshold:
+            # Normal detailed logging
+            self.get_logger().info(
+                f"HSV diagnostics: {avg_fps:.1f} FPS, {avg_detection_rate*100:.1f}% detection rate, "
+                f"Status: {diag_data['status']}, Scale: {self.current_scale_factor:.2f}, "
+                f"Skip: {self.low_power_skip_frames}"
+            )
+        else:
+            # Condensed logging in high CPU
+            self.get_logger().info(
+                f"HSV status: {diag_data['status']}, CPU: {self.current_cpu_usage:.1f}%, "
+                f"Scale: {self.current_scale_factor:.2f}"
+            )
+
+    @lru_cache(maxsize=8)  # Cache results for better performance
+    def _calculate_scaled_thresholds(self, scale_factor):
+        """Calculate area thresholds scaled by current resolution factor."""
+        # Area scales with the square of linear dimensions
+        area_scale = scale_factor * scale_factor
+        return {
+            'min_area': self.min_ball_area * area_scale,
+            'max_area': self.max_ball_area * area_scale,
+            'ideal_area': self.ideal_area * area_scale
+        }
 
     def _check_health_metrics(self):
         """Evaluate system health and make adjustments if needed."""
-        # Calculate health metrics
-        if hasattr(self, 'diagnostic_metrics'):
-            # Calculate detection health
-            frames = self.diagnostic_metrics['total_frames']
-            missed = self.diagnostic_metrics['missed_frames']
-            detection_rate = (frames - missed) / frames if frames > 0 else 0
-            
-            # Calculate processing health based on time
-            if len(self.diagnostic_metrics['processing_time_history']) > 0:
-                avg_time = np.mean(list(self.diagnostic_metrics['processing_time_history']))
-                processing_health = 1.0 - min(avg_time / 100.0, 1.0)  # 0-1 scale
-            else:
-                processing_health = 1.0
-                
-            # Calculate overall health
-            overall_health = 0.6 * detection_rate + 0.4 * processing_health
-            
-            # Take action based on health
-            if overall_health < 0.3:  # Critical health
-                self._log('warn', 'HEALTH', f"Critical health detected ({overall_health:.2f})")
-                # Adjust parameters for recovery
-                self.low_power_skip_frames = 2  # Skip more frames
-            elif overall_health < 0.6:  # Poor health
-                self._log('info', 'HEALTH', f"Suboptimal health detected ({overall_health:.2f})")
-                self.low_power_skip_frames = 1  # Skip some frames
-            elif overall_health > 0.8 and self.low_power_skip_frames > 0:  # Good health
-                self._log('info', 'HEALTH', f"Health recovered ({overall_health:.2f})")
-                self.low_power_skip_frames = 0  # Return to normal
+        # Most of the health adaptation is now handled by _check_cpu_and_adjust_processing
+        pass
 
     def destroy_node(self):
         """Ensure proper cleanup of resources."""
@@ -993,66 +1093,26 @@ class HSVTennisBallTracker(Node):
             except Exception as e:
                 self.get_logger().warn(f"Error closing OpenCV windows: {str(e)}")
         
-        # Stop any threads
+        # Stop threads and timers
         if hasattr(self, 'resource_monitor') and self.resource_monitor:
             self.resource_monitor.stop()
-        
+            
+        if hasattr(self, 'cpu_check_timer'):
+            self.cpu_check_timer.cancel()
+            
+        # Clear cached data
+        if hasattr(self, '_calculate_scaled_thresholds'):
+            self._calculate_scaled_thresholds.cache_clear()
+            
+        # Clear image buffers
+        if hasattr(self, 'image_buffers'):
+            self.image_buffers.clear()
+            
         super().destroy_node()
 
     def _collect_debug_data(self, frame, mask, contours, detection):
-        """Collect detailed debug data if in debug mode."""
-        if self.debug_level < 2:
-            return None  # Skip if not in debug mode
-            
-        # Create debug data structure
-        debug_data = {
-            'frame_time': TimeUtils.now_as_float(),
-            'frame_count': self.frame_count,
-            'detection_present': detection is not None
-        }
-        
-        # Add HSV histogram data (sampled)
-        if frame is not None:
-            try:
-                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                h_hist = cv2.calcHist([hsv], [0], None, [18], [0, 180])
-                s_hist = cv2.calcHist([hsv], [1], None, [10], [0, 256])
-                v_hist = cv2.calcHist([hsv], [2], None, [10], [0, 256])
-                debug_data['hsv_hist'] = {
-                    'h': h_hist.flatten().tolist(),
-                    's': s_hist.flatten().tolist(),
-                    'v': v_hist.flatten().tolist()
-                }
-            except Exception as e:
-                debug_data['hsv_hist_error'] = str(e)
-        
-        # Add contour statistics
-        if contours:
-            contour_stats = []
-            for i, cnt in enumerate(contours[:5]):  # First 5 contours only
-                area = cv2.contourArea(cnt)
-                if area < 10:  # Skip tiny contours
-                    continue
-                    
-                (cx, cy), radius = cv2.minEnclosingCircle(cnt)
-                circle_area = np.pi * (radius ** 2) if radius > 0 else 1
-                circularity = area / circle_area
-                
-                contour_stats.append({
-                    'id': i,
-                    'area': float(area),
-                    'center': (float(cx), float(cy)),
-                    'radius': float(radius),
-                    'circularity': float(circularity)
-                })
-            debug_data['contours'] = contour_stats
-        
-        # Store debug data
-        if not hasattr(self, 'debug_history'):
-            self.debug_history = deque(maxlen=10)
-        self.debug_history.append(debug_data)
-        
-        return debug_data
+        # ...existing code...
+        pass
 
 def main(args=None):
     """Main function to initialize and run the HSV Tennis Ball Tracker node."""
@@ -1074,6 +1134,11 @@ def main(args=None):
     print("")
     print("Publications:")
     print(f"  - Ball position: {TOPICS['output']['position']}")
+    print(f"  - CPU usage: /system/resources/cpu_load")
+    print("")
+    print("Performance Adaptation:")
+    print(f"  - High CPU threshold: {node.cpu_high_threshold}%")
+    print(f"  - Medium CPU threshold: {node.cpu_medium_threshold}%")
     print("")
     print("Press Ctrl+C to stop the program")
     print("=================================================")

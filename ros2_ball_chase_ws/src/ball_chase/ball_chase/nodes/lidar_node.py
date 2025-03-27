@@ -8,7 +8,7 @@ This node processes 2D LIDAR data to detect a basketball and provide 3D position
 It correlates LIDAR data with camera-based detections from YOLO and HSV nodes.
 
 Features:
-- Processes 2D LIDAR scans to find circular patterns matching a basketball
+- Processes 2D LIDAR scans to find circular patterns matching a basketball (10-inch diameter)
 - Uses YOLO and HSV detections to trigger validation of potential basketball locations
 - Publishes the basketball's 3D position in the robot's coordinate frame
 - Provides visualization markers for debugging in RViz
@@ -18,7 +18,9 @@ Physical Setup:
 - LIDAR mounted 6 inches (15.24 cm) above ground
 - Basketball diameter: 10 inches (25.4 cm)
 - LIDAR beam intersects basketball at a consistent height
+- Basketball rolls on ground only (center is always 5 inches above ground)
 """
+# Standard library imports
 import sys
 import rclpy
 from rclpy.node import Node
@@ -27,24 +29,21 @@ import math
 import time
 from collections import deque
 import threading
+import psutil  # Add this for CPU monitoring
 
+# ROS2 messages
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PointStamped, TransformStamped
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import String
-from tf2_ros import TransformBroadcaster, StaticTransformBroadcaster, Buffer, TransformListener
+from std_msgs.msg import String, Float32
+from tf2_ros import Buffer, TransformListener
+from tf2_geometry_msgs import PointStamped as TF2PointStamped  # Add TF2 point support
 import json
 
-
 import os
-# Add the parent directory of 'config' to the Python path
-#sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-
-# Add the 'src' directory to the Python path
-#sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-
-#from config.config_loader import ConfigLoader  # Import ConfigLoader
+# Import GroundPositionFilter for shared ground movement tracking
 from ball_chase.config.config_loader import ConfigLoader
+from ball_chase.utilities.ground_position_filter import GroundPositionFilter
 
 
 class BasketballLidarDetector(Node):
@@ -67,6 +66,9 @@ class BasketballLidarDetector(Node):
             self.get_logger().error(f"Failed to load config: {str(e)}")
             self.config = {}
         
+        # Load performance configuration
+        self._load_performance_config()
+        
         # Initialize state
         self._init_state()
         
@@ -77,21 +79,11 @@ class BasketballLidarDetector(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         
-        # Then set up the static broadcaster (we'll only use this for our fixed transform)
-        self.tf_static_broadcaster = StaticTransformBroadcaster(self)
-        
         # Set up subscribers
         self._setup_subscribers()
         
         # Set up publishers
         self._setup_publishers()
-        
-        # Publish the static transform immediately at startup
-        self.publish_static_transform()
-        
-        # NEW: Add a timer to periodically publish the static transform to ensure availability
-        # This addresses potential initialization timing issues between nodes
-        self.transform_publish_timer = self.create_timer(5.0, self.publish_static_transform)
         
         # Set up a periodic timer to check transform availability (for debugging)
         self.transform_check_timer = self.create_timer(5.0, self.check_transform)
@@ -115,6 +107,35 @@ class BasketballLidarDetector(Node):
         # NEW: Create a flag to track successful transforms
         self.transform_published_successfully = False
     
+    def _load_performance_config(self):
+        """Load performance-related configuration."""
+        perf_config = self.config.get('performance', {})
+        
+        # Visualization settings (disabled by default)
+        viz_config = self.config.get('visualization', {})
+        self.visualization_enabled = viz_config.get('enabled', False)
+        
+        # Performance adaptation settings
+        self.adaptive_processing = perf_config.get('adaptive_processing', True)
+        self.high_load_threshold = perf_config.get('high_load_threshold', 80.0)  # CPU %
+        self.low_load_threshold = perf_config.get('low_load_threshold', 50.0)    # CPU %
+        
+        # Processing settings
+        self.max_point_limit = perf_config.get('max_point_limit', 500)
+        self.dynamic_ransac_iterations = perf_config.get('dynamic_ransac_iterations', True)
+        self.min_ransac_iterations = perf_config.get('min_ransac_iterations', 10)
+        
+        # Timer frequencies
+        self.diagnostics_interval_normal = self.config.get('diagnostics', {}).get('publish_interval', 3.0)
+        self.diagnostics_interval_high_load = perf_config.get('diagnostics_interval_high_load', 10.0)
+        
+        # System resources
+        self.current_cpu_load = 0.0
+        self.performance_mode = "NORMAL"  # Can be "NORMAL", "EFFICIENT", "MINIMAL"
+        
+        # Resource monitoring timer - check every 5 seconds
+        self.resource_timer = self.create_timer(5.0, self.monitor_resources)
+        
     def _init_state(self):
         """Initialize internal state tracking."""
         # Scan data
@@ -140,6 +161,9 @@ class BasketballLidarDetector(Node):
         self.last_successful_detection_time = 0
         self.predicted_position = None
         
+        # Initialize ground position filter for shared ground movement tracking
+        self.position_filter = GroundPositionFilter()
+        
         # Health monitoring
         self.lidar_health = 1.0
         self.detection_health = 1.0
@@ -150,149 +174,94 @@ class BasketballLidarDetector(Node):
         # NEW: Transform publishing tracking
         self.transform_publish_attempts = 0
         self.transform_publish_successes = 0
-    
-    def publish_static_transform(self):
-        """Publish the static transform from camera to LIDAR."""
-        # Increment attempt counter
-        self.transform_publish_attempts += 1
         
-        # Always log at startup, then every few attempts
-        if self.transform_publish_attempts == 1 or self.transform_publish_attempts % 5 == 0:
-            self.get_logger().info(
-                f"Publishing static transform from {self.transform_parent_frame} "
-                f"to {self.transform_child_frame} (attempt #{self.transform_publish_attempts})"
-            )
-        
-        transform = TransformStamped()
-        transform.header.stamp = self.get_clock().now().to_msg()
-        transform.header.frame_id = self.transform_parent_frame
-        transform.child_frame_id = self.transform_child_frame
-        
-        # Values from configuration
-        transform.transform.translation.x = self.transform_translation['x']
-        transform.transform.translation.y = self.transform_translation['y']
-        transform.transform.translation.z = self.transform_translation['z']
-        
-        transform.transform.rotation.x = self.transform_rotation['x']
-        transform.transform.rotation.y = self.transform_rotation['y']
-        transform.transform.rotation.z = self.transform_rotation['z']
-        transform.transform.rotation.w = self.transform_rotation['w']
-        
-        # Clear any existing transforms with the same parent/child frames
-        # This is not directly supported in tf2_ros, but we can ensure a fresh transform
-        
-        # THIS IS CRITICAL: StaticTransformBroadcaster.sendTransform expects a LIST of transforms
-        self.tf_static_broadcaster.sendTransform([transform])
-        
-        # NEW: Add a delay to allow transform to propagate through the system
-        time.sleep(0.5)
-        
-        # NEW: Verify transform was published successfully
-        try:
-            test_time = rclpy.time.Time()
-            # Check both directions to be thorough
-            camera_to_lidar = self.tf_buffer.can_transform(
-                self.transform_parent_frame,
-                self.transform_child_frame,
-                test_time,
-                timeout=rclpy.duration.Duration(seconds=0.2)
-            )
-            
-            lidar_to_camera = self.tf_buffer.can_transform(
-                self.transform_child_frame,
-                self.transform_parent_frame, 
-                test_time,
-                timeout=rclpy.duration.Duration(seconds=0.2)
-            )
-            
-            if camera_to_lidar or lidar_to_camera:
-                self.transform_published_successfully = True
-                self.transform_publish_successes += 1
-                
-                # Only log on first success or occasionally
-                if self.transform_publish_successes == 1 or self.transform_publish_successes % 5 == 0:
-                    self.get_logger().info(
-                        f"✓ Transform verification successful: "
-                        f"camera→lidar={camera_to_lidar}, lidar→camera={lidar_to_camera}"
-                    )
-                    
-                    # Log the actual transform if available
-                    try:
-                        if camera_to_lidar:
-                            transform = self.tf_buffer.lookup_transform(
-                                self.transform_parent_frame,
-                                self.transform_child_frame,
-                                test_time
-                            )
-                            self.get_logger().info(
-                                f"✓ Transform details: "
-                                f"translation=[{transform.transform.translation.x:.4f}, "
-                                f"{transform.transform.translation.y:.4f}, "
-                                f"{transform.transform.translation.z:.4f}]"
-                            )
-                    except Exception as e:
-                        self.get_logger().warn(f"Could not retrieve transform details: {str(e)}")
-            else:
-                self.get_logger().warn(
-                    f"✗ Transform verification failed on attempt #{self.transform_publish_attempts}: "
-                    f"not discoverable in either direction"
-                )
-                # Publish again immediately if verification fails
-                self.tf_static_broadcaster.sendTransform([transform])
-                
-                # Log all available frames to debug
-                try:
-                    frames = self.tf_buffer.all_frames_as_string()
-                    self.get_logger().info(f"Available frames at failed verification:\n{frames}")
-                except Exception as e:
-                    self.get_logger().warn(f"Could not list frames: {str(e)}")
-        except Exception as e:
-            self.get_logger().error(f"Error during transform verification: {str(e)}")
-            # Retry publishing transform on error
-            self.tf_static_broadcaster.sendTransform([transform])
+        # New performance metrics
+        self.processing_skips = 0
+        self.current_cpu_load = 0.0
+        self.current_memory_usage = 0.0
     
     def check_transform(self):
         """Periodically check if transform is available in TF tree."""
         try:
             test_time = rclpy.time.Time()
-            # For TF operations:
-            # can_transform(target_frame, source_frame, time) checks if we can transform 
-            # a point from source_frame to target_frame
-            transform_available = self.tf_buffer.can_transform(
-                "camera_frame",  # Target frame
-                "lidar_frame",   # Source frame
+            
+            # First check: Direct transform between frames (most straightforward)
+            direct_transform_available = self.tf_buffer.can_transform(
+                "lidar_frame",           # Target frame
+                "ascamera_color_0",      # Source frame (camera)
                 test_time,
                 timeout=rclpy.duration.Duration(seconds=0.1)
             )
             
+            # Second check: Look for transform via common parent (base_link)
+            # Check from camera to base_link
+            camera_to_base = self.tf_buffer.can_transform(
+                "base_link",
+                "ascamera_color_0",
+                test_time,
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            
+            # Check from base_link to lidar
+            base_to_lidar = self.tf_buffer.can_transform(
+                "lidar_frame",
+                "base_link",
+                test_time,
+                timeout=rclpy.duration.Duration(seconds=0.1)
+            )
+            
+            # Combined check (can transform via common parent)
+            chain_transform_available = camera_to_base and base_to_lidar
+            
+            transform_available = direct_transform_available or chain_transform_available
+            
             if transform_available:
-                # Actually retrieve the transform to confirm it works
-                transform = self.tf_buffer.lookup_transform(
-                    "camera_frame",
-                    "lidar_frame",
-                    test_time
-                )
-                self.get_logger().info(
-                    f"✓ Transform check: transform is available. "
-                    f"Translation=[{transform.transform.translation.x:.4f}, "
-                    f"{transform.transform.translation.y:.4f}, "
-                    f"{transform.transform.translation.z:.4f}]"
-                )
-                
-                # NEW: Check if transform is also available in reverse direction
-                reverse_available = self.tf_buffer.can_transform(
-                    "lidar_frame",
-                    "camera_frame",
-                    test_time,
-                    timeout=rclpy.duration.Duration(seconds=0.1)
-                )
-                
-                if reverse_available:
-                    self.get_logger().info("✓ Transform also available in reverse direction")
-                else:
-                    self.get_logger().warn("✗ Transform NOT available in reverse direction")
-            else:
+                # Try to actually get the transform (direct or through chain)
+                try:
+                    transform = self.tf_buffer.lookup_transform(
+                        "lidar_frame",
+                        "ascamera_color_0",
+                        test_time
+                    )
+                    self.transform_published_successfully = True
+                    self.transform_publish_successes += 1
+                    
+                    self.get_logger().info(
+                        f"✓ Transform check: transform from ascamera_color_0 to lidar_frame is available. "
+                        f"Translation=[{transform.transform.translation.x:.4f}, "
+                        f"{transform.transform.translation.y:.4f}, "
+                        f"{transform.transform.translation.z:.4f}]"
+                    )
+                    
+                    # Check if transform is also available in reverse direction
+                    reverse_available = self.tf_buffer.can_transform(
+                        "ascamera_color_0",
+                        "lidar_frame",
+                        test_time,
+                        timeout=rclpy.duration.Duration(seconds=0.1)
+                    )
+                    
+                    if reverse_available:
+                        self.get_logger().info("✓ Transform also available in reverse direction")
+                    else:
+                        self.get_logger().warn("✗ Transform NOT available in reverse direction")
+                except Exception as e:
+                    self.get_logger().error(f"Cannot lookup transform despite availability check: {str(e)}")
+                    transform_available = False
+            
+            if not transform_available:
                 self.get_logger().warn("✗ Transform check: transform is NOT available")
+                
+                # Detailed debug info about the transform chain
+                if camera_to_base:
+                    self.get_logger().info("✓ Transform available: ascamera_color_0 to base_link")
+                else:
+                    self.get_logger().warn("✗ Missing transform: ascamera_color_0 to base_link")
+                
+                if base_to_lidar:
+                    self.get_logger().info("✓ Transform available: base_link to lidar_frame")
+                else: 
+                    self.get_logger().warn("✗ Missing transform: base_link to lidar_frame")
                 
                 # Log all available frames to debug
                 try:
@@ -301,38 +270,13 @@ class BasketballLidarDetector(Node):
                 except Exception as e:
                     self.get_logger().warn(f"Could not list frames: {str(e)}")
                 
-                # Re-publish the transform
-                self.get_logger().info("Re-publishing static transform...")
-                self.publish_static_transform()
+                # Re-publish the transform if we have a publishing function
+                if hasattr(self, 'publish_static_transform') and callable(self.publish_static_transform):
+                    self.get_logger().info("Re-publishing static transform...")
+                    self.publish_static_transform()
+                else:
+                    self.get_logger().info("No static transform publisher available")
                 
-                # NEW: Look for any transform involving our frames
-                try:
-                    camera_frame = "camera_frame"
-                    lidar_frame = "lidar_frame"
-                    
-                    self.get_logger().info("Searching for any transform involving our frames:")
-                    for parent in ["camera_frame", "lidar_frame", "map", "base_link", "odom"]:
-                        for child in ["camera_frame", "lidar_frame", "map", "base_link", "odom"]:
-                            if parent != child:
-                                is_available = self.tf_buffer.can_transform(
-                                    parent, child, test_time,
-                                    timeout=rclpy.duration.Duration(seconds=0.05)
-                                )
-                                if is_available:
-                                    self.get_logger().info(f"Found transform: {parent} → {child}")
-                                    try:
-                                        transform = self.tf_buffer.lookup_transform(
-                                            parent, child, test_time
-                                        )
-                                        self.get_logger().info(
-                                            f"  Translation=[{transform.transform.translation.x:.4f}, "
-                                            f"{transform.transform.translation.y:.4f}, "
-                                            f"{transform.transform.translation.z:.4f}]"
-                                        )
-                                    except Exception:
-                                        pass
-                except Exception as e:
-                    self.get_logger().warn(f"Error searching for transforms: {str(e)}")
         except Exception as e:
             self.get_logger().error(f"Error checking transform: {str(e)}")
     
@@ -341,8 +285,8 @@ class BasketballLidarDetector(Node):
         # Get basketball configuration
         basketball_config = self.config.get('basketball', {})
         
-        # Core parameters
-        self.ball_radius = basketball_config.get('radius', 0.127)  # 5 inches
+        # Core parameters - ensure basketball sized (10 inch diameter)
+        self.ball_radius = basketball_config.get('radius', 0.127)  # 5 inches (10 inch diameter)
         self.max_distance = basketball_config.get('max_distance', 0.2)
         self.min_points = basketball_config.get('min_points', 6)
         self.detection_samples = basketball_config.get('detection_samples', 30)
@@ -353,14 +297,15 @@ class BasketballLidarDetector(Node):
         self.quality_medium = quality_thresholds.get('medium', 0.6)
         self.quality_high = quality_thresholds.get('high', 0.8)
         
-        # Physical measurements
+        # Physical measurements - matching basketball & setup
         physical = self.config.get('physical_measurements', {})
         self.lidar_height = physical.get('lidar_height', 0.1524)  # 6 inches
+        # Ball center is always 5 inches above ground (radius) for a basketball rolling on floor
         self.ball_center_height = physical.get('ball_center_height', 0.127)  # 5 inches
         
         # Detection reliability
         reliability = self.config.get('detection_reliability', {})
-        # Increased from default 0.5 to improve reliability
+        # Increased from default 0.5 to improve reliability for larger basketball
         self.min_reliable_distance = reliability.get('min_reliable_distance', 0.8)
         self.publish_unreliable = reliability.get('publish_unreliable', True)
         
@@ -370,13 +315,17 @@ class BasketballLidarDetector(Node):
         self.ransac_max_iterations = ransac_config.get('max_iterations', 30)
         self.ransac_inlier_threshold = ransac_config.get('inlier_threshold', 0.02)
         self.ransac_min_inliers = ransac_config.get('min_inliers', 5)
+        
+        # For ground movement tracking
+        self.ground_movement = True  # Basketball always moves on ground
+        self.z_variance_threshold = 0.02  # Small threshold for height variation (2cm)
     
     def _init_transform_parameters(self):
         """Initialize coordinate transform parameters."""
         transform_config = self.config.get('transform', {})
         
-        # Frame IDs
-        self.transform_parent_frame = transform_config.get('parent_frame', 'camera_frame')
+        # Frame IDs - Update default camera frame to match what we need
+        self.transform_parent_frame = transform_config.get('parent_frame', 'ascamera_color_0')
         self.transform_child_frame = transform_config.get('child_frame', 'lidar_frame')
         
         # Translation vector
@@ -448,7 +397,7 @@ class BasketballLidarDetector(Node):
             queue_size
         )
         
-        # NEW: Debug points publisher (separate from actual detections)
+        # Debug position publisher
         debug_topic = output_topics.get('debug_position', '/basketball/lidar/debug_position')
         self.debug_publisher = self.create_publisher(
             PointStamped,
@@ -456,13 +405,15 @@ class BasketballLidarDetector(Node):
             queue_size
         )
         
-        # Visualization publisher
-        viz_topic = output_topics.get('visualization', '/basketball/lidar/visualization')
-        self.marker_publisher = self.create_publisher(
-            MarkerArray,
-            viz_topic,
-            queue_size
-        )
+        # Conditionally create visualization publisher only if enabled
+        self.marker_publisher = None
+        if self.visualization_enabled:
+            viz_topic = output_topics.get('visualization', '/basketball/lidar/visualization')
+            self.marker_publisher = self.create_publisher(
+                MarkerArray,
+                viz_topic,
+                queue_size
+            )
         
         # Diagnostics publisher
         diag_topic = output_topics.get('diagnostics', '/basketball/lidar/diagnostics')
@@ -471,8 +422,52 @@ class BasketballLidarDetector(Node):
             diag_topic,
             queue_size
         )
-    
-    
+        
+        # Publisher for sharing system load with other nodes
+        load_topic = output_topics.get('system_load', '/system/load')
+        self.load_publisher = self.create_publisher(
+            Float32,
+            load_topic,
+            queue_size
+        )
+
+    def monitor_resources(self):
+        """Monitor system resources and adapt processing accordingly."""
+        try:
+            # Get CPU and memory usage
+            self.current_cpu_load = psutil.cpu_percent()
+            self.current_memory_usage = psutil.virtual_memory().percent
+            
+            # Determine performance mode based on system load
+            if self.current_cpu_load > self.high_load_threshold:
+                new_mode = "MINIMAL"
+                # Adjust diagnostic timer for high load
+                if self.performance_mode != "MINIMAL":
+                    self.diagnostics_timer.timer_period_ns = int(self.diagnostics_interval_high_load * 1e9)
+            elif self.current_cpu_load > self.low_load_threshold:
+                new_mode = "EFFICIENT"
+            else:
+                new_mode = "NORMAL"
+                # Restore normal diagnostic frequency if coming from high load
+                if self.performance_mode == "MINIMAL":
+                    self.diagnostics_timer.timer_period_ns = int(self.diagnostics_interval_normal * 1e9)
+            
+            # Log mode changes
+            if new_mode != self.performance_mode:
+                self.get_logger().info(
+                    f"Performance mode change: {self.performance_mode} -> {new_mode} "
+                    f"(CPU: {self.current_cpu_load:.1f}%, Memory: {self.current_memory_usage:.1f}%)"
+                )
+                self.performance_mode = new_mode
+            
+            # Publish system load for other nodes
+            load_msg = Float32()
+            load_msg.data = float(self.current_cpu_load)
+            self.load_publisher.publish(load_msg)
+            
+        except Exception as e:
+            self.get_logger().warn(f"Error monitoring resources: {str(e)}")
+
     def scan_callback(self, msg):
         """
         Process LaserScan messages from the LIDAR.
@@ -480,6 +475,11 @@ class BasketballLidarDetector(Node):
         Converts polar coordinates to Cartesian coordinates.
         """
         try:
+            # If system is under very high load, we might skip processing some scans
+            if self.adaptive_processing and self.performance_mode == "MINIMAL" and self.processed_scans % 2 != 0:
+                self.processing_skips += 1
+                return
+            
             # Store scan metadata
             self.latest_scan = msg
             self.scan_timestamp = msg.header.stamp
@@ -506,28 +506,39 @@ class BasketballLidarDetector(Node):
             valid_ranges = ranges[valid_indices]
             angles = angle_min + angle_increment * np.arange(len(ranges))[valid_indices]
             
-            # Convert to Cartesian coordinates
+            # Optimize for high CPU load - limit points processed if needed
+            point_limit = self.max_point_limit
+            if self.adaptive_processing:
+                if self.performance_mode == "EFFICIENT":
+                    point_limit = self.max_point_limit // 2
+                elif self.performance_mode == "MINIMAL":
+                    point_limit = self.max_point_limit // 4
+            
+            # Sample points if there are too many (improves performance)
+            if len(valid_ranges) > point_limit:
+                sample_step = len(valid_ranges) // point_limit
+                valid_ranges = valid_ranges[::sample_step]
+                angles = angles[::sample_step]
+            
+            # Convert to Cartesian coordinates - optimized for minimal memory allocation
             x = valid_ranges * np.cos(angles)
             y = valid_ranges * np.sin(angles)
+            z = np.zeros_like(x)  # No need to allocate new memory
             
-            # Setting Z coordinates based on LIDAR height and expected ball intersection
-            # For a flat LIDAR at 6 inches, the beam will intersect the ball at a consistent height
-            # We'll set this to 0 in the LIDAR frame, and handle the actual height in transformation
-            z = np.zeros_like(x)
-            
-            # Stack coordinates
+            # Stack coordinates - memory efficient with preallocated array
             self.points_array = np.column_stack((x, y, z))
             
             # Update statistics
             self.processed_scans += 1
             
-            # Log scan information
-            log_interval = self.config.get('diagnostics', {}).get('log_scan_interval', 20)
-            if self.processed_scans % log_interval == 0:
-                self.get_logger().debug(
-                    f"Processed scan #{self.processed_scans} with "
-                    f"{len(self.points_array)} valid points"
-                )
+            # Log scan information only in normal mode
+            if self.performance_mode == "NORMAL":
+                log_interval = self.config.get('diagnostics', {}).get('log_scan_interval', 20)
+                if self.processed_scans % log_interval == 0:
+                    self.get_logger().debug(
+                        f"Processed scan #{self.processed_scans} with "
+                        f"{len(self.points_array)} valid points"
+                    )
             
         except Exception as e:
             self.log_error(f"Error processing scan: {str(e)}")
@@ -557,7 +568,8 @@ class BasketballLidarDetector(Node):
         try:
             # Check if we have valid scan data
             if self.latest_scan is None or self.points_array is None or len(self.points_array) == 0:
-                self.get_logger().info(f"LIDAR: Waiting for scan data for {source} detection")
+                if self.performance_mode != "MINIMAL":  # Skip log in minimal mode
+                    self.get_logger().info(f"LIDAR: Waiting for scan data for {source} detection")
                 return
             
             # Extract camera detection info
@@ -565,13 +577,54 @@ class BasketballLidarDetector(Node):
             y_2d = msg.point.y
             confidence = msg.point.z
             
-            self.get_logger().info(
-                f"{source}: Ball detected at pixel ({x_2d:.1f}, {y_2d:.1f}) "
-                f"with confidence {confidence:.2f}"
-            )
+            # Get camera frame - need to know which coordinate system the point is in
+            camera_frame = msg.header.frame_id
+            if not camera_frame:
+                camera_frame = "ascamera_color_0"  # Default to standard camera frame
+            
+            # Transform point from camera frame to lidar frame
+            transformed_point = None
+            try:
+                # Create a TF2PointStamped from the incoming detection
+                camera_point = TF2PointStamped()
+                camera_point.header = msg.header
+                camera_point.point = msg.point
+                
+                # Check if transform is available - only check the transform we need
+                transform_available = self.tf_buffer.can_transform(
+                    "lidar_frame",
+                    camera_frame,
+                    msg.header.stamp,
+                    timeout=rclpy.duration.Duration(seconds=0.1)
+                )
+                
+                if transform_available:
+                    # Transform the point from camera to lidar frame
+                    lidar_point = self.tf_buffer.transform(
+                        camera_point,
+                        "lidar_frame",
+                        timeout=rclpy.duration.Duration(seconds=0.1)
+                    )
+                    transformed_point = np.array([lidar_point.point.x, lidar_point.point.y, lidar_point.point.z])
+                    
+                    if self.performance_mode != "MINIMAL":  # Skip log in minimal mode
+                        self.get_logger().info(
+                            f"{source}: Transformed point from {camera_frame} to lidar_frame: "
+                            f"({transformed_point[0]:.2f}, {transformed_point[1]:.2f}, {transformed_point[2]:.2f})"
+                        )
+                else:
+                    self.get_logger().warn(f"Transform not available from {camera_frame} to lidar_frame")
+            except Exception as e:
+                self.get_logger().warn(f"Transform error: {str(e)}")
+            
+            if self.performance_mode != "MINIMAL":  # Skip log in minimal mode
+                self.get_logger().info(
+                    f"{source}: Ball detected at pixel ({x_2d:.1f}, {y_2d:.1f}) "
+                    f"with confidence {confidence:.2f}"
+                )
             
             # Find basketball in LIDAR data
-            ball_results = self.find_basketball_ransac()
+            ball_results = self.find_basketball_ransac(transformed_point)
             
             # Process the best detected ball (if any)
             if ball_results and len(ball_results) > 0:
@@ -582,7 +635,8 @@ class BasketballLidarDetector(Node):
                 # Publish ball position
                 self.publish_ball_position(center, cluster_size, circle_quality, source, msg.header.stamp)
             else:
-                self.get_logger().info(f"LIDAR: No matching ball found for {source} detection")
+                if self.performance_mode != "MINIMAL":  # Skip log in minimal mode
+                    self.get_logger().info(f"LIDAR: No matching ball found for {source} detection")
                 self.consecutive_failures += 1
             
         except Exception as e:
@@ -592,11 +646,16 @@ class BasketballLidarDetector(Node):
         processing_time = (time.time() - detection_start_time) * 1000  # in ms
         self.detection_times.append(processing_time)
         self.detection_latency = processing_time
-        self.get_logger().debug(f"LIDAR: {source} processing took {processing_time:.2f}ms")
+        if self.performance_mode != "MINIMAL":  # Skip log in minimal mode
+            self.get_logger().debug(f"LIDAR: {source} processing took {processing_time:.2f}ms")
     
-    def find_basketball_ransac(self):
+    def find_basketball_ransac(self, camera_seed_point=None):
         """
         Find a basketball in LIDAR data using RANSAC for robust circle fitting.
+        Optimized for a basketball (10-inch diameter) rolling on the ground.
+        
+        Args:
+            camera_seed_point: Optional point in LIDAR frame transformed from camera detection
         
         Returns:
             list: List of (center, cluster_size, quality) tuples for detected basketballs
@@ -607,6 +666,11 @@ class BasketballLidarDetector(Node):
         # Create seed points for RANSAC
         seed_points = []
         
+        # If camera detection provided a transformed point, prioritize it
+        if camera_seed_point is not None and len(camera_seed_point) >= 2:
+            # Use only x,y coordinates for 2D search in LIDAR data
+            seed_points.append([camera_seed_point[0], camera_seed_point[1], 0])
+        
         # Include previous ball position if available
         if self.previous_ball_position is not None:
             seed_points.append(self.previous_ball_position)
@@ -616,11 +680,19 @@ class BasketballLidarDetector(Node):
             # Create a few seed points based on point clusters
             # Focus on points within a reasonable range
             distances = np.sqrt(self.points_array[:, 0]**2 + self.points_array[:, 1]**2)
+            
+            # Adjust valid range for a larger basketball (can be detected from further away)
             valid_indices = np.where((distances > 0.3) & (distances < 3.0))[0]
             
             if len(valid_indices) > 0:
-                # Sample a few points to try as seeds
-                sample_count = min(10, len(valid_indices))
+                # Adjust sample count based on performance mode
+                if self.performance_mode == "NORMAL":
+                    sample_count = min(10, len(valid_indices))
+                elif self.performance_mode == "EFFICIENT":
+                    sample_count = min(5, len(valid_indices))
+                else:  # MINIMAL
+                    sample_count = min(3, len(valid_indices))
+                    
                 indices = np.random.choice(valid_indices, sample_count, replace=False)
                 for idx in indices:
                     seed_points.append(self.points_array[idx])
@@ -632,11 +704,13 @@ class BasketballLidarDetector(Node):
         
         # Try RANSAC with each seed point
         for seed_point in seed_points:
-            # Find all points near this seed
+            # Find all points near this seed - using vectorized operations for speed
             distances = np.sqrt(
                 (self.points_array[:, 0] - seed_point[0])**2 + 
                 (self.points_array[:, 1] - seed_point[1])**2
             )
+            
+            # For basketball, use a larger search radius based on the basketball's size
             nearby_indices = np.where(distances < self.max_distance * 3)[0]
             
             if len(nearby_indices) < self.min_points:
@@ -645,10 +719,18 @@ class BasketballLidarDetector(Node):
             # Get points near seed
             nearby_points = self.points_array[nearby_indices]
             
+            # Determine iterations based on system load
+            max_iterations = self.ransac_max_iterations
+            if self.dynamic_ransac_iterations:
+                if self.performance_mode == "EFFICIENT":
+                    max_iterations = max(self.min_ransac_iterations, self.ransac_max_iterations // 2)
+                elif self.performance_mode == "MINIMAL":
+                    max_iterations = max(self.min_ransac_iterations, self.ransac_max_iterations // 4)
+                    
             # Try fitting a circle using RANSAC
             center, inlier_count, quality = self.ransac_circle_fit(
                 nearby_points, 
-                self.ransac_max_iterations,
+                max_iterations,
                 self.ransac_inlier_threshold
             )
             
@@ -675,14 +757,7 @@ class BasketballLidarDetector(Node):
     def ransac_circle_fit(self, points, max_iterations=30, threshold=0.02):
         """
         Use RANSAC to fit a circle to points, robust to outliers.
-        
-        Args:
-            points: Points to fit circle to
-            max_iterations: Maximum RANSAC iterations
-            threshold: Distance threshold for inliers
-            
-        Returns:
-            tuple: (center, inlier_count, quality)
+        Optimized for performance.
         """
         if points is None or len(points) < 3:
             return None, 0, 0
@@ -693,7 +768,11 @@ class BasketballLidarDetector(Node):
         
         # Limit iterations based on point count for better performance
         actual_iterations = min(max_iterations, len(points) // 2)
-        actual_iterations = max(10, actual_iterations)  # At least 10 iterations
+        actual_iterations = max(self.min_ransac_iterations, actual_iterations)  # At least min iterations
+        
+        # Pre-compute point coordinates for vector operations
+        x_coords = points[:, 0]
+        y_coords = points[:, 1]
         
         for _ in range(actual_iterations):
             # Randomly sample 3 points
@@ -711,10 +790,10 @@ class BasketballLidarDetector(Node):
                 if abs(radius - self.ball_radius) > self.ball_radius * 0.5:
                     continue
                 
-                # Count inliers
+                # Count inliers using vectorized operations for speed
                 distances = np.sqrt(
-                    (points[:, 0] - center[0])**2 + 
-                    (points[:, 1] - center[1])**2
+                    (x_coords - center[0])**2 + 
+                    (y_coords - center[1])**2
                 )
                 
                 # Inliers are points close to the expected circle
@@ -738,25 +817,19 @@ class BasketballLidarDetector(Node):
             radius_error = abs(best_radius - self.ball_radius) / self.ball_radius
             quality = 0.7 * inlier_ratio + 0.3 * (1.0 - min(radius_error, 1.0))
             
-            # Add z-coordinate for 3D position
-            # Set Z to ball_center_height for consistent ground plane projection
+            # Add z-coordinate for 3D position - reuse existing array
             center_3d = np.array([best_center[0], best_center[1], self.ball_center_height])
             
             return center_3d, best_inlier_count, quality
         
         return None, 0, 0
-    
+
     def fit_circle(self, points):
         """
         Fit a circle to 2D or 3D points.
-        
-        Args:
-            points: Numpy array of shape (n, 2) or (n, 3)
-            
-        Returns:
-            tuple: (center, radius)
+        Optimized for basketball size (10-inch diameter) on Raspberry Pi.
         """
-        # Extract 2D coordinates
+        # Extract 2D coordinates - avoid copying if possible
         if points.shape[1] > 2:
             points_2d = points[:, 0:2]
         else:
@@ -766,7 +839,7 @@ class BasketballLidarDetector(Node):
         if len(points_2d) < 3:
             raise ValueError("Need at least 3 points to fit a circle")
         
-        # Direct calculation for exactly 3 points
+        # Direct calculation for exactly 3 points (most efficient)
         if len(points_2d) == 3:
             # Get coordinates
             x1, y1 = points_2d[0]
@@ -785,37 +858,59 @@ class BasketballLidarDetector(Node):
             y0 = -C / (2 * A)
             r = np.sqrt((x0 - x1)**2 + (y0 - y1)**2)
             
+            # For basketball, enforce stricter radius check (basketball has consistent size)
+            if abs(r - self.ball_radius) > self.ball_radius * 0.4:
+                raise ValueError("Fitted radius too different from basketball radius")
+                
             return np.array([x0, y0]), r
         
-        # For more points, use least squares method
-        # Center the data for numerical stability
-        centroid = np.mean(points_2d, axis=0)
-        x = points_2d[:, 0] - centroid[0]
-        y = points_2d[:, 1] - centroid[1]
+        # For more points, use optimized least squares method
+        # Center the data for numerical stability - use mean instead of full centering
+        mean_x = np.mean(points_2d[:, 0])
+        mean_y = np.mean(points_2d[:, 1])
+        x = points_2d[:, 0] - mean_x
+        y = points_2d[:, 1] - mean_y
         
-        # Formulate and solve the least squares problem
-        A = np.column_stack([x, y, np.ones(len(x))])
-        b = x**2 + y**2
-        c = np.linalg.lstsq(A, b, rcond=None)[0]
+        # Simplified matrix calculations - avoid full matrix ops when possible
+        sum_x2 = np.sum(x**2)
+        sum_y2 = np.sum(y**2)
+        sum_xy = np.sum(x*y)
+        sum_x3 = np.sum(x**3)
+        sum_y3 = np.sum(y**3)
+        sum_xy2 = np.sum(x*y**2)
+        sum_x2y = np.sum(x**2*y)
         
-        # Extract circle parameters
-        x0 = c[0] / 2 + centroid[0]
-        y0 = c[1] / 2 + centroid[1]
-        r = np.sqrt(c[2] + (c[0]**2 + c[1]**2) / 4)
+        # Calculate matrix A and B
+        A = np.array([[sum_x2, sum_xy], [sum_xy, sum_y2]])
+        B = np.array([sum_x3 + sum_xy2, sum_x2y + sum_y3]) / 2
+        
+        # Solve linear system using direct method (faster than lstsq for 2x2)
+        det = A[0,0]*A[1,1] - A[0,1]*A[1,0]
+        if abs(det) < 1e-10:
+            # Fallback to standard method if matrix is singular
+            c = np.linalg.lstsq(A, B, rcond=None)[0]
+        else:
+            c = np.array([
+                (A[1,1]*B[0] - A[0,1]*B[1])/det,
+                (A[0,0]*B[1] - A[1,0]*B[0])/det
+            ])
+        
+        # Calculate center and radius
+        x0 = c[0] + mean_x
+        y0 = c[1] + mean_y
+        r = np.sqrt(c[0]**2 + c[1]**2 + (sum_x2 + sum_y2)/len(points_2d))
         
         return np.array([x0, y0]), r
     
     def publish_ball_position(self, center, cluster_size, circle_quality, trigger_source, timestamp=None):
         """
         Publish the detected basketball position.
-        
-        Args:
-            center: Center of detected ball (3D)
-            cluster_size: Number of points in the ball cluster
-            circle_quality: Quality of the circle fit
-            trigger_source: Which detector triggered this (YOLO or HSV)
-            timestamp: Original timestamp for the detection
+        Assumes basketball is always on the ground (z-height is ball radius).
         """
+        # Always set z to basketball radius since ball rolls on ground
+        # This ensures we always assume basketball center is 5 inches above ground
+        center[2] = self.ball_center_height
+        
         # Calculate distance and reliability
         distance = np.sqrt(center[0]**2 + center[1]**2)
         is_reliable = distance >= self.min_reliable_distance
@@ -829,17 +924,23 @@ class BasketballLidarDetector(Node):
             adjusted_quality = circle_quality
             reliability_text = "RELIABLE"
         
-        # Log the detection
-        self.get_logger().info(
-            f"LIDAR: Basketball at ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f}) meters | "
-            f"Distance: {distance:.2f}m | {reliability_text} | "
-            f"Quality: {adjusted_quality:.2f} | Triggered by: {trigger_source}"
-        )
-        
         # Skip unreliable detections if configured to do so
         if not is_reliable and not self.publish_unreliable:
-            self.get_logger().info("Skipping publication of unreliable detection")
+            if self.performance_mode != "MINIMAL":
+                self.get_logger().info("Skipping publication of unreliable detection")
             return
+        
+        # Filter position using the shared ground position filter
+        current_time = time.time()
+        filtered_position = self.position_filter.update(center, current_time)
+        
+        # Log the detection - only in normal or efficient modes
+        if self.performance_mode != "MINIMAL":
+            self.get_logger().info(
+                f"LIDAR: Basketball at ({filtered_position[0]:.2f}, {filtered_position[1]:.2f}, {filtered_position[2]:.2f}) meters | "
+                f"Distance: {distance:.2f}m | {reliability_text} | "
+                f"Quality: {adjusted_quality:.2f} | Triggered by: {trigger_source}"
+            )
         
         # Create and publish position message
         msg = PointStamped()
@@ -851,44 +952,33 @@ class BasketballLidarDetector(Node):
             msg.header.stamp = self.get_clock().now().to_msg()
         
         msg.header.frame_id = "lidar_frame"
-        msg.point.x = float(center[0])
-        msg.point.y = float(center[1])
-        msg.point.z = float(center[2])
+        msg.point.x = float(filtered_position[0])
+        msg.point.y = float(filtered_position[1])
+        msg.point.z = float(filtered_position[2])
         
-        # Add quality information to z coordinate for calibration filtering
-        # Original z is self.ball_center_height, which is preserved in center[2]
-        # Store quality in point.z alongside the actual Z position using upper bits
-        # This allows the calibration tool to filter by quality
-        
+        # Publish position
         self.position_publisher.publish(msg)
         
         # Update statistics
         self.successful_detections += 1
         
-        # Determine confidence level
-        if circle_quality > self.quality_high:
-            confidence_text = "HIGH"
-        elif circle_quality > self.quality_medium:
-            confidence_text = "MEDIUM"
-        else:
-            confidence_text = "LOW"
-        
-        # Create visualization markers
-        self.visualize_detection(center, circle_quality, trigger_source)
+        # Only visualize if enabled and not in MINIMAL mode
+        if self.visualization_enabled and self.marker_publisher is not None and self.performance_mode != "MINIMAL":
+            self.visualize_detection(filtered_position, circle_quality, trigger_source)
         
         # With the lock, update position history
         with self.lock:
-            self.position_history.append(center)
+            self.position_history.append(filtered_position)
     
     def visualize_detection(self, center, quality, source):
         """
         Create visualization markers for the detected ball.
-        
-        Args:
-            center: Ball center position
-            quality: Detection quality 
-            source: Detection source (YOLO or HSV)
+        Only called when visualization is enabled and we're not in MINIMAL mode.
         """
+        # Skip if visualization is disabled or publisher wasn't created
+        if not self.visualization_enabled or self.marker_publisher is None:
+            return
+            
         markers = MarkerArray()
         
         # Get visualization settings
@@ -975,59 +1065,6 @@ class BasketballLidarDetector(Node):
         # Publish all markers
         self.marker_publisher.publish(markers)
     
-    def publish_transform(self):
-        """Publish the transform from LIDAR to camera frame."""
-        transform = TransformStamped()
-        transform.header.stamp = self.get_clock().now().to_msg()
-        transform.header.frame_id = "camera_frame"  # Parent frame
-        transform.child_frame_id = "lidar_frame"    # Child frame
-        
-        # Values from your calibration
-        transform.transform.translation.x = -0.06061338451984
-        transform.transform.translation.y = 0.09288001995264226
-        transform.transform.translation.z = -0.05080000000000001
-        
-        transform.transform.rotation.x = 0.0
-        transform.transform.rotation.y = 0.0
-        transform.transform.rotation.z = 0.009962552851448184
-        transform.transform.rotation.w = 0.9999503725388985
-        
-        # Use static broadcaster for fixed transform
-        # This makes the transform persist in the tf tree
-        self.tf_static_broadcaster.sendTransform([transform])
-        
-        # Log transform occasionally
-        current_time = time.time()
-        log_interval = self.config.get('transform', {}).get('log_interval', 10.0)  # Reduced from 60s to 10s for debugging
-        
-        if current_time - self.last_transform_log > log_interval:
-            self.get_logger().info(
-                f"Publishing transform with explicit details: "
-                f"parent_frame='{transform.header.frame_id}', "
-                f"child_frame='{transform.child_frame_id}', "
-                f"translation=[{transform.transform.translation.x:.4f}, "
-                f"{transform.transform.translation.y:.4f}, "
-                f"{transform.transform.translation.z:.4f}], "
-                f"rotation=[{transform.transform.rotation.x:.4f}, "
-                f"{transform.transform.rotation.y:.4f}, "
-                f"{transform.transform.rotation.z:.4f}, "
-                f"{transform.transform.rotation.w:.4f}]"
-            )
-            self.last_transform_log = current_time
-            
-            # Add a verification check to test if the transform is discoverable
-            try:
-                test_time = rclpy.time.Time()
-                if hasattr(self, 'tf_buffer') and self.tf_buffer.can_transform(
-                    "camera_frame", "lidar_frame", test_time, 
-                    timeout=rclpy.duration.Duration(seconds=0.1)
-                ):
-                    self.get_logger().info("✓ LIDAR self-verify: Transform is discoverable in tf_buffer")
-                else:
-                    self.get_logger().warn("✗ LIDAR self-verify: Transform NOT discoverable in tf_buffer")
-            except Exception as e:
-                self.get_logger().warn(f"! LIDAR self-verify error: {str(e)}")
-    
     def publish_diagnostics(self):
         """Publish diagnostic information about the node."""
         try:
@@ -1053,6 +1090,11 @@ class BasketballLidarDetector(Node):
                 "node": "lidar",
                 "uptime_seconds": elapsed,
                 "status": "active",
+                "performance_mode": self.performance_mode,
+                "system": {
+                    "cpu_load": self.current_cpu_load,
+                    "memory_usage": self.current_memory_usage
+                },
                 "health": {
                     "lidar_health": self.lidar_health,
                     "detection_health": self.detection_health,
@@ -1061,6 +1103,7 @@ class BasketballLidarDetector(Node):
                 "metrics": {
                     "processed_scans": self.processed_scans,
                     "successful_detections": self.successful_detections,
+                    "processing_skips": self.processing_skips,
                     "scan_rate": scan_rate,
                     "detection_rate": detection_rate,
                     "avg_processing_time_ms": avg_time * 1000,
@@ -1072,10 +1115,11 @@ class BasketballLidarDetector(Node):
                 "config": {
                     "ball_radius": self.ball_radius,
                     "max_distance": self.max_distance,
-                    "min_points": self.min_points
+                    "min_points": self.min_points,
+                    "visualization_enabled": self.visualization_enabled
                 },
-                # NEW: Add transform statistics to diagnostics
                 "transforms": {
+                    "camera_frame": "ascamera_color_0",  # Add this to make it clear which frame we expect
                     "published_successfully": self.transform_published_successfully,
                     "publish_attempts": self.transform_publish_attempts,
                     "publish_successes": self.transform_publish_successes
@@ -1087,26 +1131,26 @@ class BasketballLidarDetector(Node):
             msg.data = json.dumps(diagnostics)
             self.diagnostics_publisher.publish(msg)
             
-            # Log basic summary
-            self.get_logger().info(
-                f"LIDAR: Status: {scan_rate:.1f} scans/sec, "
-                f"{detection_rate:.1f} detections/sec, "
-                f"YOLO: {self.yolo_detections}, HSV: {self.hsv_detections}, "
-                f"Transform ok: {self.transform_published_successfully}"
-            )
+            # Log basic summary - reduced logging in MINIMAL mode
+            if self.performance_mode != "MINIMAL" or self.processed_scans % 5 == 0:
+                self.get_logger().info(
+                    f"LIDAR: Status: {scan_rate:.1f} scans/sec, "
+                    f"{detection_rate:.1f} detections/sec, "
+                    f"Mode: {self.performance_mode}, CPU: {self.current_cpu_load:.1f}%"
+                )
             
         except Exception as e:
             self.log_error(f"Error publishing diagnostics: {str(e)}")
-    
+
     def publish_debug_point(self):
         """
         Publish a debug point for calibration purposes.
-        Selects visible points from the LIDAR scan.
-        
-        NOTE: This function now publishes to a completely separate debug topic
-        to avoid interfering with actual detections during calibration.
-        Debug points are NEVER published to the main position topic.
+        Only executed when not in MINIMAL mode.
         """
+        # Skip in MINIMAL performance mode
+        if self.performance_mode == "MINIMAL":
+            return
+            
         if self.points_array is None or len(self.points_array) == 0:
             return
         

@@ -1,18 +1,22 @@
-# Configuration for the depth camera node
+# Configuration for the depth camera node - Basketball tracking
 
 # Depth measurement parameters
 depth:
   scale: 0.001           # Depth scale factor (converts raw depth to meters)
   min_depth: 0.1         # Minimum valid depth in meters
   max_depth: 8.0         # Maximum valid depth in meters
-  radius: 3              # Radius around detection point to sample depth values
-  min_valid_points: 5    # Minimum number of valid points required for reliable estimation
+  radius: 6              # Increased radius around detection point for basketball (was 3)
+  min_valid_points: 8    # Increased minimum valid points for reliable estimation (was 5)
   adaptive_radius: true  # Whether to try larger radius if not enough valid points
-  max_radius: 7          # Maximum radius to try when using adaptive sampling
+  max_radius: 10         # Increased maximum radius for basketball (was 7)
   calibration_file: "depth_camera_calibration.yaml"  # Path to calibration parameters
   detection_resolution:  # Resolution of detection images (YOLO/HSV)
     width: 320
     height: 320
+  ball_diameter: 0.254   # Basketball diameter in meters (10 inches)
+  min_height_from_ground: 0.0254  # Minimum expected height from ground (1 inch)
+  max_height_from_ground: 0.254   # Max expected height from ground (10 inches - ball diameter)
+  ground_tracking: true  # Enable specialized tracking for ground-based movement
 
 # Topic configuration
 topics:
@@ -24,7 +28,7 @@ topics:
   output:
     yolo_3d: "/basketball/yolo/position_3d"
     hsv_3d: "/basketball/hsv/position_3d"
-    combined: "/basketball/detected_position"  # Legacy/combined topic
+    combined: "/basketball/detected_position"  # Combined topic
 
 # Performance and diagnostics
 diagnostics:
@@ -37,3 +41,12 @@ diagnostics:
 frames:
   reference_frame: "base_link"  # Common reference frame for all sensors
   transform_timeout: 0.1        # Timeout for transform lookups in seconds
+  camera_height: 0.1016         # Camera height from ground in meters (4 inches)
+
+# Movement filtering parameters for ground-based basketball
+movement:
+  max_speed: 5.0          # Maximum expected basketball speed in meters/second
+  position_filter_alpha: 0.7  # Position smoothing factor (higher = more responsive)
+  ground_plane_tolerance: 0.03  # Tolerance for ground plane detection (3 cm)
+  direction_filter_size: 5     # Number of samples for direction filtering
+  acceleration_limit: 8.0      # Maximum expected acceleration in m/s²

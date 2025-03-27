@@ -101,3 +101,22 @@ ransac:
   quality_weight:
     inlier_ratio: 0.6    # Weight for inlier ratio in quality calculation
     radius_error: 0.4    # Weight for radius error in quality calculation
+
+# Performance configuration for resource-constrained systems
+performance:
+  # Enable adaptive processing based on system load
+  adaptive_processing: true
+  
+  # CPU load thresholds for changing processing modes
+  high_load_threshold: 80.0  # % CPU usage to trigger minimal processing
+  low_load_threshold: 50.0   # % CPU usage to return to normal processing
+  
+  # Point cloud processing limits
+  max_point_limit: 500       # Maximum points to process from LIDAR scan
+  
+  # RANSAC optimization
+  dynamic_ransac_iterations: true  # Reduce iterations under high load
+  min_ransac_iterations: 10        # Minimum iterations even under load
+  
+  # Timer adjustments under high load
+  diagnostics_interval_high_load: 10.0  # Seconds between diagnostics when CPU is high

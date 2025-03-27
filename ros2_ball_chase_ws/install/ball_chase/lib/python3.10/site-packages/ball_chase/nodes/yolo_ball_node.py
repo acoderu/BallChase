@@ -572,7 +572,7 @@ class TennisBallDetector(Node):
                     position_msg.header.stamp = TimeUtils.now_as_ros_time()
                     self.get_logger().debug(f"Using current time as timestamp (invalid original timestamp)")
                 
-                position_msg.header.frame_id = "camera_frame"  # Use consistent frame ID
+                position_msg.header.frame_id = "ascamera_color_0"  # Use consistent frame ID
                 
                 # Track sequence internally (ROS2 doesn't use header.seq)
                 if not hasattr(self, 'seq_counter'):

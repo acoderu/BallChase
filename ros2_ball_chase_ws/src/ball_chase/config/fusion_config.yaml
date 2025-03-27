@@ -4,7 +4,7 @@ startup:
   wait_for_transform: true
   transform_retry_count: 60  # Increase retry count
   transform_retry_delay: 1.0  # 1 second between retries
-  required_transforms: ['camera_frame', 'lidar_frame']
+  required_transforms: ['base_link', 'lidar_frame']
   
 # Process noise: how much uncertainty to add during prediction steps
 process_noise:
@@ -83,3 +83,12 @@ initialization:
   max_initialization_time: 5.0         # Maximum time to wait for initialization (seconds)
   position_variance_initial: 10.0      # Initial position variance (meters²)
   velocity_variance_initial: 100.0     # Initial velocity variance (m/s)²
+
+expected_frames:
+  lidar: "lidar_frame"
+  hsv_2d: "ascamera_color_0"
+  yolo_2d: "ascamera_color_0"
+  hsv_3d: "ascamera_color_0"
+  yolo_3d: "ascamera_color_0"
+  depth_camera: "ascamera_camera_link_0"
+  reference_frame: "base_link"
