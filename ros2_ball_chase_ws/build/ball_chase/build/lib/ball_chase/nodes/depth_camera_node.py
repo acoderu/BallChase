@@ -373,6 +373,10 @@ class OptimizedPositionEstimator(Node):
         self.depth_result = None   # Storage for async depth result
         self.depth_processing = False  # Flag for active depth processing
         self.depth_queue = deque(maxlen=5)  # Queue for depth processing requests
+        
+        # Frame IDs
+        self.depth_camera_frame = "ascamera_camera_link_0"  # Depth camera frame
+        self.detection_camera_frame = "ascamera_color_0"    # Detection camera frame
     
     def _preallocate_messages(self):
         """Pre-allocate message objects to reduce memory allocations."""
@@ -431,14 +435,20 @@ class OptimizedPositionEstimator(Node):
     def _verify_transform(self):
         """Verify transform is registered and cancel verification timer if successful."""
         try:
+            # Check transform between reference frame and depth camera frame
             if self.tf_buffer.can_transform(
                 self.reference_frame,
-                "ascamera_color_0",
+                self.depth_camera_frame,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.1)
+            ) and self.tf_buffer.can_transform(
+                self.depth_camera_frame,
+                self.detection_camera_frame,
                 rclpy.time.Time(),
                 rclpy.duration.Duration(seconds=0.1)
             ):
                 self.verified_transform = True
-                self.get_logger().info("Transform verification successful")
+                self.get_logger().info(f"Transform verification successful between {self.reference_frame}, {self.depth_camera_frame}, and {self.detection_camera_frame}")
                 self.transform_check_timer.cancel()
                 return
         except Exception:
@@ -446,7 +456,7 @@ class OptimizedPositionEstimator(Node):
             
         # If transform is not ready, log warning
         if not self.transform_not_verified_logged:
-            self.get_logger().warning("Transform not yet available: base_link -> ascamera_color_0")
+            self.get_logger().warning(f"Transform not yet available between required frames: {self.reference_frame}, {self.depth_camera_frame}, and {self.detection_camera_frame}")
             self.transform_not_verified_logged = True
     
     def _setup_subscriptions(self):
@@ -1258,20 +1268,56 @@ class OptimizedPositionEstimator(Node):
     def _get_3d_position(self, msg, source):
         """Convert a 2D ball detection to a 3D position using depth data."""
         try:
-            # Get 2D coordinates from detection
+            # Skip if we don't have depth data yet
+            if self.depth_array is None or self.camera_info is None:
+                return False
+                
+            # Skip if transform not verified
+            if not self.verified_transform:
+                return False
+            
+            # Verify we can transform between detection frame and depth frame
+            if not self._transform_detection_to_depth_frame(msg):
+                return False
+                
+            # Get 2D coordinates from detection (in detection frame)
             orig_x = float(msg.point.x)
             orig_y = float(msg.point.y)
             
-            # Debug log detection coordinates 
-            if self.debug_depth:
-                self.get_logger().info(f"DEPTH DEBUG: Processing {source} detection at ({orig_x:.2f}, {orig_y:.2f})")
-                sys.stdout.flush()  # Force flush
+            # First transform these coordinates to 3D in the detection camera frame
+            # using a standard depth or assumed Z value (e.g., 1.0m)
+            # This creates a ray from the camera through the detected point
+            assumed_z = 1.0  # Assumed depth for creating initial 3D point
             
-            # Scale coordinates to depth image space
-            pixel_x = int(round(orig_x * self.x_scale))
-            pixel_y = int(round(orig_y * self.y_scale))
+            # Use detection camera intrinsics (these may need to be obtained from camera_info)
+            # For now using the depth camera intrinsics as approximation
+            detection_x = (orig_x - self.cx) * assumed_z / self.fx
+            detection_y = (orig_y - self.cy) * assumed_z / self.fy
+            detection_z = assumed_z
             
-            # Constrain to valid image bounds with margin
+            # Create a point in 3D space using detection camera frame
+            detection_3d = PointStamped()
+            detection_3d.header.frame_id = self.detection_camera_frame
+            detection_3d.header.stamp = self.get_clock().now().to_msg()
+            detection_3d.point.x = detection_x
+            detection_3d.point.y = detection_y
+            detection_3d.point.z = detection_z
+            
+            # Transform to depth camera frame
+            depth_frame_point = self._transform_to_depth_frame(detection_3d)
+            if depth_frame_point is None:
+                return False
+            
+            # Project the 3D point in depth camera frame back to depth camera's 2D space
+            # This gives us the correct pixel coordinates in the depth image
+            proj_x = depth_frame_point.point.x / depth_frame_point.point.z * self.fx + self.cx
+            proj_y = depth_frame_point.point.y / depth_frame_point.point.z * self.fy + self.cy
+            
+            # Round to integers for pixel lookup
+            pixel_x = int(round(proj_x))
+            pixel_y = int(round(proj_y))
+            
+            # Constrain to valid image bounds
             depth_height, depth_width = self.depth_array.shape
             margin = 10
             
@@ -1294,10 +1340,10 @@ class OptimizedPositionEstimator(Node):
             y = float((pixel_y - self.cy) * median_depth / self.fy)
             z = float(median_depth)
             
-            # Create the 3D position message in camera frame
+            # Create the 3D position message in depth camera frame
             camera_position_msg = PointStamped()
             camera_position_msg.header.stamp = self.get_clock().now().to_msg()
-            camera_position_msg.header.frame_id = "ascamera_color_0"
+            camera_position_msg.header.frame_id = self.depth_camera_frame  # Use depth camera frame
             camera_position_msg.point.x = x
             camera_position_msg.point.y = y
             camera_position_msg.point.z = z
@@ -1316,18 +1362,27 @@ class OptimizedPositionEstimator(Node):
                 filtered_msg.point.y = filtered_position[1]
                 filtered_msg.point.z = filtered_position[2]
                 
+                # Transform back to depth camera frame for consistent output
+                depth_frame_msg = self._transform_to_depth_frame(filtered_msg)
+                if depth_frame_msg is None:
+                    return False
+                
                 # Publish to source-specific topic
                 if source == "YOLO":
-                    self.yolo_3d_publisher.publish(filtered_msg)
+                    self.yolo_3d_publisher.publish(depth_frame_msg)
                 else:  # HSV
-                    self.hsv_3d_publisher.publish(filtered_msg)
+                    self.hsv_3d_publisher.publish(depth_frame_msg)
                 
                 # Also publish to combined topic
-                self.position_publisher.publish(filtered_msg)
+                self.position_publisher.publish(depth_frame_msg)
+                
+                # Verify all published messages are in depth camera frame
+                if depth_frame_msg.header.frame_id != self.depth_camera_frame:
+                    self.get_logger().error(f"Frame ID mismatch! Expected {self.depth_camera_frame}, got {depth_frame_msg.header.frame_id}")
                 
                 # Update cache - store both 2D and 3D positions
                 self.detection_cache[source]['detection_2d'] = msg         # Original 2D detection
-                self.detection_cache[source]['position_3d'] = filtered_msg  # Processed 3D result
+                self.detection_cache[source]['position_3d'] = depth_frame_msg  # Processed 3D result
                 self.detection_cache[source]['timestamp'] = time.time()
                 
                 # Count successful conversion
@@ -1663,6 +1718,58 @@ class OptimizedPositionEstimator(Node):
                 return entry['depth'], max(1, entry['valid_points'] // 2)  # Reduce quality score
         
         return None, 0
+
+    def _transform_detection_to_depth_frame(self, msg):
+        """Transform a detection from detection frame to depth camera frame."""
+        try:
+            # Create a temporary PointStamped for the transform
+            detection_point = PointStamped()
+            detection_point.header.frame_id = self.detection_camera_frame
+            detection_point.header.stamp = self.get_clock().now().to_msg()
+            detection_point.point.x = 0.0  # We're only transforming the frame, not the pixel coords
+            detection_point.point.y = 0.0
+            detection_point.point.z = 0.0
+            
+            # Get transform from detection frame to depth frame
+            transform = self.tf_buffer.lookup_transform(
+                self.depth_camera_frame,
+                self.detection_camera_frame,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.1)
+            )
+            
+            # For debugging transforms
+            if self.debug_mode:
+                self.get_logger().info(f"Transform from {self.detection_camera_frame} to {self.depth_camera_frame}: "
+                                      f"Translation: ({transform.transform.translation.x:.3f}, "
+                                      f"{transform.transform.translation.y:.3f}, {transform.transform.translation.z:.3f})")
+                sys.stdout.flush()
+            
+            # No need to transform 2D image coordinates since they're in their respective camera's frame
+            # We just want to make sure we can do the 3D transform later
+            return True
+            
+        except Exception as e:
+            if self.debug_mode:
+                self.get_logger().warning(f"Transform detection error: {str(e)}")
+            return False
+
+    def _transform_to_depth_frame(self, point_stamped):
+        """Transform a point from reference frame to depth camera frame."""
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.depth_camera_frame,
+                point_stamped.header.frame_id,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.1)
+            )
+            
+            transformed = tf2_geometry_msgs.do_transform_point(point_stamped, transform)
+            return transformed
+        except Exception as e:
+            if self.debug_mode:
+                self.get_logger().error(f"Transform to depth frame error: {str(e)}")
+            return None
 
 
 def main(args=None):

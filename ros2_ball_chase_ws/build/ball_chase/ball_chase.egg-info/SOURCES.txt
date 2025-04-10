@@ -9,6 +9,13 @@ setup.py
 ../../build/ball_chase/ball_chase.egg-info/top_level.txt
 ../../build/ball_chase/ball_chase.egg-info/zip-safe
 ball_chase/__init__.py
+ball_chase.egg-info/PKG-INFO
+ball_chase.egg-info/SOURCES.txt
+ball_chase.egg-info/dependency_links.txt
+ball_chase.egg-info/entry_points.txt
+ball_chase.egg-info/requires.txt
+ball_chase.egg-info/top_level.txt
+ball_chase.egg-info/zip-safe
 ball_chase/config/__init__.py
 ball_chase/config/config_loader.py
 ball_chase/nodes/__init__.py
@@ -50,6 +57,3 @@ models/yolo12n_320.mnn
 models/yolo12n_640.mnn
 models/yolo12s_320.mnn
 resource/ball_chase
-test/test_copyright.py
-test/test_flake8.py
-test/test_pep257.py
