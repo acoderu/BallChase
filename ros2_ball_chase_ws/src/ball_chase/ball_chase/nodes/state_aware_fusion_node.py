@@ -289,14 +289,291 @@ class SensorBuffer:
         return thresholds
 
 
+class SensorReliabilityTracker:
+    """
+    Tracks reliability metrics for various sensors based on their historical performance.
+    This allows dynamic weighting of sensor measurements in the fusion algorithm.
+    """
+    
+    def __init__(self, sensors=None):
+        """
+        Initialize the reliability tracker with a list of sensors.
+        
+        Args:
+            sensors (list): List of sensor names to track
+        """
+        self.sensors = sensors or []
+        
+        # Reliability scores (0.0 to 1.0)
+        self.reliability_scores = {sensor: 0.5 for sensor in self.sensors}
+        
+        # Historical counters
+        self.total_measurements = {sensor: 0 for sensor in self.sensors}
+        self.valid_measurements = {sensor: 0 for sensor in self.sensors}
+        self.rejected_measurements = {sensor: 0 for sensor in self.sensors}
+        
+        # Innovation history for each sensor (recent residuals)
+        self.innovation_history = {sensor: deque(maxlen=20) for sensor in self.sensors}
+        
+        # Gap tracking
+        self.total_gaps = {sensor: 0 for sensor in self.sensors}
+        self.gap_duration = {sensor: 0.0 for sensor in self.sensors}
+        
+        # Timing metrics
+        self.timing_stability = {sensor: 1.0 for sensor in self.sensors}  # 1.0 = perfectly stable
+        
+        # Set default decay rates
+        self.reliability_decay_rate = 0.99  # Slow decay when no new data
+        self.reliability_boost_rate = 1.1   # Moderate boost for good measurements
+        
+    def add_sensor(self, sensor_name):
+        """Add a new sensor to track."""
+        if sensor_name not in self.sensors:
+            self.sensors.append(sensor_name)
+            self.reliability_scores[sensor_name] = 0.5
+            self.total_measurements[sensor_name] = 0
+            self.valid_measurements[sensor_name] = 0
+            self.rejected_measurements[sensor_name] = 0
+            self.innovation_history[sensor_name] = deque(maxlen=20)
+            self.total_gaps[sensor_name] = 0
+            self.gap_duration[sensor_name] = 0.0
+            self.timing_stability[sensor_name] = 1.0
+            
+    def record_measurement(self, sensor_name, is_valid, innovation=None):
+        """
+        Record a new measurement from a sensor.
+        
+        Args:
+            sensor_name (str): Name of the sensor
+            is_valid (bool): Whether the measurement was valid and used
+            innovation (float): Optional innovation (residual) value
+        """
+        if sensor_name not in self.sensors:
+            self.add_sensor(sensor_name)
+            
+        # Update counters
+        self.total_measurements[sensor_name] += 1
+        if is_valid:
+            self.valid_measurements[sensor_name] += 1
+        else:
+            self.rejected_measurements[sensor_name] += 1
+            
+        # Store innovation if provided
+        if innovation is not None:
+            self.innovation_history[sensor_name].append(innovation)
+            
+        # Update reliability score
+        if is_valid:
+            # Boost score for valid measurements (faster than decay)
+            self.reliability_scores[sensor_name] = min(
+                1.0, 
+                self.reliability_scores[sensor_name] * self.reliability_boost_rate
+            )
+        else:
+            # Reduce score for invalid measurements
+            self.reliability_scores[sensor_name] = max(
+                0.1,  # Don't go below 0.1 to allow recovery
+                self.reliability_scores[sensor_name] * 0.9  # Stronger penalty for rejection
+            )
+            
+    def record_gap(self, sensor_name, gap_duration):
+        """Record a data gap for a sensor."""
+        if sensor_name not in self.sensors:
+            self.add_sensor(sensor_name)
+            
+        self.total_gaps[sensor_name] += 1
+        self.gap_duration[sensor_name] += gap_duration
+        
+        # Reduce reliability score based on gap duration
+        gap_factor = min(1.0, gap_duration / 2.0)  # Scale by gap duration up to 2 seconds
+        self.reliability_scores[sensor_name] = max(
+            0.1,  # Don't go below 0.1
+            self.reliability_scores[sensor_name] * (1.0 - 0.2 * gap_factor)  # Up to 20% reduction
+        )
+        
+    def record_timing_variance(self, sensor_name, timing_variance):
+        """
+        Record timing variance for a sensor to track stability.
+        
+        Args:
+            sensor_name (str): Sensor name
+            timing_variance (float): Variance in time between measurements
+        """
+        if sensor_name not in self.sensors:
+            self.add_sensor(sensor_name)
+            
+        # Convert variance to stability score (1.0 = perfectly stable)
+        # Assume variance under 0.001 is very stable, over 0.01 is unstable
+        stability = max(0.5, min(1.0, 1.0 - (timing_variance * 100)))
+        
+        # Update using exponential moving average
+        alpha = 0.2  # Weight for new measurement
+        self.timing_stability[sensor_name] = (
+            (1 - alpha) * self.timing_stability[sensor_name] + alpha * stability
+        )
+        
+    def decay_unused_sensors(self):
+        """Slightly decay reliability scores for sensors that haven't been updated."""
+        for sensor in self.sensors:
+            self.reliability_scores[sensor] = max(
+                0.1,  # Don't go below 0.1
+                self.reliability_scores[sensor] * self.reliability_decay_rate
+            )
+            
+    def get_reliability(self, sensor_name):
+        """Get the current reliability score for a sensor."""
+        return self.reliability_scores.get(sensor_name, 0.5)
+        
+    def get_all_reliabilities(self):
+        """Get all current reliability scores."""
+        return self.reliability_scores.copy()
+        
+    def get_adaptive_measurement_noise(self, sensor_name, base_noise, motion_state="unknown"):
+        """
+        Get adaptive measurement noise based on reliability and motion state.
+        
+        Args:
+            sensor_name (str): Sensor name
+            base_noise (float or array): Base noise value(s)
+            motion_state (str): Current motion state
+            
+        Returns:
+            float or array: Adjusted noise value(s)
+        """
+        if sensor_name not in self.sensors:
+            return base_noise
+            
+        reliability = self.reliability_scores[sensor_name]
+        
+        # Calculate adjustment factor based on reliability
+        # For low reliability, increase noise up to 3x
+        # For high reliability, decrease noise down to 0.8x
+        if reliability < 0.5:
+            # Scale 0.1-0.5 reliability to 1.0-3.0 factor
+            factor = 3.0 - 5.0 * (reliability - 0.1)
+        else:
+            # Scale 0.5-1.0 reliability to 0.8-1.0 factor
+            factor = 1.0 - 0.4 * (reliability - 0.5)
+            
+        # Apply motion state adjustment
+        if motion_state == "medium_fast":
+            factor *= 1.2  # More uncertainty during fast motion
+        elif motion_state == "stationary":
+            factor *= 0.9  # Less uncertainty when stationary
+            
+        # Apply the factor to the base noise
+        if isinstance(base_noise, (list, tuple, np.ndarray)):
+            return base_noise * factor
+        else:
+            return base_noise * factor
+
+
+class SmoothedStateEstimator:
+    """
+    Provides temporal smoothing for state estimates to reduce uncertainty spikes
+    during sensor recoveries and transitions.
+    """
+    
+    def __init__(self, window_size=5):
+        """
+        Initialize the smoothed state estimator.
+        
+        Args:
+            window_size (int): Size of the smoothing window
+        """
+        self.window_size = window_size
+        self.position_buffer = deque(maxlen=window_size)
+        self.velocity_buffer = deque(maxlen=window_size)
+        self.uncertainty_buffer = deque(maxlen=window_size)
+        self.timestamp_buffer = deque(maxlen=window_size)
+        
+        # Weights for exponential smoothing (newest to oldest)
+        self.weights = np.array([0.4, 0.25, 0.15, 0.1, 0.1])
+        # Truncate weights if window_size is smaller
+        if window_size < len(self.weights):
+            self.weights = self.weights[:window_size]
+            # Renormalize
+            self.weights = self.weights / np.sum(self.weights)
+            
+    def add_state(self, position, velocity, uncertainty, timestamp):
+        """
+        Add a new state estimate to the buffer.
+        
+        Args:
+            position (np.ndarray): Position vector [x, y, z]
+            velocity (np.ndarray): Velocity vector [vx, vy, vz]
+            uncertainty (float): Position uncertainty scalar
+            timestamp (float): Timestamp of the estimate
+        """
+        self.position_buffer.append(position.copy())
+        self.velocity_buffer.append(velocity.copy())
+        self.uncertainty_buffer.append(uncertainty)
+        self.timestamp_buffer.append(timestamp)
+        
+    def get_smoothed_state(self):
+        """
+        Get the temporally smoothed state estimate.
+        
+        Returns:
+            dict: Smoothed state with keys 'position', 'velocity', 'uncertainty'
+        """
+        if len(self.position_buffer) == 0:
+            return None
+            
+        # If we have only one estimate, return it directly
+        if len(self.position_buffer) == 1:
+            return {
+                'position': self.position_buffer[0].copy(),
+                'velocity': self.velocity_buffer[0].copy(),
+                'uncertainty': self.uncertainty_buffer[0],
+                'timestamp': self.timestamp_buffer[0]
+            }
+            
+        # Calculate active weights based on buffer size
+        active_weights = self.weights[:len(self.position_buffer)]
+        # Renormalize weights
+        active_weights = active_weights / np.sum(active_weights)
+        
+        # Calculate weighted average of position
+        smoothed_position = np.zeros_like(self.position_buffer[0])
+        for i, pos in enumerate(self.position_buffer):
+            smoothed_position += active_weights[i] * pos
+            
+        # Calculate weighted average of velocity
+        smoothed_velocity = np.zeros_like(self.velocity_buffer[0])
+        for i, vel in enumerate(self.velocity_buffer):
+            smoothed_velocity += active_weights[i] * vel
+            
+        # Calculate smoothed uncertainty (use minimum to avoid overconfidence)
+        # This helps maintain conservative uncertainty estimates
+        smoothed_uncertainty = np.min(self.uncertainty_buffer)
+        
+        # Use newest timestamp
+        latest_timestamp = self.timestamp_buffer[-1]
+        
+        return {
+            'position': smoothed_position,
+            'velocity': smoothed_velocity,
+            'uncertainty': smoothed_uncertainty,
+            'timestamp': latest_timestamp
+        }
+        
+    def reset(self):
+        """Reset the smoothing buffer."""
+        self.position_buffer.clear()
+        self.velocity_buffer.clear()
+        self.uncertainty_buffer.clear()
+        self.timestamp_buffer.clear()
+
+
 class EnhancedFusionLifecycleNode(LifecycleNode):
     """
     Enhanced fusion node using ROS 2 Lifecycle framework for state management.
     This provides a clear state machine model for managing node transitions.
     """
     
-    def __init__(self):
-        super().__init__('state_fusion_node')
+    def __init__(self, node_name='state_aware_fusion_node'):
+        super().__init__(node_name)
         
         self.get_logger().info("======xxxxx Enhanced Fusion Lifecycle Node Starting ======")
         
@@ -308,6 +585,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.transform_failures = 0
         self.transform_confirmed = False  # Flag to track if transform is permanently confirmed
         self.is_ready = False  # Flag to track if the node is ready for processing
+        self._transform_available_count = 0
         
         # Initialize publishers list with a different name to avoid conflicts
         self._publishers = []
@@ -321,13 +599,93 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.get_logger().info(f"Using {self.reference_frame} as reference coordinate frame for fusion")
         
         # Lifecycle requirement: Store timers in a list to manage them in lifecycle transitions
-        self._timer_list = []  # Changed from self.timers
+        self._timer_list = []
         self.subscribers = []
         
         # We'll initialize these in on_configure and on_activate
         self.tf_buffer = None
         self.tf_listener = None
         self.tf_static_broadcaster = None
+        
+        # Initialize tracking variables that are checked with hasattr later
+        self.position_anchors = {}
+        self.sync_quality_metrics = {
+            'success_rate': 0.0,
+            'avg_time_diff': 0.0,
+            'sensor_availability': {},
+            'sync_counts': 0,
+            'attempt_counts': 0
+        }
+        
+        # ENHANCEMENT 1: Initialize motion state tracking
+        self.motion_state = "unknown"
+        self.prev_motion_state = "unknown"
+        self.motion_state_counts = {
+            "stationary": 0,
+            "long_stationary": 0,
+            "small_movement": 0,
+            "medium_fast": 0,
+            "unknown": 0
+        }
+        
+        # Motion state confidence tracking
+        self.motion_state_confidence = {
+            "stationary": 0.5,
+            "long_stationary": 0.5,
+            "small_movement": 0.5, 
+            "medium_fast": 0.5,
+            "unknown": 0.5
+        }
+        
+        # Motion state protection
+        self.motion_state_protection = {
+            'long_stationary_confirmed_time': 0.0,
+            'long_stationary_established': False,
+            'consecutive_stationary_after_long': 0,
+            'min_time_in_long_stationary': 5.0,
+            'post_gap_cooldown_active': False,
+            'post_gap_cooldown_end': 0.0,
+            'post_gap_protected_state': None,
+            'last_gap_recovery_time': 0.0,
+            'protection_violation_count': 0
+        }
+        
+        # Velocity credibility tracking
+        self.velocity_credibility = 1.0
+        self.velocity_confidence = 1.0
+        self.state_transition_evidence = {
+            "stationary": 0,
+            "small_movement": 0,
+            "medium_fast": 0
+        }
+        self.stationary_start_time = None
+        self.last_long_stationary_log = 0
+        
+        # ENHANCEMENT 4: Initialize flat ground tracking
+        self.flat_ground_detected = False
+        self.flat_ground_count = 0
+        
+        # ENHANCEMENT 5: Initialize sensor recovery tracking
+        self.sensor_gap_detection = {}
+        
+        # ENHANCEMENT 6: Initialize reliability buffer
+        self.reliability_buffer = deque([False] * 3, maxlen=5)
+        self.last_tracking_state = False
+        
+        # Sensor gap tolerance window tracking
+        self.sensor_gap_window = {
+            'active': False,
+            'start_time': 0.0,
+            'previous_reliability': False,
+            'tolerance_seconds': 0.8
+        }
+        
+        # Tracking variables
+        self.initialized = False
+        self.tracking_reliable = False
+        self.last_update_time = None
+        self.consecutive_updates = 0
+        self.debug_level = 1  # Default until loaded from config
     
     def on_configure(self, state):
         """
@@ -369,6 +727,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.prev_motion_state = "unknown"
             self.motion_state_counts = {
                 "stationary": 0,
+                "long_stationary": 0,  # Added the missing 'long_stationary' key
                 "small_movement": 0,
                 "medium_fast": 0,
                 "unknown": 0
@@ -641,6 +1000,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.yolo_3d_topic = input_topics.get('yolo_3d', '/basketball/yolo/position_3d')
             self.hsv_2d_topic = input_topics.get('hsv_2d', '/basketball/hsv/position')
             self.yolo_2d_topic = input_topics.get('yolo_2d', '/basketball/yolo/position')
+            self.combined_topic = output_topics.get('combined', '/basketball/detected_position')
             
             # 2D bounding box topics for distance estimation
             self.hsv_bbox_topic = input_topics.get('hsv_bbox', '/basketball/hsv/bbox')
@@ -663,9 +1023,15 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Override reference_frame if specified in config
             if 'reference_frame' in expected_frames:
                 self.reference_frame = expected_frames['reference_frame']
+            
+            # Set the specific frame for yolo_3d, hsv_3d, and combined topics
+            self.expected_frames['yolo_3d'] = 'ascamera_camera_link_0'
+            self.expected_frames['hsv_3d'] = 'ascamera_camera_link_0'
+            self.expected_frames['combined'] = 'ascamera_camera_link_0'
                 
             self.get_logger().info(f"Expected sensor frames: {self.expected_frames}")
             self.get_logger().info(f"Using {self.reference_frame} as reference frame")
+            self.get_logger().info(f"Using ascamera_camera_link_0 frame for yolo_3d, hsv_3d, and combined topics")
                 
             # Process noise parameters
             self.process_noise_pos = self.config.get('process_noise', {}).get('position', 0.1)
@@ -760,11 +1126,12 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.base_measurement_noise_yolo_2d_est3d = self.measurement_noise_yolo_2d_est3d
 
     def init_state_tracking(self):
-        """Initialize state tracking variables with 32-bit floats for better Pi 5 performance."""
-        # Kalman filter state: [x, y, z, vx, vy, vz]
-        self.state = np.zeros(6, dtype=np.float32)
+        """Initialize state tracking variables with 4D state optimized for ground-only basketball movement."""
+        # Kalman filter state: [x, y, vx, vy] - reduced from 6D to 4D
+        # We eliminate z and vz since the basketball only moves on the ground
+        self.state = np.zeros(4, dtype=np.float32)
         
-        # Create initial covariance matrix (uncertainty)
+        # Create initial covariance matrix (uncertainty) - reduced to 4x4
         if not hasattr(self, 'config') or self.config is None:
             # Use default values if config is not available
             position_variance = 10.0
@@ -775,9 +1142,10 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             position_variance = float(self.config.get('initialization', {}).get('position_variance_initial', 10.0))
             velocity_variance = float(self.config.get('initialization', {}).get('velocity_variance_initial', 100.0))
             
-        self.covariance = np.eye(6, dtype=np.float32)
-        self.covariance[0:3, 0:3] *= position_variance
-        self.covariance[3:6, 3:6] *= velocity_variance
+        # Reduced 4x4 covariance matrix (x, y, vx, vy)
+        self.covariance = np.eye(4, dtype=np.float32)
+        self.covariance[0:2, 0:2] *= position_variance  # x,y position variance
+        self.covariance[2:4, 2:4] *= velocity_variance  # x,y velocity variance
         
         # State tracking flags
         self.initialized = False
@@ -789,7 +1157,11 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.position_uncertainty = float('inf')
         self.velocity_uncertainty = float('inf')
         
-        # Sensor health tracking
+        # Define basketball properties
+        self.basketball_radius = 0.127  # 5 inches in meters (half of 10-inch diameter)
+        self.basketball_z_height = self.basketball_radius  # Basketball center height above ground
+        
+        # Sensor health tracking - focus on horizontal plane reliability
         self.sensor_reliability = {
             'lidar': 0.5,
             'hsv_3d': 0.5,
@@ -801,20 +1173,21 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         # Store base reliability for reverting after adjustments
         self.base_sensor_reliability = self.sensor_reliability.copy()
         
-        # Direction change detection
-        self.direction_change_detected = False
-        self.last_direction_change_time = 0.0
-        
         # Pre-allocate filter matrices for efficiency (using float32)
-        self._F_matrix = np.eye(6, dtype=np.float32)  # State transition matrix
-        self._Q_matrix = np.zeros((6, 6), dtype=np.float32)  # Process noise matrix
-        self._H_matrix_3d = np.zeros((3, 6), dtype=np.float32)  # Measurement matrix for 3D
-        self._H_matrix_2d = np.zeros((2, 6), dtype=np.float32)  # Measurement matrix for 2D
+        # Reduced to 4x4 for state transition and process noise
+        self._F_matrix = np.eye(4, dtype=np.float32)  # State transition matrix
+        self._Q_matrix = np.zeros((4, 4), dtype=np.float32)  # Process noise matrix
+        
+        # Special handling for measurement matrices:
+        # For 3D sensors, we'll extract only x,y and ignore z (or set constant z)
+        self._H_matrix_3d = np.zeros((3, 4), dtype=np.float32)  # Still has 3 rows for measurements
+        self._H_matrix_2d = np.zeros((2, 4), dtype=np.float32)  # 2D measurement matrix
         
         # Set up constant components of measurement matrices
         self._H_matrix_3d[0, 0] = 1.0  # x position
         self._H_matrix_3d[1, 1] = 1.0  # y position
-        self._H_matrix_3d[2, 2] = 1.0  # z position
+        # Note: The 3rd row (for z) is now not directly mapped to any state variable
+        # We'll handle z separately since it's fixed at basketball height
         
         self._H_matrix_2d[0, 0] = 1.0  # x position
         self._H_matrix_2d[1, 1] = 1.0  # y position
@@ -826,29 +1199,126 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.time_history = deque(maxlen=self.history_length)
         self.innovation_history = deque(maxlen=self.history_length)
         
-        self.get_logger().info(f"State tracking initialized with float32 precision, history length: {self.history_length}")
+        # Initialize the ground position filter as a second stage
+        from ball_chase.utilities.ground_position_filter import GroundPositionFilter
+        self.ground_filter = GroundPositionFilter({
+            "max_speed": 5.0,                # Maximum allowed speed in m/s
+            "position_filter_alpha": 0.7,    # Position smoothing factor
+            "ground_plane_z": self.basketball_radius,  # Basketball center height
+            "basketball_radius": self.basketball_radius
+        })
+        
+        self.get_logger().info(f"State tracking initialized with 4D state optimized for ground-only movement")
+        
+        # ENHANCEMENT 1: Initialize motion state tracking
+        self.motion_state = "unknown"
+        self.prev_motion_state = "unknown"
+        self.motion_state_counts = {
+            "stationary": 0,
+            "long_stationary": 0,  # Added the missing 'long_stationary' key
+            "small_movement": 0,
+            "medium_fast": 0,
+            "unknown": 0
+        }
+        
+        # NEW: Enhanced motion state memory system
+        self.motion_state_memory = {
+            'long_stationary_confirmed_time': 0.0,  # When long_stationary was confirmed
+            'requires_cooldown': False,             # Flag for post-gap cooldown period
+            'cooldown_end_time': 0.0,               # When cooldown period ends
+            'stationary_detections_after_gap': 0,   # Counter for stationary detections after a gap
+            'last_reset_time': 0.0,                 # When counters were last reset
+            'continuous_movement_start': 0.0,       # When continuous movement started
+            'state_confidence': {                   # Confidence levels for each state (0-1)
+                "stationary": 0.5,
+                "long_stationary": 0.0,
+                "small_movement": 0.0,
+                "medium_fast": 0.0,
+                "unknown": 0.0
+            },
+            'gap_recovery_time': 0.0,               # When the last gap recovery happened
+            'protected_state': None,                # State that's currently under protection
+            'protection_violation_count': 0         # Count of attempted transitions blocked by protection
+        }
+        
+        # NEW: Velocity credibility system
+        self.velocity_credibility = {
+            'score': 1.0,                   # Current credibility score (0.0-1.0)
+            'history': deque(maxlen=10),    # Recent credibility scores
+            'last_significant_change': 0.0, # Timestamp of last significant velocity change
+            'transition_times': {},         # Timestamps of state transitions
+            'false_transition_count': 0,    # Counter for suspected false transitions
+            'recovery_cooldown': False,     # Flag for gap recovery cooldown period
+            'cooldown_end_time': 0.0        # When cooldown period ends
+        }
+        
+        self.get_logger().info(f"State tracking initialized with 4D state optimized for ground-only movement")
+        
+        # ENHANCEMENT 1: Initialize motion state tracking
+        self.motion_state = "unknown"
+        self.prev_motion_state = "unknown"
+        self.motion_state_counts = {
+            "stationary": 0,
+            "long_stationary": 0,  # Added the missing 'long_stationary' key
+            "small_movement": 0,
+            "medium_fast": 0,
+            "unknown": 0
+        }
+        
+        # NEW: Initialize motion state memory and protection system
+        self.motion_state_protection = {
+            'long_stationary_confirmed_time': 0.0,  # When long_stationary was confirmed
+            'long_stationary_established': False,   # Whether long_stationary is established
+            'consecutive_stationary_after_long': 0, # Count of stationary detections after long_stationary
+            'min_time_in_long_stationary': 5.0,     # Min time required in long_stationary before accepting transition out
+            'post_gap_cooldown_active': False,      # Whether we're in post-gap cooldown
+            'post_gap_cooldown_end': 0.0,           # When post-gap cooldown ends
+            'post_gap_protected_state': None,       # The state protected during cooldown
+            'last_gap_recovery_time': 0.0,          # When last sensor recovery happened
+        }
+        
+        # NEW: Add state confidence tracking
+        self.motion_state_confidence = {
+            "stationary": 0.5,
+            "long_stationary": 0.5,
+            "small_movement": 0.5, 
+            "medium_fast": 0.5,
+            "unknown": 0.5
+        }
 
     def init_sensor_synchronization(self):
-        """Initialize sensor synchronization system."""
-        # Create sensor buffer with increased time tolerance (0.5s instead of 0.1s)
+        """Initialize sensor synchronization system with extended buffer sizes."""
+        """Initialize sensor synchronization system with extended buffer sizes."""
+        # Create sensor buffer with increased buffer size and time tolerance
         self.sensor_buffer = SensorBuffer(max_time_diff=0.5)
-        # ENHANCEMENT 8: Add parent reference for motion state access
+        # Add parent reference for motion state access
         self.sensor_buffer.parent_node = self
         
         # Define all expected sensors
         self.expected_sensors = ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']
         
-        # Add sensors to the buffer
+        # ENHANCEMENT 6: Increase buffer sizes for predictive buffering
+        buffer_sizes = {
+            'lidar': 30,     # Increase from 20 to 30
+            'hsv_3d': 30,    # Increase from 20 to 30
+            'yolo_3d': 30,   # Increase from 20 to 30
+            'hsv_2d': 25,    # Increase from 20 to 25
+            'yolo_2d': 25    # Increase from 20 to 25
+        }
+        
+        # Add sensors to the buffer with larger buffer sizes
         for sensor in self.expected_sensors:
-            self.sensor_buffer.add_sensor(sensor, buffer_size=20)
+            size = buffer_sizes.get(sensor, 25)  # Default to 25 if not specified
+            self.sensor_buffer.add_sensor(sensor, buffer_size=size)
         
         # Track last detection time for each sensor
         self.last_detection_time = {sensor: 0.0 for sensor in self.expected_sensors}
         self.sensor_counts = {sensor: 0 for sensor in self.expected_sensors}
         
         # Add sensor timing statistics for FPS calculation
-        self.sensor_frame_times = {sensor: deque(maxlen=30) for sensor in self.expected_sensors}  # Store last 30 frame times
-        self.sensor_fps = {sensor: 0.0 for sensor in self.expected_sensors}  # Calculated FPS for each sensor
+        # Use larger buffer to better handle irregular timing
+        self.sensor_frame_times = {sensor: deque(maxlen=40) for sensor in self.expected_sensors}  # Increased from 30 to 40
+        self.sensor_fps = {sensor: 0.0 for sensor in self.expected_sensors}
         
         # Store bounding box information for distance estimation
         self.bbox_data = {
@@ -856,16 +1326,27 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             'yolo_2d': {'width': 30, 'height': 30, 'timestamp': 0.0}
         }
         
-        # ENHANCEMENT 5: Initialize sensor recovery tracking for all expected sensors
+        # Initialize sensor recovery tracking for all expected sensors
         self.sensor_gap_detection = {}
         for sensor in self.expected_sensors:
             self.sensor_gap_detection[sensor] = {
                 'gap_detected': False,
                 'gap_start_time': 0.0,
-                'gap_level': 0.0  # Track gap severity (0.0-1.0)
+                'gap_level': 0.0,  # Track gap severity (0.0-1.0)
+                'recent_gaps': deque(maxlen=5)  # Store recent gap durations for pattern analysis
             }
         
-        self.get_logger().info("Sensor synchronization system initialized")
+        # ENHANCEMENT 6: Create predictive buffer for position/velocity tracking
+        self.position_prediction_buffer = deque(maxlen=10)  # Store recent predictions
+        self.velocity_prediction_buffer = deque(maxlen=10)  # Store recent velocity predictions
+        
+        self.get_logger().info("Sensor synchronization system initialized with extended buffers")
+        
+        # ENHANCEMENT 6: Initialize sensor reliability tracker
+        self.sensor_reliability_tracker = SensorReliabilityTracker(self.expected_sensors)
+        
+        # ENHANCEMENT 6: Initialize smoothed state estimator
+        self.smoothed_state_estimator = SmoothedStateEstimator(window_size=5)
 
     def init_diagnostics(self):
         """Initialize diagnostic tracking."""
@@ -1087,20 +1568,20 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
     def initialize_filter_with_defaults(self):
         """Initialize filter with default values."""
         try:
-            # Set default state with zero position and velocity
-            self.state = np.zeros(6)
+            # Set default state with zero position and velocity - use 4D state
+            self.state = np.zeros(4, dtype=np.float32)
             
             # Set initial covariance (high uncertainty since this is a guess)
-            self.covariance = np.eye(6)
-            self.covariance[0:3, 0:3] *= 1.0  # Position uncertainty
-            self.covariance[3:6, 3:6] *= 2.0  # Velocity uncertainty
+            self.covariance = np.eye(4, dtype=np.float32)
+            self.covariance[0:2, 0:2] *= 1.0  # Position uncertainty
+            self.covariance[2:4, 2:4] *= 2.0  # Velocity uncertainty
             
             self.initialized = True
             self.last_update_time = time.time()
             
             # Update uncertainty metrics
-            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:3, 0:3]) / 3.0)
-            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[3:6, 3:6]) / 3.0)
+            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
+            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
             
             self.get_logger().info(
                 f"Filter initialized with default values. Beginning active tracking with higher uncertainty."
@@ -1258,17 +1739,20 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.get_logger().error(f"Error during filter initialization: {str(e)}")
             return False
 
-    # ENHANCEMENT 1: Motion State Detection System
+    # ENHANCEMENT 8: Enhanced Motion State Detection with State Protection
     def detect_motion_state(self):
         """
-        Detect the current motion state of the object based on recent velocity history.
+        Detect the current motion state of the object with enhanced protection
+        against false transitions, especially after sensor gaps.
         
         Returns:
-            str: One of "stationary", "small_movement", "medium_fast", or "unknown"
+            str: One of "stationary", "long_stationary", "small_movement", "medium_fast", or "unknown"
         """
         # If not initialized or insufficient velocity history, return unknown
         if not self.initialized or len(self.velocity_history) < 5:
             return "unknown"
+        
+        current_time = time.time()
         
         # Get the most recent velocity estimates
         recent_velocities = list(self.velocity_history)[-5:]
@@ -1277,24 +1761,377 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         valid_velocities = [vel for vel in recent_velocities if isinstance(vel, (list, tuple, np.ndarray)) and len(vel) >= 3]
         if not valid_velocities:
             return "unknown"
+            
+        # ---------------------------------------------------------------------
+        # NEW: Check if we're in a post-gap cooldown period
+        # ---------------------------------------------------------------------
+        if hasattr(self, 'motion_state_protection'):
+            # If we're in cooldown, strictly enforce the protected state
+            if self.motion_state_protection['post_gap_cooldown_active']:
+                if current_time < self.motion_state_protection['post_gap_cooldown_end']:
+                    protected_state = self.motion_state_protection['post_gap_protected_state']
+                    
+                    # Log this occasionally for debugging
+                    if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 10 == 0:
+                        remaining = self.motion_state_protection['post_gap_cooldown_end'] - current_time
+                        self.get_logger().debug(
+                            f"Motion state cooldown active: enforcing '{protected_state}' for {remaining:.1f}s more"
+                        )
+                    
+                    return protected_state
+                else:
+                    # Cooldown period has ended
+                    self.motion_state_protection['post_gap_cooldown_active'] = False
+                    if self.debug_level >= 2:
+                        self.get_logger().debug("Motion state cooldown period ended")
         
-        avg_velocity = 0.0
-        for vel in valid_velocities:
-            avg_velocity += np.linalg.norm(vel)
-        avg_velocity /= len(valid_velocities)
+        # ---------------------------------------------------------------------
+        # Check for gap recovery conditions to activate cooldown
+        # ---------------------------------------------------------------------
+        recent_gap_recovery = False
+        if hasattr(self, 'sensor_gap_detection'):
+            # Check for sensors that just recovered from gaps
+            for sensor, gap_info in self.sensor_gap_detection.items():
+                if not gap_info.get('gap_detected', True):  # Not currently in a gap
+                    last_time = self.last_detection_time.get(sensor, 0)
+                    if current_time - last_time < 0.5:  # Recent data
+                        # This sensor may have just recovered
+                        if gap_info.get('gap_start_time', 0) > 0:
+                            gap_duration = current_time - gap_info.get('gap_start_time', 0)
+                            if gap_duration > 0.5:  # It was a significant gap
+                                recent_gap_recovery = True
+                                # Record recovery time
+                                if hasattr(self, 'motion_state_protection'):
+                                    self.motion_state_protection['last_gap_recovery_time'] = current_time
         
-        # Classify based on thresholds
-        if avg_velocity < 0.03:
-            motion_state = "stationary"
-        elif avg_velocity < 0.25:
-            motion_state = "small_movement"
+        # If we just recovered from a gap, activate cooldown protection
+        if recent_gap_recovery and hasattr(self, 'motion_state_protection') and not self.motion_state_protection['post_gap_cooldown_active']:
+            # Set up cooldown period
+            self.motion_state_protection['post_gap_cooldown_active'] = True
+            # Protected state is the current motion state (before the gap)
+            self.motion_state_protection['post_gap_protected_state'] = getattr(self, 'motion_state', 'unknown')
+            # Set cooldown end time (2 seconds after recovery)
+            self.motion_state_protection['post_gap_cooldown_end'] = current_time + 2.0
+            
+            if self.debug_level >= 1:
+                self.get_logger().info(
+                    f"Post-gap cooldown activated: protecting '{self.motion_state_protection['post_gap_protected_state']}' state for 2.0s"
+                )
+            
+            # Return the protected state immediately
+            return self.motion_state_protection['post_gap_protected_state']
+        
+        # IMPROVEMENT 3: Detect and filter out implausible velocity spikes during sensor gaps
+        # Check for gaps in our sensor data
+        current_time = time.time()
+        has_recent_gap = False
+        max_gap_level = 0.0
+        
+        if hasattr(self, 'sensor_gap_detection'):
+            for sensor, gap_info in self.sensor_gap_detection.items():
+                if gap_info.get('gap_detected', False):
+                    has_recent_gap = True
+                    max_gap_level = max(max_gap_level, gap_info.get('gap_level', 0.0))
+        
+        # Initialize velocity confidence if not already present
+        if not hasattr(self, 'velocity_confidence'):
+            self.velocity_confidence = 1.0  # Start with full confidence
+            
+        # Reduce confidence during sensor gaps
+        if has_recent_gap:
+            # Reduce confidence based on gap level (0.0-1.0)
+            self.velocity_confidence = max(0.1, self.velocity_confidence * (1.0 - (max_gap_level * 0.5)))
         else:
-            motion_state = "medium_fast"
+            # Gradually restore confidence when no gaps
+            self.velocity_confidence = min(1.0, self.velocity_confidence + 0.1)
+            
+        # Calculate average velocity with gap-aware filtering
+        filtered_velocities = valid_velocities
+        
+        # Check for implausible acceleration during gaps
+        if len(valid_velocities) >= 2 and has_recent_gap:
+            # Get the last two velocity values
+            prev_vel = np.linalg.norm(valid_velocities[-2])
+            curr_vel = np.linalg.norm(valid_velocities[-1])
+            
+            # Calculate acceleration
+            dt = 0.1  # Assume nominal update rate of 10Hz
+            if hasattr(self, 'time_history') and len(self.time_history) >= 2:
+                recent_times = list(self.time_history)[-2:]
+                dt = max(0.01, recent_times[1] - recent_times[0])  # Ensure non-zero dt
+                
+            acceleration = abs(curr_vel - prev_vel) / dt
+            
+            # Check if acceleration is implausible (> 20 m/s²)
+            if acceleration > 20.0:
+                # Use previous velocity instead of spike
+                filtered_velocities = valid_velocities[:-1] + [valid_velocities[-2]]
+                
+                # Log this filtering occasionally
+                if self.debug_level >= 2:
+                    self.get_logger().debug(
+                        f"Filtered implausible velocity spike: {curr_vel:.2f} m/s (accel: {acceleration:.1f} m/s²)"
+                    )
+        
+        # Calculate average velocity with filtered data
+        avg_velocity = 0.0
+        for vel in filtered_velocities:
+            avg_velocity += np.linalg.norm(vel)
+        avg_velocity /= len(filtered_velocities)
+        
+        # ---------------------------------------------------------------------
+        # NEW: Update state confidence levels based on velocity evidence
+        # ---------------------------------------------------------------------
+        
+        # Initialize confidence dictionary if needed
+        if not hasattr(self, 'motion_state_confidence'):
+            self.motion_state_confidence = {
+                "stationary": 0.5,
+                "long_stationary": 0.0,
+                "small_movement": 0.0, 
+                "medium_fast": 0.0,
+                "unknown": 0.0
+            }
+        
+        # Update confidence values based on current velocity evidence
+        if avg_velocity < 0.03:
+            # Strong evidence for stationary state
+            self.motion_state_confidence["stationary"] = min(1.0, self.motion_state_confidence["stationary"] + 0.1)
+            self.motion_state_confidence["small_movement"] = max(0.0, self.motion_state_confidence["small_movement"] - 0.1)
+            self.motion_state_confidence["medium_fast"] = max(0.0, self.motion_state_confidence["medium_fast"] - 0.2)
+        elif avg_velocity < 0.25:
+            # Evidence for small movement
+            self.motion_state_confidence["small_movement"] = min(1.0, self.motion_state_confidence["small_movement"] + 0.1)
+            self.motion_state_confidence["stationary"] = max(0.0, self.motion_state_confidence["stationary"] - 0.05)
+            self.motion_state_confidence["medium_fast"] = max(0.0, self.motion_state_confidence["medium_fast"] - 0.1)
+        else:
+            # Evidence for medium/fast movement
+            self.motion_state_confidence["medium_fast"] = min(1.0, self.motion_state_confidence["medium_fast"] + 0.15)
+            self.motion_state_confidence["small_movement"] = max(0.0, self.motion_state_confidence["small_movement"] - 0.05)
+            self.motion_state_confidence["stationary"] = max(0.0, self.motion_state_confidence["stationary"] - 0.15)
+        
+        # Special handling for long_stationary confidence
+        if self.motion_state == "long_stationary":
+            # Once established, long_stationary confidence decays very slowly
+            self.motion_state_confidence["long_stationary"] = max(0.8, self.motion_state_confidence["long_stationary"])
+            
+            # During gaps, boost the confidence to prevent state transition
+            if has_recent_gap:
+                self.motion_state_confidence["long_stationary"] = 1.0
+        
+        # ---------------------------------------------------------------------
+        # NEW: Apply confidence-based transition thresholds
+        # ---------------------------------------------------------------------
+        
+        # Classifier with confidence-adjusted thresholds
+        if has_recent_gap and hasattr(self, 'motion_state') and self.motion_state == "long_stationary":
+            # Special case: during gaps, require 3x higher evidence to transition out of long_stationary
+            if avg_velocity < 0.15:  # Significantly higher threshold (was 0.03)
+                base_motion_state = "stationary"
+            elif avg_velocity < 0.6:  # Significantly higher threshold (was 0.25)
+                base_motion_state = "small_movement"
+            else:
+                base_motion_state = "medium_fast"
+        elif self.velocity_confidence < 0.5 and hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
+            # Require stronger evidence to leave stationary state during low confidence periods
+            if avg_velocity < 0.1:  # Increased threshold during low confidence
+                base_motion_state = "stationary"
+            elif avg_velocity < 0.5:  # Increased threshold during low confidence
+                base_motion_state = "small_movement"
+            else:
+                base_motion_state = "medium_fast"
+        else:
+            # Normal thresholds when confidence is normal
+            if avg_velocity < 0.03:
+                base_motion_state = "stationary"
+            elif avg_velocity < 0.25:
+                base_motion_state = "small_movement"
+            else:
+                base_motion_state = "medium_fast"
+        
+        # IMPROVEMENT 3: Add transition inertia - require consistent evidence for state changes
+        # Initialize state transition evidence if not already present
+        if not hasattr(self, 'state_transition_evidence'):
+            self.state_transition_evidence = {
+                "stationary": 0,
+                "small_movement": 0,
+                "medium_fast": 0
+            }
+            
+        # Update evidence counters
+        self.state_transition_evidence[base_motion_state] += 1
+        
+        # Decay other evidence counters
+        for state in self.state_transition_evidence:
+            if state != base_motion_state:
+                self.state_transition_evidence[state] = max(0, self.state_transition_evidence[state] - 1)
+        
+        # ---------------------------------------------------------------------
+        # NEW: Special protection for long_stationary -> stationary transition
+        # ---------------------------------------------------------------------
+        if hasattr(self, 'motion_state') and self.motion_state == "long_stationary":
+            # Already in long_stationary state - this needs special protection
+            
+            # Check if long_stationary is established in memory
+            if not hasattr(self, 'motion_state_protection') or not self.motion_state_protection.get('long_stationary_established', False):
+                # Mark it as established and record the time
+                if not hasattr(self, 'motion_state_protection'):
+                    self.motion_state_protection = {}
+                self.motion_state_protection['long_stationary_established'] = True
+                self.motion_state_protection['long_stationary_confirmed_time'] = current_time
+                
+                if self.debug_level >= 1:
+                    self.get_logger().info("Long stationary state confirmed and protected against transitions")
+            
+            # Special protection against transitioning back to regular stationary
+            if base_motion_state == "stationary":
+                # -----------------------------------------------------------------
+                # FIX: Restructure to decide if transition should even be considered
+                # -----------------------------------------------------------------
+                
+                # Initialize protection if needed
+                if not hasattr(self, 'motion_state_protection'):
+                    self.motion_state_protection = {}
+                
+                if 'consecutive_stationary_after_long' not in self.motion_state_protection:
+                    self.motion_state_protection['consecutive_stationary_after_long'] = 0
+                
+                # Determine if we should even consider this transition
+                consider_transition = False
+                
+                # Check velocity stability 
+                if avg_velocity < 0.01:  # Very stable velocity
+                    # Get time since long_stationary was established
+                    time_in_long_stationary = current_time - self.motion_state_protection.get('long_stationary_confirmed_time', 0)
+                    
+                    # Only consider transitions if:
+                    # 1. Object has been in long_stationary for at least 20 seconds AND
+                    # 2. Velocity confidence is high
+                    if time_in_long_stationary > 20.0 and self.velocity_confidence > 0.8:
+                        consider_transition = True
+                
+                # Skip all processing if transition isn't being considered
+                if not consider_transition:
+                    # Silently maintain long_stationary without logging
+                    base_motion_state = "long_stationary"
+                    
+                    # Reset counter to avoid accumulating incorrect statistics
+                    self.motion_state_protection['consecutive_stationary_after_long'] = 0
+                else:
+                    # We've decided to consider this transition - now track evidence
+                    
+                    # Increment counter
+                    self.motion_state_protection['consecutive_stationary_after_long'] += 1
+                    
+                    # Need at least 5 consecutive "stationary" detections to override "long_stationary"
+                    if self.motion_state_protection['consecutive_stationary_after_long'] < 5:
+                        # Not enough evidence - remain in long_stationary
+                        base_motion_state = "long_stationary"
+                    else:
+                        # Log this transition (only if truly changing state)
+                        self.get_logger().info(
+                            f"Long stationary -> stationary transition accepted after "
+                            f"{self.motion_state_protection['consecutive_stationary_after_long']} consecutive stationary detections"
+                        )
+            else:
+                # Reset consecutive counter if not detecting stationary
+                if hasattr(self, 'motion_state_protection'):
+                    self.motion_state_protection['consecutive_stationary_after_long'] = 0
+        
+        # Special protection for stationary state
+        if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
+            # Require 3+ consecutive motion samples to transition away from stationary to movement
+            evidence_needed = 3
+            # During gaps, require even more evidence
+            if has_recent_gap:
+                evidence_needed = 5
+                
+            # Check if we have enough evidence for the new state
+            if base_motion_state not in ["stationary", "long_stationary"] and self.state_transition_evidence[base_motion_state] < evidence_needed:
+                # Not enough evidence to leave stationary state yet
+                if self.motion_state == "long_stationary":
+                    base_motion_state = "long_stationary"
+                else:
+                    base_motion_state = "stationary"
+        
+        # IMPROVEMENT 2: Detect long-term stationary state
+        
+        # Initialize tracking attributes if they don't exist
+        if not hasattr(self, 'stationary_start_time'):
+            self.stationary_start_time = None
+            
+        if base_motion_state == "stationary":
+            # Start or continue tracking stationary time
+            if self.stationary_start_time is None:
+                self.stationary_start_time = current_time
+                motion_state = "stationary"
+            else:
+                # Check if it's been stationary for a significant period (5+ seconds)
+                stationary_duration = current_time - self.stationary_start_time
+                if stationary_duration > 5.0:  # 5 seconds threshold for long-term stationary
+                    motion_state = "long_stationary"
+                    
+                    # Record when long_stationary was confirmed
+                    if hasattr(self, 'motion_state_protection'):
+                        if not self.motion_state_protection.get('long_stationary_established', False):
+                            self.motion_state_protection['long_stationary_established'] = True
+                            self.motion_state_protection['long_stationary_confirmed_time'] = current_time
+                            
+                    # Set confidence to high for long_stationary
+                    if hasattr(self, 'motion_state_confidence'):
+                        self.motion_state_confidence["long_stationary"] = 1.0
+                    
+                    # Log transition to long-term stationary occasionally
+                    if not hasattr(self, 'last_long_stationary_log') or current_time - self.last_long_stationary_log > 10.0:
+                        self.get_logger().info(f"Object has been stationary for {stationary_duration:.1f}s - using long-term stationary mode")
+                        self.last_long_stationary_log = current_time
+                else:
+                    motion_state = "stationary"
+        else:
+            # ---------------------------------------------------------------------
+            # NEW: Check for minimum time requirement in long_stationary state
+            # ---------------------------------------------------------------------
+            if hasattr(self, 'motion_state') and self.motion_state == "long_stationary" and hasattr(self, 'motion_state_protection'):
+                # Get time since long_stationary was established
+                time_in_long_stationary = current_time - self.motion_state_protection.get('long_stationary_confirmed_time', 0)
+                min_time_required = self.motion_state_protection.get('min_time_in_long_stationary', 5.0)
+                
+                if time_in_long_stationary < min_time_required:
+                    # Not been in long_stationary state long enough to leave it for movement
+                    # Only apply this protection for actual movement transitions, not back to stationary
+                    if base_motion_state not in ["stationary", "unknown"]:
+                        # Check if movement is very significant, which would override protection
+                        if avg_velocity > 0.5:  # Clear movement detected
+                            motion_state = base_motion_state
+                            # Log this special override
+                            self.get_logger().info(
+                                f"Significant movement (v={avg_velocity:.2f}m/s) overriding long_stationary protection"
+                            )
+                        else:
+                            # Movement not significant enough - maintain long_stationary
+                            motion_state = "long_stationary"
+                            
+                            # Log this protection occasionally
+                            if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
+                                self.get_logger().debug(
+                                    f"Protected long_stationary state (established for {time_in_long_stationary:.1f}s < required {min_time_required:.1f}s)"
+                                )
+                    else:
+                        # For non-movement transitions, use normal logic
+                        motion_state = base_motion_state
+                else:
+                    # Been in long_stationary state long enough, normal transitions allowed
+                    motion_state = base_motion_state
+            else:
+                # Reset stationary timer when moving
+                self.stationary_start_time = None
+                motion_state = base_motion_state
         
         # Update motion state counts for stability
         if not hasattr(self, 'motion_state_counts'):
             self.motion_state_counts = {
                 "stationary": 0,
+                "long_stationary": 0,
                 "small_movement": 0,
                 "medium_fast": 0,
                 "unknown": 0
@@ -1312,12 +2149,47 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         if not hasattr(self, 'motion_state'):
             self.motion_state = "unknown"
             self.prev_motion_state = "unknown"
-                 
+        
+        # ---------------------------------------------------------------------
+        # NEW: Apply confidence-based transition protection
+        # ---------------------------------------------------------------------
+        # Only for transitions FROM long_stationary TO stationary
+        if self.motion_state == "long_stationary" and dominant_state == "stationary":
+            # Check if confidence for long_stationary is still high
+            long_stationary_confidence = self.motion_state_confidence.get("long_stationary", 0.0)
+            stationary_confidence = self.motion_state_confidence.get("stationary", 0.0)
+            
+            # Require 3x higher confidence to transition from long_stationary to stationary
+            if long_stationary_confidence > stationary_confidence / 3.0:
+                # Confidence in long_stationary is still strong enough - block transition
+                dominant_state = "long_stationary"
+                
+                # If debugging enabled, log this protection
+                if self.debug_level >= 2:
+                    self.get_logger().debug(
+                        f"Protected long_stationary (conf={long_stationary_confidence:.2f}) from transition to stationary (conf={stationary_confidence:.2f})"
+                    )
+                
+                # Track count of blocked transitions
+                if hasattr(self, 'motion_state_protection'):
+                    if 'protection_violation_count' not in self.motion_state_protection:
+                        self.motion_state_protection['protection_violation_count'] = 0
+                    self.motion_state_protection['protection_violation_count'] += 1
+        
         # Log if motion state changes
         if dominant_state != self.motion_state:
             self.prev_motion_state = self.motion_state
             self.motion_state = dominant_state
-            self.get_logger().info(f"Motion state changed: {self.prev_motion_state} -> {self.motion_state} (velocity={avg_velocity:.3f}m/s)")
+            
+            # Add confidence information to the log
+            confidence_str = ""
+            if hasattr(self, 'motion_state_confidence'):
+                from_conf = self.motion_state_confidence.get(self.prev_motion_state, 0.0)
+                to_conf = self.motion_state_confidence.get(self.motion_state, 0.0)
+                confidence_str = f", confidence={to_conf:.2f}"
+                
+            self.get_logger().info(f"Motion state changed: {self.prev_motion_state} -> {self.motion_state} "
+                                f"(velocity={avg_velocity:.3f}m/s{confidence_str})")
         
         return self.motion_state
 
@@ -1345,18 +2217,21 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         base_thresholds = {
             "lidar": {
                 "stationary": (3.0, 1.5),  # (initial_threshold, min_threshold)
+                "long_stationary": (2.5, 1.2),  # Even more permissive for long-term stationary objects
                 "small_movement": (5.0, 2.0),
                 "medium_fast": (8.0, 3.0),
                 "unknown": (10.0, 3.0)
             },
             "3d_vision": {
                 "stationary": (6.0, 2.0),
+                "long_stationary": (5.0, 1.8),  # More permissive for long-term stationary
                 "small_movement": (9.0, 3.0),
                 "medium_fast": (12.0, 4.0),
                 "unknown": (15.0, 5.0)
             },
             "2d": {
                 "stationary": (10.0, 3.0),
+                "long_stationary": (8.0, 2.5),  # More permissive for long-term stationary
                 "small_movement": (15.0, 5.0),
                 "medium_fast": (20.0, 8.0),
                 "unknown": (25.0, 10.0)
@@ -1364,6 +2239,14 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         }
         
         # Get thresholds for this state and sensor type
+        # If motion_state is not in the dictionary, fall back to "stationary" for "long_stationary" 
+        # or "unknown" for any other missing state
+        if motion_state not in base_thresholds[sensor_type]:
+            if motion_state == "long_stationary":
+                motion_state = "stationary"
+            else:
+                motion_state = "unknown"
+        
         initial, minimum = base_thresholds[sensor_type][motion_state]
         
         # Decay toward minimum with consecutive successful updates
@@ -1390,52 +2273,47 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
     # ENHANCEMENT 4: Flat Ground Movement Handling
     def apply_flat_ground_constraints(self):
         """
-        Apply gentle constraints based on detected flat ground movement.
+        Apply flat ground constraints for a basketball that only moves on the ground.
+        Optimized for 4D state vector [x, y, vx, vy].
         """
-        # Need sufficient history to determine flat ground movement
-        if not self.initialized or len(self.position_history) < 10:
-            self.flat_ground_detected = False
-            self.flat_ground_count = 0
-            return
-            
-        # Analyze recent z-dimension behavior
-        recent_positions = list(self.position_history)[-10:]
+        # Since we know the basketball only moves on the ground,
+        # we don't need to detect flat ground - it's always on the ground
         
-        # Ensure positions have z-component before accessing
-        if all(len(pos) >= 3 for pos in recent_positions):
-            recent_z_values = [pos[2] for pos in recent_positions]
-            z_variance = np.var(recent_z_values)
-            z_range = max(recent_z_values) - min(recent_z_values)
+        # For a 4D state, we don't have z or vz components
+        # Instead, we use the ground filter's constraints directly
+        
+        # Update our velocity estimates based on recent positions if we have history
+        if len(self.position_history) >= 3:
+            recent_positions = list(self.position_history)[-3:]
             
-            # Use motion-aware thresholds to detect flat ground movement
-            motion_state = self.detect_motion_state()
-            z_variance_threshold = 0.0005 if motion_state == "stationary" else 0.002
-            
-            # Detect flat ground movement
-            flat_ground = z_variance < z_variance_threshold and z_range < 0.05
-            
-            # Update counter and detection state
-            if flat_ground:
-                self.flat_ground_count = min(self.flat_ground_count + 1, 20)
-            else:
-                self.flat_ground_count = max(self.flat_ground_count - 1, 0)
+            # If we have time history as well, calculate recent velocities
+            if hasattr(self, 'time_history') and len(self.time_history) >= 3:
+                recent_times = list(self.time_history)[-3:]
                 
-            # Set detected state based on counter
-            self.flat_ground_detected = self.flat_ground_count > 5
-            
-            if self.flat_ground_detected:
-                # Apply strict constraints for a basketball rolling on the ground
-                # Fix Z height to a reasonable value for a basketball on the ground
-                self.state[2] = 0.08  # Basketball radius above ground
-                
-                # Zero out vertical velocity for ground rolling
-                self.state[5] = 0.0
-                
-                if hasattr(self, 'debug_level') and hasattr(self, 'sync_quality_metrics') and self.debug_level >= 2 and self.sync_quality_metrics['attempt_counts'] % 20 == 0:
-                    self.get_logger().debug(
-                        f"Ground rolling ball detected (count={self.flat_ground_count}). "
-                        f"z_variance={z_variance:.6f}, z_range={z_range:.3f}, fixing height to 0.08m"
-                    )
+                # Calculate velocity between last two positions
+                if recent_times[-1] > recent_times[-2]:  # Ensure time moved forward
+                    dt = recent_times[-1] - recent_times[-2]
+                    if dt > 0:
+                        vx = (recent_positions[-1][0] - recent_positions[-2][0]) / dt
+                        vy = (recent_positions[-1][1] - recent_positions[-2][1]) / dt
+                        
+                        # Apply physics constraints for a ball rolling on the ground
+                        # (maximum speed, rolling friction, etc.)
+                        speed = math.sqrt(vx*vx + vy*vy)
+                        max_speed = 5.0  # Maximum rolling speed for basketball
+                        
+                        if speed > max_speed:
+                            # Scale velocity to maximum speed
+                            scale = max_speed / speed
+                            vx *= scale
+                            vy *= scale
+                            
+                        # Update state with constrained velocity
+                        self.state[2] = vx
+                        self.state[3] = vy
+        
+        # Always enforce ground height constraint through the ground filter
+        # This happens in publish_state when we run the state through the ground filter
 
     # ENHANCEMENT 5: Smart Sensor Recovery
     def handle_sensor_recovery(self):
@@ -1493,6 +2371,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
     def filter_update(self):
         """
         Perform a Kalman filter update based on synchronized sensor measurements.
+        Enhanced with new reliability tracking and smoothing capabilities.
         """
         # Skip if not active or not initialized
         if not self.is_activated or not self.initialized:
@@ -1501,36 +2380,100 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         try:
             # Get current time
             current_time = time.time()
-            dt = current_time - self.last_update_time
+            
+            # Calculate time step since last update
+            if self.last_update_time is None:
+                dt = 0.1  # Default initial time step
+            else:
+                dt = current_time - self.last_update_time
+                # Limit dt to reasonable values
+                dt = min(dt, 0.5)  # Cap at 0.5 seconds to prevent big jumps
+            
+            # IMPROVEMENT 7: Apply gap-aware covariance adjustment
+            self.adjust_covariance_for_gaps()
             
             # Find synchronized measurements
-            measurements = self.sensor_buffer.find_synchronized_measurements(min_sensors=2)
+            measurements = self.sensor_buffer.find_synchronized_measurements(min_sensors=1)
             
-            # If no synchronized measurements, skip update
-            if not measurements:
-                return
+            # Update sync quality metrics
+            self.sync_quality_metrics['attempt_counts'] += 1
+            if measurements:
+                self.sync_quality_metrics['sync_counts'] += 1
+                self.sync_quality_metrics['success_rate'] = self.sync_quality_metrics['sync_counts'] / self.sync_quality_metrics['attempt_counts']
+                
+                # Track sensor availability
+                for sensor in self.expected_sensors:
+                    if sensor in measurements:
+                        if sensor not in self.sync_quality_metrics['sensor_availability']:
+                            self.sync_quality_metrics['sensor_availability'][sensor] = 1
+                        else:
+                            self.sync_quality_metrics['sensor_availability'][sensor] += 1
             
             # Predict state forward to current time
             self.predict_state(dt)
             
-            # Update state with measurements
-            self.update_state(measurements)
+            # Update state with measurements if available
+            successful_update = False
+            if measurements:
+                successful_update = self.update_state(measurements)
+                
+                # IMPROVEMENT 3: Record sensor reliability
+                for sensor in measurements.keys():
+                    self.sensor_reliability_tracker.record_measurement(sensor, successful_update)
             
             # Update last update time
             self.last_update_time = current_time
             
-            # Update uncertainty metrics
-            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:3, 0:3]) / 3.0)
-            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[3:6, 3:6]) / 3.0)
+            # Update uncertainty metrics - FIX: Use [0:2, 0:2] for position part of 4D state
+            self.position_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))
+            self.velocity_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[2:4, 2:4]) / 2.0))
             
-            # Publish fused position and velocity
+            # Store current state in history buffers - FIX: Handle 4D state properly for history tracking
             if hasattr(self, 'position_history'):
-                self.position_history.append(self.state[0:3].copy())
+                # For position history, create a 3D position with fixed z-height
+                pos_3d = [self.state[0], self.state[1], self.basketball_z_height]
+                self.position_history.append(pos_3d)
+                
             if hasattr(self, 'velocity_history'):
-                self.velocity_history.append(self.state[3:6].copy())
+                # For velocity history, create a 3D velocity with zero z component
+                vel_3d = [self.state[2], self.state[3], 0.0]
+                self.velocity_history.append(vel_3d)
+                
             if hasattr(self, 'time_history'):
                 self.time_history.append(current_time)
             
+            # IMPROVEMENT 3: Add current state to smoother
+            if hasattr(self, 'smoothed_state_estimator'):
+                # Create 3D position and velocity vectors for the smoother
+                pos_3d = np.array([self.state[0], self.state[1], self.basketball_z_height])
+                vel_3d = np.array([self.state[2], self.state[3], 0.0])
+                
+                self.smoothed_state_estimator.add_state(
+                    pos_3d,
+                    vel_3d,
+                    self.position_uncertainty,
+                    current_time
+                )
+                
+                # Get smoothed state if available
+                smoothed = self.smoothed_state_estimator.get_smoothed_state()
+                if smoothed and self.position_uncertainty > 0.1:
+                    # Use smoothed state for final output to reduce uncertainty spikes
+                    # But only if current uncertainty is significant
+                    # FIX: Only copy x,y to 4D state
+                    self.state[0:2] = smoothed['position'][0:2].copy()
+                    self.state[2:4] = smoothed['velocity'][0:2].copy()
+                    
+                    if self.debug_level >= 2:
+                        smoothed_uncertainty = smoothed['uncertainty']
+                        self.get_logger().debug(
+                            f"Applied smoothing: uncertainty {self.position_uncertainty:.3f}m -> {smoothed_uncertainty:.3f}m"
+                        )
+            
+            # IMPROVEMENT 8: Update tracking status using confidence-based approach
+            self.update_tracking_status()
+            
+            # Publish fused position and velocity
             self.publish_state()
             
             # Publish uncertainty
@@ -1547,66 +2490,112 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             
             # Update motion state
             self.detect_motion_state()
+            
+            # Decay reliability for unused sensors
+            if hasattr(self, 'sensor_reliability_tracker'):
+                self.sensor_reliability_tracker.decay_unused_sensors()
+                
         except Exception as e:
             self.get_logger().error(f"Error during filter update: {str(e)}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
 
     def predict_state(self, dt):
         """
-        Predict the state forward by dt seconds.
+        Predict the state forward by dt seconds, optimized for ground-only movement.
         
         Args:
             dt (float): Time step in seconds
         """
-        # Reset the state transition matrix to identity first
-        self._F_matrix = np.eye(6, dtype=np.float32)
+        # Reset the state transition matrix to identity - 4D state vector
+        self._F_matrix = np.eye(4, dtype=np.float32)
         
-        # Then set the time-dependent values
-        self._F_matrix[0, 3] = dt
-        self._F_matrix[1, 4] = dt
-        self._F_matrix[2, 5] = dt
+        # Set time-dependent values for x,y position updates from velocity
+        self._F_matrix[0, 2] = dt  # x += vx*dt
+        self._F_matrix[1, 3] = dt  # y += vy*dt
         
         # Reset the process noise matrix to zeros
-        self._Q_matrix = np.zeros((6, 6), dtype=np.float32)
+        self._Q_matrix = np.zeros((4, 4), dtype=np.float32)
         
-        # Process noise parameters
-        q_pos = self.process_noise_pos * dt
-        q_vel = self.process_noise_vel * dt
+        # Apply adaptive process noise based on prediction duration
+        gap_factor = min(5.0, max(1.0, dt / 0.1))  # Scale factor based on gap length
         
-        # Fill in the process noise matrix properly
+        # Factor in sensor gaps
+        if hasattr(self, 'sensor_gap_detection'):
+            current_time = time.time()
+            avg_gap_level = 0.0
+            gap_count = 0
+            
+            for sensor, gap_info in self.sensor_gap_detection.items():
+                if gap_info.get('gap_detected', False):
+                    avg_gap_level += gap_info.get('gap_level', 0.0)
+                    gap_count += 1
+                    
+            if gap_count > 0:
+                avg_gap_level /= gap_count
+                gap_factor *= (1.0 + avg_gap_level)
+        
+        # Process noise parameters with adaptive scaling
+        q_pos = self.process_noise_pos * dt * gap_factor
+        q_vel = self.process_noise_vel * dt * gap_factor
+        
+        # Apply physics-based rolling friction for ground movement
+        # (Basketball always rolls on ground, never bounces)
+        friction_coef = 0.03  # Rolling friction coefficient
+        
+        # Apply deceleration to horizontal velocity components
+        current_velocity = np.linalg.norm(self.state[2:4])  # x-y plane velocity
+        if current_velocity > 0:
+            # Calculate friction deceleration: a = μg
+            deceleration = friction_coef * 9.81  # μg in m/s²
+            
+            # Don't decelerate more than the current velocity
+            max_dv = current_velocity
+            dv = min(max_dv, deceleration * dt)
+            
+            # Apply proportional deceleration to velocity components
+            if dv > 0 and current_velocity > 0:
+                factor = 1.0 - (dv / current_velocity)
+                self.state[2] *= factor  # Reduce x velocity
+                self.state[3] *= factor  # Reduce y velocity
+        
+        # Fill in the 4x4 process noise matrix
         # Position variances
         self._Q_matrix[0, 0] = q_pos * dt**3 / 3.0  # x position variance
         self._Q_matrix[1, 1] = q_pos * dt**3 / 3.0  # y position variance
-        self._Q_matrix[2, 2] = q_pos * dt**3 / 3.0  # z position variance
         
         # Velocity variances
-        self._Q_matrix[3, 3] = q_vel * dt          # x velocity variance
-        self._Q_matrix[4, 4] = q_vel * dt          # y velocity variance
-        self._Q_matrix[5, 5] = q_vel * dt          # z velocity variance
-        
+        self._Q_matrix[2, 2] = q_vel * dt          # x velocity variance
+        self._Q_matrix[3, 3] = q_vel * dt          # y velocity variance
         
         # Position-velocity covariances
-        self._Q_matrix[0, 3] = self._Q_matrix[3, 0] = q_pos * dt**2 / 2.0  # x position-velocity
-        self._Q_matrix[1, 4] = self._Q_matrix[4, 1] = q_pos * dt**2 / 2.0  # y position-velocity
-        self._Q_matrix[2, 5] = self._Q_matrix[5, 2] = q_pos * dt**2 / 2.0  # z position-velocity
+        self._Q_matrix[0, 2] = self._Q_matrix[2, 0] = q_pos * dt**2 / 2.0  # x position-velocity
+        self._Q_matrix[1, 3] = self._Q_matrix[3, 1] = q_pos * dt**2 / 2.0  # y position-velocity
         
-        # Predict state
+        # Predict state using state transition matrix
         self.state = np.dot(self._F_matrix, self.state)
         
         # Predict covariance
         self.covariance = np.dot(np.dot(self._F_matrix, self.covariance), self._F_matrix.T) + self._Q_matrix
         
-        # Ensure covariance remains symmetric after prediction too
+        # Ensure covariance remains symmetric
         self.covariance = 0.5 * (self.covariance + self.covariance.T)
 
     def update_state(self, measurements):
         """
-        Update the state with synchronized measurements.
+        Update the state with synchronized measurements (4D state version).
         
         Args:
             measurements (dict): Dictionary of {sensor_name: measurement}
+            
+        Returns:
+            bool: Whether any measurements were successfully processed
         """
         # Store successful update flag to track if any measurements were processed
         successful_update = False
+        
+        # Motion state for adaptive validation
+        motion_state = self.detect_motion_state()
         
         for sensor, msg in measurements.items():
             # Transform measurement to reference frame
@@ -1614,15 +2603,52 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             if not transformed:
                 continue
             
-            # Measurement vector
+            # For ground-only basketball movement, we need special handling for measurements
+            # 1. For 3D sensors, we use x,y and ignore z (basketball is always at fixed height)
+            # 2. For 2D sensors, we use x,y coordinates
+            
             if sensor.endswith('_2d'):
+                # For 2D sensors, we create a 2x4 measurement matrix that only extracts x,y
                 z = np.array([transformed.point.x, transformed.point.y], dtype=np.float32)
-                H = self._H_matrix_2d
-                R = self.get_measurement_noise(sensor, is_2d=True)
+                H = np.zeros((2, 4), dtype=np.float32)  # 2x4 matrix for 2D sensors with 4D state
+                H[0, 0] = 1.0  # Extract x position
+                H[1, 1] = 1.0  # Extract y position
+                
+                # Get appropriate noise matrix
+                if sensor == 'hsv_2d':
+                    R = np.diag([self.measurement_noise_hsv_2d, self.measurement_noise_hsv_2d]).astype(np.float32)
+                elif sensor == 'yolo_2d':
+                    R = np.diag([self.measurement_noise_yolo_2d, self.measurement_noise_yolo_2d]).astype(np.float32)
+                else:
+                    R = np.diag([50.0, 50.0]).astype(np.float32)  # Default noise
             else:
-                z = np.array([transformed.point.x, transformed.point.y, transformed.point.z], dtype=np.float32)
-                H = self._H_matrix_3d
-                R = self.get_measurement_noise(sensor, is_2d=False)
+                # For 3D sensors, we extract x,y and optionally use z as a consistency check
+                # (since basketball is always at a known height)
+                z = np.array([transformed.point.x, transformed.point.y], dtype=np.float32)
+                H = np.zeros((2, 4), dtype=np.float32)  # 2x4 matrix for position-only with 4D state
+                H[0, 0] = 1.0  # Extract x position
+                H[1, 1] = 1.0  # Extract y position
+                
+                # Get appropriate noise matrix based on sensor type
+                if sensor == 'lidar':
+                    R = np.diag([self.measurement_noise_lidar, self.measurement_noise_lidar]).astype(np.float32)
+                elif sensor == 'hsv_3d':
+                    R = np.diag([self.measurement_noise_hsv_3d, self.measurement_noise_hsv_3d]).astype(np.float32)
+                elif sensor == 'yolo_3d':
+                    R = np.diag([self.measurement_noise_yolo_3d, self.measurement_noise_yolo_3d]).astype(np.float32)
+                else:
+                    R = np.diag([0.1, 0.1]).astype(np.float32)  # Default noise
+                
+                # Optional check if z-height is reasonable (within tolerance of expected height)
+                # Skip if the measurement's z-value is too far from expected basketball height
+                z_tolerance = 0.1  # 10cm tolerance for z-height
+                if abs(transformed.point.z - self.basketball_z_height) > z_tolerance:
+                    if self.debug_level >= 2:
+                        self.get_logger().debug(
+                            f"Skipping {sensor} measurement with unusual z-height: "
+                            f"{transformed.point.z:.3f}m (expected: {self.basketball_z_height:.3f}m ±{z_tolerance:.2f}m)"
+                        )
+                    continue
             
             # Calculate innovation (measurement residual)
             y = z - np.dot(H, self.state)
@@ -1630,14 +2656,11 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Innovation covariance
             S = np.dot(np.dot(H, self.covariance), H.T) + R
             
-            # ENHANCEMENT 3: Apply dynamic measurement validation
-            # Get appropriate innovation threshold based on sensor type and motion state
-            motion_state = self.detect_motion_state()
+            # Apply dynamic measurement validation based on motion state
             threshold = self.get_innovation_threshold(sensor, motion_state)
             
             # Compute Mahalanobis distance for validation
             try:
-                # Use proper dimensionality for S_inv based on sensor type
                 S_inv = np.linalg.inv(S)
                 mahalanobis_dist = np.sqrt(np.dot(np.dot(y.T, S_inv), y))
                 
@@ -1676,6 +2699,13 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 
                 # Mark that we had a successful update
                 successful_update = True
+                
+                # For logging
+                if self.debug_level >= 2:
+                    self.get_logger().debug(
+                        f"Successfully incorporated {sensor} measurement: "
+                        f"innovation={mahalanobis_dist:.2f}, position=({transformed.point.x:.2f}, {transformed.point.y:.2f})"
+                    )
                 
             except np.linalg.LinAlgError:
                 self.get_logger().warn(f"Matrix inversion failed during Kalman update for {sensor}")
@@ -1792,28 +2822,70 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.velocity_pub.publish(msg)
 
     def publish_state(self):
-        """Publish the current state estimate."""
+        """
+        Publish the current state estimate using the GroundPositionFilter as a second stage.
+        This ensures all published positions adhere to ground-only basketball movement constraints.
+        """
         # Skip if not active
         if not self.is_activated:
             return
+            
+        # Create current position as 3D point from our 4D state
+        current_pos = [float(self.state[0]), float(self.state[1]), float(self.basketball_z_height)]
+        current_time = time.time()
+        
+        # IMPROVEMENT: Pass through GroundPositionFilter as second stage
+        # This applies basketball-specific physics constraints
+        filtered_pos = self.ground_filter.update(current_pos, current_time)
+        
+        # Get velocity from ground filter (more accurate for rolling balls)
+        ground_velocity = self.ground_filter.get_velocity()
+        
+        # Update our state with the filtered position
+        # This keeps the Kalman filter state in sync with published positions
+        self.state[0:2] = filtered_pos[0:2]  # Update x,y position
+        
+        # Optionally update velocity state from ground filter's estimate
+        # Only do this for stronger movements to avoid noise in stationary case
+        ground_speed = self.ground_filter.get_speed()
+        if ground_speed > 0.1:  # Only use ground filter velocity for significant movement
+            # Fix: Only use x,y components of the ground_velocity (which is 3D)
+            self.state[2] = ground_velocity[0]  # x velocity
+            self.state[3] = ground_velocity[1]  # y velocity
         
         # Create position message
         pos_msg = PointStamped()
         pos_msg.header.stamp = self.get_clock().now().to_msg()
         pos_msg.header.frame_id = self.reference_frame
-        pos_msg.point.x = self.state[0]
-        pos_msg.point.y = self.state[1]
-        pos_msg.point.z = self.state[2]
+        pos_msg.point.x = float(filtered_pos[0])
+        pos_msg.point.y = float(filtered_pos[1])
+        pos_msg.point.z = float(filtered_pos[2])  # Always at basketball height
         self.position_pub.publish(pos_msg)
         
         # Create velocity message
         vel_msg = TwistStamped()
         vel_msg.header.stamp = self.get_clock().now().to_msg()
         vel_msg.header.frame_id = self.reference_frame
-        vel_msg.twist.linear.x = self.state[3]
-        vel_msg.twist.linear.y = self.state[4]
-        vel_msg.twist.linear.z = self.state[5]
+        
+        # Use ground filter velocity if significant, otherwise use Kalman filter
+        if ground_speed > 0.1:
+            vel_msg.twist.linear.x = float(ground_velocity[0])
+            vel_msg.twist.linear.y = float(ground_velocity[1])
+        else:
+            vel_msg.twist.linear.x = float(self.state[2])
+            vel_msg.twist.linear.y = float(self.state[3])
+            
+        vel_msg.twist.linear.z = 0.0  # Zero vertical velocity for ground movement
         self.velocity_pub.publish(vel_msg)
+        
+        # Get statistics from ground filter occasionally
+        if hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 100 == 0:
+            stats = self.ground_filter.get_statistics()
+            if stats:
+                self.get_logger().info(
+                    f"Ground filter stats: speed={stats['current_speed']:.2f}m/s, "
+                    f"avg={stats['average_speed']:.2f}m/s, jumps={stats['position_jumps']}"
+                )
 
     def publish_uncertainty(self):
         """Publish the position uncertainty."""
@@ -1892,6 +2964,340 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         for timer in self._timer_list:
             self.destroy_timer(timer)
         self._timer_list = []
+
+    # ENHANCEMENT 7: Gap-Aware Covariance Adjustment
+    def adjust_covariance_for_gaps(self):
+        """
+        Adjust the filter covariance based on sensor gap patterns,
+        using a refined approach optimized for 4D state.
+        """
+        # Need sensors to be initialized first
+        if not hasattr(self, 'sensor_gap_detection'):
+            return
+            
+        current_time = time.time()
+        
+        # Count active sensors and their gap levels
+        active_3d_sensors = 0
+        active_2d_sensors = 0
+        total_gap_level = 0.0  # Initialize total_gap_level here
+        sensor_count = 0
+        
+        for sensor, gap_info in self.sensor_gap_detection.items():
+            last_time = self.last_detection_time.get(sensor, 0)
+            gap_duration = current_time - last_time
+            
+            # Skip sensors we've never seen
+            if self.sensor_counts.get(sensor, 0) == 0:
+                continue
+                
+            sensor_count += 1
+            
+            # Calculate effective gap level
+            if gap_duration < 0.1:
+                gap_level = 0.0  # Very recent update - no gap
+            elif gap_duration < 0.5:
+                gap_level = gap_duration / 0.5  # Linear increase to 1.0
+            else:
+                gap_level = 1.0  # Full gap level
+                
+            total_gap_level += gap_level
+            
+            # Count active sensors by type (with recent enough data)
+            if gap_duration < 1.0:
+                if not sensor.endswith('_2d'):
+                    active_3d_sensors += 1
+                else:
+                    active_2d_sensors += 1
+        
+        # Calculate average gap level
+        avg_gap_level = total_gap_level / max(1, sensor_count)
+        
+        # IMPROVEMENT 7: Slower covariance growth for stationary objects
+        motion_state = self.detect_motion_state()
+        
+        # Use advanced growth model based on sensor coverage and status
+        if active_3d_sensors >= 2:
+            # With multiple 3D sensors, use modest growth rate
+            growth_rate = 1.05 + (avg_gap_level * 0.15)  # 1.05-1.20 range
+        elif active_3d_sensors == 1:
+            # With single 3D sensor, slightly higher growth
+            growth_rate = 1.1 + (avg_gap_level * 0.2)  # 1.10-1.30 range
+        elif active_2d_sensors > 0:
+            # Only 2D sensors active, faster growth
+            growth_rate = 1.15 + (avg_gap_level * 0.25)  # 1.15-1.40 range
+        else:
+            # No active sensors, use much faster growth
+            growth_rate = 1.2 + (avg_gap_level * 0.6)  # 1.20-1.80 range
+            
+        # IMPROVEMENT 7: Reduce covariance growth for stationary objects
+        if motion_state in ["stationary", "long_stationary"]:
+            # Further reduce growth rate for stationary objects
+            # Changed from 40% to 30% of normal growth rate
+            growth_rate = 1.0 + ((growth_rate - 1.0) * 0.3)  
+            
+            # For long-term stationary objects, even slower growth
+            # Changed from 25% to 15% of normal growth rate
+            if motion_state == "long_stationary":
+                growth_rate = 1.0 + ((growth_rate - 1.0) * 0.15)
+                
+            # Log this adjustment occasionally
+            if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 30 == 0:
+                self.get_logger().debug(f"Reduced covariance growth for {motion_state} object: {growth_rate:.3f}")
+        
+        # Apply growth limit based on uncertainties
+        # Don't let position uncertainty exceed reasonable bounds
+        pos_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))  # Updated for 4D state, added max(0.0, ...)
+        if pos_uncertainty > 0.5:
+            # Limit further growth when already uncertain
+            growth_rate = min(growth_rate, 1.1)
+        
+        # Apply growth factor
+        if growth_rate > 1.0:
+            # Apply different rates to position and velocity parts of the covariance
+            self.covariance[0:2, 0:2] *= growth_rate  # Position part (x,y)
+            self.covariance[2:4, 2:4] *= (growth_rate * 1.05)  # Reduced from 1.1 to 1.05 for velocity
+            
+            # Keep covariance symmetric
+            self.covariance = 0.5 * (self.covariance + self.covariance.T)
+            
+            # Force positive semi-definiteness
+            # Ensure diagonal elements are positive
+            for i in range(4):
+                self.covariance[i, i] = max(0.01, self.covariance[i, i])
+            
+            # Add maximum cap on uncertainty growth to prevent excessive uncertainty
+            max_pos_uncertainty = 0.5  # Maximum position uncertainty during gaps
+            max_vel_uncertainty = 2.0  # Maximum velocity uncertainty during gaps
+            
+            # Calculate current uncertainties - FIX: add max(0.0, ...) to avoid negative values due to numerical errors
+            current_pos_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))
+            current_vel_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[2:4, 2:4]) / 2.0))
+            
+            # Apply caps if needed
+            if current_pos_uncertainty > max_pos_uncertainty:
+                scale = (max_pos_uncertainty / current_pos_uncertainty) ** 2
+                self.covariance[0:2, 0:2] *= scale
+                
+            if current_vel_uncertainty > max_vel_uncertainty:
+                scale = (max_vel_uncertainty / current_vel_uncertainty) ** 2
+                self.covariance[2:4, 2:4] *= scale
+                
+            # Keep covariance symmetric after capping
+            self.covariance = 0.5 * (self.covariance + self.covariance.T)
+            
+            # Debug log for significant growth
+            if growth_rate > 1.2 and self.debug_level > 1:
+                self.get_logger().debug(
+                    f"Covariance adjusted: growth={growth_rate:.2f}, gap_level={avg_gap_level:.2f}, "
+                    f"sensors={active_3d_sensors}(3D)+{active_2d_sensors}(2D)"
+                )
+
+    # ENHANCEMENT 8: Confidence-Based Tracking
+    def update_tracking_status(self):
+        """
+        Updated method to determine tracking status using a confidence-based approach.
+        Allows maintaining tracking at lower thresholds once it's established.
+        """
+        current_time = time.time()
+        
+        # Get current uncertainty metrics
+        pos_uncertainty = self.position_uncertainty
+        vel_uncertainty = self.velocity_uncertainty
+        
+        # Count active sensors
+        active_3d_sensors = 0
+        active_2d_sensors = 0
+        
+        for sensor in self.expected_sensors:
+            last_time = self.last_detection_time.get(sensor, 0)
+            if current_time - last_time < 1.0:  # Consider sensors active within last 1 second
+                if sensor.endswith('_2d'):
+                    active_2d_sensors += 1
+                else:
+                    active_3d_sensors += 1
+        
+        # NEW: Track sensor gap conditions
+        all_sensors_gap = (active_3d_sensors == 0 and active_2d_sensors == 0)
+        
+        # Initialize sensor gap tolerance window tracking if not already present
+        if not hasattr(self, 'sensor_gap_window'):
+            self.sensor_gap_window = {
+                'active': False,
+                'start_time': 0.0,
+                'previous_reliability': False,
+                'tolerance_seconds': 0.8  # Default 0.8 second tolerance window
+            }
+            
+        # Detect start of a new sensor gap
+        if all_sensors_gap and not self.sensor_gap_window['active']:
+            # Only activate gap mode if we were previously tracking
+            if self.tracking_reliable:
+                self.sensor_gap_window['active'] = True
+                self.sensor_gap_window['start_time'] = current_time
+                self.sensor_gap_window['previous_reliability'] = True
+                
+                # For long-stationary objects, extend the tolerance window
+                motion_state = self.detect_motion_state()
+                if motion_state == "long_stationary":
+                    self.sensor_gap_window['tolerance_seconds'] = 2.0  # 2 seconds for long-stationary
+                elif motion_state == "stationary":
+                    self.sensor_gap_window['tolerance_seconds'] = 1.2  # 1.2 seconds for regular stationary
+                else:
+                    self.sensor_gap_window['tolerance_seconds'] = 0.5  # 0.5 seconds for moving objects
+                
+                if self.debug_level >= 2:
+                    self.get_logger().debug(
+                        f"Sensor gap tolerance activated: window={self.sensor_gap_window['tolerance_seconds']:.1f}s, "
+                        f"state={motion_state}, uncertainty={pos_uncertainty:.3f}m"
+                    )
+        
+        # Check if we're within the tolerance window during a sensor gap
+        within_gap_tolerance = False
+        if self.sensor_gap_window['active']:
+            # If any sensors have recovered, exit gap mode
+            if not all_sensors_gap:
+                self.sensor_gap_window['active'] = False
+                if self.debug_level >= 2:
+                    self.get_logger().debug("Sensor gap tolerance deactivated: sensors recovered")
+            else:
+                # Check if we're still within the tolerance window
+                gap_duration = current_time - self.sensor_gap_window['start_time']
+                within_gap_tolerance = gap_duration < self.sensor_gap_window['tolerance_seconds']
+                
+                # If gap exceeds tolerance window, exit gap mode
+                if not within_gap_tolerance:
+                    self.sensor_gap_window['active'] = False
+                    if self.debug_level >= 1:
+                        self.get_logger().info(
+                            f"Sensor gap tolerance expired after {gap_duration:.2f}s > "
+                            f"{self.sensor_gap_window['tolerance_seconds']:.1f}s threshold"
+                        )
+        
+        # IMPROVEMENT 1: Use different thresholds based on tracking state
+        # If currently tracking, use more lenient thresholds to maintain tracking
+        if self.tracking_reliable:
+            pos_threshold = self.position_uncertainty_threshold * 2.0  # Increased from 1.5 to 2.0
+            vel_threshold = self.velocity_uncertainty_threshold * 2.0  # Increased from 1.5 to 2.0
+        else:
+            pos_threshold = self.position_uncertainty_threshold * 1.2  # Add 20% margin for establishing tracking
+            vel_threshold = self.velocity_uncertainty_threshold * 1.2  # Add 20% margin
+        
+        # IMPROVEMENT 4: Apply motion-aware threshold adjustments
+        motion_state = self.detect_motion_state()
+        if motion_state == "stationary":
+            # Be MUCH more lenient with uncertainty thresholds for stationary objects
+            # Increased from 2.5x to 3.0x to better maintain tracking during stationary periods
+            pos_threshold *= 3.0
+            vel_threshold *= 3.0
+        elif motion_state == "long_stationary":
+            # Even more permissive for long-term stationary objects
+            pos_threshold *= 3.5
+            vel_threshold *= 3.5
+        
+        # IMPROVEMENT 7: Special handling for yolo_2d-only mode
+        # If only yolo_2d is active, still allow tracking with appropriate thresholds
+        if active_3d_sensors == 0 and active_2d_sensors > 0 and self.allow_tracking_with_2d_only:
+            # Check if yolo_2d is one of the active sensors
+            yolo_2d_active = False
+            for sensor in ['yolo_2d']:
+                if current_time - self.last_detection_time.get(sensor, 0) < 1.0:
+                    yolo_2d_active = True
+                    break
+                    
+            if yolo_2d_active:
+                # Use a more lenient threshold when only yolo_2d is available
+                pos_threshold *= 1.25
+                
+                # IMPROVEMENT 4: For stationary objects with yolo_2d only, be even more permissive
+                if motion_state in ["stationary", "long_stationary"]:
+                    pos_threshold *= 2.0  # Increased from 1.5x to 2.0x for stationary objects with only 2D data
+                    
+                    # NEW: For long_stationary objects with 2D-only data, consider always reliable
+                    if motion_state == "long_stationary":
+                        reliable = True  # Override reliability check - trust 2D data for long-stationary objects
+                        
+                        # Log this special enhancement occasionally
+                        if hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
+                            self.get_logger().info(f"Maintaining tracking with 2D-only data for long-stationary object")
+                
+                # Log this special case occasionally
+                if hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 50 == 0:
+                    self.get_logger().info(f"Operating in yolo_2d-only mode with adjusted thresholds")
+        
+        # NEW: Modified reliability assessment with gap tolerance window
+        # During sensor gaps within tolerance window for stationary objects, 
+        # bypass the normal sensor count check
+        if within_gap_tolerance and motion_state in ["stationary", "long_stationary"]:
+            # During gap tolerance window, only check uncertainty thresholds, ignore sensor counts
+            reliable = (pos_uncertainty < pos_threshold and vel_uncertainty < vel_threshold)
+            
+            # Log this special condition occasionally
+            if self.debug_level >= 2:
+                self.get_logger().debug(
+                    f"Gap tolerance active: uncertainty={pos_uncertainty:.3f}m < threshold={pos_threshold:.3f}m"
+                )
+        else:
+            # Normal reliability assessment including sensor availability
+            reliable = (pos_uncertainty < pos_threshold and 
+                        vel_uncertainty < vel_threshold and
+                        (active_3d_sensors >= 1 or (active_2d_sensors >= 1 and self.allow_tracking_with_2d_only)))
+        
+        # Use time-based stability buffer
+        if len(self.reliability_buffer) == 0:
+            # Initialize buffer if empty
+            self.reliability_buffer = deque([reliable] * 3, maxlen=5)
+        else:
+            # Add newest value
+            self.reliability_buffer.append(reliable)
+        
+        # Analyze buffer for stability
+        true_count = sum(1 for r in self.reliability_buffer if r)
+        
+        # IMPROVEMENT 3: Apply stronger hysteresis to tracking status based on motion state
+        # When stationary, be MUCH more reluctant to lose tracking
+        if motion_state in ["stationary", "long_stationary"]:
+            # For stationary objects: 
+            # - Need 2/5 reliable to start tracking (easier to start tracking)
+            # - Need 5/5 unreliable to stop tracking (much harder to lose tracking)
+            if not self.tracking_reliable and true_count >= 2:
+                self.tracking_reliable = True
+                if self.last_tracking_state != self.tracking_reliable:
+                    self.get_logger().info(
+                        f"Tracking started: uncertainty={pos_uncertainty:.3f}m, sensors={active_3d_sensors}(3D)+{active_2d_sensors}(2D)"
+                    )
+            elif self.tracking_reliable and true_count == 0:  # Need ALL 5/5 unreliable to stop tracking
+                # NEW: Add special case for sensor gaps with very low uncertainty
+                if all_sensors_gap and pos_uncertainty < (self.position_uncertainty_threshold * 1.5) and motion_state == "long_stationary":
+                    # Temporary loss - maintain tracking during brief gaps for long-stationary objects with low uncertainty
+                    if self.debug_level >= 1:
+                        self.get_logger().info(
+                            f"Maintaining tracking despite sensor gap: uncertainty={pos_uncertainty:.3f}m < special threshold"
+                        )
+                else:
+                    self.tracking_reliable = False
+                    if self.last_tracking_state != self.tracking_reliable:
+                        self.get_logger().info(
+                            f"Tracking lost: uncertainty={pos_uncertainty:.3f}m, sensors={active_3d_sensors}(3D)+{active_2d_sensors}(2D)"
+                        )
+        else:
+            # For moving objects, use standard criteria:
+            # Need 3/5 reliable to start tracking, need 4/5 unreliable to stop tracking
+            if not self.tracking_reliable and true_count >= 3:  # Need 3/5 reliable to start tracking
+                self.tracking_reliable = True
+                if self.last_tracking_state != self.tracking_reliable:
+                    self.get_logger().info(
+                        f"Tracking started: uncertainty={pos_uncertainty:.3f}m, sensors={active_3d_sensors}(3D)+{active_2d_sensors}(2D)"
+                    )
+            elif self.tracking_reliable and true_count <= 1:  # Need 4/5 unreliable to stop tracking (more conservative)
+                self.tracking_reliable = False
+                if self.last_tracking_state != self.tracking_reliable:
+                    self.get_logger().info(
+                        f"Tracking lost: uncertainty={pos_uncertainty:.3f}m, sensors={active_3d_sensors}(3D)+{active_2d_sensors}(2D)"
+                    )
+                
+        self.last_tracking_state = self.tracking_reliable
+        return self.tracking_reliable
 
 def main(args=None):
     rclpy.init(args=args)

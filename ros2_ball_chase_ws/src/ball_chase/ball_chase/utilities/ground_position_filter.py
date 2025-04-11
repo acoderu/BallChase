@@ -16,278 +16,290 @@ import time
 
 class GroundPositionFilter:
     """
-    Specialized filter for tracking basketballs moving on the ground.
-    
-    Features:
-    - Constrains movement to ground plane
-    - Handles varying movement speeds
-    - Manages direction changes
-    - Adjusts for basketball physics
+    Filter for tracking ground-constrained basketball movement.
+    Improved with motion state feedback and enhanced jump detection.
     """
     
     def __init__(self, config=None):
-        """Initialize the ground position filter with configuration parameters."""
-        # Default configuration
-        self.config = {
-            "max_speed": 5.0,                # Maximum allowed speed in m/s
-            "position_filter_alpha": 0.7,     # Position smoothing factor (higher = more responsive)
-            "ground_plane_z": 0.127,         # Default expected z-coordinate for ball center (5 inches - half of basketball)
-            "ground_plane_tolerance": 0.03,  # Tolerance for ground plane detection (3 cm)
-            "min_speed_threshold": 0.05,     # Min speed to be considered moving (m/s)
-            "direction_filter_size": 5,      # Number of samples for direction filtering
-            "acceleration_limit": 8.0,       # Maximum allowed acceleration (m/s²)
-            "basketball_radius": 0.127       # Basketball radius in meters (5 inches)
-        }
+        self.config = config or {}
         
-        # Override defaults with provided config
-        if config:
-            for key, value in config.items():
-                if key in self.config:
-                    self.config[key] = value
+        # Basketball parameters
+        self.max_speed = self.config.get("max_speed", 5.0)
+        self.position_filter_alpha = self.config.get("position_filter_alpha", 0.7)
+        self.ground_plane_z = self.config.get("ground_plane_z", 0.127)  # Default basketball radius
+        self.basketball_radius = self.config.get("basketball_radius", 0.127)
         
-        # Initialize state variables
-        self.last_position = None         # Last filtered position
-        self.last_raw_position = None     # Last raw (unfiltered) position
-        self.last_velocity = [0.0, 0.0]   # Last estimated velocity [vx, vy]
-        self.last_timestamp = 0           # Timestamp of last update
+        # Current state
+        self.current_position = None
+        self.filtered_position = None
+        self.current_velocity = [0.0, 0.0, 0.0]
+        self.last_update_time = None
         
-        # Position and velocity history
-        self.position_history = deque(maxlen=10)
-        self.direction_history = deque(maxlen=self.config["direction_filter_size"])
-        self.velocity_magnitude_history = deque(maxlen=5)
+        # History for velocity calculation
+        self.position_history = []
+        self.time_history = []
         
-        # Track statistics
-        self.position_jumps = 0      # Count of discontinuous position jumps
-        self.filtered_positions = 0  # Count of filtered positions
-    
+        # Increase history length for smoother filtering
+        self.history_max_length = 10  # Increased from 5 to 10 for better smoothing
+        
+        # Statistics
+        self.position_jumps = 0
+        self.jump_threshold = 0.1  # Minimum jump distance to count
+        self.total_distance = 0.0
+        self.max_observed_speed = 0.0
+        
+        # NEW: Add stationary history for state-specific filtering
+        self.stationary_positions = []
+        self.stationary_max_length = 30  # Longer history for stationary objects
+        
+        # NEW: Add motion state information
+        self.motion_state = "unknown"
+        self.motion_state_count = {"stationary": 0, "long_stationary": 0, "moving": 0}
+        
+        # NEW: Velocity validation system
+        self.velocity_history = []
+        self.velocity_history_max_length = 10
+        self.velocity_confidence = 1.0  # 0.0-1.0 scale
+        
     def reset(self):
         """Reset the filter state."""
-        self.last_position = None
-        self.last_raw_position = None
-        self.last_velocity = [0.0, 0.0]
-        self.last_timestamp = 0
-        self.position_history.clear()
-        self.direction_history.clear()
-        self.velocity_magnitude_history.clear()
+        self.current_position = None
+        self.filtered_position = None
+        self.current_velocity = [0.0, 0.0, 0.0]
+        self.last_update_time = None
+        self.position_history = []
+        self.time_history = []
         self.position_jumps = 0
-        self.filtered_positions = 0
+        self.total_distance = 0.0
+        self.max_observed_speed = 0.0
+        self.stationary_positions = []
+        self.velocity_history = []
     
-    def update(self, position, timestamp=None):
+    def update(self, position, timestamp, motion_state=None):
         """
-        Process a new position measurement and return filtered position.
+        Update the filter with a new position measurement.
         
         Args:
-            position: Tuple/list of (x, y, z) coordinates
-            timestamp: Time of measurement (defaults to current time)
+            position (list): [x, y, z] position
+            timestamp (float): Current time
+            motion_state (str, optional): Current motion state if available
             
         Returns:
-            Filtered position as (x, y, z) tuple
+            list: Filtered position
         """
-        if timestamp is None:
-            timestamp = time.time()
+        # Update motion state if provided
+        if motion_state is not None:
+            self.motion_state = motion_state
+            # Update state counter
+            if motion_state in ["stationary", "long_stationary"]:
+                self.motion_state_count["stationary"] += 1
+                if motion_state == "long_stationary":
+                    self.motion_state_count["long_stationary"] += 1
+                self.motion_state_count["moving"] = max(0, self.motion_state_count["moving"] - 1)
+            else:
+                self.motion_state_count["moving"] += 1
+                self.motion_state_count["stationary"] = max(0, self.motion_state_count["stationary"] - 1)
+                self.motion_state_count["long_stationary"] = max(0, self.motion_state_count["long_stationary"] - 1)
         
-        # Convert position to list for manipulation
-        position = list(position)
-        
-        # If this is the first position, initialize and return
-        if self.last_position is None:
-            # Initialize with this position (but constrain z to ground plane)
-            ground_position = self._constrain_to_ground_plane(position)
-            self.last_position = ground_position
-            self.last_raw_position = position
-            self.last_timestamp = timestamp
-            self.position_history.append(ground_position)
-            return tuple(ground_position)
+        # For the first update, just store the position
+        if self.current_position is None:
+            self.current_position = list(position)
+            self.filtered_position = list(position)
+            self.last_update_time = timestamp
+            return list(position)
         
         # Calculate time delta
-        dt = timestamp - self.last_timestamp
+        dt = timestamp - self.last_update_time
         if dt <= 0:
-            # Prevent division by zero or negative time
-            dt = 0.01  # 10ms minimum
+            # Invalid time delta, just return current position
+            return self.filtered_position
+            
+        # Store previous position for jump detection
+        prev_position = list(self.filtered_position)
         
-        # Apply ground plane constraint
-        ground_position = self._constrain_to_ground_plane(position)
+        # Calculate distance from previous position
+        dx = position[0] - self.filtered_position[0]
+        dy = position[1] - self.filtered_position[1]
+        dz = position[2] - self.filtered_position[2]
+        distance = (dx*dx + dy*dy + dz*dz) ** 0.5
         
-        # Calculate current velocity
-        curr_velocity = self._estimate_velocity(ground_position, dt)
-        
-        # Check for impossible movements (speed/acceleration limits)
-        filtered_position = self._filter_impossible_movements(ground_position, curr_velocity, dt)
-        
-        # Apply adaptive smoothing
-        smoothed_position = self._apply_smoothing(filtered_position)
-        
-        # Update state variables
-        self.last_raw_position = position
-        self.last_position = smoothed_position
-        self.last_timestamp = timestamp
-        self.position_history.append(smoothed_position)
-        self.filtered_positions += 1
-        
-        return tuple(smoothed_position)
-    
-    def _constrain_to_ground_plane(self, position):
-        """
-        Constrain the position to the ground plane.
-        The basketball center should be at basketball_radius height above ground.
-        """
-        # Copy to avoid modifying original
-        position = list(position)
-        
-        # Calculate expected z-height for basketball center
-        expected_z = self.config["basketball_radius"]
-        
-        # Check if measured z is within tolerance
-        tolerance = self.config["ground_plane_tolerance"]
-        if abs(position[2] - expected_z) > tolerance:
-            # Replace with expected z
-            position[2] = expected_z
-        
-        return position
-    
-    def _estimate_velocity(self, position, dt):
-        """Estimate current velocity based on position change."""
-        if self.last_position is None:
-            return [0.0, 0.0]
-        
-        # Calculate raw velocity (only x-y plane for ground movement)
-        vx = (position[0] - self.last_position[0]) / dt
-        vy = (position[1] - self.last_position[1]) / dt
-        
-        # Calculate direction and magnitude
-        magnitude = math.sqrt(vx*vx + vy*vy)
-        
-        # If moving significantly, record direction
-        if magnitude > self.config["min_speed_threshold"]:
-            direction = [vx/magnitude, vy/magnitude] if magnitude > 0 else [0, 0]
-            self.direction_history.append(direction)
-            self.velocity_magnitude_history.append(magnitude)
-        
-        return [vx, vy]
-    
-    def _filter_impossible_movements(self, position, velocity, dt):
-        """Filter out physically impossible movements based on speed/acceleration."""
-        if self.last_position is None:
-            return position
-        
-        # Create a copy to work with
-        filtered_pos = list(position)
-        
-        # Calculate distance and speed
-        dx = position[0] - self.last_position[0]
-        dy = position[1] - self.last_position[1]
-        distance = math.sqrt(dx*dx + dy*dy)
+        # Calculate speed
         speed = distance / dt
         
-        # Check if speed exceeds limit
-        if speed > self.config["max_speed"]:
-            # Position jump detected - could be noise or tracking error
-            self.position_jumps += 1
-            
-            # Scale back to maximum allowed distance
-            max_distance = self.config["max_speed"] * dt
-            scale_factor = max_distance / distance if distance > 0 else 0
-            
-            # Apply scaled movement
-            filtered_pos[0] = self.last_position[0] + dx * scale_factor
-            filtered_pos[1] = self.last_position[1] + dy * scale_factor
+        # NEW: Apply velocity sanity check based on motion state
+        velocity_valid = True
+        expected_max_speed = self.max_speed
         
-        # Check for excessive acceleration
-        if len(self.velocity_magnitude_history) > 0:
-            # Calculate acceleration
-            prev_velocity_magnitude = sum(self.velocity_magnitude_history) / len(self.velocity_magnitude_history)
-            current_velocity_magnitude = math.sqrt(velocity[0]**2 + velocity[1]**2)
-            acceleration = abs(current_velocity_magnitude - prev_velocity_magnitude) / dt
+        # Adjust expected max speed based on motion state
+        if self.motion_state == "stationary":
+            expected_max_speed = 0.5  # 0.5 m/s max for stationary objects
+        elif self.motion_state == "long_stationary":
+            expected_max_speed = 0.2  # 0.2 m/s max for long-term stationary
+        
+        # Check if speed is implausible
+        if speed > expected_max_speed:
+            # Calculate how many standard deviations from recent speeds
+            if len(self.velocity_history) >= 3:
+                recent_speeds = [v[3] for v in self.velocity_history[-3:]]
+                avg_speed = sum(recent_speeds) / len(recent_speeds)
+                if speed > avg_speed * 3:  # More than 3x recent average
+                    velocity_valid = False
+                    # Treat as jump rather than valid movement
+                    self.position_jumps += 1
+        
+        # NEW: Special handling for stationary and long-stationary objects
+        if self.motion_state in ["stationary", "long_stationary"]:
+            # For stationary objects, use stronger filtering to reject jumps
+            filter_alpha = self.position_filter_alpha * 0.5  # More aggressive smoothing (0.35 vs 0.7)
             
-            # If acceleration exceeds limit, dampen the change
-            if acceleration > self.config["acceleration_limit"]:
-                # Calculate maximum allowed velocity change
-                max_vel_change = self.config["acceleration_limit"] * dt
+            # For long-stationary objects, use even stronger filtering
+            if self.motion_state == "long_stationary":
+                filter_alpha = self.position_filter_alpha * 0.3  # Very aggressive smoothing (0.21 vs 0.7)
                 
-                # Direction of velocity change
-                if current_velocity_magnitude > prev_velocity_magnitude:
-                    # Speeding up - limit acceleration
-                    allowed_velocity = prev_velocity_magnitude + max_vel_change
-                else:
-                    # Slowing down - limit deceleration
-                    allowed_velocity = max(0, prev_velocity_magnitude - max_vel_change)
+                # Add position to stationary history
+                self.stationary_positions.append(list(position))
+                if len(self.stationary_positions) > self.stationary_max_length:
+                    self.stationary_positions.pop(0)
                 
-                # Scale current velocity
-                if current_velocity_magnitude > 0:
-                    scale = allowed_velocity / current_velocity_magnitude
-                    scaled_vx = velocity[0] * scale
-                    scaled_vy = velocity[1] * scale
+                # If we have enough history, use centroid of recent positions
+                if len(self.stationary_positions) >= 5:
+                    # Calculate centroid of recent positions
+                    centroid = [0, 0, 0]
+                    for pos in self.stationary_positions:
+                        centroid[0] += pos[0]
+                        centroid[1] += pos[1]
+                        centroid[2] += pos[2]
+                    centroid = [c / len(self.stationary_positions) for c in centroid]
                     
-                    # Calculate new position based on scaled velocity
-                    filtered_pos[0] = self.last_position[0] + scaled_vx * dt
-                    filtered_pos[1] = self.last_position[1] + scaled_vy * dt
+                    # Use centroid with very slight update from new position
+                    self.filtered_position = [
+                        centroid[0] * 0.9 + position[0] * 0.1,
+                        centroid[1] * 0.9 + position[1] * 0.1,
+                        self.ground_plane_z  # Force to ground plane
+                    ]
+                else:
+                    # Standard EMA filter with lower alpha
+                    self.filtered_position = [
+                        self.filtered_position[0] * (1 - filter_alpha) + position[0] * filter_alpha,
+                        self.filtered_position[1] * (1 - filter_alpha) + position[1] * filter_alpha,
+                        self.ground_plane_z  # Force to ground plane
+                    ]
+            else:
+                # Regular stationary - standard EMA filter with lower alpha
+                self.filtered_position = [
+                    self.filtered_position[0] * (1 - filter_alpha) + position[0] * filter_alpha,
+                    self.filtered_position[1] * (1 - filter_alpha) + position[1] * filter_alpha,
+                    self.ground_plane_z  # Force to ground plane
+                ]
+        else:
+            # Moving object - use standard filter
+            # Check if this is a position jump rather than real movement
+            if distance > self.jump_threshold and speed > self.max_speed:
+                self.position_jumps += 1
+                # Use less filtering weight for suspected jumps (0.3 vs 0.7)
+                filter_alpha = self.position_filter_alpha * 0.3
+            else:
+                # Normal EMA filter
+                filter_alpha = self.position_filter_alpha
+                
+            # Apply EMA filter
+            self.filtered_position = [
+                self.filtered_position[0] * (1 - filter_alpha) + position[0] * filter_alpha,
+                self.filtered_position[1] * (1 - filter_alpha) + position[1] * filter_alpha,
+                self.ground_plane_z  # Force to ground plane
+            ]
         
-        return filtered_pos
-    
-    def _apply_smoothing(self, position):
-        """Apply adaptive position smoothing based on movement dynamics."""
-        if self.last_position is None:
-            return position
-        
-        # Get basic smoothing factor
-        alpha = self.config["position_filter_alpha"]
-        
-        # If there's enough history, adapt smoothing factor based on movement
-        if len(self.velocity_magnitude_history) > 0:
-            avg_speed = sum(self.velocity_magnitude_history) / len(self.velocity_magnitude_history)
-            
-            # More smoothing for very slow movements (reduce noise)
-            if avg_speed < 0.1:  # Nearly stationary
-                alpha = 0.3  # More smoothing
-            # Less smoothing for fast movements (more responsive)
-            elif avg_speed > 1.0:  # Fast movement
-                alpha = 0.8  # Less smoothing
-        
-        # Apply exponential filter
-        smoothed = [
-            alpha * position[0] + (1 - alpha) * self.last_position[0],
-            alpha * position[1] + (1 - alpha) * self.last_position[1],
-            position[2]  # Z is already constrained to ground plane
+        # Calculate velocity vector
+        velocity = [
+            (self.filtered_position[0] - prev_position[0]) / dt,
+            (self.filtered_position[1] - prev_position[1]) / dt,
+            0.0  # No vertical velocity for ground movement
         ]
         
-        return smoothed
+        # Calculate speed from velocity
+        current_speed = (velocity[0]**2 + velocity[1]**2 + velocity[2]**2) ** 0.5
+        
+        # NEW: Apply velocity validation
+        if velocity_valid:
+            # Store velocity with timestamp and speed
+            self.velocity_history.append((velocity[0], velocity[1], velocity[2], current_speed, timestamp))
+            if len(self.velocity_history) > self.velocity_history_max_length:
+                self.velocity_history.pop(0)
+                
+            # Update current velocity with smoothing
+            if len(self.velocity_history) >= 3:
+                # Use weighted average of recent velocities
+                total_weight = 0
+                weighted_vel = [0, 0, 0]
+                
+                for i, (vx, vy, vz, spd, ts) in enumerate(self.velocity_history[-3:]):
+                    # More recent velocities get higher weight
+                    weight = i + 1
+                    total_weight += weight
+                    weighted_vel[0] += vx * weight
+                    weighted_vel[1] += vy * weight
+                    weighted_vel[2] += vz * weight
+                
+                self.current_velocity = [v / total_weight for v in weighted_vel]
+            else:
+                self.current_velocity = velocity
+        
+        # Update history
+        self.position_history.append(list(self.filtered_position))
+        self.time_history.append(timestamp)
+        
+        if len(self.position_history) > self.history_max_length:
+            self.position_history.pop(0)
+            self.time_history.pop(0)
+        
+        # Update statistics
+        self.total_distance += distance
+        self.max_observed_speed = max(self.max_observed_speed, current_speed)
+        
+        # Update last update time
+        self.last_update_time = timestamp
+        
+        # Return filtered position
+        return self.filtered_position
     
     def get_velocity(self):
-        """Return the current estimated velocity as [vx, vy]."""
-        return self.last_velocity
+        """Get current velocity vector."""
+        return self.current_velocity
     
     def get_speed(self):
-        """Return the current speed in m/s."""
-        if self.last_velocity:
-            return math.sqrt(self.last_velocity[0]**2 + self.last_velocity[1]**2)
-        return 0.0
+        """Get current speed magnitude."""
+        return (self.current_velocity[0]**2 + 
+                self.current_velocity[1]**2 + 
+                self.current_velocity[2]**2) ** 0.5
     
-    def get_movement_direction(self):
-        """Return the current movement direction as [dx, dy] unit vector."""
-        # Use average direction for stability
-        if not self.direction_history:
-            return [0.0, 0.0]
+    def get_statistics(self):
+        """Get filter statistics for diagnostics."""
+        current_speed = self.get_speed()
         
-        # Calculate average direction from history
-        avg_x = 0.0
-        avg_y = 0.0
-        for direction in self.direction_history:
-            avg_x += direction[0]
-            avg_y += direction[1]
-        
-        # Normalize
-        count = len(self.direction_history)
-        if count > 0:
-            avg_x /= count
-            avg_y /= count
+        # Calculate average speed from position history
+        avg_speed = 0.0
+        if len(self.position_history) >= 2 and len(self.time_history) >= 2:
+            total_distance = 0.0
+            for i in range(1, len(self.position_history)):
+                p1 = self.position_history[i-1]
+                p2 = self.position_history[i]
+                dx = p2[0] - p1[0]
+                dy = p2[1] - p1[1]
+                dz = p2[2] - p1[2]
+                total_distance += (dx*dx + dy*dy + dz*dz) ** 0.5
             
-            # Convert back to unit vector
-            magnitude = math.sqrt(avg_x*avg_x + avg_y*avg_y)
-            if magnitude > 0.001:  # Avoid division by near-zero
-                avg_x /= magnitude
-                avg_y /= magnitude
+            time_span = self.time_history[-1] - self.time_history[0]
+            if time_span > 0:
+                avg_speed = total_distance / time_span
         
-        return [avg_x, avg_y]
+        return {
+            "current_speed": current_speed,
+            "average_speed": avg_speed,
+            "position_jumps": self.position_jumps,
+            "total_distance": self.total_distance,
+            "max_observed_speed": self.max_observed_speed,
+            "motion_state": self.motion_state
+        }
     
     def predict_position(self, time_ahead):
         """
@@ -299,23 +311,12 @@ class GroundPositionFilter:
         Returns:
             Predicted position as (x, y, z)
         """
-        if self.last_position is None or not self.last_velocity:
+        if self.filtered_position is None or not self.current_velocity:
             return None
         
         # Simple linear prediction with current velocity
-        pred_x = self.last_position[0] + self.last_velocity[0] * time_ahead
-        pred_y = self.last_position[1] + self.last_velocity[1] * time_ahead
-        pred_z = self.last_position[2]  # Z stays constant (ground plane)
+        pred_x = self.filtered_position[0] + self.current_velocity[0] * time_ahead
+        pred_y = self.filtered_position[1] + self.current_velocity[1] * time_ahead
+        pred_z = self.filtered_position[2]  # Z stays constant (ground plane)
         
         return (pred_x, pred_y, pred_z)
-    
-    def get_statistics(self):
-        """Return filter statistics as a dictionary."""
-        return {
-            "position_jumps": self.position_jumps,
-            "filtered_positions": self.filtered_positions,
-            "position_jump_rate": self.position_jumps / max(1, self.filtered_positions),
-            "current_speed": self.get_speed(),
-            "average_speed": sum(self.velocity_magnitude_history) / max(1, len(self.velocity_magnitude_history)) 
-                            if self.velocity_magnitude_history else 0
-        }

@@ -52,9 +52,11 @@ filter:
 
 # Tracking reliability thresholds
 tracking:
-  position_uncertainty_threshold: 0.5  # Position uncertainty threshold for reliable tracking
-  velocity_uncertainty_threshold: 1.0  # Velocity uncertainty threshold for reliable tracking
-  consecutive_updates_required: 3      # Required number of successful consecutive updates
+  position_uncertainty_threshold: 0.12  # Reduced from 0.15 for improved tracking stability
+  velocity_uncertainty_threshold: 0.8
+  tracking_reliability_buffer_size: 5  # Number of consecutive reliability checks to buffer
+  tracking_reliability_threshold: 3     # Number of "true" values needed to start tracking
+  tracking_loss_threshold: 1            # Number of "false" values needed to stop tracking (lower = more persistent)
 
 # Distance-based reliability settings
 reliability:
@@ -75,8 +77,12 @@ physical_measurements:
 # Advanced features
 advanced_features:
   use_bbox_distance_estimation: true
-  allow_tracking_with_2d_only: true
+  allow_tracking_with_2d_only: true      # Enable 2D-only tracking (important for stationary ball with yolo_2d)
   increased_uncertainty_mode: true
+  stationary_object_tolerance: 1.3       # Multiplier for position uncertainty when object is stationary
+  use_smoothed_state_estimation: true    # Use temporal smoothing to reduce uncertainty spikes
+  maximum_position_uncertainty: 0.5      # Maximum allowed position uncertainty in meters
+  maximum_velocity_uncertainty: 2.0      # Maximum allowed velocity uncertainty in m/s
 
 # Performance optimization settings for Raspberry Pi
 performance:

@@ -9,7 +9,7 @@ import numpy as np
 
 class HSVTuner(Node):  
     """  
-    A ROS2 node for interactively tuning HSV parameters to detect tennis balls.  
+    A ROS2 node for interactively tuning HSV parameters to detect basketballs.  
     
     This node:  
     1. Subscribes to a camera topic  
@@ -43,12 +43,12 @@ class HSVTuner(Node):
         cv2.resizeWindow("Trackbars", 640, 300)  
         
         # Create trackbars for HSV tuning  
-        # Tennis ball default starting values (yellow)  
-        cv2.createTrackbar("LowerH", "Trackbars", 25, 179, self.nothing)  
-        cv2.createTrackbar("LowerS", "Trackbars", 50, 255, self.nothing)  
-        cv2.createTrackbar("LowerV", "Trackbars", 80, 255, self.nothing)  
+        # Basketball default starting values (tanned red/orange)
+        cv2.createTrackbar("LowerH", "Trackbars", 0, 179, self.nothing)  
+        cv2.createTrackbar("LowerS", "Trackbars", 100, 255, self.nothing)  
+        cv2.createTrackbar("LowerV", "Trackbars", 100, 255, self.nothing)  
         
-        cv2.createTrackbar("UpperH", "Trackbars", 45, 179, self.nothing)  
+        cv2.createTrackbar("UpperH", "Trackbars", 20, 179, self.nothing)  
         cv2.createTrackbar("UpperS", "Trackbars", 255, 255, self.nothing)  
         cv2.createTrackbar("UpperV", "Trackbars", 255, 255, self.nothing)  
         
