@@ -636,8 +636,14 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             'active': False,
             'start_time': 0.0,
             'previous_reliability': False,
-            'tolerance_seconds': 0.8
+            'tolerance_seconds': 2.0,  # Increased from 0.8 to 2.0 seconds as default
+            'base_tolerance': 2.0,     # Store base tolerance value for adaptive calculations
+            'adaptive_enabled': True   # Enable adaptive tolerance adjustment
         }
+        
+        # Add sensor history for adaptive gap tolerance
+        self.sensor_update_intervals = {sensor: deque(maxlen=10) for sensor in ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']}
+        self.last_sensor_update_times = {sensor: 0.0 for sensor in ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']}
         
         # Tracking variables
         self.initialized = False
@@ -3029,17 +3035,82 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 self.sensor_gap_window['start_time'] = current_time
                 self.sensor_gap_window['previous_reliability'] = True
                 
-                # For long-stationary objects, extend the tolerance window
+                # 1. Motion-Aware Base Tolerance
+                # Start with the base tolerance from configuration
+                base_tolerance = self.sensor_gap_window.get('base_tolerance', 2.0)
+                
+                # Apply motion-based multipliers instead of hardcoded values
                 motion_state = self.detect_motion_state()
                 if motion_state == "long_stationary":
-                    self.sensor_gap_window['tolerance_seconds'] = 2.0  # 2 seconds for long-stationary
+                    # For long-stationary objects, allow MUCH longer gaps (5x)
+                    tolerance = base_tolerance * 5.0  # 10 seconds for long-stationary
                 elif motion_state == "stationary":
-                    self.sensor_gap_window['tolerance_seconds'] = 1.2  # 1.2 seconds for regular stationary
+                    # For regular stationary, use 2.5x longer gaps
+                    tolerance = base_tolerance * 2.5  # 5 seconds for stationary
                 else:
-                    self.sensor_gap_window['tolerance_seconds'] = 0.5  # 0.5 seconds for moving objects
+                    # For moving objects, use the base tolerance
+                    tolerance = base_tolerance
+                    
+                # Store the adjusted tolerance
+                self.sensor_gap_window['tolerance_seconds'] = tolerance
                 
-                if self.debug_level >= 2:
-                    self.get_logger().debug(
+                # 2. Implement the Adaptive Tolerance Mechanism
+                if self.sensor_gap_window.get('adaptive_enabled', True):
+                    max_avg_interval = 0.0
+                    for sensor in self.expected_sensors:
+                        intervals = self.sensor_update_intervals.get(sensor, [])
+                        if intervals:
+                            avg_interval = sum(intervals) / len(intervals)
+                            max_avg_interval = max(max_avg_interval, avg_interval)
+                    
+                    # Set tolerance to at least 4x the maximum average update interval
+                    adaptive_tolerance = max(tolerance, max_avg_interval * 4.0)
+                    
+                    # Cap the maximum tolerance at a reasonable value (15 seconds)
+                    adaptive_tolerance = min(15.0, adaptive_tolerance)
+                    
+                    # Use the adaptive tolerance if it's higher than the motion-based tolerance
+                    self.sensor_gap_window['tolerance_seconds'] = max(tolerance, adaptive_tolerance)
+                
+                # 3. Track Sensor-Specific Gap Patterns
+                if motion_state in ["stationary", "long_stationary"]:
+                    for sensor in self.expected_sensors:
+                        # If this sensor has recent data, it's not showing a stationary gap pattern
+                        if current_time - self.last_detection_time.get(sensor, 0) < 1.0:
+                            continue
+                            
+                        # If this is a known gap-prone sensor (like lidar during stationary periods)
+                        if sensor == 'lidar' or not sensor.endswith('_2d'):
+                            # Create a flag for specific sensors if it doesn't exist
+                            if not hasattr(self, 'stationary_gap_patterns'):
+                                self.stationary_gap_patterns = {}
+                            if sensor not in self.stationary_gap_patterns:
+                                self.stationary_gap_patterns[sensor] = False
+                                
+                            # Mark this sensor as having a stationary gap pattern
+                            self.stationary_gap_patterns[sensor] = True
+                            
+                            # Log this pattern recognition occasionally
+                            if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
+                                self.get_logger().debug(f"Recognized {sensor} gap pattern during {motion_state} state")
+                
+                # 4. Apply Very Long Tolerance for Known Gap Patterns
+                if motion_state in ["stationary", "long_stationary"] and hasattr(self, 'stationary_gap_patterns'):
+                    gap_pattern_sensors = sum(1 for s, has_pattern in self.stationary_gap_patterns.items() if has_pattern)
+                    
+                    # If most sensors show stationary gap patterns, use a much larger tolerance
+                    if gap_pattern_sensors >= 2:  # At least 2 sensors showing the pattern
+                        extended_tolerance = 30.0 if motion_state == "long_stationary" else 15.0
+                        self.sensor_gap_window['tolerance_seconds'] = max(self.sensor_gap_window['tolerance_seconds'], extended_tolerance)
+                        
+                        # Log this special adjustment occasionally
+                        if self.debug_level >= 1 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 30 == 0:
+                            self.get_logger().info(
+                                f"Using extended gap tolerance for {motion_state} with known gap patterns: {self.sensor_gap_window['tolerance_seconds']:.1f}s"
+                            )
+                
+                if self.debug_level >= 1:
+                    self.get_logger().info(
                         f"Sensor gap tolerance activated: window={self.sensor_gap_window['tolerance_seconds']:.1f}s, "
                         f"state={motion_state}, uncertainty={pos_uncertainty:.3f}m"
                     )
