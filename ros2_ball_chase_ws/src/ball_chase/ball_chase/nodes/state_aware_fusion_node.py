@@ -1539,7 +1539,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         Common callback for all sensor measurements.
         
         Args:
-            msg (PointStamped): The point measurement from sensor
+            msg (PointStamped): The point message from sensor
             source (str): Sensor source identifier
         """
         # Skip if not active yet
@@ -1572,7 +1572,54 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     f"({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame"
                 )
             
-            # Add to synchronization buffer
+            # For 2D YOLO data, estimate 3D position here instead of waiting until publish time
+            if source == 'yolo_2d' and 'yolo_2d' in self.bbox_data:
+                try:
+                    # Only estimate 3D position if we have recent bbox data
+                    estimated_3d_point = self.estimate_3d_from_2d(msg, self.bbox_data['yolo_2d'])
+                    if estimated_3d_point:
+                        # Add estimated 3D point to the sensor buffer as a new sensor type
+                        self.sensor_buffer.add_measurement('yolo_2d_est3d', estimated_3d_point, msg.header.stamp)
+                        
+                        # Initialize this sensor type in the reliability tracker if needed
+                        if hasattr(self, 'sensor_reliability_tracker'):
+                            if 'yolo_2d_est3d' not in self.sensor_reliability_tracker.sensors:
+                                self.sensor_reliability_tracker.add_sensor('yolo_2d_est3d')
+                        
+                        # Initialize gap tracking for this sensor type
+                        if hasattr(self, 'sensor_gap_detection') and 'yolo_2d_est3d' not in self.sensor_gap_detection:
+                            self.sensor_gap_detection['yolo_2d_est3d'] = {
+                                'gap_detected': False,
+                                'gap_start_time': 0.0,
+                                'gap_level': 0.0,
+                                'recent_gaps': deque(maxlen=5)
+                            }
+                            
+                        # Also update last detection time for this derived sensor
+                        if hasattr(self, 'last_detection_time'):
+                            self.last_detection_time['yolo_2d_est3d'] = current_time
+                            
+                        # Initialize counts if needed
+                        if 'yolo_2d_est3d' not in self.sensor_counts:
+                            self.sensor_counts['yolo_2d_est3d'] = 0
+                        self.sensor_counts['yolo_2d_est3d'] += 1
+                        
+                        # Initialize FPS tracking
+                        if 'yolo_2d_est3d' not in self.sensor_frame_times:
+                            self.sensor_frame_times['yolo_2d_est3d'] = deque(maxlen=40)
+                        self.sensor_frame_times['yolo_2d_est3d'].append(current_time)
+                        
+                        # Log occasionally for debugging
+                        if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
+                            self.get_logger().debug(
+                                f"Created 3D estimate from YOLO 2D: pos=({estimated_3d_point.point.x:.2f}, "
+                                f"{estimated_3d_point.point.y:.2f}, {estimated_3d_point.point.z:.2f})"
+                            )
+                except Exception as e:
+                    if self.debug_level >= 1:
+                        self.get_logger().warn(f"Error creating 3D estimate from YOLO 2D: {str(e)}")
+            
+            # Add to synchronization buffer (always add original measurement too)
             self.sensor_buffer.add_measurement(source, msg, msg.header.stamp)
             
             # If this is a 3D source and we're not initialized yet, try initializing
@@ -2869,7 +2916,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                                 )
                         except Exception as e:
                             if self.debug_level >= 2:
-                                self.get_logger().warn(f"Error transforming YOLO 2D position: {str(e)}")
+                                self.get_logger().warn(f"Could not list frames: {str(e)}")
         
         # IMPROVEMENT: Pass through GroundPositionFilter as second stage
         # If we have an estimated position from 2D data, use that instead of Kalman state
@@ -3736,6 +3783,155 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                                   f"(velocity={avg_velocity:.3f}m/s{confidence_str})")
                                 
         return actual_state
+
+    def estimate_3d_from_2d(self, detection_msg, bbox_data):
+        """
+        Estimate a 3D position from a 2D detection and bounding box.
+        
+        Args:
+            detection_msg (PointStamped): The 2D detection message
+            bbox_data (dict): Bounding box data with width, height, and timestamp
+            
+        Returns:
+            PointStamped: Estimated 3D position or None if estimation fails
+        """
+        try:
+            current_time = time.time()
+            
+            # Check if bbox data is recent enough
+            if current_time - bbox_data.get('timestamp', 0) > 1.0:
+                return None
+                
+            # Get bounding box dimensions
+            bbox_width = bbox_data.get('width', 0)
+            bbox_height = bbox_data.get('height', 0)
+            
+            if bbox_width <= 0 or bbox_height <= 0:
+                return None
+                
+            # Known basketball diameter in meters
+            basketball_diameter_meters = self.basketball_radius * 2
+            
+            # Calculate distance based on apparent size vs actual size
+            focal_length_pixels = 345.58  # Calibrated focal length for camera
+            estimated_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
+            
+            # Get camera to reference frame transform
+            transform = self.tf_buffer.lookup_transform(
+                self.reference_frame,
+                'ascamera_color_0',  # Frame of the YOLO camera
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.2)
+            )
+            
+            # Camera's position in reference frame
+            camera_pos_x = transform.transform.translation.x
+            camera_pos_y = transform.transform.translation.y
+            camera_pos_z = transform.transform.translation.z
+            
+            # Get image dimensions
+            image_width = 320  # Width of the camera image
+            image_height = 320  # Height of the camera image
+            image_center_x = image_width / 2
+            image_center_y = image_height / 2
+            
+            # Get the detection coordinates
+            detection_x = detection_msg.point.x  # X pixel coordinate in image
+            detection_y = detection_msg.point.y  # Y pixel coordinate in image
+            
+            # Calculate offsets from center of image
+            offset_x = detection_x - image_center_x
+            offset_y = detection_y - image_center_y
+            
+            # Camera coordinate system mapping:
+            # - Z axis points forward
+            # - X axis points right
+            # - Y axis points down
+            
+            # Convert pixel offsets to direction vector using focal length
+            camera_dir_z = focal_length_pixels  # Z is forward in camera frame
+            camera_dir_x = offset_x             # X is right in camera frame
+            camera_dir_y = offset_y             # Y is down in camera frame
+            
+            # Normalize the direction vector
+            dir_magnitude = math.sqrt(camera_dir_x**2 + camera_dir_y**2 + camera_dir_z**2)
+            if dir_magnitude > 0:
+                camera_dir_x /= dir_magnitude
+                camera_dir_y /= dir_magnitude
+                camera_dir_z /= dir_magnitude
+            
+            # Extract rotation quaternion
+            qx = transform.transform.rotation.x
+            qy = transform.transform.rotation.y
+            qz = transform.transform.rotation.z
+            qw = transform.transform.rotation.w
+            
+            # Convert quaternion to rotation matrix
+            norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+            qw /= norm
+            qx /= norm
+            qy /= norm
+            qz /= norm
+            
+            # Convert to rotation matrix elements
+            xx = qx * qx
+            xy = qx * qy
+            xz = qx * qz
+            xw = qx * qw
+            yy = qy * qy
+            yz = qy * qz
+            yw = qy * qw
+            zz = qz * qz
+            zw = qz * qw
+            
+            # Rotation matrix
+            r00 = 1 - 2 * (yy + zz)
+            r01 = 2 * (xy - zw)
+            r02 = 2 * (xz + yw)
+            r10 = 2 * (xy + zw)
+            r11 = 1 - 2 * (xx + zz)
+            r12 = 2 * (yz - xw)
+            r20 = 2 * (xz - yw)
+            r21 = 2 * (yz + xw)
+            r22 = 1 - 2 * (xx + yy)
+            
+            # Apply rotation to camera direction
+            ref_dir_x = r00 * camera_dir_x + r01 * camera_dir_y + r02 * camera_dir_z
+            ref_dir_y = r10 * camera_dir_x + r11 * camera_dir_y + r12 * camera_dir_z
+            ref_dir_z = r20 * camera_dir_x + r21 * camera_dir_y + r22 * camera_dir_z
+            
+            # Normalize direction vector
+            dir_magnitude = math.sqrt(ref_dir_x*ref_dir_x + ref_dir_y*ref_dir_y + ref_dir_z*ref_dir_z)
+            if dir_magnitude > 0:
+                ref_dir_x /= dir_magnitude
+                ref_dir_y /= dir_magnitude
+                ref_dir_z /= dir_magnitude
+            
+            # Calculate estimated position in reference frame
+            est_x = camera_pos_x + estimated_distance * ref_dir_x
+            est_y = camera_pos_y + estimated_distance * ref_dir_y
+            est_z = self.basketball_z_height  # Always at basketball height above ground
+            
+            # Create and return a new 3D point message in the reference frame
+            estimated_point = PointStamped()
+            estimated_point.header.stamp = detection_msg.header.stamp
+            estimated_point.header.frame_id = self.reference_frame
+            estimated_point.point.x = est_x
+            estimated_point.point.y = est_y
+            estimated_point.point.z = est_z
+            
+            if self.debug_level >= 2:
+                self.get_logger().debug(
+                    f"Estimated 3D from YOLO 2D: distance={estimated_distance:.2f}m, "
+                    f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
+                )
+                
+            return estimated_point
+            
+        except Exception as e:
+            if self.debug_level >= 1:
+                self.get_logger().warn(f"Error estimating 3D from YOLO 2D: {str(e)}")
+            return None
 
 def main(args=None):
     rclpy.init(args=args)
