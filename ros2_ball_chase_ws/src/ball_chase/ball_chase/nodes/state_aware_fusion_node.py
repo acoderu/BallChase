@@ -760,23 +760,49 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # PHASE 5: Set up subscriptions (only now that transform is available)
             self.setup_subscriptions()
             
-            # PHASE 6: Initialize filter with defaults
-            self.initialize_filter_with_defaults()
+            # DO NOT initialize filter here - instead, set a flag for delayed initialization
+            self.pending_initialization = True
+            self.initialization_attempts = 0
             
             # PHASE 7: Set up processing timers
             self.setup_timers()
+            
+            # Add a one-shot timer to attempt initialization after callbacks have had time to run
+            self.create_timer(0.5, self.delayed_initialization, callback_group=None)
             
             # Mark as activated and ready
             self.is_activated = True
             self.is_ready = True
             
-            self.get_logger().info("Node activated successfully and is now ready")
+            self.get_logger().info("Node activated - waiting for sensor data to initialize filter")
             
             return TransitionCallbackReturn.SUCCESS
-            
         except Exception as e:
             self.get_logger().error(f"Error during activation: {str(e)}")
             return TransitionCallbackReturn.ERROR
+
+    def delayed_initialization(self):
+        """Attempt delayed initialization after sensors have had time to provide data."""
+        if not self.initialized and self.pending_initialization:
+            lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
+            yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
+            
+            if lidar_msg or (yolo_2d_msg and 'yolo_2d' in self.bbox_data):
+                # We have sensor data - initialize now
+                self.initialize_filter_with_defaults()
+                self.pending_initialization = False
+                self.get_logger().info("Delayed initialization completed with sensor data")
+            else:
+                # Try again if we haven't made too many attempts
+                self.initialization_attempts += 1
+                if self.initialization_attempts < 5:
+                    self.get_logger().info(f"No sensor data yet for initialization (attempt {self.initialization_attempts})")
+                    self.create_timer(0.5, self.delayed_initialization, callback_group=None)
+                else:
+                    # Fall back to default initialization after multiple attempts
+                    self.get_logger().warn("No sensor data available after multiple attempts - initializing with defaults")
+                    self.initialize_filter_with_defaults()
+                    self.pending_initialization = False
     
     def retry_activation(self):
         """
@@ -1509,10 +1535,32 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.get_logger().info("Processing timers initialized")
 
     def initialize_filter_with_defaults(self):
-        """Initialize filter with default values."""
+        """Initialize filter with default values, using first available sensor data if possible."""
         try:
-            # Set default state with zero position and velocity - use 4D state
-            self.state = np.zeros(4, dtype=np.float32)
+            # Check for any existing sensor data to use for initialization
+            lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
+            yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
+            
+            # Initialize position from sensor data if available
+            if lidar_msg:
+                transformed = self.transform_point(lidar_msg, self.reference_frame, False)
+                if transformed:
+                    self.state = np.zeros(4, dtype=np.float32)
+                    self.state[0] = transformed.point.x  # x position
+                    self.state[1] = transformed.point.y  # y position
+                    self.get_logger().info(f"Filter initialized with lidar data: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
+            elif yolo_2d_msg and 'yolo_2d' in self.bbox_data:
+                # Attempt to estimate 3D position from 2D yolo data
+                estimated_3d = self.estimate_3d_from_2d(yolo_2d_msg, self.bbox_data['yolo_2d'])
+                if estimated_3d:
+                    self.state = np.zeros(4, dtype=np.float32)
+                    self.state[0] = estimated_3d.point.x  # x position
+                    self.state[1] = estimated_3d.point.y  # y position
+                    self.get_logger().info(f"Filter initialized with estimated 3D from yolo_2d: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
+            else:
+                # Fall back to zeros if no sensor data available
+                self.state = np.zeros(4, dtype=np.float32)
+                self.get_logger().info("Filter initialized with zeros - waiting for sensor data to update position")
             
             # Set initial covariance (high uncertainty since this is a guess)
             self.covariance = np.eye(4, dtype=np.float32)
@@ -2326,6 +2374,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Find synchronized measurements
             measurements = self.sensor_buffer.find_synchronized_measurements(min_sensors=1)
             
+            # Add debug logging for sensor synchronization
+            #self.get_logger().info(f"Synchronized measurements found: {list(measurements.keys())}")
+            
             # Update sync quality metrics
             self.sync_quality_metrics['attempt_counts'] += 1
             if measurements:
@@ -2403,6 +2454,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             
             # IMPROVEMENT 8: Update tracking status using confidence-based approach
             self.update_tracking_status()
+            
+            # Log the state before publishing
+            #self.get_logger().info(f"State before publishing: pos=({self.state[0]:.2f}, {self.state[1]:.2f}), velocity=({self.state[2]:.2f}, {self.state[3]:.2f})")
             
             # Publish fused position and velocity
             self.publish_state()
@@ -2525,6 +2579,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         # Store successful update flag to track if any measurements were processed
         successful_update = False
         
+        # Add debug log for synchronized measurements
+        #self.get_logger().info(f"Synchronized measurements found: {list(measurements.keys())}")
+        
         # Motion state for adaptive validation
         motion_state = self.detect_motion_state()
         
@@ -2641,6 +2698,11 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             except np.linalg.LinAlgError:
                 self.get_logger().warn(f"Matrix inversion failed during Kalman update for {sensor}")
                 continue
+        
+        # Add debug log for state after update
+        #self.get_logger().info(
+        #    f"State after update: pos=({self.state[0]:.2f}, {self.state[1]:.2f}), uncertainty={self.position_uncertainty:.2f}"
+        #)
         
         # Return flag indicating if any measurements were successfully processed
         return successful_update
@@ -3800,6 +3862,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             
             # Check if bbox data is recent enough
             if current_time - bbox_data.get('timestamp', 0) > 1.0:
+                self.get_logger().warn(f"Bbox data too old: {current_time - bbox_data.get('timestamp', 0):.2f}s > 1.0s")
                 return None
                 
             # Get bounding box dimensions
@@ -3807,6 +3870,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             bbox_height = bbox_data.get('height', 0)
             
             if bbox_width <= 0 or bbox_height <= 0:
+                self.get_logger().warn(f"Invalid bbox dimensions: {bbox_width}x{bbox_height}")
                 return None
                 
             # Known basketball diameter in meters
@@ -3817,12 +3881,19 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             estimated_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
             
             # Get camera to reference frame transform
-            transform = self.tf_buffer.lookup_transform(
-                self.reference_frame,
-                'ascamera_color_0',  # Frame of the YOLO camera
-                rclpy.time.Time(),
-                rclpy.duration.Duration(seconds=0.2)
-            )
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    self.reference_frame,
+                    'ascamera_color_0',  # Frame of the YOLO camera
+                    rclpy.time.Time(),
+                    rclpy.duration.Duration(seconds=0.2)
+                )
+                
+                # Log transform details for debugging
+                self.get_logger().info(f"Transform details for {detection_msg.header.frame_id}: translation=[{transform.transform.translation.x:.4f}, {transform.transform.translation.y:.4f}, {transform.transform.translation.z:.4f}]")
+            except Exception as te:
+                self.get_logger().error(f"Transform lookup failed: {str(te)}")
+                return None
             
             # Camera's position in reference frame
             camera_pos_x = transform.transform.translation.x
@@ -3920,17 +3991,19 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             estimated_point.point.y = est_y
             estimated_point.point.z = est_z
             
-            if self.debug_level >= 2:
-                self.get_logger().debug(
-                    f"Estimated 3D from YOLO 2D: distance={estimated_distance:.2f}m, "
-                    f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
-                )
+            # Enhanced debugging for 3D estimation
+            self.get_logger().info(
+                f"3D estimation details: bbox={bbox_width}x{bbox_height}, "
+                f"distance={estimated_distance:.2f}m, "
+                f"camera_dir=({camera_dir_x:.2f}, {camera_dir_y:.2f}, {camera_dir_z:.2f}), "
+                f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
+            )
                 
             return estimated_point
             
         except Exception as e:
-            if self.debug_level >= 1:
-                self.get_logger().warn(f"Error estimating 3D from YOLO 2D: {str(e)}")
+            self.get_logger().error(f"Error estimating 3D from YOLO 2D: {str(e)}")
+            self.get_logger().error(traceback.format_exc())
             return None
 
 def main(args=None):

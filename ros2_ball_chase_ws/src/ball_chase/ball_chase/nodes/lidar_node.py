@@ -8,7 +8,7 @@ This node processes 2D LIDAR data to detect a basketball and provide 3D position
 It correlates LIDAR data with camera-based detections from YOLO and HSV nodes.
 
 Features:
-- Processes 2D LIDAR scans to find circular patterns matching a basketball (10-inch diameter)
+- Processes 2D LIDAR scans to find circular patterns matching a basketball (9-inch diameter)
 - Uses YOLO and HSV detections to trigger validation of potential basketball locations
 - Publishes the basketball's 3D position in the robot's coordinate frame
 - Provides visualization markers for debugging in RViz
@@ -16,9 +16,9 @@ Features:
 
 Physical Setup:
 - LIDAR mounted 6 inches (15.24 cm) above ground
-- Basketball diameter: 10 inches (25.4 cm)
+- Basketball diameter: 9 inches (22.86 cm)
 - LIDAR beam intersects basketball at a consistent height
-- Basketball rolls on ground only (center is always 5 inches above ground)
+- Basketball rolls on ground only (center is always 4.5 inches above ground)
 """
 # Standard library imports
 import sys
@@ -285,8 +285,8 @@ class BasketballLidarDetector(Node):
         # Get basketball configuration
         basketball_config = self.config.get('basketball', {})
         
-        # Core parameters - ensure basketball sized (10 inch diameter)
-        self.ball_radius = basketball_config.get('radius', 0.127)  # 5 inches (10 inch diameter)
+        # Core parameters - ensure basketball sized (9 inch diameter, updated from 10 inch)
+        self.ball_radius = basketball_config.get('radius', 0.1143)  # 4.5 inches (9 inch diameter)
         self.max_distance = basketball_config.get('max_distance', 0.2)
         self.min_points = basketball_config.get('min_points', 6)
         self.detection_samples = basketball_config.get('detection_samples', 30)
@@ -381,6 +381,23 @@ class BasketballLidarDetector(Node):
             self.hsv_callback,
             queue_size
         )
+        
+        # YOLO bounding box subscription for 3D position estimation
+        from std_msgs.msg import Float32MultiArray
+        yolo_bbox_topic = input_topics.get('yolo_bbox', '/basketball/yolo/bbox')
+        self.yolo_bbox_subscription = self.create_subscription(
+            Float32MultiArray,
+            yolo_bbox_topic,
+            self.yolo_bbox_callback,
+            queue_size
+        )
+        
+        # Initialize bounding box data storage
+        self.yolo_bbox_data = {
+            'width': 0.0,
+            'height': 0.0,
+            'timestamp': 0.0
+        }
     
     def _setup_publishers(self):
         """Set up publishers for this node."""
@@ -623,8 +640,48 @@ class BasketballLidarDetector(Node):
                     f"with confidence {confidence:.2f}"
                 )
             
+            # Get 3D point estimate from YOLO bbox if available
+            estimated_3d_point = None
+            if source == "YOLO" and hasattr(self, 'yolo_bbox_data') and self.yolo_bbox_data.get('timestamp', 0) > time.time() - 1.0:
+                bbox_width = self.yolo_bbox_data.get('width', 0)
+                bbox_height = self.yolo_bbox_data.get('height', 0)
+                
+                if bbox_width > 0 and bbox_height > 0:
+                    estimated_3d_point = self.estimate_3d_from_2d(msg, bbox_width, bbox_height)
+                    
+                    if estimated_3d_point is not None and self.performance_mode != "MINIMAL":
+                        self.get_logger().info(
+                            f"Using estimated 3D position from YOLO 2D: "
+                            f"({estimated_3d_point[0]:.2f}, {estimated_3d_point[1]:.2f}, {estimated_3d_point[2]:.2f})"
+                        )
+            
+            # Use estimated 3D point as primary seed if available, transformed point as backup
+            seed_point = estimated_3d_point if estimated_3d_point is not None else transformed_point
+            
             # Find basketball in LIDAR data
-            ball_results = self.find_basketball_ransac(transformed_point)
+            ball_results = self.find_basketball_ransac(seed_point)
+            
+            # If no ball found with RANSAC but we have an estimated 3D position from bbox,
+            # directly use that instead of relying only on LIDAR points
+            if (not ball_results or len(ball_results) == 0) and estimated_3d_point is not None:
+                if self.performance_mode != "MINIMAL":
+                    self.get_logger().info("No matching ball found with RANSAC, using estimated 3D position directly")
+                
+                # Calculate a default quality score based on confidence
+                quality = 0.6  # Base quality for bbox-derived positions
+                if hasattr(msg.point, 'z'):
+                    # Adjust quality based on confidence if available (0.0-1.0)
+                    quality = min(0.9, quality + msg.point.z * 0.3)
+                
+                # Publish the estimated position
+                self.publish_ball_position(
+                    estimated_3d_point,  # Use the estimated 3D point
+                    10,                  # Default cluster size
+                    quality,             # Quality score
+                    f"{source}_3D_EST",  # Mark as estimated
+                    msg.header.stamp     # Use original timestamp
+                )
+                return
             
             # Process the best detected ball (if any)
             if ball_results and len(ball_results) > 0:
@@ -1249,6 +1306,165 @@ class BasketballLidarDetector(Node):
         
         # Log the error
         self.get_logger().error(f"LIDAR ERROR: {message}")
+
+    def estimate_3d_from_2d(self, detection_msg, bbox_width, bbox_height):
+        """
+        Estimate a 3D position from a 2D detection and bbox dimensions.
+        Similar to the fusion node's implementation but optimized for LIDAR use.
+        
+        Args:
+            detection_msg (PointStamped): The 2D detection message
+            bbox_width (float): Width of bounding box in pixels
+            bbox_height (float): Height of bounding box in pixels
+            
+        Returns:
+            np.ndarray: Estimated 3D position [x, y, z] or None if estimation fails
+        """
+        try:
+            # Known basketball diameter in meters
+            basketball_diameter_meters = self.ball_radius * 2
+            
+            # Calculate distance based on apparent size vs actual size
+            focal_length_pixels = 345.58  # Calibrated focal length for camera
+            estimated_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
+            
+            # Get camera frame
+            camera_frame = detection_msg.header.frame_id or "ascamera_color_0"
+            
+            # Get camera to lidar frame transform
+            transform = self.tf_buffer.lookup_transform(
+                "lidar_frame",
+                camera_frame,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.2)
+            )
+            
+            # Extract camera position in lidar frame
+            camera_pos_x = transform.transform.translation.x
+            camera_pos_y = transform.transform.translation.y
+            camera_pos_z = transform.transform.translation.z
+            
+            # Get image dimensions
+            image_width = 320  # Width of the camera image
+            image_height = 320  # Height of the camera image
+            image_center_x = image_width / 2
+            image_center_y = image_height / 2
+            
+            # Get detection coordinates
+            detection_x = detection_msg.point.x
+            detection_y = detection_msg.point.y
+            
+            # Calculate offsets from center
+            offset_x = detection_x - image_center_x
+            offset_y = detection_y - image_center_y
+            
+            # Camera coordinate system mapping:
+            # - Z axis points forward
+            # - X axis points right
+            # - Y axis points down
+            
+            # Convert pixel offsets to direction vector using focal length
+            camera_dir_z = focal_length_pixels  # Z is forward in camera frame
+            camera_dir_x = offset_x             # X is right in camera frame 
+            camera_dir_y = offset_y             # Y is down in camera frame
+            
+            # Normalize the direction vector
+            dir_magnitude = math.sqrt(camera_dir_x**2 + camera_dir_y**2 + camera_dir_z**2)
+            if dir_magnitude > 0:
+                camera_dir_x /= dir_magnitude
+                camera_dir_y /= dir_magnitude
+                camera_dir_z /= dir_magnitude
+            
+            # Extract rotation quaternion
+            qx = transform.transform.rotation.x
+            qy = transform.transform.rotation.y
+            qz = transform.transform.rotation.z
+            qw = transform.transform.rotation.w
+            
+            # Convert quaternion to rotation matrix
+            norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+            qw /= norm
+            qx /= norm
+            qy /= norm
+            qz /= norm
+            
+            # Convert to rotation matrix elements
+            xx = qx * qx
+            xy = qx * qy
+            xz = qx * qz
+            xw = qx * qw
+            yy = qy * qy
+            yz = qy * qz
+            yw = qy * qw
+            zz = qz * qz
+            zw = qz * qw
+            
+            # Rotation matrix
+            r00 = 1 - 2 * (yy + zz)
+            r01 = 2 * (xy - zw)
+            r02 = 2 * (xz + yw)
+            r10 = 2 * (xy + zw)
+            r11 = 1 - 2 * (xx + zz)
+            r12 = 2 * (yz - xw)
+            r20 = 2 * (xz - yw)
+            r21 = 2 * (yz + xw)
+            r22 = 1 - 2 * (xx + yy)
+            
+            # Apply rotation to camera direction
+            ref_dir_x = r00 * camera_dir_x + r01 * camera_dir_y + r02 * camera_dir_z
+            ref_dir_y = r10 * camera_dir_x + r11 * camera_dir_y + r12 * camera_dir_z
+            ref_dir_z = r20 * camera_dir_x + r21 * camera_dir_y + r22 * camera_dir_z
+            
+            # Normalize direction vector
+            dir_magnitude = math.sqrt(ref_dir_x*ref_dir_x + ref_dir_y*ref_dir_y + ref_dir_z*ref_dir_z)
+            if dir_magnitude > 0:
+                ref_dir_x /= dir_magnitude
+                ref_dir_y /= dir_magnitude
+                ref_dir_z /= dir_magnitude
+            
+            # Calculate estimated position in reference frame
+            est_x = camera_pos_x + estimated_distance * ref_dir_x
+            est_y = camera_pos_y + estimated_distance * ref_dir_y
+            est_z = self.ball_center_height  # Always at basketball height above ground
+            
+            if self.performance_mode != "MINIMAL":
+                self.get_logger().info(
+                    f"Estimated 3D from YOLO 2D: distance={estimated_distance:.2f}m, "
+                    f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
+                )
+                
+            return np.array([est_x, est_y, est_z])
+            
+        except Exception as e:
+            self.get_logger().warn(f"Error estimating 3D from 2D: {str(e)}")
+            return None
+
+    def yolo_bbox_callback(self, msg):
+        """
+        Process bounding box information from YOLO detection.
+        
+        Args:
+            msg (Float32MultiArray): Bounding box data formatted as [center_x, center_y, width, height, confidence]
+        """
+        try:
+            # Handle Float32MultiArray format for YOLO
+            if hasattr(msg, 'data') and len(msg.data) >= 4:
+                # Format: [center_x, center_y, width, height, confidence]
+                width = msg.data[2]   # width is the 3rd value (index 2)
+                height = msg.data[3]  # height is the 4th value (index 3)
+                
+                # Store bounding box data with timestamp
+                self.yolo_bbox_data = {
+                    'width': width,
+                    'height': height,
+                    'timestamp': time.time()
+                }
+                
+                if self.performance_mode != "MINIMAL":
+                    self.get_logger().info(f"Received YOLO bbox: {width:.1f}x{height:.1f}")
+                    
+        except Exception as e:
+            self.get_logger().warn(f"Error processing YOLO bbox: {str(e)}")
 
 def main(args=None):
     """Main entry point."""

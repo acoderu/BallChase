@@ -13,6 +13,7 @@ import time
 from collections import deque
 import psutil  # Add psutil for accurate CPU monitoring
 import sys  # For immediate log flushing
+import math  # Add math for 3D estimation calculations
 
 # ROS2 imports
 import rclpy
@@ -166,6 +167,12 @@ class OptimizedPositionEstimator(Node):
         self.debug_depth = DEPTH_CONFIG.get("debug_depth", False)  # Specific flag for depth debugging
         self.last_debug_log = 0
         
+        # Set up ball position logging timer
+        self.ball_position_log_timer = self.create_timer(
+            self.ball_position_log_interval, 
+            self._log_ball_position_and_direction
+        )
+        
         # Log initialization (minimal)
         self.get_logger().info("Pi-Optimized 3D Position Estimator initialized")
         
@@ -295,6 +302,16 @@ class OptimizedPositionEstimator(Node):
         # Add timing and path counter statistics 
         self.path_counts = {'direct': 0, 'window': 0, 'roi': 0, 'fallback': 0}
         self.last_roi_time = 0
+        
+        # Ball position and direction tracking
+        self.ball_position_log_timer = None
+        self.most_recent_detection = {
+            'position': None,
+            'timestamp': 0.0,
+            'source': None
+        }
+        self.last_ball_position_log = 0.0
+        self.ball_position_log_interval = 5.0  # Log every 5 seconds
     
     def _preallocate_messages(self):
         """Pre-allocate message objects to reduce memory allocations."""
@@ -414,6 +431,24 @@ class OptimizedPositionEstimator(Node):
             self.qos_profile,
             callback_group=self.callback_group
         )
+        
+        # Subscribe to YOLO bounding box information
+        from std_msgs.msg import Float32MultiArray
+        yolo_bbox_topic = TOPICS["input"].get('yolo_bbox', '/basketball/yolo/bbox')
+        self.yolo_bbox_subscription = self.create_subscription(
+            Float32MultiArray,
+            yolo_bbox_topic,
+            self.yolo_bbox_callback,
+            self.qos_profile,
+            callback_group=self.callback_group
+        )
+        
+        # Initialize bounding box data storage
+        self.yolo_bbox_data = {
+            'width': 0.0,
+            'height': 0.0,
+            'timestamp': 0.0
+        }
     
     def _setup_publishers(self):
         """Set up all publishers for this node."""
@@ -533,6 +568,18 @@ class OptimizedPositionEstimator(Node):
         if not self.verified_transform:
             return
             
+        # Apply scaling to the detection coordinates from YOLO 320x320 to camera 640x480
+        # This is a critical fix for the coordinate mismatch
+        scaled_msg = msg
+        if source == 'YOLO':
+            # Create a copy to avoid modifying the original message
+            scaled_msg = PointStamped()
+            scaled_msg.header = msg.header
+            # Apply scaling factors to convert from YOLO coordinates to camera coordinates
+            scaled_msg.point.x = msg.point.x * self.x_scale
+            scaled_msg.point.y = msg.point.y * self.y_scale
+            scaled_msg.point.z = msg.point.z
+            
         # Track detection position and movement for adaptive frame skipping
         if self.adaptive_frame_skip:
             current_pos = (msg.point.x, msg.point.y)
@@ -560,11 +607,11 @@ class OptimizedPositionEstimator(Node):
                 }
         
         # Check cache first for performance
-        if self._check_position_cache(msg, source):
+        if self._check_position_cache(scaled_msg, source):
             return
             
         # Process detection
-        self._get_3d_position(msg, source)
+        self._get_3d_position(scaled_msg, source)
     
     def _check_position_cache(self, msg, source):
         """Improved cache checking with higher hit rates."""
@@ -781,7 +828,8 @@ class OptimizedPositionEstimator(Node):
         else:
             stats = self.depth_region_stats[region_key]
             stats['total_attempts'] += 1
-            stats['successful'] += 1
+            if success and nonzero_count > 0:
+                stats['successful'] += 1
             stats['success_rate'] = stats['successful'] / stats['total_attempts']
             stats['last_updated'] = current_time
         
@@ -1187,6 +1235,21 @@ class OptimizedPositionEstimator(Node):
             orig_x = float(msg.point.x)
             orig_y = float(msg.point.y)
             
+            # Check if we have a YOLO bounding box for this detection
+            estimated_3d_point = None
+            if source == "YOLO" and hasattr(self, 'yolo_bbox_data') and self.yolo_bbox_data.get('timestamp', 0) > time.time() - 1.0:
+                bbox_width = self.yolo_bbox_data.get('width', 0)
+                bbox_height = self.yolo_bbox_data.get('height', 0)
+                
+                if bbox_width > 0 and bbox_height > 0:
+                    estimated_3d_point = self._estimate_3d_from_2d(msg, bbox_width, bbox_height)
+                    
+                    if estimated_3d_point is not None and self.debug_mode:
+                        self.get_logger().info(
+                            f"Using estimated 3D position from YOLO 2D: "
+                            f"({estimated_3d_point[0]:.2f}, {estimated_3d_point[1]:.2f}, {estimated_3d_point[2]:.2f})"
+                        )
+            
             # First transform these coordinates to 3D in the detection camera frame
             # using a standard depth or assumed Z value (e.g., 1.0m)
             # This creates a ray from the camera through the detected point
@@ -1233,6 +1296,66 @@ class OptimizedPositionEstimator(Node):
             
             # Get depth using fast estimation
             median_depth, valid_points = self._ultra_fast_depth(pixel_x, pixel_y)
+            
+            # Check if estimated 3D point is available from YOLO
+            # Use it as a reference to validate or replace the depth measurement
+            if estimated_3d_point is not None:
+                # Calculate reference depth from estimated 3D point
+                estimated_distance = np.linalg.norm(estimated_3d_point)
+                
+                # If depth measurement is poor quality or differs significantly from estimate
+                if valid_points < 3 or abs(median_depth - estimated_distance) > estimated_distance * 0.3:
+                    if self.debug_mode:
+                        self.get_logger().info(
+                            f"Using YOLO estimate instead of depth: {median_depth:.2f}m vs {estimated_distance:.2f}m "
+                            f"(Valid points: {valid_points})"
+                        )
+                    # Use the estimated distance instead
+                    median_depth = estimated_distance
+                    valid_points = max(valid_points, 5)  # Ensure reasonable quality score
+                    
+                    # Create the 3D position message directly from the estimated point
+                    reference_position_msg = PointStamped()
+                    reference_position_msg.header.stamp = self.get_clock().now().to_msg()
+                    reference_position_msg.header.frame_id = self.reference_frame
+                    reference_position_msg.point.x = float(estimated_3d_point[0])
+                    reference_position_msg.point.y = float(estimated_3d_point[1]) 
+                    reference_position_msg.point.z = float(estimated_3d_point[2])
+                    
+                    # Transform to depth camera frame
+                    depth_frame_msg = self._transform_to_depth_frame(reference_position_msg)
+                    if depth_frame_msg is not None:
+                        # Use this as our final position
+                        position_msg = depth_frame_msg
+                        
+                        # Publish
+                        source_msg = self.reusable_yolo_point if source == "YOLO" else self.reusable_hsv_point
+                        source_msg.header = position_msg.header
+                        source_msg.point = position_msg.point
+                        
+                        # Publish to source-specific topic
+                        if source == "YOLO":
+                            self.yolo_3d_publisher.publish(source_msg)
+                        else:  # HSV
+                            self.hsv_3d_publisher.publish(source_msg)
+                        
+                        # Also publish to combined topic
+                        self.position_publisher.publish(source_msg)
+                        
+                        # Update cache and statistics
+                        self.detection_cache[source]['timestamp'] = time.time()
+                        if self.detection_cache[source]['detection_2d'] is None:
+                            self.detection_cache[source]['detection_2d'] = PointStamped()
+                        self.detection_cache[source]['detection_2d'].header = msg.header
+                        self.detection_cache[source]['detection_2d'].point = msg.point
+                        
+                        if self.detection_cache[source]['position_3d'] is None:
+                            self.detection_cache[source]['position_3d'] = PointStamped()
+                        self.detection_cache[source]['position_3d'].header = position_msg.header
+                        self.detection_cache[source]['position_3d'].point = position_msg.point
+                        
+                        self.successful_conversions += 1
+                        return True
             
             # Better handling of poor quality cases
             if valid_points == 0:
@@ -1364,6 +1487,256 @@ class OptimizedPositionEstimator(Node):
         except Exception as e:
             self.log_error(f"Error in 3D conversion: {str(e)}")
             return False
+
+    def yolo_bbox_callback(self, msg):
+        """
+        Process bounding box information from YOLO detection.
+        
+        Args:
+            msg (Float32MultiArray): Bounding box data formatted as [center_x, center_y, width, height, confidence]
+        """
+        try:
+            # Handle Float32MultiArray format for YOLO
+            if hasattr(msg, 'data') and len(msg.data) >= 4:
+                # Format: [center_x, center_y, width, height, confidence]
+                width = msg.data[2]   # width is the 3rd value (index 2)
+                height = msg.data[3]  # height is the 4th value (index 3)
+                
+                # Store bounding box data with timestamp
+                self.yolo_bbox_data = {
+                    'width': width,
+                    'height': height,
+                    'timestamp': time.time()
+                }
+                
+                if self.debug_mode:
+                    self.get_logger().info(f"Received YOLO bbox: {width:.1f}x{height:.1f}")
+                    
+        except Exception as e:
+            self.log_error(f"Error processing YOLO bbox: {str(e)}", is_warning=True)
+
+    def _estimate_3d_from_2d(self, detection_msg, bbox_width, bbox_height):
+        """
+        Estimate a 3D position from a 2D detection and bbox dimensions.
+        Similar to the LIDAR node's implementation but optimized for depth camera use.
+        
+        Args:
+            detection_msg (PointStamped): The 2D detection message
+            bbox_width (float): Width of bounding box in pixels
+            bbox_height (float): Height of bounding box in pixels
+            
+        Returns:
+            np.ndarray: Estimated 3D position [x, y, z] or None if estimation fails
+        """
+        try:
+            # Known basketball diameter in meters (standard basketball is ~9 inches / 22.86 cm)
+            basketball_diameter_meters = 0.2286
+            
+            # Calculate distance based on apparent size vs actual size
+            focal_length_pixels = 345.58  # Calibrated focal length for camera
+            estimated_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
+            
+            # Get camera frame
+            camera_frame = detection_msg.header.frame_id or self.detection_camera_frame
+            
+            # Get camera to reference frame transform
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    self.reference_frame,
+                    camera_frame,
+                    rclpy.time.Time(),
+                    rclpy.duration.Duration(seconds=0.2)
+                )
+            except Exception as e:
+                self.log_error(f"Transform lookup error in 3D estimation: {str(e)}", is_warning=True)
+                return None
+            
+            # Extract camera position in reference frame
+            camera_pos_x = transform.transform.translation.x
+            camera_pos_y = transform.transform.translation.y
+            camera_pos_z = transform.transform.translation.z
+            
+            # Get detection coordinates
+            detection_x = detection_msg.point.x
+            detection_y = detection_msg.point.y
+            
+            # Calculate direction vector using camera intrinsics
+            # We need the ray from camera through the detected pixel
+            ray_x = (detection_x - self.cx) / self.fx
+            ray_y = (detection_y - self.cy) / self.fy
+            ray_z = 1.0  # Forward direction in camera frame
+            
+            # Normalize the direction vector
+            magnitude = math.sqrt(ray_x**2 + ray_y**2 + ray_z**2)
+            if magnitude > 0:
+                ray_x /= magnitude
+                ray_y /= magnitude
+                ray_z /= magnitude
+            
+            # Extract rotation quaternion from transform
+            qx = transform.transform.rotation.x
+            qy = transform.transform.rotation.y
+            qz = transform.transform.rotation.z
+            qw = transform.transform.rotation.w
+            
+            # Convert quaternion to rotation matrix to rotate the ray
+            # Simplified rotation calculation
+            xx = qx * qx
+            xy = qx * qy
+            xz = qx * qz
+            xw = qx * qw
+            yy = qy * qy
+            yz = qy * qz
+            yw = qy * qw
+            zz = qz * qz
+            zw = qz * qw
+            
+            # Rotation matrix elements
+            r00 = 1 - 2 * (yy + zz)
+            r01 = 2 * (xy - zw)
+            r02 = 2 * (xz + yw)
+            r10 = 2 * (xy + zw)
+            r11 = 1 - 2 * (xx + zz)
+            r12 = 2 * (yz - xw)
+            r20 = 2 * (xz - yw)
+            r21 = 2 * (yz + xw)
+            r22 = 1 - 2 * (xx + yy)
+            
+            # Apply rotation to camera ray
+            ref_dir_x = r00 * ray_x + r01 * ray_y + r02 * ray_z
+            ref_dir_y = r10 * ray_x + r11 * ray_y + r12 * ray_z
+            ref_dir_z = r20 * ray_x + r21 * ray_y + r22 * ray_z
+            
+            # Normalize the rotated direction vector
+            magnitude = math.sqrt(ref_dir_x**2 + ref_dir_y**2 + ref_dir_z**2)
+            if magnitude > 0:
+                ref_dir_x /= magnitude
+                ref_dir_y /= magnitude
+                ref_dir_z /= magnitude
+            
+            # Calculate 3D position by extending ray by estimated distance
+            est_x = camera_pos_x + estimated_distance * ref_dir_x
+            est_y = camera_pos_y + estimated_distance * ref_dir_y
+            est_z = camera_pos_z + estimated_distance * ref_dir_z
+            
+            # For basketball tracking, we know the ball is always on the ground
+            # Override est_z with reasonable value for basketball center height (half diameter)
+            est_z = 0.12  # Basketball radius (~12cm) above ground
+            
+            if self.debug_mode:
+                self.get_logger().info(
+                    f"Estimated 3D from YOLO 2D: distance={estimated_distance:.2f}m, "
+                    f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
+                )
+                
+            return np.array([est_x, est_y, est_z])
+            
+        except Exception as e:
+            self.log_error(f"Error estimating 3D from 2D: {str(e)}", is_warning=True)
+            return None
+
+    def _log_ball_position_and_direction(self):
+        """
+        Periodically log the ball's distance and direction for monitoring.
+        This provides more descriptive information about the ball's position.
+        """
+        current_time = time.time()
+        
+        # Check if we have any recent successful detections
+        yolo_timestamp = self.detection_cache['YOLO']['timestamp']
+        hsv_timestamp = self.detection_cache['HSV']['timestamp']
+        
+        # Find the most recent detection
+        position_3d = None
+        source = None
+        
+        if yolo_timestamp > hsv_timestamp and current_time - yolo_timestamp < 2.0:
+            position_3d = self.detection_cache['YOLO']['position_3d']
+            source = "YOLO"
+        elif hsv_timestamp > 0 and current_time - hsv_timestamp < 2.0:
+            position_3d = self.detection_cache['HSV']['position_3d']
+            source = "HSV"
+        
+        # Exit if no recent detection
+        if position_3d is None:
+            self.get_logger().info("Ball tracking: No recent ball detection to report")
+            return
+        
+        # Calculate distance from camera to ball
+        ball_x = position_3d.point.x
+        ball_y = position_3d.point.y
+        ball_z = position_3d.point.z
+        
+        # Get distance from origin (camera position)
+        distance = math.sqrt(ball_x**2 + ball_y**2 + ball_z**2)
+        
+        # Calculate position in reference frame if needed
+        ref_position = None
+        if position_3d.header.frame_id != self.reference_frame:
+            try:
+                # Create a temporary point for transform
+                temp_point = PointStamped()
+                temp_point.header = position_3d.header
+                temp_point.point = position_3d.point
+                
+                # Transform to reference frame
+                ref_point = self._fast_transform(temp_point)
+                if ref_point is not None:
+                    ref_position = (ref_point.point.x, ref_point.point.y, ref_point.point.z)
+            except Exception:
+                pass
+        else:
+            ref_position = (ball_x, ball_y, ball_z)
+        
+        # Log the position, distance and direction
+        if ref_position is not None:
+            # Calculate ground distance (ignore height)
+            ground_distance = math.sqrt(ref_position[0]**2 + ref_position[1]**2)
+            
+            # Calculate direction angles using reference frame coordinates
+            # Azimuth (horizontal angle) - positive is right, negative is left
+            azimuth = math.degrees(math.atan2(ref_position[1], ref_position[0]))
+            
+            # Elevation (vertical angle) - positive is up, negative is down
+            elevation = math.degrees(math.atan2(ref_position[2], math.sqrt(ref_position[0]**2 + ref_position[1]**2)))
+            
+            # Direction in plain language based on reference frame coordinates - fixed direction logic
+            horizontal_direction = "left" if ref_position[1] > 0 else "right"
+            forward_backward = "in front" if ref_position[0] > 0 else "behind"
+            
+            # Descriptive direction from robot's perspective
+            direction_desc = f"{horizontal_direction} and {forward_backward}"
+            
+            # Log detailed information
+            self.get_logger().info(
+                f"🏀 Ball tracking: Distance = {distance:.2f}m | Ground distance = {ground_distance:.2f}m | "
+                f"Position = ({ref_position[0]:.2f}, {ref_position[1]:.2f}, {ref_position[2]:.2f})m | "
+                f"Direction: {direction_desc} | "
+                f"Azimuth = {azimuth:.1f}° | Elevation = {elevation:.1f}° | "
+                f"Source: {source}"
+            )
+            
+            # Update most recent detection data for other components
+            self.most_recent_detection = {
+                'position': ref_position,
+                'timestamp': current_time,
+                'source': source,
+                'distance': distance,
+                'ground_distance': ground_distance,
+                'azimuth': azimuth,
+                'elevation': elevation
+            }
+        else:
+            # Fallback to simple log if reference position not available
+            self.get_logger().info(
+                f"🏀 Ball tracking: Distance = {distance:.2f}m | "
+                f"Position (in {position_3d.header.frame_id}) = ({ball_x:.2f}, {ball_y:.2f}, {ball_z:.2f})m | "
+                f"Direction: {horizontal_direction}, {forward_backward}, {vertical_direction} | "
+                f"Source: {source}"
+            )
+        
+        # Force flush logs
+        sys.stdout.flush()
 
 def main(args=None):
     """Main function to initialize and run the 3D position estimator node."""
