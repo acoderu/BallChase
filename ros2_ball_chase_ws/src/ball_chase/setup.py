@@ -31,7 +31,7 @@ setup(
             'depth_camera_node = ball_chase.nodes.depth_camera_node:main',
             'fusion_node = ball_chase.nodes.fusion_node:main',         
             'state_fusion_node = ball_chase.nodes.state_aware_fusion_node:main', 
-            'base_link_fusion_node = ball_chase.nodes.base_link_fusion_node:main',
+            'state_management_node = ball_chase.nodes.state_management_node:main',            
        ],
     },   
 )
