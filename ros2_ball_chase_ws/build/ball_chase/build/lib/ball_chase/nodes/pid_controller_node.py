@@ -257,8 +257,8 @@ class PIDControllerNode(Node):
                 ('linear_kp', 0.5),     # Proportional gain
                 ('linear_ki', 0.1),     # Integral gain
                 ('linear_kd', 0.05),    # Derivative gain
-                ('linear_min', -0.3),   # Backward limit (m/s)
-                ('linear_max', 0.5),    # Forward limit (m/s)
+                ('linear_min', -0.1),   # Backward limit (m/s) - MODIFIED from -0.3 to -0.1
+                ('linear_max', 0.2),    # Forward limit (m/s) - MODIFIED from 0.5 to 0.2
                 
                 # Angular velocity PID parameters - controls turning
                 ('angular_kp', 1.0),    # Proportional gain
@@ -500,13 +500,17 @@ class PIDControllerNode(Node):
         cmd_vel.linear.x = linear_velocity
         cmd_vel.angular.z = angular_velocity
         
+        # Log every 20th callback velocity values
+        if self.cycle_count % 20 == 0:
+            self.get_logger().info(f"[#{self.cycle_count}] Velocity values - linear: {linear_velocity:.3f} m/s, angular: {angular_velocity:.3f} rad/s")
+        
         # Save for history
         self.velocity_history.append((linear_velocity, angular_velocity))
         if len(self.velocity_history) > 20:  # Keep last 20 commands
             self.velocity_history.pop(0)
         
         # Publish command
-        self.cmd_vel_pub.publish(cmd_vel)
+        #self.cmd_vel_pub.publish(cmd_vel)
         
         # Publish basic diagnostics every cycle
         self.publish_basic_diagnostics(distance_error, angular_error,
@@ -657,15 +661,27 @@ def main(args=None):
     print("Press Ctrl+C to stop the program")
     print("=================================================")
     
+    # Define shutdown handler to ensure robot stops on any exit
+    def shutdown_handler():
+        node.get_logger().info("Shutdown handler called, stopping robot...")
+        # Ensure robot stops on shutdown
+        node.stop_robot()
+        node.destroy_node()
+    
+    # Register shutdown handler
+    rclpy.get_global_executor().add_node(node)
+    rclpy.get_default_context().on_shutdown(shutdown_handler)
+    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("PID Controller shutdown requested")
+        node.get_logger().info("PID Controller shutdown requested via Ctrl+C")
     except Exception as e:
         node.get_logger().error(f"Unexpected error: {str(e)}")
     finally:
-        # Ensure robot stops on shutdown
+        # Explicitly stop the robot before shutdown
         node.stop_robot()
+        node.get_logger().info("Robot motion stopped - setting velocity and rotation to 0")
         node.destroy_node()
         rclpy.shutdown()
 

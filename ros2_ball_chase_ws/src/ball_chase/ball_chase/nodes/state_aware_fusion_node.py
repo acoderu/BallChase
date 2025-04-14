@@ -2014,6 +2014,13 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     # Increment counter
                     self.motion_state_protection['consecutive_stationary_after_long'] += 1
                     
+                    # Log only after every 20 consecutive detections
+                    if self.motion_state_protection['consecutive_stationary_after_long'] % 20 == 0:
+                        self.get_logger().info(
+                            f"Long stationary -> stationary transition accepted after "
+                            f"{self.motion_state_protection['consecutive_stationary_after_long']} consecutive stationary detections"
+                        )
+                    
                     # Need at least 5 consecutive "stationary" detections to override "long_stationary"
                     if self.motion_state_protection['consecutive_stationary_after_long'] < 5:
                         # Not enough evidence - remain in long_stationary

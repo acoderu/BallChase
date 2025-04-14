@@ -3,6 +3,7 @@ depth_camera_node = ball_chase.nodes.depth_camera_node:main
 fusion_node = ball_chase.nodes.fusion_node:main
 hsv_ball_node = ball_chase.nodes.hsv_ball_node:main
 lidar_node = ball_chase.nodes.lidar_node:main
+pid_controller_node = ball_chase.nodes.pid_controller_node:main
 state_fusion_node = ball_chase.nodes.state_aware_fusion_node:main
 state_management_node = ball_chase.nodes.state_management_node:main
 yolo_ball_node = ball_chase.nodes.yolo_ball_node:main

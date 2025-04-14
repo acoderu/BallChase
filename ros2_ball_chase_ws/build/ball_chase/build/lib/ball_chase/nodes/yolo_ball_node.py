@@ -44,6 +44,10 @@ Dependencies:
 - OpenCV
 - Numpy
 """
+# Import BoundingBox2D for bounding box publishing
+from vision_msgs.msg import BoundingBox2D  # Add BoundingBox2D message import
+from geometry_msgs.msg import Pose2D  # Required for BoundingBox2D center field
+
 
 import sys
 import os
@@ -61,6 +65,7 @@ import MNN.numpy as mnn_np
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PointStamped
 from std_msgs.msg import String  # Add String message type
+from std_msgs.msg import Float32MultiArray  # Add Float32MultiArray for simplified bbox
 from cv_bridge import CvBridge
 import cv2 as std_cv2
 import numpy as np
@@ -83,10 +88,11 @@ MODEL_CONFIG = config.get('model', {
     "path": "yolo12n_320.mnn",    # Path to our YOLO model file
     "input_width": 320,           # Width our model expects
     "input_height": 320,          # Height our model expects
-    "precision": "lowBF",         # Lower precision for faster inference
+    #"precision": "lowBF",        # Lower precision for faster inference
+    "precision": "medium",           # Lower precision for faster inference
     "backend": "CPU",             # Using CPU for inference
-    "thread_count": 2,            # Number of CPU threads to use
-    "confidence_threshold": 0.25  # Only keep detections above this confidence
+    "thread_count": 1,            # Number of CPU threads to use
+    "confidence_threshold": 0.2  # Only keep detections above this confidence
 })
 
 # COCO dataset class ID for "sports ball" - this includes tennis balls
@@ -98,7 +104,8 @@ TOPICS = config.get('topics', {
         "camera": "/ascamera/camera_publisher/rgb0/image"
     },
     "output": {
-        "position": "/tennis_ball/yolo/position"
+        "position": "/tennis_ball/yolo/position",
+        "bbox": "/basketball/yolo/bbox"  # Added bbox topic configuration
     }
 })
 
@@ -120,9 +127,11 @@ class TennisBallDetector(Node):
     Published Topics:
     - /tennis_ball/yolo/position (geometry_msgs/PointStamped): 
       The detected ball position with timestamp
+    - /basketball/yolo/bbox (std_msgs/Float32MultiArray):
+      The bounding box of the detected ball for distance estimation
       
     Subscribed Topics:
-    - /ascamera/camera_publisher/rgb0/image (sensor_msgs/Image): 
+    - /ascamera/camera_publisher/rgb0/image (sensor_msgs.Image): 
       RGB camera feed
     """
     
@@ -164,6 +173,14 @@ class TennisBallDetector(Node):
             TOPICS["output"]["position"], 
             10
         )  
+
+        # Create a publisher for bounding box information
+        # This will be used by the fusion node for distance estimation
+        self.bbox_publisher = self.create_publisher(
+            Float32MultiArray, 
+            TOPICS["output"].get("bbox", "/basketball/yolo/bbox"), 
+            10
+        )
 
         # Create a publisher for system diagnostics
         self.system_diagnostics_publisher = self.create_publisher(
@@ -216,6 +233,9 @@ class TennisBallDetector(Node):
         
         # Initialize log file if configured
         self._init_log_file()
+
+        # Log that we've created the bounding box publisher
+        self.get_logger().info(f"Publishing bounding boxes to: {TOPICS['output'].get('bbox', '/basketball/yolo/bbox')}")
 
     def _configure_logging(self, log_config):
         """Configure logger levels and parameters."""
@@ -423,6 +443,9 @@ class TennisBallDetector(Node):
         # Find all tennis ball detections with confidence above threshold
         tennis_ball_indices = []
         for i in range(len(class_ids)):
+            if scores[i] < 0.01:
+                continue
+            #print (f"found class {class_ids[i]}, with score {scores[i]}")
             if (class_ids[i] == TENNIS_BALL_CLASS_ID and 
                 scores[i] > MODEL_CONFIG["confidence_threshold"]):
                 tennis_ball_indices.append(i)
@@ -489,7 +512,6 @@ class TennisBallDetector(Node):
             self.frame_counter = 0
             
         if self.low_power_mode and self.frame_counter % 2 != 0:
-            # Process only every other frame in low power mode
             return
 
         inference_start = TimeUtils.now_as_float()  # Use TimeUtils instead of time.time()
@@ -524,7 +546,7 @@ class TennisBallDetector(Node):
             # If a tennis ball was detected, publish its position
             if best_box is not None:
                 x0, y0, x1, y1 = best_box
-                
+                print ("box found")
                 # Calculate center point of the tennis ball
                 center_x = (x0 + x1) / 2
                 center_y = (y0 + y1) / 2
@@ -554,7 +576,7 @@ class TennisBallDetector(Node):
                     self.diagnostic_metrics['detection_rate_history'].append(detection_rate)
                 
                 # Log significant detections to avoid console flooding
-                if self.image_count % DIAG_CONFIG["log_interval"] == 0 or confidence > 0.6:
+                if self.image_count % DIAG_CONFIG["log_interval"] == 0 or confidence > 0.1:
                     self.get_logger().info(
                         f"YOLO detected ball: ({center_x:.1f}, {center_y:.1f}), "
                         f"Size: {width:.1f}x{height:.1f}, Confidence: {confidence:.2f}"
@@ -587,6 +609,14 @@ class TennisBallDetector(Node):
                 position_msg.point.z = float(confidence)  # Using z for confidence
                 self.ball_publisher.publish(position_msg)
 
+                # Create and populate Float32MultiArray message
+                bbox_data = Float32MultiArray()
+                # Format: [center_x, center_y, width, height, confidence]
+                bbox_data.data = [float(center_x), float(center_y), float(width), float(height), float(confidence)]
+                
+                # Publish the bounding box
+                self.bbox_publisher.publish(bbox_data)
+
                 # Store detailed data for high-confidence detections
                 if confidence > 0.5:
                     if not hasattr(self, 'recent_detections'):
@@ -601,6 +631,7 @@ class TennisBallDetector(Node):
                         "frame_id": self.seq_counter
                     })
             else:
+                #print ("no box")
                 # Only log "no detection" occasionally to avoid flooding logs
                 if self.image_count % 30 == 0:
                     self.get_logger().debug("No tennis ball detected in recent frames")

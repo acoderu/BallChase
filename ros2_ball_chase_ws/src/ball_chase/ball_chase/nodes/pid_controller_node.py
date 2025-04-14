@@ -51,7 +51,7 @@ import numpy as np
 # Topic configuration (ensures consistency with other nodes)
 TOPICS = {
     "input": {
-        "target": "/tennis_ball/target",
+        "target": "/basketball/fused/position",
         "state": "/robot/state"
     },
     "output": {
@@ -257,8 +257,8 @@ class PIDControllerNode(Node):
                 ('linear_kp', 0.5),     # Proportional gain
                 ('linear_ki', 0.1),     # Integral gain
                 ('linear_kd', 0.05),    # Derivative gain
-                ('linear_min', -0.3),   # Backward limit (m/s)
-                ('linear_max', 0.5),    # Forward limit (m/s)
+                ('linear_min', -0.1),   # Backward limit (m/s) - MODIFIED from -0.3 to -0.1
+                ('linear_max', 0.2),    # Forward limit (m/s) - MODIFIED from 0.5 to 0.2
                 
                 # Angular velocity PID parameters - controls turning
                 ('angular_kp', 1.0),    # Proportional gain
@@ -461,11 +461,17 @@ class PIDControllerNode(Node):
             # When not tracking, ensure robot is stopped (unless in a state where another node controls movement)
             if self.robot_state not in ["searching", "lost_ball"]:
                 self.stop_robot()
+            # Log the reason we're not controlling, but only every 10 cycles to avoid log spam
+            if self.debug_level >= 1 and self.cycle_count % 10 == 0:
+                if self.robot_state != "tracking":
+                    self.get_logger().info(f"Not controlling robot - current state: {self.robot_state}")
+                elif self.current_target is None:
+                    self.get_logger().info("Not controlling robot - no target data received yet")
             return
             
         # Check if target is too old (500ms timeout)
         if self.last_target_time is None or (current_time - self.last_target_time) > 0.5:
-            self.get_logger().debug("Target is too old, stopping robot")
+            self.get_logger().warn("Target is too old (>500ms), stopping robot")
             self.stop_robot()
             return
             
@@ -480,12 +486,20 @@ class PIDControllerNode(Node):
         # Use X position (left/right) divided by Z to get normalized offset
         bearing = math.atan2(target.x, target.z)
         
+        # Log target data but only every 20 cycles to avoid verbosity
+        if self.debug_level >= 2 and self.cycle_count % 20 == 0:
+            self.get_logger().info(f"Target position: x={target.x:.2f}, z={target.z:.2f}, distance={distance:.2f}m, bearing={math.degrees(bearing):.1f}°")
+        
         # Calculate desired distance (with minimum safe distance)
         desired_distance = max(self.min_distance, min(distance, self.max_distance))
         
         # Calculate errors
         distance_error = distance - desired_distance - self.target_offset_x
         angular_error = bearing  # We want bearing to be 0 (centered)
+        
+        # Log errors only if they're significant or occasionally
+        if self.debug_level >= 1 and (abs(distance_error) > 0.1 or abs(angular_error) > 0.1 or self.cycle_count % 30 == 0):
+            self.get_logger().info(f"Control errors: distance_error={distance_error:.2f}m, angular_error={math.degrees(angular_error):.1f}°")
         
         # Apply adaptive gains if enabled
         if self.adaptive_gains:
@@ -499,6 +513,10 @@ class PIDControllerNode(Node):
         cmd_vel = Twist()
         cmd_vel.linear.x = linear_velocity
         cmd_vel.angular.z = angular_velocity
+        
+        # Log velocity values less frequently
+        if self.debug_level >= 1 and self.cycle_count % 20 == 0:
+            self.get_logger().info(f"[#{self.cycle_count}] Velocity cmd: linear={linear_velocity:.3f}m/s, angular={angular_velocity:.3f}rad/s")
         
         # Save for history
         self.velocity_history.append((linear_velocity, angular_velocity))
@@ -657,15 +675,27 @@ def main(args=None):
     print("Press Ctrl+C to stop the program")
     print("=================================================")
     
+    # Define shutdown handler to ensure robot stops on any exit
+    def shutdown_handler():
+        node.get_logger().info("Shutdown handler called, stopping robot...")
+        # Ensure robot stops on shutdown
+        node.stop_robot()
+        node.destroy_node()
+    
+    # Register shutdown handler
+    rclpy.get_global_executor().add_node(node)
+    rclpy.get_default_context().on_shutdown(shutdown_handler)
+    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("PID Controller shutdown requested")
+        node.get_logger().info("PID Controller shutdown requested via Ctrl+C")
     except Exception as e:
         node.get_logger().error(f"Unexpected error: {str(e)}")
     finally:
-        # Ensure robot stops on shutdown
+        # Explicitly stop the robot before shutdown
         node.stop_robot()
+        node.get_logger().info("Robot motion stopped - setting velocity and rotation to 0")
         node.destroy_node()
         rclpy.shutdown()
 

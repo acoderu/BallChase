@@ -4,8 +4,8 @@
 Basketball Chaser - State Management Node
 
 This node determines the robot's behavior based on tracking reliability,
-transitioning between states like initialization, tracking, searching,
-lost ball, and stopped states.
+transitioning between states like initialization, tracking, lost ball, 
+and stopped states.
 """
 
 import rclpy
@@ -18,11 +18,24 @@ import math
 import json
 from collections import deque  # For tracking history
 
+# Add a custom JSON encoder for NumPy types
+class NumpyJSONEncoder(json.JSONEncoder):
+    """JSON Encoder that can handle NumPy types."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        return super(NumpyJSONEncoder, self).default(obj)
+
 class RobotState:
     """Enumeration of robot operational states"""
     INITIALIZING = "initializing"  # Startup state, waiting for first reliable detection
     TRACKING = "tracking"          # Actively tracking the ball with reliable detections
-    SEARCHING = "searching"        # Looking for a lost ball using search patterns
     LOST_BALL = "lost_ball"        # Ball not found after extensive searching
     STOPPED = "stopped"            # Stationary state when ball is close and stationary
 
@@ -192,8 +205,21 @@ class BallChaseStateManager(Node):
         Args:
             msg (Bool): Whether tracking is reliable
         """
+        # Initialize message counter if not already created
+        if not hasattr(self, 'tracking_status_msg_count'):
+            self.tracking_status_msg_count = 0
+        
+        # Increment message counter
+        self.tracking_status_msg_count += 1
+        
+        # Store tracking status
         self.tracking_reliable = msg.data
-        self.get_logger().debug(f"Tracking status update: {self.tracking_reliable}")
+        
+        # Log every 10th message with more detail
+        if self.tracking_status_msg_count % 10 == 0:
+            self.get_logger().info(f"Fusion node tracking status message #{self.tracking_status_msg_count}: reliable={self.tracking_reliable}")
+        else:
+            self.get_logger().debug(f"Tracking status update: {self.tracking_reliable}")
     
     def uncertainty_callback(self, msg):
         """
@@ -202,7 +228,21 @@ class BallChaseStateManager(Node):
         Args:
             msg (Float32): Position uncertainty in meters
         """
+        # Initialize message counter if not already created
+        if not hasattr(self, 'uncertainty_msg_count'):
+            self.uncertainty_msg_count = 0
+        
+        # Increment message counter
+        self.uncertainty_msg_count += 1
+        
+        # Store uncertainty value
         self.position_uncertainty = msg.data
+        
+        # Log every 10th message with more detail
+        if self.uncertainty_msg_count % 10 == 0:
+            self.get_logger().info(f"Fusion node uncertainty message #{self.uncertainty_msg_count}: {self.position_uncertainty:.3f}m")
+        else:
+            self.get_logger().debug(f"Position uncertainty update: {self.position_uncertainty:.3f}m")
     
     def position_callback(self, msg):
         """
@@ -213,7 +253,7 @@ class BallChaseStateManager(Node):
         """
         current_time = time.time()
         
-        # Extract position
+        # Extract position - only use 3D sensor data, ignore 2D
         position = np.array([msg.point.x, msg.point.y, msg.point.z])
         
         # Update detection time
@@ -239,8 +279,9 @@ class BallChaseStateManager(Node):
             # First detection
             self.consecutive_detections = 1
         
-        # Calculate distance to ball
-        self.ball_distance = np.linalg.norm(position[:2])  # Only consider XY plane
+        # Calculate distance to ball correctly - use full 3D position 
+        # (ignoring 2D sensor data which adds noise)
+        self.ball_distance = np.linalg.norm(position[:2])  # Only consider XY plane distance
         
         # Update close ball detection
         self.is_ball_close = self.ball_distance <= self.proximity_threshold
@@ -286,17 +327,24 @@ class BallChaseStateManager(Node):
         """
         # Transition from INITIALIZING to TRACKING if reliable detections
         if self.current_state == RobotState.INITIALIZING:
-            if self.consecutive_detections >= self.min_tracking_detections and self.tracking_reliable:
-                self.transition_to_state(RobotState.TRACKING)
-        
-        # Transition from SEARCHING to TRACKING if ball found
-        elif self.current_state == RobotState.SEARCHING:
-            if self.consecutive_detections >= self.min_tracking_detections and self.tracking_reliable:
+            # MODIFIED: Relax reliability requirement if ball is stationary
+            if (self.consecutive_detections >= self.min_tracking_detections and 
+                (self.tracking_reliable or 
+                 (hasattr(self, 'is_ball_stationary') and self.is_ball_stationary) or
+                 (hasattr(self, 'motion_state') and 
+                  self.motion_state in ["stationary", "long_stationary"]))):
+                self.get_logger().info("Transitioning to TRACKING: ball is detected with sufficient confidence or is stationary")
                 self.transition_to_state(RobotState.TRACKING)
         
         # Transition from LOST_BALL to TRACKING if ball reappears
         elif self.current_state == RobotState.LOST_BALL:
-            if self.consecutive_detections >= self.min_tracking_detections and self.tracking_reliable:
+            # MODIFIED: Same relaxed condition for LOST_BALL to TRACKING
+            if (self.consecutive_detections >= self.min_tracking_detections and 
+                (self.tracking_reliable or 
+                 (hasattr(self, 'is_ball_stationary') and self.is_ball_stationary) or
+                 (hasattr(self, 'motion_state') and 
+                  self.motion_state in ["stationary", "long_stationary"]))):
+                self.get_logger().info("Transitioning from LOST_BALL to TRACKING: ball reappeared with reliability or is stationary")
                 self.transition_to_state(RobotState.TRACKING)
         
         # Handle transition to STOPPED if ball is close and stationary
@@ -336,67 +384,37 @@ class BallChaseStateManager(Node):
             time_since_detection = (current_time - self.last_detection_time 
                                    if self.last_detection_time is not None else float('inf'))
             
-            if not self.tracking_reliable or time_since_detection > self.lost_ball_timeout:
+            # Don't transition to LOST_BALL if ball is stationary
+            ignore_reliability = (hasattr(self, 'is_ball_stationary') and self.is_ball_stationary) or \
+                               (hasattr(self, 'motion_state') and 
+                                self.motion_state in ["stationary", "long_stationary"] and
+                                time_since_detection < self.lost_ball_timeout * 1.5)  # Give more time for stationary balls
+            
+            if (not self.tracking_reliable and not ignore_reliability) or time_since_detection > self.lost_ball_timeout:
                 reason = "unreliable tracking" if not self.tracking_reliable else "detection timeout"
                 self.get_logger().info(f"Ball lost! Reason: {reason}")
-                self.transition_to_state(RobotState.SEARCHING)
-        
-        elif self.current_state == RobotState.SEARCHING:
-            # Execute search pattern (rotating in place)
-            self.execute_search_rotation()
-            
-            # Update total search time
-            self.total_search_time += 0.1  # Add time since this runs at 10Hz
-            
-            # Check if search rotation completed a full circle
-            if self.search_angle_accumulated >= 360.0:
-                self.get_logger().info("Search completed a full 360-degree rotation")
-                if self.consecutive_detections < self.min_tracking_detections:
-                    # If still haven't found the ball after full rotation, give up
-                    self.transition_to_state(RobotState.LOST_BALL)
-            
-            # Also transition to LOST_BALL if we've searched for too long
-            elif self.total_search_time >= self.max_search_time:
                 self.transition_to_state(RobotState.LOST_BALL)
-                self.get_logger().info(f"Search timeout after {self.total_search_time:.1f} seconds. Entering LOST_BALL state.")
         
         elif self.current_state == RobotState.INITIALIZING:
             # Check if we should timeout initialization
             time_in_state = current_time - self.state_start_time
             if time_in_state > 5.0:  # 5 seconds to initialize
-                self.transition_to_state(RobotState.SEARCHING)
+                self.transition_to_state(RobotState.LOST_BALL)
         
         elif self.current_state == RobotState.LOST_BALL:
-            # Occasionally do a brief scan for recovery
-            time_in_state = current_time - self.state_start_time
-            if time_in_state > 10.0 and time_in_state % 30.0 < 5.0:
-                # Do a brief scan every 30 seconds for 5 seconds
-                self.execute_search_rotation()
-            else:
-                self.stop_robot()
+            # Just stay in LOST_BALL state - we don't search for the ball
+            # The transition to TRACKING happens in handle_position_based_transitions
+            # when the ball is detected again
+            self.stop_robot()
     
     def execute_search_rotation(self):
-        """Execute rotational search pattern to find the ball."""
-        current_time = time.time()
-        
-        # Initialize rotation start time if not set
-        if self.search_rotation_start_time is None:
-            self.search_rotation_start_time = current_time
-            self.search_angle_accumulated = 0.0
-        
-        # Calculate rotation time and angle
-        rotation_time = current_time - self.search_rotation_start_time
-        rotation_angle = self.search_rotation_speed * rotation_time * 180.0 / math.pi
-        self.search_angle_accumulated = rotation_angle
-        
-        # Send rotation command
+        """
+        This method is deprecated - we no longer search for the ball by moving.
+        Keeping the method as a stub for compatibility.
+        """
+        # Just publish zero velocity - no searching
         twist = Twist()
-        twist.angular.z = self.search_rotation_speed * self.search_direction
         self.cmd_vel_publisher.publish(twist)
-        
-        # Log search progress occasionally
-        if int(rotation_time) % 5 == 0 and abs(rotation_time % 1.0) < 0.1:
-            self.get_logger().info(f"Searching: Rotated {rotation_angle:.1f}° / 360°")
     
     def transition_to_state(self, new_state):
         """
@@ -416,9 +434,9 @@ class BallChaseStateManager(Node):
         )
         
         # Handle exit actions for current state
-        if self.current_state == RobotState.SEARCHING:
-            # Record total search time
-            self.total_search_time += time_in_prev_state
+        if self.current_state == RobotState.LOST_BALL:
+            # Record total time ball was lost
+            self.total_lost_time = getattr(self, 'total_lost_time', 0) + time_in_prev_state
         
         # Update state and reset state timer
         prev_state = self.current_state
@@ -429,21 +447,8 @@ class BallChaseStateManager(Node):
         if new_state == RobotState.TRACKING:
             self.get_logger().info("Ball tracking initiated")
         
-        elif new_state == RobotState.SEARCHING:
-            self.get_logger().info("Starting basketball search pattern")
-            
-            # Reset search variables
-            self.search_rotation_start_time = None
-            self.search_angle_accumulated = 0.0
-            
-            # Alternate search direction each time
-            if prev_state == RobotState.TRACKING or prev_state == RobotState.INITIALIZING:
-                self.search_direction = 1  # Counter-clockwise
-            else:
-                self.search_direction *= -1  # Reverse previous direction
-        
         elif new_state == RobotState.LOST_BALL:
-            self.get_logger().info("Ball not found after searching. Entering wait mode.")
+            self.get_logger().info("Ball lost. Entering wait mode.")
             self.stop_robot()
         
         elif new_state == RobotState.STOPPED:
@@ -471,9 +476,14 @@ class BallChaseStateManager(Node):
             time_since_detection = time.time() - self.last_detection_time
         else:
             time_since_detection = float('inf')
-            
+
         state_duration = time.time() - self.state_start_time
-        
+
+        # Calculate direction if position is available
+        direction = None
+        if self.last_position is not None:
+            direction = math.atan2(self.last_position[1], self.last_position[0])
+
         # Create a structured diagnostic log
         diagnostic_info = {
             "state": {
@@ -489,20 +499,13 @@ class BallChaseStateManager(Node):
             "ball": {
                 "distance": f"{self.ball_distance:.2f}m",
                 "is_close": self.is_ball_close,
-                "is_stationary": self.is_ball_stationary
+                "is_stationary": self.is_ball_stationary,
+                "direction": f"{math.degrees(direction):.2f}°" if direction is not None else "unknown"
             }
         }
-        
-        # Add state-specific info
-        if self.current_state == RobotState.SEARCHING:
-            diagnostic_info["search"] = {
-                "angle": f"{self.search_angle_accumulated:.1f}°",
-                "direction": "CCW" if self.search_direction > 0 else "CW",
-                "total_time": f"{self.total_search_time:.1f}s"
-            }
-        
+
         # Log diagnostic information
-        self.get_logger().info(f"State Manager Diagnostics: {json.dumps(diagnostic_info)}")
+        self.get_logger().info(f"State Manager Diagnostics: {json.dumps(diagnostic_info, cls=NumpyJSONEncoder)}")
     
     # 1. Motion State Integration
     def motion_state_callback(self, msg):
@@ -512,38 +515,33 @@ class BallChaseStateManager(Node):
         Args:
             msg (String): Current motion state (stationary, long_stationary, small_movement, medium_fast)
         """
+        # Initialize message counter if not already created
+        if not hasattr(self, 'motion_state_msg_count'):
+            self.motion_state_msg_count = 0
+        
+        # Increment message counter
+        self.motion_state_msg_count += 1
+        
+        # Store motion state
         self.motion_state = msg.data
         
-        # Enhanced state transitions based on motion state
-        if self.current_state == RobotState.TRACKING:
-            # Use motion state to determine if we should transition to STOPPED
-            if self.motion_state == "long_stationary" and self.is_ball_close:
-                # Ball has been stationary for a significant time - transition faster
-                if self.stationary_start_time is None:
-                    self.stationary_start_time = time.time()
-                    
-                # Use shorter time threshold for long_stationary motion state
-                time_threshold = self.stationary_time_threshold * 0.5  # 50% shorter time required
-                
-                if time.time() - self.stationary_start_time >= time_threshold:
-                    self.get_logger().info("Motion state 'long_stationary' detected - transitioning to STOPPED faster")
-                    self.transition_to_state(RobotState.STOPPED)
-            elif self.motion_state == "medium_fast" and self.stationary_start_time is not None:
-                # Reset stationary detection when ball is moving at medium/fast speed
-                self.stationary_start_time = None
-                
-        # Adjust search pattern based on motion state history
-        elif self.current_state == RobotState.SEARCHING:
-            if hasattr(self, 'last_motion_state') and self.last_motion_state == "medium_fast":
-                # If the ball was moving quickly before being lost, use wider search pattern
-                self.search_rotation_speed = self.get_parameter('search_rotation_speed').value * 1.2
-            elif hasattr(self, 'last_motion_state') and self.last_motion_state in ["stationary", "long_stationary"]:
-                # If the ball was stationary, use slower, more careful search
-                self.search_rotation_speed = self.get_parameter('search_rotation_speed').value * 0.8
+        # Log every 10th message with detailed information
+        if self.motion_state_msg_count % 10 == 0:
+            self.get_logger().info(f"Fusion node motion state message #{self.motion_state_msg_count}: {self.motion_state}")
+        else:
+            self.get_logger().debug(f"Received motion state update: {self.motion_state}")
         
-        # Store last motion state
-        self.last_motion_state = self.motion_state
-        
+        # When ball is stationary or long-stationary, we can be more lenient with tracking reliability
+        if self.motion_state in ["stationary", "long_stationary"]:
+            # During stationary states, consecutive detections are more meaningful than tracking_reliable flag
+            if self.consecutive_detections >= self.min_tracking_detections:
+                # Force a position-based transition check
+                self.handle_position_based_transitions(time.time())
+                
+        # Update adaptive thresholds based on motion state
+        if hasattr(self, 'update_adaptive_thresholds'):
+            self.update_adaptive_thresholds()
+    
     # 2. Confidence-Based Decision Making
     def tracking_confidence_callback(self, msg):
         """
@@ -979,7 +977,7 @@ class BallChaseStateManager(Node):
             }
         
         # Log enhanced diagnostic information
-        self.get_logger().info(f"Enhanced State Manager Diagnostics: {json.dumps(diagnostic_info)}")
+        self.get_logger().info(f"Enhanced State Manager Diagnostics: {json.dumps(diagnostic_info, cls=NumpyJSONEncoder)}")
         
     def calculate_stability_score(self):
         """Calculate a stability score based on state transitions and protection metrics."""
@@ -1011,8 +1009,7 @@ def main(args=None):
     print("This node manages the robot's operational states:")
     print("- INITIALIZING: Startup, waiting for ball detection")
     print("- TRACKING: Following the tennis ball")
-    print("- SEARCHING: Looking for a lost ball")
-    print("- LOST_BALL: Stationary waiting for ball to reappear")
+    print("- LOST_BALL: Ball not found, waiting for it to reappear")
     print("- STOPPED: Ball is close and stationary")
     print("=================================================")
     

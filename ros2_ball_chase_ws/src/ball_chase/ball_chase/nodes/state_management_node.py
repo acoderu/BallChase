@@ -476,9 +476,14 @@ class BallChaseStateManager(Node):
             time_since_detection = time.time() - self.last_detection_time
         else:
             time_since_detection = float('inf')
-            
+
         state_duration = time.time() - self.state_start_time
-        
+
+        # Calculate direction if position is available
+        direction = None
+        if self.last_position is not None:
+            direction = math.atan2(self.last_position[1], self.last_position[0])
+
         # Create a structured diagnostic log
         diagnostic_info = {
             "state": {
@@ -494,10 +499,11 @@ class BallChaseStateManager(Node):
             "ball": {
                 "distance": f"{self.ball_distance:.2f}m",
                 "is_close": self.is_ball_close,
-                "is_stationary": self.is_ball_stationary
+                "is_stationary": self.is_ball_stationary,
+                "direction": f"{math.degrees(direction):.2f}°" if direction is not None else "unknown"
             }
         }
-        
+
         # Log diagnostic information
         self.get_logger().info(f"State Manager Diagnostics: {json.dumps(diagnostic_info, cls=NumpyJSONEncoder)}")
     

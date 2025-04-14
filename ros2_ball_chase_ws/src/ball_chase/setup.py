@@ -32,6 +32,7 @@ setup(
             'fusion_node = ball_chase.nodes.fusion_node:main',         
             'state_fusion_node = ball_chase.nodes.state_aware_fusion_node:main', 
             'state_management_node = ball_chase.nodes.state_management_node:main',            
+            'pid_controller_node = ball_chase.nodes.pid_controller_node:main',            
        ],
     },   
 )

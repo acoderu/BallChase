@@ -11,7 +11,7 @@ from rclpy.node import Node
 import time
 import numpy as np
 from geometry_msgs.msg import PointStamped, TwistStamped, TransformStamped
-from std_msgs.msg import Float32, Bool, String
+from std_msgs.msg import Float32, Bool, String, Float32MultiArray
 from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
 from tf2_geometry_msgs import do_transform_point
 from collections import deque
@@ -760,23 +760,49 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # PHASE 5: Set up subscriptions (only now that transform is available)
             self.setup_subscriptions()
             
-            # PHASE 6: Initialize filter with defaults
-            self.initialize_filter_with_defaults()
+            # DO NOT initialize filter here - instead, set a flag for delayed initialization
+            self.pending_initialization = True
+            self.initialization_attempts = 0
             
             # PHASE 7: Set up processing timers
             self.setup_timers()
+            
+            # Add a one-shot timer to attempt initialization after callbacks have had time to run
+            self.create_timer(0.5, self.delayed_initialization, callback_group=None)
             
             # Mark as activated and ready
             self.is_activated = True
             self.is_ready = True
             
-            self.get_logger().info("Node activated successfully and is now ready")
+            self.get_logger().info("Node activated - waiting for sensor data to initialize filter")
             
             return TransitionCallbackReturn.SUCCESS
-            
         except Exception as e:
             self.get_logger().error(f"Error during activation: {str(e)}")
             return TransitionCallbackReturn.ERROR
+
+    def delayed_initialization(self):
+        """Attempt delayed initialization after sensors have had time to provide data."""
+        if not self.initialized and self.pending_initialization:
+            lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
+            yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
+            
+            if lidar_msg or (yolo_2d_msg and 'yolo_2d' in self.bbox_data):
+                # We have sensor data - initialize now
+                self.initialize_filter_with_defaults()
+                self.pending_initialization = False
+                self.get_logger().info("Delayed initialization completed with sensor data")
+            else:
+                # Try again if we haven't made too many attempts
+                self.initialization_attempts += 1
+                if self.initialization_attempts < 5:
+                    self.get_logger().info(f"No sensor data yet for initialization (attempt {self.initialization_attempts})")
+                    self.create_timer(0.5, self.delayed_initialization, callback_group=None)
+                else:
+                    # Fall back to default initialization after multiple attempts
+                    self.get_logger().warn("No sensor data available after multiple attempts - initializing with defaults")
+                    self.initialize_filter_with_defaults()
+                    self.pending_initialization = False
     
     def retry_activation(self):
         """
@@ -1115,7 +1141,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.velocity_uncertainty = float('inf')
         
         # Define basketball properties
-        self.basketball_radius = 0.127  # 5 inches in meters (half of 10-inch diameter)
+        self.basketball_radius = 0.1143  # 4.5 inches in meters (half of 9-inch diameter)
         self.basketball_z_height = self.basketball_radius  # Basketball center height above ground
         
         # Sensor health tracking - focus on horizontal plane reliability
@@ -1401,28 +1427,30 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.subscribers.append(yolo_2d_sub)
         
         # NEW: Bounding box subscriptions for distance estimation 
-        # Note: You'll need to import the appropriate message type for bounding boxes
-        # This is just a placeholder assuming BoundingBox message type
+        # Use Float32MultiArray for YOLO
+        from std_msgs.msg import Float32MultiArray
+        
+        yolo_bbox_sub = self.create_subscription(
+            Float32MultiArray,
+            self.yolo_bbox_topic,
+            lambda msg: self.bbox_callback(msg, 'yolo_2d'),
+            10
+        )
+        self.subscribers.append(yolo_bbox_sub)
+        
+        # Keep BoundingBox2D for HSV if that's what the HSV node publishes
         try:
             from vision_msgs.msg import BoundingBox2D
             
             hsv_bbox_sub = self.create_subscription(
                 BoundingBox2D,
                 self.hsv_bbox_topic,
-                lambda msg: self.bbox_callback(msg, 'hsv_2d'),
+                lambda msg: self.bbox_callback_standard(msg, 'hsv_2d'),
                 10
             )
             self.subscribers.append(hsv_bbox_sub)
-            
-            yolo_bbox_sub = self.create_subscription(
-                BoundingBox2D,
-                self.yolo_bbox_topic,
-                lambda msg: self.bbox_callback(msg, 'yolo_2d'),
-                10
-            )
-            self.subscribers.append(yolo_bbox_sub)
         except ImportError:
-            self.get_logger().warn("vision_msgs not available - bounding box processing disabled")
+            self.get_logger().warn("vision_msgs not available - standard bbox processing disabled")
         
         self.get_logger().info("Subscriptions initialized")
         self.get_logger().info(f"Subscribed to: {self.lidar_topic}, {self.hsv_3d_topic}, {self.yolo_3d_topic}, {self.hsv_2d_topic}, {self.yolo_2d_topic}")
@@ -1507,10 +1535,32 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.get_logger().info("Processing timers initialized")
 
     def initialize_filter_with_defaults(self):
-        """Initialize filter with default values."""
+        """Initialize filter with default values, using first available sensor data if possible."""
         try:
-            # Set default state with zero position and velocity - use 4D state
-            self.state = np.zeros(4, dtype=np.float32)
+            # Check for any existing sensor data to use for initialization
+            lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
+            yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
+            
+            # Initialize position from sensor data if available
+            if lidar_msg:
+                transformed = self.transform_point(lidar_msg, self.reference_frame, False)
+                if transformed:
+                    self.state = np.zeros(4, dtype=np.float32)
+                    self.state[0] = transformed.point.x  # x position
+                    self.state[1] = transformed.point.y  # y position
+                    self.get_logger().info(f"Filter initialized with lidar data: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
+            elif yolo_2d_msg and 'yolo_2d' in self.bbox_data:
+                # Attempt to estimate 3D position from 2D yolo data
+                estimated_3d = self.estimate_3d_from_2d(yolo_2d_msg, self.bbox_data['yolo_2d'])
+                if estimated_3d:
+                    self.state = np.zeros(4, dtype=np.float32)
+                    self.state[0] = estimated_3d.point.x  # x position
+                    self.state[1] = estimated_3d.point.y  # y position
+                    self.get_logger().info(f"Filter initialized with estimated 3D from yolo_2d: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
+            else:
+                # Fall back to zeros if no sensor data available
+                self.state = np.zeros(4, dtype=np.float32)
+                self.get_logger().info("Filter initialized with zeros - waiting for sensor data to update position")
             
             # Set initial covariance (high uncertainty since this is a guess)
             self.covariance = np.eye(4, dtype=np.float32)
@@ -1537,7 +1587,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         Common callback for all sensor measurements.
         
         Args:
-            msg (PointStamped): The point measurement from sensor
+            msg (PointStamped): The point message from sensor
             source (str): Sensor source identifier
         """
         # Skip if not active yet
@@ -1570,7 +1620,54 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     f"({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame"
                 )
             
-            # Add to synchronization buffer
+            # For 2D YOLO data, estimate 3D position here instead of waiting until publish time
+            if source == 'yolo_2d' and 'yolo_2d' in self.bbox_data:
+                try:
+                    # Only estimate 3D position if we have recent bbox data
+                    estimated_3d_point = self.estimate_3d_from_2d(msg, self.bbox_data['yolo_2d'])
+                    if estimated_3d_point:
+                        # Add estimated 3D point to the sensor buffer as a new sensor type
+                        self.sensor_buffer.add_measurement('yolo_2d_est3d', estimated_3d_point, msg.header.stamp)
+                        
+                        # Initialize this sensor type in the reliability tracker if needed
+                        if hasattr(self, 'sensor_reliability_tracker'):
+                            if 'yolo_2d_est3d' not in self.sensor_reliability_tracker.sensors:
+                                self.sensor_reliability_tracker.add_sensor('yolo_2d_est3d')
+                        
+                        # Initialize gap tracking for this sensor type
+                        if hasattr(self, 'sensor_gap_detection') and 'yolo_2d_est3d' not in self.sensor_gap_detection:
+                            self.sensor_gap_detection['yolo_2d_est3d'] = {
+                                'gap_detected': False,
+                                'gap_start_time': 0.0,
+                                'gap_level': 0.0,
+                                'recent_gaps': deque(maxlen=5)
+                            }
+                            
+                        # Also update last detection time for this derived sensor
+                        if hasattr(self, 'last_detection_time'):
+                            self.last_detection_time['yolo_2d_est3d'] = current_time
+                            
+                        # Initialize counts if needed
+                        if 'yolo_2d_est3d' not in self.sensor_counts:
+                            self.sensor_counts['yolo_2d_est3d'] = 0
+                        self.sensor_counts['yolo_2d_est3d'] += 1
+                        
+                        # Initialize FPS tracking
+                        if 'yolo_2d_est3d' not in self.sensor_frame_times:
+                            self.sensor_frame_times['yolo_2d_est3d'] = deque(maxlen=40)
+                        self.sensor_frame_times['yolo_2d_est3d'].append(current_time)
+                        
+                        # Log occasionally for debugging
+                        if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
+                            self.get_logger().debug(
+                                f"Created 3D estimate from YOLO 2D: pos=({estimated_3d_point.point.x:.2f}, "
+                                f"{estimated_3d_point.point.y:.2f}, {estimated_3d_point.point.z:.2f})"
+                            )
+                except Exception as e:
+                    if self.debug_level >= 1:
+                        self.get_logger().warn(f"Error creating 3D estimate from YOLO 2D: {str(e)}")
+            
+            # Add to synchronization buffer (always add original measurement too)
             self.sensor_buffer.add_measurement(source, msg, msg.header.stamp)
             
             # If this is a 3D source and we're not initialized yet, try initializing
@@ -1588,11 +1685,12 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.log_error(f"Error in {source} callback: {str(e)}")
                 
     def bbox_callback(self, msg, source):
+        print ("bbox....")
         """
         Callback for bounding box messages.
         
         Args:
-            msg (BoundingBox2D): The bounding box message
+            msg (Float32MultiArray): The bounding box message in Float32MultiArray format
             source (str): Source identifier (e.g., 'hsv_2d', 'yolo_2d')
         """
         # Skip if not active yet
@@ -1600,39 +1698,22 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             return
         
         try:
-            # Extract width and height from the bounding box message
-            # Handle different possible message field structures
-            width = 0
-            height = 0
-            
-            # Try different field names that might exist in BoundingBox2D message
-            if hasattr(msg, 'size_x') and hasattr(msg, 'size_y'):
-                width = msg.size_x
-                height = msg.size_y
-            elif hasattr(msg, 'width') and hasattr(msg, 'height'):
-                width = msg.width
-                height = msg.height
-            elif hasattr(msg, 'bbox') and hasattr(msg.bbox, 'size_x') and hasattr(msg.bbox, 'size_y'):
-                width = msg.bbox.size_x
-                height = msg.bbox.size_y
-            elif hasattr(msg, 'bbox') and hasattr(msg.bbox, 'width') and hasattr(msg.bbox, 'height'):
-                width = msg.bbox.width
-                height = msg.bbox.height
-            elif hasattr(msg, 'size') and hasattr(msg.size, 'x') and hasattr(msg.size, 'y'):
-                width = msg.size.x
-                height = msg.size.y
-            else:
-                self.get_logger().warn(f"Could not extract width and height from {source} bounding box message")
-                return
-            
-            # Store the bounding box data with timestamp
-            if source in self.bbox_data:
-                self.bbox_data[source]['width'] = width
-                self.bbox_data[source]['height'] = height
-                self.bbox_data[source]['timestamp'] = time.time()
+            # Handle Float32MultiArray format for yolo
+            if hasattr(msg, 'data') and hasattr(msg.data, '__len__') and len(msg.data) >= 4:                
+                # Format: [center_x, center_y, width, height, confidence]
+                width = msg.data[2]   # width is the 3rd value (index 2)
+                height = msg.data[3]  # height is the 4th value (index 3)
                 
-                if self.debug_level >= 2:
-                    self.get_logger().debug(f"Received {source} bbox: {width:.1f}x{height:.1f}")
+                # Store the bounding box data with timestamp
+                if source in self.bbox_data:
+                    self.bbox_data[source]['width'] = width
+                    self.bbox_data[source]['height'] = height
+                    self.bbox_data[source]['timestamp'] = time.time()
+                    
+                    self.get_logger().info(f"Received {source} bbox: {width:.1f}x{height:.1f}")
+            else:
+                self.get_logger().warn(f"Invalid format for {source} bounding box message")
+                
         except Exception as e:
             self.log_error(f"Error in {source} bbox callback: {str(e)}")
 
@@ -1932,6 +2013,13 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     
                     # Increment counter
                     self.motion_state_protection['consecutive_stationary_after_long'] += 1
+                    
+                    # Log only after every 20 consecutive detections
+                    if self.motion_state_protection['consecutive_stationary_after_long'] % 20 == 0:
+                        self.get_logger().info(
+                            f"Long stationary -> stationary transition accepted after "
+                            f"{self.motion_state_protection['consecutive_stationary_after_long']} consecutive stationary detections"
+                        )
                     
                     # Need at least 5 consecutive "stationary" detections to override "long_stationary"
                     if self.motion_state_protection['consecutive_stationary_after_long'] < 5:
@@ -2293,6 +2381,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Find synchronized measurements
             measurements = self.sensor_buffer.find_synchronized_measurements(min_sensors=1)
             
+            # Add debug logging for sensor synchronization
+            #self.get_logger().info(f"Synchronized measurements found: {list(measurements.keys())}")
+            
             # Update sync quality metrics
             self.sync_quality_metrics['attempt_counts'] += 1
             if measurements:
@@ -2370,6 +2461,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             
             # IMPROVEMENT 8: Update tracking status using confidence-based approach
             self.update_tracking_status()
+            
+            # Log the state before publishing
+            #self.get_logger().info(f"State before publishing: pos=({self.state[0]:.2f}, {self.state[1]:.2f}), velocity=({self.state[2]:.2f}, {self.state[3]:.2f})")
             
             # Publish fused position and velocity
             self.publish_state()
@@ -2492,6 +2586,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         # Store successful update flag to track if any measurements were processed
         successful_update = False
         
+        # Add debug log for synchronized measurements
+        #self.get_logger().info(f"Synchronized measurements found: {list(measurements.keys())}")
+        
         # Motion state for adaptive validation
         motion_state = self.detect_motion_state()
         
@@ -2608,6 +2705,11 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             except np.linalg.LinAlgError:
                 self.get_logger().warn(f"Matrix inversion failed during Kalman update for {sensor}")
                 continue
+        
+        # Add debug log for state after update
+        #self.get_logger().info(
+        #    f"State after update: pos=({self.state[0]:.2f}, {self.state[1]:.2f}), uncertainty={self.position_uncertainty:.2f}"
+        #)
         
         # Return flag indicating if any measurements were successfully processed
         return successful_update
@@ -2732,16 +2834,178 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         current_pos = [float(self.state[0]), float(self.state[1]), float(self.basketball_z_height)]
         current_time = time.time()
         
+        # Check if we're in 2D-only mode and need to handle distance estimation differently
+        using_2d_only = True
+        for sensor in ['lidar', 'hsv_3d', 'yolo_3d']:
+            if current_time - self.last_detection_time.get(sensor, 0) < 1.0:
+                using_2d_only = False
+                break
+        
+        # For 2D-only mode with YOLO data, perform distance estimation from bounding box
+        estimated_pos = None
+        if using_2d_only and current_time - self.last_detection_time.get('yolo_2d', 0) < 1.0:
+            # Check if we have bbox data for distance estimation
+            if 'yolo_2d' in self.bbox_data and current_time - self.bbox_data['yolo_2d'].get('timestamp', 0) < 1.0:
+                # Use bounding box to estimate distance
+                bbox_width = self.bbox_data['yolo_2d'].get('width', 0)
+                bbox_height = self.bbox_data['yolo_2d'].get('height', 0)
+                
+                if bbox_width > 0 and bbox_height > 0:
+                    # Known basketball diameter in meters
+                    basketball_diameter_meters = self.basketball_radius * 2
+                    
+                    # Use width for horizontal field of view (assuming camera is calibrated)
+                    # This is a simplified model that assumes camera focal length is known
+                    # We'd use a more accurate model in production with actual camera parameters
+                    horizontal_fov_degrees = 70.0  # Typical camera horizontal FOV
+                    image_width_pixels = 640  # Typical camera resolution width
+                    
+                    # Calculate distance based on apparent size vs actual size
+                    # distance = (actual_size * focal_length) / apparent_size
+                    focal_length_pixels = 345.58  # Calibrated focal length for this camera
+                    estimated_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
+                    
+                    # Get the last known YOLO detection for direction
+                    yolo_detection = self.sensor_buffer.get_latest_measurement('yolo_2d')
+                    if yolo_detection is not None:
+                        # Get camera to reference frame transform
+                        try:
+                            transform = self.tf_buffer.lookup_transform(
+                                self.reference_frame,
+                                'ascamera_color_0',  # Frame of the YOLO camera
+                                rclpy.time.Time(),
+                                rclpy.duration.Duration(seconds=0.2)
+                            )
+                            
+                            # Camera's position in reference frame
+                            camera_pos_x = transform.transform.translation.x
+                            camera_pos_y = transform.transform.translation.y
+                            camera_pos_z = transform.transform.translation.z
+                            
+                            # Get image dimensions
+                            image_width = 320  # Width of the camera image
+                            image_height = 320  # Height of the camera image
+                            image_center_x = image_width / 2
+                            image_center_y = image_height / 2
+                            
+                            # Get the detection coordinates
+                            detection_x = yolo_detection.point.x  # X pixel coordinate in image
+                            detection_y = yolo_detection.point.y  # Y pixel coordinate in image
+                            
+                            # Calculate offsets from center of image
+                            offset_x = detection_x - image_center_x
+                            offset_y = detection_y - image_center_y
+                            
+                            # FIXED CAMERA COORDINATE SYSTEM MAPPING:
+                            # Camera coordinate system needs to map correctly to robot frame
+                            # In this robot's setup, the camera's:
+                            #   - Z axis points forward (not X as we previously assumed)
+                            #   - X axis points right
+                            #   - Y axis points down
+                            
+                            # Convert pixel offsets to direction vector using focal length
+                            camera_dir_z = focal_length_pixels  # Z is forward in camera frame
+                            camera_dir_x = offset_x             # X is right in camera frame
+                            camera_dir_y = offset_y             # Y is down in camera frame
+                            
+                            # Normalize the direction vector
+                            dir_magnitude = math.sqrt(camera_dir_x**2 + camera_dir_y**2 + camera_dir_z**2)
+                            if dir_magnitude > 0:
+                                camera_dir_x /= dir_magnitude
+                                camera_dir_y /= dir_magnitude
+                                camera_dir_z /= dir_magnitude
+                            
+                            self.get_logger().info(f"Received yolo_2d detection: ({detection_x:.2f}, {detection_y:.2f}, {yolo_detection.point.z:.2f}) in {yolo_detection.header.frame_id} frame")
+                            
+                            # Log the camera direction vector for debugging
+                            if hasattr(self, 'debug_level') and self.debug_level >= 2:
+                                self.get_logger().debug(f"Camera direction vector from pixel ({detection_x:.1f}, {detection_y:.1f}): vector=({camera_dir_x:.2f}, {camera_dir_y:.2f}, {camera_dir_z:.2f})")
+                            
+                            # Extract rotation quaternion
+                            qx = transform.transform.rotation.x
+                            qy = transform.transform.rotation.y
+                            qz = transform.transform.rotation.z
+                            qw = transform.transform.rotation.w
+                            
+                            # Convert quaternion to rotation matrix to transform direction vector
+                            # This is a simplified quaternion to rotation calculation
+                            # Full implementation would use proper quaternion conversion
+                            norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+                            qw /= norm
+                            qx /= norm
+                            qy /= norm
+                            qz /= norm
+                            
+                            # Convert to rotation matrix elements (simplified)
+                            xx = qx * qx
+                            xy = qx * qy
+                            xz = qx * qz
+                            xw = qx * qw
+                            yy = qy * qy
+                            yz = qy * qz
+                            yw = qy * qw
+                            zz = qz * qz
+                            zw = qz * qw
+                            
+                            # Rotation matrix
+                            r00 = 1 - 2 * (yy + zz)
+                            r01 = 2 * (xy - zw)
+                            r02 = 2 * (xz + yw)
+                            r10 = 2 * (xy + zw)
+                            r11 = 1 - 2 * (xx + zz)
+                            r12 = 2 * (yz - xw)
+                            r20 = 2 * (xz - yw)
+                            r21 = 2 * (yz + xw)
+                            r22 = 1 - 2 * (xx + yy)
+                            
+                            # Apply rotation to camera direction
+                            ref_dir_x = r00 * camera_dir_x + r01 * camera_dir_y + r02 * camera_dir_z
+                            ref_dir_y = r10 * camera_dir_x + r11 * camera_dir_y + r12 * camera_dir_z
+                            ref_dir_z = r20 * camera_dir_x + r21 * camera_dir_y + r22 * camera_dir_z
+                            
+                            # Normalize direction vector
+                            dir_magnitude = math.sqrt(ref_dir_x*ref_dir_x + ref_dir_y*ref_dir_y + ref_dir_z*ref_dir_z)
+                            if dir_magnitude > 0:
+                                ref_dir_x /= dir_magnitude
+                                ref_dir_y /= dir_magnitude
+                                ref_dir_z /= dir_magnitude
+                            
+                            # Calculate estimated position in reference frame
+                            est_x = camera_pos_x + estimated_distance * ref_dir_x
+                            est_y = camera_pos_y + estimated_distance * ref_dir_y
+                            est_z = self.basketball_z_height  # Always at basketball height above ground
+                            
+                            estimated_pos = [est_x, est_y, est_z]
+                            
+                            # Log this special calculation occasionally
+                            if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 10 == 0:
+                                self.get_logger().debug(
+                                    f"Estimated 3D position from YOLO 2D: distance={estimated_distance:.2f}m, "
+                                    f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
+                                )
+                        except Exception as e:
+                            if self.debug_level >= 2:
+                                self.get_logger().warn(f"Could not list frames: {str(e)}")
+        
         # IMPROVEMENT: Pass through GroundPositionFilter as second stage
-        # This applies basketball-specific physics constraints
-        filtered_pos = self.ground_filter.update(current_pos, current_time)
+        # If we have an estimated position from 2D data, use that instead of Kalman state
+        filtered_pos = None
+        if estimated_pos is not None:
+            # Use the estimated position from 2D data
+            filtered_pos = self.ground_filter.update(estimated_pos, current_time)
+            
+            # Update Kalman state with this new estimate to keep everything in sync
+            self.state[0:2] = filtered_pos[0:2]  # Update x,y position
+        else:
+            # Use normal Kalman filter state
+            filtered_pos = self.ground_filter.update(current_pos, current_time)
+            
+            # Update our state with the filtered position
+            # This keeps the Kalman filter state in sync with published positions
+            self.state[0:2] = filtered_pos[0:2]  # Update x,y position
         
         # Get velocity from ground filter (more accurate for rolling balls)
         ground_velocity = self.ground_filter.get_velocity()
-        
-        # Update our state with the filtered position
-        # This keeps the Kalman filter state in sync with published positions
-        self.state[0:2] = filtered_pos[0:2]  # Update x,y position
         
         # Optionally update velocity state from ground filter's estimate
         # Only do this for stronger movements to avoid noise in stationary case
@@ -2750,6 +3014,17 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Fix: Only use x,y components of the ground_velocity (which is 3D)
             self.state[2] = ground_velocity[0]  # x velocity
             self.state[3] = ground_velocity[1]  # y velocity
+        
+        # Calculate distance and direction to the ball
+        distance = math.sqrt(filtered_pos[0]**2 + filtered_pos[1]**2)
+        direction = math.degrees(math.atan2(filtered_pos[1], filtered_pos[0]))
+        
+        # Log the distance and direction periodically to avoid log flooding
+        if hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 5 == 0:
+            self.get_logger().info(
+                f"Ball position: distance={distance:.2f}m, direction={direction:.1f}°, "
+                f"pos=({filtered_pos[0]:.2f}, {filtered_pos[1]:.2f}, {filtered_pos[2]:.2f})"
+            )
         
         # Create position message
         pos_msg = PointStamped()
@@ -3577,6 +3852,166 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                                   f"(velocity={avg_velocity:.3f}m/s{confidence_str})")
                                 
         return actual_state
+
+    def estimate_3d_from_2d(self, detection_msg, bbox_data):
+        """
+        Estimate a 3D position from a 2D detection and bounding box.
+        
+        Args:
+            detection_msg (PointStamped): The 2D detection message
+            bbox_data (dict): Bounding box data with width, height, and timestamp
+            
+        Returns:
+            PointStamped: Estimated 3D position or None if estimation fails
+        """
+        try:
+            current_time = time.time()
+            
+            # Check if bbox data is recent enough
+            if current_time - bbox_data.get('timestamp', 0) > 1.0:
+                self.get_logger().warn(f"Bbox data too old: {current_time - bbox_data.get('timestamp', 0):.2f}s > 1.0s")
+                return None
+                
+            # Get bounding box dimensions
+            bbox_width = bbox_data.get('width', 0)
+            bbox_height = bbox_data.get('height', 0)
+            
+            if bbox_width <= 0 or bbox_height <= 0:
+                self.get_logger().warn(f"Invalid bbox dimensions: {bbox_width}x{bbox_height}")
+                return None
+                
+            # Known basketball diameter in meters
+            basketball_diameter_meters = self.basketball_radius * 2
+            
+            # Calculate distance based on apparent size vs actual size
+            focal_length_pixels = 345.58  # Calibrated focal length for camera
+            estimated_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
+            
+            # Get camera to reference frame transform
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    self.reference_frame,
+                    'ascamera_color_0',  # Frame of the YOLO camera
+                    rclpy.time.Time(),
+                    rclpy.duration.Duration(seconds=0.2)
+                )
+                
+                # Log transform details for debugging
+                self.get_logger().info(f"Transform details for {detection_msg.header.frame_id}: translation=[{transform.transform.translation.x:.4f}, {transform.transform.translation.y:.4f}, {transform.transform.translation.z:.4f}]")
+            except Exception as te:
+                self.get_logger().error(f"Transform lookup failed: {str(te)}")
+                return None
+            
+            # Camera's position in reference frame
+            camera_pos_x = transform.transform.translation.x
+            camera_pos_y = transform.transform.translation.y
+            camera_pos_z = transform.transform.translation.z
+            
+            # Get image dimensions
+            image_width = 320  # Width of the camera image
+            image_height = 320  # Height of the camera image
+            image_center_x = image_width / 2
+            image_center_y = image_height / 2
+            
+            # Get the detection coordinates
+            detection_x = detection_msg.point.x  # X pixel coordinate in image
+            detection_y = detection_msg.point.y  # Y pixel coordinate in image
+            
+            # Calculate offsets from center of image
+            offset_x = detection_x - image_center_x
+            offset_y = detection_y - image_center_y
+            
+            # Camera coordinate system mapping:
+            # - Z axis points forward
+            # - X axis points right
+            # - Y axis points down
+            
+            # Convert pixel offsets to direction vector using focal length
+            camera_dir_z = focal_length_pixels  # Z is forward in camera frame
+            camera_dir_x = offset_x             # X is right in camera frame
+            camera_dir_y = offset_y             # Y is down in camera frame
+            
+            # Normalize the direction vector
+            dir_magnitude = math.sqrt(camera_dir_x**2 + camera_dir_y**2 + camera_dir_z**2)
+            if dir_magnitude > 0:
+                camera_dir_x /= dir_magnitude
+                camera_dir_y /= dir_magnitude
+                camera_dir_z /= dir_magnitude
+            
+            # Extract rotation quaternion
+            qx = transform.transform.rotation.x
+            qy = transform.transform.rotation.y
+            qz = transform.transform.rotation.z
+            qw = transform.transform.rotation.w
+            
+            # Convert quaternion to rotation matrix
+            norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+            qw /= norm
+            qx /= norm
+            qy /= norm
+            qz /= norm
+            
+            # Convert to rotation matrix elements
+            xx = qx * qx
+            xy = qx * qy
+            xz = qx * qz
+            xw = qx * qw
+            yy = qy * qy
+            yz = qy * qz
+            yw = qy * qw
+            zz = qz * qz
+            zw = qz * qw
+            
+            # Rotation matrix
+            r00 = 1 - 2 * (yy + zz)
+            r01 = 2 * (xy - zw)
+            r02 = 2 * (xz + yw)
+            r10 = 2 * (xy + zw)
+            r11 = 1 - 2 * (xx + zz)
+            r12 = 2 * (yz - xw)
+            r20 = 2 * (xz - yw)
+            r21 = 2 * (yz + xw)
+            r22 = 1 - 2 * (xx + yy)
+            
+            # Apply rotation to camera direction
+            ref_dir_x = r00 * camera_dir_x + r01 * camera_dir_y + r02 * camera_dir_z
+            ref_dir_y = r10 * camera_dir_x + r11 * camera_dir_y + r12 * camera_dir_z
+            ref_dir_z = r20 * camera_dir_x + r21 * camera_dir_y + r22 * camera_dir_z
+            
+            # Normalize direction vector
+            dir_magnitude = math.sqrt(ref_dir_x*ref_dir_x + ref_dir_y*ref_dir_y + ref_dir_z*ref_dir_z)
+            if dir_magnitude > 0:
+                ref_dir_x /= dir_magnitude
+                ref_dir_y /= dir_magnitude
+                ref_dir_z /= dir_magnitude
+            
+            # Calculate estimated position in reference frame
+            est_x = camera_pos_x + estimated_distance * ref_dir_x
+            est_y = camera_pos_y + estimated_distance * ref_dir_y
+            est_z = self.basketball_z_height  # Always at basketball height above ground
+            
+            # Create and return a new 3D point message in the reference frame
+            estimated_point = PointStamped()
+            estimated_point.header.stamp = detection_msg.header.stamp
+            estimated_point.header.frame_id = self.reference_frame
+            estimated_point.point.x = est_x
+            estimated_point.point.y = est_y
+            estimated_point.point.z = est_z
+            
+            # Enhanced debugging for 3D estimation
+            self.get_logger().info(
+                f"3D estimation details: bbox={bbox_width}x{bbox_height}, "
+                f"distance={estimated_distance:.2f}m, "
+                f"camera_dir=({camera_dir_x:.2f}, {camera_dir_y:.2f}, {camera_dir_z:.2f}), "
+                f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
+            )
+                
+            return estimated_point
+            
+        except Exception as e:
+            self.get_logger().error(f"Error estimating 3D from YOLO 2D: {str(e)}")
+            self.get_logger().error(traceback.format_exc())
+            return None
 
 def main(args=None):
     rclpy.init(args=args)
