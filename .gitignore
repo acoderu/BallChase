@@ -1,0 +1,6 @@
+# ROS 2 build artifacts
+ros2_ball_chase_ws/build/
+ros2_ball_chase_ws/install/
+ros2_ball_chase_ws/log/
+*.pyc
+__pycache__/

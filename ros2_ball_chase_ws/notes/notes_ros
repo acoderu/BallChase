@@ -11,4 +11,4 @@ ros2 lifecycle set /state_aware_fusion_node configure
 ros2 lifecycle set /state_aware_fusion_node activate
 
 docker exec -it MentorPi bash
-
+....
