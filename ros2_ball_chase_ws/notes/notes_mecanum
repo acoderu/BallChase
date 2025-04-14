@@ -1,0 +1,30 @@
+Based on the Mecanum Wheel Chassis robot described in the document, let me explain the movement controls:
+For Linear Velocity:
+
+X-axis: Controls forward/backward movement
+
+Positive values (e.g., 0.1) make the robot move forward
+Negative values (e.g., -0.1) make the robot move backward
+Recommended range: -0.2 to 0.2 meters per second
+
+
+Y-axis: Controls sideways/lateral movement (a unique capability of Mecanum wheels)
+
+Positive values make the robot move to the left side
+Negative values make the robot move to the right side
+This allows the robot to strafe sideways without changing its orientation
+
+
+
+For Angular Velocity:
+
+Z-axis: Controls rotational movement
+
+Positive values (e.g., 0.1) make the robot turn counterclockwise (left)
+Negative values (e.g., -0.1) make the robot turn clockwise (right)
+Recommended range: -0.2 to 0.2
+A value of 0 means no rotation
+
+
+The angular velocity Z component creates a twisting or rotating motion. In the document, it explains that when you set a positive Z value, the robot will rotate to the left (counterclockwise when viewed from above), while a negative Z value causes it to rotate to the right (clockwise).
+This combination of linear and angular velocities gives the Mecanum Wheel Chassis excellent maneuverability, allowing it to move in any direction and rotate in place - capabilities that traditional wheeled robots don't have.

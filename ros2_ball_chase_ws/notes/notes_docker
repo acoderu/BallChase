@@ -1,0 +1,8 @@
+docker commit MentorPi mentorpi_backup_v1
+docker images
+docker ps
+docker inspect MentorPi
+docker stop MentorPi
+docker rm MentorPi
+docker run -d   --name MentorPi   --user ubuntu   --restart always   --privileged   --network host   -v /dev:/dev   -v /tmp/.X11-unix:/tmp/.X11-unix   -v /home/pi/docker/tmp:/home/ubuntu/shared   -v /home/pi/dev:/home/ubuntu/dev   -e DISPLAY=:0   --security-opt label=disable   mentorpi_backup_v1   tail -f /dev/null
+docker exec -it MentorPi bash

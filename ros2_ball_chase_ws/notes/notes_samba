@@ -1,0 +1,33 @@
+Samba setup
+
+1. Create the directory
+First, let's create the directory:
+bashsudo mkdir -p /home/pi/dev
+sudo chmod 777 /home/pi/dev
+This creates the directory and gives it full permissions. You can adjust permissions later as needed.
+2. Install Samba
+Install the Samba package:
+bashsudo apt update
+sudo apt install samba samba-common-bin -y
+3. Configure Samba
+Edit the Samba configuration file:
+bashsudo nano /etc/samba/smb.conf
+At the end of the file, add the following configuration for your share:
+[dev]
+   path = /home/pi/dev
+   writeable = yes
+   create mask = 0777
+   directory mask = 0777
+   public = yes
+   browseable = yes
+Save and exit (Ctrl+X, then Y, then Enter).
+4. Set up a Samba user
+Create a Samba user (typically your Pi username):
+bashsudo smbpasswd -a pi
+You'll be prompted to enter and confirm a password for this Samba user.
+5. Restart Samba
+Apply the changes by restarting the Samba service:
+bashsudo systemctl restart smbd
+6. Find your Raspberry Pi's IP address
+You'll need the Pi's IP address to access it from Windows:
+bashhostname -I

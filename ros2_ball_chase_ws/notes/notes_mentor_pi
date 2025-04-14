@@ -1,0 +1,22 @@
+MentorPi tutorials :
+https://www.youtube.com/watch?v=DuYhJ2BcjMw&list=PLFbzd0m6AcmJ9E8DIJZAW-WVbMgigIo3K&index=1
+
+
+
+Remove Hot Spot :
+
+First, stop the wifi service:
+sudo systemctl stop wifi.service
+
+Disable the service so it doesn't start on boot:
+sudo systemctl disable wifi.service
+
+Remove the service file:
+sudo rm /etc/systemd/system/wifi.service
+
+Remove the NetworkManager connection profile for the hotspot:
+sudo rm /etc/NetworkManager/system-connections/HW-67E41A1F.nmconnection
+
+If you want to be thorough, you could also delete or rename the Python script that creates the hotspot:
+sudo mv /home/pi/hiwonder-toolbox/wifi.py /home/pi/hiwonder-toolbox/wifi.py.disabled
+
