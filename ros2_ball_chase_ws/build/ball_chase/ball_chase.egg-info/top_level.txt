@@ -1,2 +1,0 @@
-ball_chase
-models
