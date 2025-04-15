@@ -2156,10 +2156,10 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             else:
                 base_motion_state = "medium_fast"
         else:
-            # Normal thresholds when confidence is normal
-            if avg_velocity < 0.03:
+            # RELAXED: Normal thresholds when confidence is normal
+            if avg_velocity < 0.02:  # Reduced from 0.03 to be more sensitive
                 base_motion_state = "stationary"
-            elif avg_velocity < 0.25:
+            elif avg_velocity < 0.20:  # Reduced from 0.25 to be more sensitive
                 base_motion_state = "small_movement"
             else:
                 base_motion_state = "medium_fast"
@@ -2182,10 +2182,16 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 self.state_transition_evidence[state] = max(0, self.state_transition_evidence[state] - 1)
         
         # ---------------------------------------------------------------------
-        # NEW: Special protection for long_stationary -> stationary transition
+        # RELAXED: Special protection for long_stationary -> stationary transition
         # ---------------------------------------------------------------------
         if hasattr(self, 'motion_state') and self.motion_state == "long_stationary":
             # Already in long_stationary state - this needs special protection
+            
+            # NEW: Add stronger override for clear movement detection
+            if base_motion_state in ["small_movement", "medium_fast"] and avg_velocity > 0.15:
+                # If clear movement detected, override protection immediately
+                self.get_logger().info(f"Movement override: velocity {avg_velocity:.2f}m/s exceeds threshold 0.15m/s")
+                return base_motion_state
             
             # Check if long_stationary is established in memory
             if not hasattr(self, 'motion_state_protection') or not self.motion_state_protection.get('long_stationary_established', False):
@@ -2260,13 +2266,14 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 if hasattr(self, 'motion_state_protection'):
                     self.motion_state_protection['consecutive_stationary_after_long'] = 0
         
-        # Special protection for stationary state
+        # RELAXED: Special protection for stationary state
         if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
-            # Require 3+ consecutive motion samples to transition away from stationary to movement
-            evidence_needed = 3
-            # During gaps, require even more evidence
+            # Require 2+ consecutive motion samples to transition away from stationary to movement
+            # Reduced from 3+ to be more responsive
+            evidence_needed = 2
+            # During gaps, require more evidence but reduced from previous requirements
             if has_recent_gap:
-                evidence_needed = 5
+                evidence_needed = 3  # Reduced from 5
                 
             # Check if we have enough evidence for the new state
             if base_motion_state not in ["stationary", "long_stationary"] and self.state_transition_evidence[base_motion_state] < evidence_needed:
@@ -2311,12 +2318,12 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     motion_state = "stationary"
         else:
             # ---------------------------------------------------------------------
-            # NEW: Check for minimum time requirement in long_stationary state
+            # RELAXED: Check for minimum time requirement in long_stationary state
             # ---------------------------------------------------------------------
             if hasattr(self, 'motion_state') and self.motion_state == "long_stationary" and hasattr(self, 'motion_state_protection'):
                 # Get time since long_stationary was established
                 time_in_long_stationary = current_time - self.motion_state_protection.get('long_stationary_confirmed_time', 0)
-                min_time_required = self.motion_state_protection.get('min_time_in_long_stationary', 5.0)
+                min_time_required = self.motion_state_protection.get('min_time_in_long_stationary', 1.0)  # Reduced from 2.0 to 1.0
                 
                 if time_in_long_stationary < min_time_required:
                     # Not been in long_stationary state long enough to leave it for movement
@@ -2373,7 +2380,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.prev_motion_state = "unknown"
         
         # ---------------------------------------------------------------------
-        # NEW: Apply confidence-based transition protection
+        # RELAXED: Apply confidence-based transition protection
         # ---------------------------------------------------------------------
         # Only for transitions FROM long_stationary TO stationary
         if self.motion_state == "long_stationary" and dominant_state == "stationary":
@@ -2381,8 +2388,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             long_stationary_confidence = self.motion_state_confidence.get("long_stationary", 0.0)
             stationary_confidence = self.motion_state_confidence.get("stationary", 0.0)
             
-            # Require 3x higher confidence to transition from long_stationary to stationary
-            if long_stationary_confidence > stationary_confidence / 3.0:
+            # RELAXED: Require lower confidence to transition from long_stationary to stationary
+            # Changed from 3x to 2x higher confidence
+            if long_stationary_confidence > stationary_confidence / 2.0:
                 # Confidence in long_stationary is still strong enough - block transition
                 dominant_state = "long_stationary"
                 
@@ -2397,6 +2405,26 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     if 'protection_violation_count' not in self.motion_state_protection:
                         self.motion_state_protection['protection_violation_count'] = 0
                     self.motion_state_protection['protection_violation_count'] += 1
+        
+        # RELAXED: Special handling for transitions from long_stationary to movement states
+        if self.motion_state == "long_stationary" and dominant_state in ["small_movement", "medium_fast"]:
+            # Get confidence values
+            long_stationary_confidence = self.motion_state_confidence.get("long_stationary", 0.0)
+            movement_confidence = self.motion_state_confidence.get(dominant_state, 0.0)
+            
+            # RELAXED: Only need a small amount of evidence to override previous state
+            # If movement confidence is > 50% of long_stationary confidence, allow transition
+            if movement_confidence > long_stationary_confidence * 0.5:
+                # Log this relaxed transition
+                if self.debug_level >= 1:
+                    self.get_logger().info(
+                        f"Allowing movement transition: {dominant_state} confidence ({movement_confidence:.2f}) > "
+                        f"{long_stationary_confidence * 0.5:.2f} threshold"
+                    )
+                # Let transition proceed
+            else:
+                # Still not enough confidence, maintain long_stationary
+                dominant_state = "long_stationary"
         
         # Log if motion state changes
         if dominant_state != self.motion_state:
