@@ -704,6 +704,19 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.reliability_buffer = deque([False] * 3, maxlen=5)
             self.last_tracking_state = False
             
+            # Motion state protection with reduced long_stationary threshold (5.0 -> 2.0 seconds)
+            self.motion_state_protection = {
+                'long_stationary_confirmed_time': 0.0,
+                'long_stationary_established': False,
+                'consecutive_stationary_after_long': 0,
+                'min_time_in_long_stationary': 2.0,  # Reduced from 5.0 to 2.0 seconds
+                'post_gap_cooldown_active': False,
+                'post_gap_cooldown_end': 0.0,
+                'post_gap_protected_state': None,
+                'last_gap_recovery_time': 0.0,
+                'protection_violation_count': 0
+            }
+            
             # Mark configuration as complete
             self.is_configured = True
             self.get_logger().info("Configuration completed successfully")
@@ -1250,7 +1263,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             'long_stationary_confirmed_time': 0.0,  # When long_stationary was confirmed
             'long_stationary_established': False,   # Whether long_stationary is established
             'consecutive_stationary_after_long': 0, # Count of stationary detections after long_stationary
-            'min_time_in_long_stationary': 5.0,     # Min time required in long_stationary before accepting transition out
+            'min_time_in_long_stationary': 2.0,     # Reduced from 5.0 to 2.0 seconds
             'post_gap_cooldown_active': False,      # Whether we're in post-gap cooldown
             'post_gap_cooldown_end': 0.0,           # When post-gap cooldown ends
             'post_gap_protected_state': None,       # The state protected during cooldown
@@ -1808,7 +1821,6 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     
                     # Log this occasionally for debugging
                     if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 10 == 0:
-                        remaining = self.motion_state_protection['post_gap_cooldown_end'] - current_time
                         self.get_logger().debug(
                             f"Motion state cooldown active: enforcing '{protected_state}' for {remaining:.1f}s more"
                         )
@@ -1929,10 +1941,11 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         
         # Classifier with confidence-adjusted thresholds
         if has_recent_gap and hasattr(self, 'motion_state') and self.motion_state == "long_stationary":
-            # Special case: during gaps, require 3x higher evidence to transition out of long_stationary
-            if avg_velocity < 0.15:  # Significantly higher threshold (was 0.03)
+            # Special case: during gaps, require 1.5x higher evidence to transition out of long_stationary
+            # Previously required 3x more velocity - reduced to 1.5x
+            if avg_velocity < 0.045:  # Modified from 0.03 * 3 (0.09) to 0.03 * 1.5 (0.045)
                 base_motion_state = "stationary"
-            elif avg_velocity < 0.6:  # Significantly higher threshold (was 0.25)
+            elif avg_velocity < 0.375:  # Modified from 0.25 * 3 (0.75) to 0.25 * 1.5 (0.375)
                 base_motion_state = "small_movement"
             else:
                 base_motion_state = "medium_fast"
@@ -2034,8 +2047,8 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                             f"{self.motion_state_protection['consecutive_stationary_after_long']} consecutive stationary detections"
                         )
                     
-                    # Need at least 5 consecutive "stationary" detections to override "long_stationary"
-                    if self.motion_state_protection['consecutive_stationary_after_long'] < 5:
+                    # Reduce consecutive detection requirement from 5 to 2
+                    if self.motion_state_protection['consecutive_stationary_after_long'] < 2:
                         # Not enough evidence - remain in long_stationary
                         base_motion_state = "long_stationary"
                     else:
@@ -3048,7 +3061,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         # Log the distance and direction periodically to avoid log flooding
         if hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 5 == 0:
             self.get_logger().info(
-                f"Ball position: distance={distance:.2f}m, direction={direction:.1f}°, "
+                f"Ball position: distance={distance:.2f}m, direction={direction:.1f} degrees, "
                 f"pos=({filtered_pos[0]:.2f}, {filtered_pos[1]:.2f}, {filtered_pos[2]:.2f})"
             )
         
@@ -3590,7 +3603,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             'long_stationary_confirmed_time': 0.0,
             'long_stationary_established': False,
             'consecutive_stationary_after_long': 0,
-            'min_time_in_long_stationary': 5.0,
+            'min_time_in_long_stationary': 2.0,     # Reduced from 5.0 to 2.0 seconds
             'post_gap_cooldown_active': False,
             'post_gap_cooldown_end': 0.0,
             'post_gap_protected_state': None,
