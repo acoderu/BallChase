@@ -75,6 +75,10 @@ class BasketballLidarDetector(Node):
         # Initialize coordinate transform parameters first
         self._init_transform_parameters()
         
+        # EMA smoothing for YOLO distance
+        self.smoothed_yolo_distance = None
+        self.ema_alpha = 0.5  # Smoothing factor between 0 (more smoothing) and 1 (no smoothing)
+        
         # Set up TF system - Initialize buffer and listener FIRST
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -1347,7 +1351,18 @@ class BasketballLidarDetector(Node):
             
             # Calculate distance based on apparent size vs actual size
             focal_length_pixels = 345.58  # Calibrated focal length for camera
-            estimated_distance = (basketball_diameter_meters * focal_length_pixels) / ball_diameter_pixels
+            distance = (basketball_diameter_meters * focal_length_pixels) / ball_diameter_pixels
+            
+            # Apply EMA smoothing to the distance
+            if self.smoothed_yolo_distance is None:
+                self.smoothed_yolo_distance = distance
+            else:
+                self.smoothed_yolo_distance = (self.ema_alpha * distance +
+                                              (1 - self.ema_alpha) * self.smoothed_yolo_distance)
+            distance = self.smoothed_yolo_distance
+            
+            # Optional logging of both raw and smoothed distance
+            self.get_logger().info(f"YOLO raw distance={distance:.2f}m | Smoothed={self.smoothed_yolo_distance:.2f}m")
             
             # Get camera frame
             camera_frame = detection_msg.header.frame_id or "ascamera_color_0"
@@ -1444,13 +1459,13 @@ class BasketballLidarDetector(Node):
                 ref_dir_z /= dir_magnitude
             
             # Calculate estimated position in reference frame
-            est_x = camera_pos_x + estimated_distance * ref_dir_x
-            est_y = camera_pos_y + estimated_distance * ref_dir_y
+            est_x = camera_pos_x + distance * ref_dir_x
+            est_y = camera_pos_y + distance * ref_dir_y
             est_z = self.ball_center_height  # Always at basketball height above ground
             
             if self.performance_mode != "MINIMAL":
                 self.get_logger().info(
-                    f"Estimated 3D from YOLO 2D: distance={estimated_distance:.2f}m, "
+                    f"Estimated 3D from YOLO 2D: distance={distance:.2f}m, "
                     f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
                 )
                 
