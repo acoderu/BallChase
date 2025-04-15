@@ -13,9 +13,10 @@ state manager, and finally to this PID controller node that generates motor comm
 This Node's Purpose:
 ------------------
 The PID controller node is responsible for the actual motion control of the robot when
-it's actively tracking a tennis ball. It implements two separate PID controllers:
-1. Linear velocity controller - Controls forward/backward movement to maintain ideal distance
-2. Angular velocity controller - Controls turning to keep the ball centered in view
+it's actively tracking a tennis ball. It implements three separate PID controllers:
+1. Linear X velocity controller - Controls forward/backward movement to maintain ideal distance
+2. Linear Y velocity controller - Controls lateral movement (strafing) for mecanum wheels
+3. Angular velocity controller - Controls turning to keep the ball centered in view
 
 PID Control Explained:
 --------------------
@@ -47,6 +48,8 @@ from std_msgs.msg import String, Float32MultiArray
 import math
 import time
 import numpy as np
+import signal
+import sys
 
 # Topic configuration (ensures consistency with other nodes)
 TOPICS = {
@@ -211,8 +214,9 @@ class PIDControllerNode(Node):
     """
     PID Controller node for tennis ball tracking.
     
-    This node uses separate PID controllers for linear and angular velocity:
-    - Linear velocity controller: Adjusts forward/backward speed to maintain ideal distance
+    This node uses separate PID controllers for movement:
+    - Linear X velocity controller: Adjusts forward/backward speed to maintain ideal distance
+    - Linear Y velocity controller: Controls lateral movement (strafing) for mecanum wheels
     - Angular velocity controller: Adjusts turning to keep the ball centered
     
     The node:
@@ -253,36 +257,51 @@ class PIDControllerNode(Node):
         self.declare_parameters(
             namespace='',
             parameters=[
-                # Linear velocity PID parameters - controls forward/backward movement
-                ('linear_kp', 0.5),     # Proportional gain
-                ('linear_ki', 0.1),     # Integral gain
-                ('linear_kd', 0.05),    # Derivative gain
-                ('linear_min', -0.1),   # Backward limit (m/s) - MODIFIED from -0.3 to -0.1
-                ('linear_max', 0.2),    # Forward limit (m/s) - MODIFIED from 0.5 to 0.2
+                # Linear X velocity PID parameters - controls forward/backward movement
+                ('linear_x_kp', 0.5),     # Proportional gain
+                ('linear_x_ki', 0.1),     # Integral gain
+                ('linear_x_kd', 0.05),    # Derivative gain
+                ('linear_x_min', -0.2),   # Backward limit (m/s)
+                ('linear_x_max', 0.2),    # Forward limit (m/s)
+                
+                # Linear Y velocity PID parameters - controls lateral movement (strafing)
+                ('linear_y_kp', 0.5),     # Proportional gain
+                ('linear_y_ki', 0.1),     # Integral gain
+                ('linear_y_kd', 0.05),    # Derivative gain
+                ('linear_y_min', -0.2),   # Right strafe limit (m/s)
+                ('linear_y_max', 0.2),    # Left strafe limit (m/s)
                 
                 # Angular velocity PID parameters - controls turning
                 ('angular_kp', 1.0),    # Proportional gain
                 ('angular_ki', 0.1),    # Integral gain
                 ('angular_kd', 0.2),    # Derivative gain
-                ('angular_min', -1.0),  # Right turn limit (rad/s)
-                ('angular_max', 1.0),   # Left turn limit (rad/s)
+                ('angular_min', -0.2),  # Right turn limit (rad/s)
+                ('angular_max', 0.2),   # Left turn limit (rad/s)
                 
                 # Control parameters
                 ('min_distance', 0.5),       # Minimum distance to keep from ball (meters)
                 ('max_distance', 2.0),       # Maximum tracking distance (meters)
                 ('target_offset_x', 0.0),    # Desired offset from ball in x direction
+                ('target_offset_y', 0.0),    # Desired offset from ball in y direction
                 ('target_update_rate', 10.0),# Control loop update rate (Hz)
                 ('debug_level', 1),          # 0=errors only, 1=info, 2=debug
                 ('adaptive_gains', True),    # Whether to adjust gains based on distance
+                ('use_lateral_control', True), # Whether to use Y-axis control for lateral movement
             ]
         )
         
         # Get all parameters
-        self.linear_kp = self.get_parameter('linear_kp').value
-        self.linear_ki = self.get_parameter('linear_ki').value
-        self.linear_kd = self.get_parameter('linear_kd').value
-        self.linear_min = self.get_parameter('linear_min').value
-        self.linear_max = self.get_parameter('linear_max').value
+        self.linear_x_kp = self.get_parameter('linear_x_kp').value
+        self.linear_x_ki = self.get_parameter('linear_x_ki').value
+        self.linear_x_kd = self.get_parameter('linear_x_kd').value
+        self.linear_x_min = self.get_parameter('linear_x_min').value
+        self.linear_x_max = self.get_parameter('linear_x_max').value
+        
+        self.linear_y_kp = self.get_parameter('linear_y_kp').value
+        self.linear_y_ki = self.get_parameter('linear_y_ki').value
+        self.linear_y_kd = self.get_parameter('linear_y_kd').value
+        self.linear_y_min = self.get_parameter('linear_y_min').value
+        self.linear_y_max = self.get_parameter('linear_y_max').value
         
         self.angular_kp = self.get_parameter('angular_kp').value
         self.angular_ki = self.get_parameter('angular_ki').value
@@ -293,17 +312,25 @@ class PIDControllerNode(Node):
         self.min_distance = self.get_parameter('min_distance').value
         self.max_distance = self.get_parameter('max_distance').value
         self.target_offset_x = self.get_parameter('target_offset_x').value
+        self.target_offset_y = self.get_parameter('target_offset_y').value
         self.update_rate = self.get_parameter('target_update_rate').value
         self.debug_level = self.get_parameter('debug_level').value
         self.adaptive_gains = self.get_parameter('adaptive_gains').value
+        self.use_lateral_control = self.get_parameter('use_lateral_control').value
         
     def _init_controllers(self):
         """Initialize the PID controllers."""
         # Initialize PID controllers with descriptive names
-        self.pid_linear = PIDController(
-            self.linear_kp, self.linear_ki, self.linear_kd,
-            self.linear_min, self.linear_max,
-            name="Linear"
+        self.pid_linear_x = PIDController(
+            self.linear_x_kp, self.linear_x_ki, self.linear_x_kd,
+            self.linear_x_min, self.linear_x_max,
+            name="Linear X"
+        )
+        
+        self.pid_linear_y = PIDController(
+            self.linear_y_kp, self.linear_y_ki, self.linear_y_kd,
+            self.linear_y_min, self.linear_y_max,
+            name="Linear Y"
         )
         
         self.pid_angular = PIDController(
@@ -325,6 +352,7 @@ class PIDControllerNode(Node):
         # Derived values
         self.current_distance = 0.0     # Current distance to target
         self.current_bearing = 0.0      # Current bearing to target
+        self.current_lateral = 0.0      # Current lateral offset to target
         
         # Diagnostic information
         self.cycle_count = 0            # Number of control cycles
@@ -372,12 +400,19 @@ class PIDControllerNode(Node):
         # Create a slower timer for detailed diagnostics
         self.diagnostic_timer = self.create_timer(1.0, self.publish_detailed_diagnostics)
         
+        # Create a timer for coordinate frame diagnostics to catch mismatches early
+        self.frame_diagnostic_timer = self.create_timer(3.0, self.run_coordinate_frame_diagnostics)
+        
     def log_parameters(self):
         """Log all the current parameter values for reference."""
         self.get_logger().info("=== PID Controller Parameters ===")
-        self.get_logger().info("Linear velocity PID:")
-        self.get_logger().info(f"  Kp: {self.linear_kp}, Ki: {self.linear_ki}, Kd: {self.linear_kd}")
-        self.get_logger().info(f"  Limits: [{self.linear_min}, {self.linear_max}] m/s")
+        self.get_logger().info("Linear X velocity PID:")
+        self.get_logger().info(f"  Kp: {self.linear_x_kp}, Ki: {self.linear_x_ki}, Kd: {self.linear_x_kd}")
+        self.get_logger().info(f"  Limits: [{self.linear_x_min}, {self.linear_x_max}] m/s")
+        
+        self.get_logger().info("Linear Y velocity PID:")
+        self.get_logger().info(f"  Kp: {self.linear_y_kp}, Ki: {self.linear_y_ki}, Kd: {self.linear_y_kd}")
+        self.get_logger().info(f"  Limits: [{self.linear_y_min}, {self.linear_y_max}] m/s")
         
         self.get_logger().info("Angular velocity PID:")
         self.get_logger().info(f"  Kp: {self.angular_kp}, Ki: {self.angular_ki}, Kd: {self.angular_kd}")
@@ -387,8 +422,10 @@ class PIDControllerNode(Node):
         self.get_logger().info(f"  Min distance: {self.min_distance} m")
         self.get_logger().info(f"  Max distance: {self.max_distance} m")
         self.get_logger().info(f"  Target offset X: {self.target_offset_x} m")
+        self.get_logger().info(f"  Target offset Y: {self.target_offset_y} m")
         self.get_logger().info(f"  Update rate: {self.update_rate} Hz")
         self.get_logger().info(f"  Adaptive gains: {self.adaptive_gains}")
+        self.get_logger().info(f"  Use lateral control: {self.use_lateral_control}")
         self.get_logger().info(f"  Debug level: {self.debug_level}")
         self.get_logger().info("==================================")
         
@@ -411,7 +448,8 @@ class PIDControllerNode(Node):
             
             # Only reset PIDs when switching to/from tracking
             if new_state == "tracking" or self.robot_state == "tracking":
-                self.pid_linear.reset()
+                self.pid_linear_x.reset()
+                self.pid_linear_y.reset()
                 self.pid_angular.reset()
                 self.get_logger().debug("PID controllers reset due to state change")
                 
@@ -433,17 +471,56 @@ class PIDControllerNode(Node):
         self.current_target = msg
         self.last_target_time = time.time()
         
-        # Extract key information from target for logging
+        # Extract key information from target
         target = msg.point
-        self.current_distance = target.z  # Z is the forward distance in camera frame
-        self.current_bearing = math.atan2(target.x, target.z)  # Angle to target
         
-        if self.debug_level >= 2:
-            self.get_logger().debug(
-                f"Target: x={target.x:.2f}, y={target.y:.2f}, z={target.z:.2f}, "
-                f"distance={self.current_distance:.2f}m, bearing={math.degrees(self.current_bearing):.1f}°"
-            )
+        # Calculate full 3D distance to target (more robust)
+        full_distance = math.sqrt(target.x**2 + target.y**2 + target.z**2)
+        
+        # Store raw target components for logging
+        self.raw_target_x = target.x
+        self.raw_target_y = target.y
+        self.raw_target_z = target.z
+        
+        # Handle coordinates based on frame_id
+        frame_id = msg.header.frame_id if hasattr(msg.header, 'frame_id') else "unknown_frame"
+        
+        # Store for logging and diagnostics
+        self.target_frame = frame_id
+        
+        # Use appropriate interpretation based on coordinate frame
+        # State manager appears to be publishing in a frame where distance is the 
+        # magnitude of the position vector, not just the z component
+        self.current_distance = full_distance
+        
+        # Calculate bearing/direction to ball
+        # Most robot/world frames have x forward, y left - adapt based on frame
+        # Use atan2 for consistent angle calculation
+        if frame_id == "camera_frame" or frame_id == "camera_optical_frame":
+            # Camera optical frame: Z forward, X right, Y down
+            self.current_bearing = math.atan2(target.x, target.z)
+            # For camera frame, positive X is right, which is the correct sign convention
+            self.current_lateral = target.x
+        else:
+            # Standard robot frame: X forward, Y left
+            self.current_bearing = math.atan2(target.y, target.x)
+            # FIX: In base_link frame, positive Y is left, but we need negative lateral for leftward movement
+            # Negating Y to maintain the correct sign convention (negative = right, positive = left)
+            self.current_lateral = -target.y
             
+            # For base frame, we might need to handle z component differently
+            if abs(target.z) > 0.1:  # If there's significant height difference
+                self.get_logger().debug(f"Target has height component: z={target.z:.2f}m")
+
+        # Enhanced detailed logging for every target update to catch issues early
+        self.get_logger().info(
+            f"Target update: raw=[{target.x:.2f}, {target.y:.2f}, {target.z:.2f}], "
+            f"frame={frame_id}, "
+            f"calculated: distance={self.current_distance:.2f}m, "
+            f"lateral={self.current_lateral:.2f}m, "
+            f"bearing={math.degrees(self.current_bearing):.1f}°"
+        )
+        
     def control_loop_callback(self):
         """
         Regular control loop to calculate and publish velocity commands.
@@ -474,52 +551,69 @@ class PIDControllerNode(Node):
             self.get_logger().warn("Target is too old (>500ms), stopping robot")
             self.stop_robot()
             return
+        
+        # Log current target position and properties for diagnostics
+        # This will help catch any coordinate frame mismatches
+        if self.debug_level >= 2 and self.cycle_count % 10 == 0:
+            raw_point = self.current_target.point
+            frame_id = getattr(self.current_target.header, 'frame_id', 'unknown')
+            self.get_logger().info(
+                f"Raw target data: pos=[{raw_point.x:.2f}, {raw_point.y:.2f}, {raw_point.z:.2f}], "
+                f"frame={frame_id}"
+            )
             
-        # Extract target position (in camera frame)
-        target = self.current_target.point
+        # Use the processed values from target_callback instead of recalculating
+        # This ensures consistent interpretation of coordinate frames
+        distance = self.current_distance
+        lateral = self.current_lateral
+        bearing = self.current_bearing
         
-        # Calculate distance to target
-        # In camera frame, Z is forward, X is right, Y is down
-        distance = target.z  # Z is the forward distance
-        
-        # Calculate normalized target bearing (angular error)
-        # Use X position (left/right) divided by Z to get normalized offset
-        bearing = math.atan2(target.x, target.z)
-        
-        # Log target data but only every 20 cycles to avoid verbosity
-        if self.debug_level >= 2 and self.cycle_count % 20 == 0:
-            self.get_logger().info(f"Target position: x={target.x:.2f}, z={target.z:.2f}, distance={distance:.2f}m, bearing={math.degrees(bearing):.1f}°")
+        # Log values each cycle to diagnose coordinate frame issues
+        self.get_logger().info(f"Control errors: distance_error={distance - self.min_distance:.2f}m, lateral_error={lateral:.2f}m, angular_error={math.degrees(bearing):.1f}°")
         
         # Calculate desired distance (with minimum safe distance)
         desired_distance = max(self.min_distance, min(distance, self.max_distance))
         
-        # Calculate errors
+        # Calculate errors - ball_distance is already the full 3D distance
         distance_error = distance - desired_distance - self.target_offset_x
+        lateral_error = lateral - self.target_offset_y
         angular_error = bearing  # We want bearing to be 0 (centered)
-        
-        # Log errors only if they're significant or occasionally
-        if self.debug_level >= 1 and (abs(distance_error) > 0.1 or abs(angular_error) > 0.1 or self.cycle_count % 30 == 0):
-            self.get_logger().info(f"Control errors: distance_error={distance_error:.2f}m, angular_error={math.degrees(angular_error):.1f}°")
         
         # Apply adaptive gains if enabled
         if self.adaptive_gains:
             self._adjust_gains_for_distance(distance)
         
         # Compute PID outputs
-        linear_velocity = self.pid_linear.compute(distance_error, current_time)
-        angular_velocity = self.pid_angular.compute(angular_error, current_time)
+        linear_x_velocity = self.pid_linear_x.compute(distance_error, current_time)
         
-        # Create velocity command
+        # Handle lateral movement based on configuration
+        if self.use_lateral_control:
+            # Use direct lateral control with mecanum wheels
+            linear_y_velocity = self.pid_linear_y.compute(lateral_error, current_time)
+            # Reduce angular velocity influence when using lateral control
+            angular_scale = 0.7 
+        else:
+            # No lateral control, use only angular velocity for alignment
+            linear_y_velocity = 0.0
+            angular_scale = 1.0
+            
+        angular_velocity = self.pid_angular.compute(angular_error, current_time) * angular_scale
+        
+        # Create velocity command for mecanum wheels
         cmd_vel = Twist()
-        cmd_vel.linear.x = linear_velocity
-        cmd_vel.angular.z = angular_velocity
+        cmd_vel.linear.x = linear_x_velocity   # Forward/backward
+        cmd_vel.linear.y = linear_y_velocity   # Left/right strafe (positive = left)
+        cmd_vel.angular.z = angular_velocity   # Rotation (positive = counterclockwise)
         
         # Log velocity values less frequently
         if self.debug_level >= 1 and self.cycle_count % 20 == 0:
-            self.get_logger().info(f"[#{self.cycle_count}] Velocity cmd: linear={linear_velocity:.3f}m/s, angular={angular_velocity:.3f}rad/s")
+            self.get_logger().info(
+                f"[#{self.cycle_count}] Velocity cmd: linear_x={linear_x_velocity:.3f}m/s, "
+                f"linear_y={linear_y_velocity:.3f}m/s, angular={angular_velocity:.3f}rad/s"
+            )
         
         # Save for history
-        self.velocity_history.append((linear_velocity, angular_velocity))
+        self.velocity_history.append((linear_x_velocity, linear_y_velocity, angular_velocity))
         if len(self.velocity_history) > 20:  # Keep last 20 commands
             self.velocity_history.pop(0)
         
@@ -527,25 +621,31 @@ class PIDControllerNode(Node):
         self.cmd_vel_pub.publish(cmd_vel)
         
         # Publish basic diagnostics every cycle
-        self.publish_basic_diagnostics(distance_error, angular_error,
-                                      linear_velocity, angular_velocity)
+        self.publish_basic_diagnostics(distance_error, lateral_error, angular_error,
+                                      linear_x_velocity, linear_y_velocity, angular_velocity)
         
         # Log periodic status (approximately once per second)
         if self.debug_level >= 1 and (current_time - self.last_control_time) >= 1.0:
             # Get PID components for debugging
-            lin_p, lin_i, lin_d = self.pid_linear.get_components()
+            lin_x_p, lin_x_i, lin_x_d = self.pid_linear_x.get_components()
+            lin_y_p, lin_y_i, lin_y_d = self.pid_linear_y.get_components()
             ang_p, ang_i, ang_d = self.pid_angular.get_components()
             
             self.get_logger().info(
                 f"PID Control: dist_err={distance_error:.2f}m, "
+                f"lat_err={lateral_error:.2f}m, "
                 f"ang_err={math.degrees(angular_error):.1f}°, "
-                f"lin_v={linear_velocity:.2f}m/s, "
+                f"lin_x={linear_x_velocity:.2f}m/s, "
+                f"lin_y={linear_y_velocity:.2f}m/s, "
                 f"ang_v={angular_velocity:.2f}rad/s"
             )
             
             if self.debug_level >= 2:
                 self.get_logger().debug(
-                    f"Linear PID: P={lin_p:.2f}, I={lin_i:.2f}, D={lin_d:.2f}"
+                    f"Linear X PID: P={lin_x_p:.2f}, I={lin_x_i:.2f}, D={lin_x_d:.2f}"
+                )
+                self.get_logger().debug(
+                    f"Linear Y PID: P={lin_y_p:.2f}, I={lin_y_i:.2f}, D={lin_y_d:.2f}"
                 )
                 self.get_logger().debug(
                     f"Angular PID: P={ang_p:.2f}, I={ang_i:.2f}, D={ang_d:.2f}"
@@ -567,10 +667,14 @@ class PIDControllerNode(Node):
         scale = 0.5 + 0.5 * min(1.0, max(0.0, (distance - self.min_distance) / 
                                         (self.max_distance - self.min_distance)))
         
-        # Apply scaling to both controllers
-        # Linear controller: less aggressive when close
-        self.pid_linear.kp = self.linear_kp * scale
-        self.pid_linear.ki = self.linear_ki * scale
+        # Apply scaling to controllers
+        # Linear X controller: less aggressive when close
+        self.pid_linear_x.kp = self.linear_x_kp * scale
+        self.pid_linear_x.ki = self.linear_x_ki * scale
+        
+        # Linear Y controller: less aggressive when close
+        self.pid_linear_y.kp = self.linear_y_kp * scale
+        self.pid_linear_y.ki = self.linear_y_ki * scale
         
         # Angular controller: more precise when close
         precision_scale = 1.5 - 0.5 * scale  # 1.25 when close, 1.0 when far
@@ -584,8 +688,8 @@ class PIDControllerNode(Node):
         # Clear velocity history
         self.velocity_history = []
         
-    def publish_basic_diagnostics(self, distance_error, angular_error,
-                               linear_velocity, angular_velocity):
+    def publish_basic_diagnostics(self, distance_error, lateral_error, angular_error,
+                               linear_x_velocity, linear_y_velocity, angular_velocity):
         """
         Publish basic diagnostic information for PID controllers.
         
@@ -594,17 +698,22 @@ class PIDControllerNode(Node):
         
         Args:
             distance_error: Error in distance from target (meters)
+            lateral_error: Error in lateral position (meters)
             angular_error: Error in angular position (radians)
-            linear_velocity: Computed linear velocity (m/s)
+            linear_x_velocity: Computed forward/backward velocity (m/s)
+            linear_y_velocity: Computed left/right velocity (m/s)
             angular_velocity: Computed angular velocity (rad/s)
         """
         diag_msg = Float32MultiArray()
         diag_msg.data = [
             distance_error,
+            lateral_error,
             angular_error,
-            linear_velocity,
+            linear_x_velocity,
+            linear_y_velocity,
             angular_velocity,
-            self.pid_linear.integral,
+            self.pid_linear_x.integral,
+            self.pid_linear_y.integral,
             self.pid_angular.integral
         ]
         self.pid_diag_pub.publish(diag_msg)
@@ -622,33 +731,141 @@ class PIDControllerNode(Node):
         # Calculate velocity statistics
         if self.velocity_history:
             # Extract linear and angular velocities
-            lin_velocities = [v[0] for v in self.velocity_history]
-            ang_velocities = [v[1] for v in self.velocity_history]
+            lin_x_velocities = [v[0] for v in self.velocity_history]
+            lin_y_velocities = [v[1] for v in self.velocity_history]
+            ang_velocities = [v[2] for v in self.velocity_history]
             
             # Calculate statistics
-            avg_lin_vel = sum(lin_velocities) / len(lin_velocities)
+            avg_lin_x_vel = sum(lin_x_velocities) / len(lin_x_velocities)
+            avg_lin_y_vel = sum(lin_y_velocities) / len(lin_y_velocities)
             avg_ang_vel = sum(ang_velocities) / len(ang_velocities)
-            max_lin_vel = max(lin_velocities)
+            max_lin_x_vel = max(lin_x_velocities)
+            max_lin_y_vel = max(lin_y_velocities) if any(lin_y_velocities) else 0
             max_ang_vel = max(ang_velocities)
             
             # Log detailed information
             self.get_logger().info("=== PID Detailed Diagnostics ===")
-            self.get_logger().info(f"Target: distance={self.current_distance:.2f}m, bearing={math.degrees(self.current_bearing):.1f}°")
-            self.get_logger().info(f"Linear velocity: avg={avg_lin_vel:.2f}m/s, max={max_lin_vel:.2f}m/s")
+            self.get_logger().info(f"Target: distance={self.current_distance:.2f}m, lateral={self.current_lateral:.2f}m, bearing={math.degrees(self.current_bearing):.1f}°")
+            self.get_logger().info(f"Linear X velocity: avg={avg_lin_x_vel:.2f}m/s, max={max_lin_x_vel:.2f}m/s")
+            self.get_logger().info(f"Linear Y velocity: avg={avg_lin_y_vel:.2f}m/s, max={max_lin_y_vel:.2f}m/s")
             self.get_logger().info(f"Angular velocity: avg={avg_ang_vel:.2f}rad/s, max={max_ang_vel:.2f}rad/s")
             
             # Get PID components
-            lin_p, lin_i, lin_d = self.pid_linear.get_components()
+            lin_x_p, lin_x_i, lin_x_d = self.pid_linear_x.get_components()
+            lin_y_p, lin_y_i, lin_y_d = self.pid_linear_y.get_components()
             ang_p, ang_i, ang_d = self.pid_angular.get_components()
             
-            self.get_logger().info(f"Linear PID components: P={lin_p:.2f}, I={lin_i:.2f}, D={lin_d:.2f}")
+            self.get_logger().info(f"Linear X PID components: P={lin_x_p:.2f}, I={lin_x_i:.2f}, D={lin_x_d:.2f}")
+            self.get_logger().info(f"Linear Y PID components: P={lin_y_p:.2f}, I={lin_y_i:.2f}, D={lin_y_d:.2f}")
             self.get_logger().info(f"Angular PID components: P={ang_p:.2f}, I={ang_i:.2f}, D={ang_d:.2f}")
             
             if self.adaptive_gains:
-                self.get_logger().info(f"Adaptive gains: linear_kp={self.pid_linear.kp:.2f}, angular_kp={self.pid_angular.kp:.2f}")
+                self.get_logger().info(f"Adaptive gains: linear_x_kp={self.pid_linear_x.kp:.2f}, linear_y_kp={self.pid_linear_y.kp:.2f}, angular_kp={self.pid_angular.kp:.2f}")
             
             self.get_logger().info(f"Control cycles: {self.cycle_count}")
             self.get_logger().info("================================")
+            
+    def handle_coordinate_frame_diagnostics(self):
+        """
+        Special diagnostic function to detect and report coordinate frame issues.
+        
+        This function analyzes the latest target data and logs detailed information
+        about potential coordinate frame mismatches or interpretation issues.
+        """
+        if self.current_target is None:
+            return
+            
+        target = self.current_target.point
+        frame_id = getattr(self.current_target.header, 'frame_id', 'unknown')
+        
+        # Calculate distances in different ways to detect coordinate mismatches
+        # Full 3D distance
+        dist_3d = math.sqrt(target.x**2 + target.y**2 + target.z**2)
+        
+        # XY plane distance (commonly used for ground robots)
+        dist_xy = math.sqrt(target.x**2 + target.y**2)
+        
+        # Individual axis distances that could be the "forward" direction
+        dist_x = abs(target.x)
+        dist_y = abs(target.y)
+        dist_z = abs(target.z)
+        
+        # Direction calculations in different possible interpretations
+        dir_xy = math.degrees(math.atan2(target.y, target.x))
+        dir_yz = math.degrees(math.atan2(target.z, target.y))
+        dir_xz = math.degrees(math.atan2(target.z, target.x))
+        
+        # Compare the different calculations to how we're interpreting in target_callback
+        # If these vary widely, we may have a coordinate frame issue
+        
+        frame_mismatch_detected = False
+        
+        # Check if our interpretation differs significantly from other interpretations
+        if abs(self.current_distance - dist_3d) > 0.1:
+            frame_mismatch_detected = True
+        
+        # Check which axis seems to be the primary distance component
+        primary_axis = "unknown"
+        if dist_x > dist_y and dist_x > dist_z:
+            primary_axis = "x"
+        elif dist_y > dist_x and dist_y > dist_z:
+            primary_axis = "y"
+        elif dist_z > dist_x and dist_z > dist_y:
+            primary_axis = "z"
+            
+        # Our interpretation vs what we calculated
+        frame_diagnostics = {
+            "detected_issue": frame_mismatch_detected,
+            "target_frame": frame_id,
+            "raw_position": [round(target.x, 2), round(target.y, 2), round(target.z, 2)],
+            "distance_calculations": {
+                "3d_distance": round(dist_3d, 2),
+                "xy_plane": round(dist_xy, 2),
+                "x_axis": round(dist_x, 2),
+                "y_axis": round(dist_y, 2),
+                "z_axis": round(dist_z, 2)
+            },
+            "bearing_calculations": {
+                "xy_plane": round(dir_xy, 1),
+                "yz_plane": round(dir_yz, 1),
+                "xz_plane": round(dir_xz, 1)
+            },
+            "our_interpretation": {
+                "distance": round(self.current_distance, 2),
+                "lateral": round(self.current_lateral, 2),
+                "bearing_deg": round(math.degrees(self.current_bearing), 1)
+            },
+            "primary_axis": primary_axis
+        }
+        
+        # Log warning if we detect a potential coordinate frame mismatch
+        if frame_mismatch_detected:
+            self.get_logger().warn(f"Possible coordinate frame issue detected - {frame_diagnostics}")
+        else:
+            self.get_logger().debug(f"Coordinate frame diagnostics: {frame_diagnostics}")
+            
+        return frame_diagnostics
+
+    def run_coordinate_frame_diagnostics(self):
+        """Periodic function to check for coordinate frame issues."""
+        if self.current_target is None:
+            return
+
+        # Run the diagnostics
+        diagnostics = self.handle_coordinate_frame_diagnostics()
+        
+        # If we're actively tracking, log a bit more detail about the coordinate frames
+        if self.robot_state == "tracking":
+            # Extract the latest position values from state manager 
+            target = self.current_target.point
+            
+            # Additional logging to help diagnose frame issues
+            self.get_logger().info(
+                f"Frame check: Target=[{target.x:.2f}, {target.y:.2f}, {target.z:.2f}], "
+                f"interpreted as dist={self.current_distance:.2f}m, "
+                f"bearing={math.degrees(self.current_bearing):.1f}°, "
+                f"primary_component={diagnostics['primary_axis'] if diagnostics else 'unknown'}"
+            )
 
 
 def main(args=None):
@@ -660,9 +877,10 @@ def main(args=None):
     print("=================================================")
     print("Tennis Ball Tracking - PID Controller Node")
     print("=================================================")
-    print("This node implements two PID controllers:")
-    print("1. Linear velocity (forward/backward movement)")
-    print("2. Angular velocity (turning/rotation)")
+    print("This node implements three PID controllers:")
+    print("1. Linear X velocity (forward/backward movement)")
+    print("2. Linear Y velocity (lateral/strafing movement)")
+    print("3. Angular velocity (turning/rotation)")
     print("")
     print("Subscriptions:")
     for name, topic in TOPICS["input"].items():
@@ -685,6 +903,15 @@ def main(args=None):
     # Register shutdown handler
     rclpy.get_global_executor().add_node(node)
     rclpy.get_default_context().on_shutdown(shutdown_handler)
+    
+    # Register signal handlers for proper shutdown
+    def signal_handler(sig, frame):
+        node.get_logger().info(f"Signal {sig} received, stopping robot...")
+        shutdown_handler()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     try:
         rclpy.spin(node)

@@ -83,9 +83,8 @@ class BallChaseStateManager(Node):
         # Set up publishers
         self._setup_publishers()
         
-        # Timer for state management
-        self.timer = self.create_timer(0.1, self.state_manager_callback)  # 10Hz state management
-        self.diagnostic_timer = self.create_timer(1.0, self.publish_diagnostics)  # 1Hz diagnostics
+        # Set up timers
+        self._setup_timers()
         
         self.get_logger().info("Basketball Chaser State Manager initialized in INITIALIZING state")
         self.publish_state()
@@ -197,6 +196,18 @@ class BallChaseStateManager(Node):
             '/robot/state',
             10
         )
+    
+    def _setup_timers(self):
+        """Set up all timer callbacks for the node."""
+        # Timer for state management
+        self.timer = self.create_timer(0.1, self.state_manager_callback)  # 10Hz state management
+        
+        # Timer for diagnostics
+        self.diagnostic_timer = self.create_timer(1.0, self.publish_diagnostics)  # 1Hz diagnostics
+        
+        # Timer for periodic state republishing
+        self.state_republish_timer = self.create_timer(2.0, self.publish_state)  # 0.5Hz state republishing
+        self.get_logger().info("Set up timer to republish state every 2 seconds")
     
     def tracking_status_callback(self, msg):
         """

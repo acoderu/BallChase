@@ -102,6 +102,22 @@ class BasketballLidarDetector(Node):
         # Uncomment when not doing calibration
         # self.debug_timer = self.create_timer(2.0, self.publish_debug_point)
         
+        # NEW: Set up autonomous detection timer for independent ball finding
+        autonomous_detection_config = self.config.get('autonomous_detection', {})
+        self.autonomous_detection_enabled = autonomous_detection_config.get('enabled', True)
+        self.autonomous_interval = autonomous_detection_config.get('interval', 1.0)  # seconds
+        self.autonomous_detection_timer = self.create_timer(
+            self.autonomous_interval, self.autonomous_detection_callback
+        )
+        
+        # NEW: Track detection modes and confidence
+        self.detection_mode = "HYBRID"  # Can be "HYBRID", "INDEPENDENT", or "CAMERA_DEPENDENT"
+        self.independent_confidence = 0.5  # Initial confidence in independent detection
+        self.last_independent_detection_time = 0.0
+        self.last_camera_detection_time = 0.0
+        self.recovery_attempts = 0
+        self.max_recovery_attempts = autonomous_detection_config.get('max_recovery_attempts', 5)
+        
         self.get_logger().info("Basketball LIDAR detector initialized")
         
         # NEW: Create a flag to track successful transforms
@@ -117,13 +133,26 @@ class BasketballLidarDetector(Node):
         
         # Performance adaptation settings
         self.adaptive_processing = perf_config.get('adaptive_processing', True)
-        self.high_load_threshold = perf_config.get('high_load_threshold', 80.0)  # CPU %
-        self.low_load_threshold = perf_config.get('low_load_threshold', 50.0)    # CPU %
+        # Adjusted thresholds with wider gap to prevent frequent switching
+        self.high_load_threshold = perf_config.get('high_load_threshold', 85.0)  # CPU % (increased from 80)
+        self.low_load_threshold = perf_config.get('low_load_threshold', 40.0)    # CPU % (decreased from 50)
+        
+        # NEW: Hysteresis parameters for performance mode transitions
+        self.mode_transition_hysteresis = perf_config.get('mode_transition_hysteresis', 5.0)  # % hysteresis
+        self.mode_stability_time = perf_config.get('mode_stability_time', 10.0)  # seconds to maintain mode
+        self.last_mode_change_time = time.time()
+        self.mode_samples = deque(maxlen=5)  # Track recent CPU measurements for smoothing
         
         # Processing settings
         self.max_point_limit = perf_config.get('max_point_limit', 500)
         self.dynamic_ransac_iterations = perf_config.get('dynamic_ransac_iterations', True)
-        self.min_ransac_iterations = perf_config.get('min_ransac_iterations', 10)
+        # Increased minimum RANSAC iterations for better quality in all modes
+        self.min_ransac_iterations = perf_config.get('min_ransac_iterations', 15)  # Increased from 10
+        
+        # NEW: Quality protection parameters
+        self.min_quality_threshold = perf_config.get('min_quality_threshold', 0.3)  # Minimum acceptable quality
+        self.critical_point_radius = perf_config.get('critical_point_radius', 0.5)  # Radius around previous detection
+        self.min_critical_points = perf_config.get('min_critical_points', 15)  # Minimum points to keep for detection
         
         # Timer frequencies
         self.diagnostics_interval_normal = self.config.get('diagnostics', {}).get('publish_interval', 3.0)
@@ -156,7 +185,9 @@ class BasketballLidarDetector(Node):
         
         # Position tracking
         self.position_history = deque(maxlen=10)
+        self.velocity_history = deque(maxlen=5)  # Track recent velocity for consistency checks
         self.previous_ball_position = None
+        self.previous_timestamp = None  # Track timestamp for velocity calculation
         self.consecutive_failures = 0
         self.last_successful_detection_time = 0
         self.predicted_position = None
@@ -179,6 +210,11 @@ class BasketballLidarDetector(Node):
         self.processing_skips = 0
         self.current_cpu_load = 0.0
         self.current_memory_usage = 0.0
+        
+        # Position smoothing parameters
+        self.smoothing_alpha = 0.3  # Smoothing factor (0-1), lower = more smoothing
+        self.max_position_jump = 0.5  # Maximum allowed jump in meters between frames
+        self.max_speed = 2.0  # Maximum physically plausible speed in m/s
     
     def check_transform(self):
         """Periodically check if transform is available in TF tree."""
@@ -297,6 +333,16 @@ class BasketballLidarDetector(Node):
         self.quality_medium = quality_thresholds.get('medium', 0.6)
         self.quality_high = quality_thresholds.get('high', 0.8)
         
+        # NEW: Adaptive quality parameters
+        adaptive_quality = basketball_config.get('adaptive_quality', {})
+        self.quality_distance_factor = adaptive_quality.get('distance_factor', 0.1)  # How much distance affects quality
+        self.quality_point_count_factor = adaptive_quality.get('point_count_factor', 0.02)  # How much point count affects threshold
+        self.quality_min_threshold = adaptive_quality.get('min_threshold', 0.25)  # Absolute minimum threshold
+        self.quality_max_threshold = adaptive_quality.get('max_threshold', 0.9)  # Absolute maximum threshold
+        self.quality_history_size = adaptive_quality.get('history_size', 10)  # Size of quality history buffer
+        self.quality_history = deque(maxlen=self.quality_history_size)  # Track recent quality scores
+        self.detection_confidence_weight = adaptive_quality.get('detection_confidence_weight', 0.7)  # Weight for distance-based detection confidence
+        
         # Physical measurements - matching basketball & setup
         physical = self.config.get('physical_measurements', {})
         self.lidar_height = physical.get('lidar_height', 0.1524)  # 6 inches
@@ -305,9 +351,15 @@ class BasketballLidarDetector(Node):
         
         # Detection reliability
         reliability = self.config.get('detection_reliability', {})
-        # Increased from default 0.5 to improve reliability for larger basketball
-        self.min_reliable_distance = reliability.get('min_reliable_distance', 0.8)
+        # Reduced from 0.5m to 0.2m to improve close-range detection reliability
+        self.min_reliable_distance = reliability.get('min_reliable_distance', 0.2)
         self.publish_unreliable = reliability.get('publish_unreliable', True)
+        # New parameters for quality-weighted reliability assessment
+        self.close_range_threshold = reliability.get('close_range_threshold', 0.3)
+        self.close_range_min_quality = reliability.get('close_range_min_quality', 0.4)
+        # Hysteresis parameters for reliability assessment
+        self.reliability_history_size = reliability.get('history_size', 5)
+        self.reliability_history = deque(maxlen=self.reliability_history_size)
         
         # RANSAC parameters
         ransac_config = self.config.get('ransac', {})
@@ -449,47 +501,99 @@ class BasketballLidarDetector(Node):
         )
 
     def monitor_resources(self):
-        """Monitor system resources and adapt processing accordingly."""
+        """
+        Monitor system resources and adapt processing accordingly.
+        Implements hysteresis and gradual mode transitions to prevent thrashing.
+        """
         try:
             # Get CPU and memory usage
-            self.current_cpu_load = psutil.cpu_percent()
+            current_cpu = psutil.cpu_percent()
+            self.current_cpu_load = current_cpu
             self.current_memory_usage = psutil.virtual_memory().percent
             
-            # Determine performance mode based on system load
-            if self.current_cpu_load > self.high_load_threshold:
-                new_mode = "MINIMAL"
-                # Adjust diagnostic timer for high load
-                if self.performance_mode != "MINIMAL":
-                    self.diagnostics_timer.timer_period_ns = int(self.diagnostics_interval_high_load * 1e9)
-            elif self.current_cpu_load > self.low_load_threshold:
-                new_mode = "EFFICIENT"
-            else:
-                new_mode = "NORMAL"
-                # Restore normal diagnostic frequency if coming from high load
-                if self.performance_mode == "MINIMAL":
-                    self.diagnostics_timer.timer_period_ns = int(self.diagnostics_interval_normal * 1e9)
+            # Add to rolling window for smoothing
+            self.mode_samples.append(current_cpu)
             
-            # Log mode changes
+            # Calculate smoothed CPU load (more stable than instantaneous readings)
+            smoothed_cpu = sum(self.mode_samples) / len(self.mode_samples) if self.mode_samples else current_cpu
+            
+            # Determine tentative performance mode based on system load
+            new_mode = self.determine_performance_mode(smoothed_cpu)
+            
+            # Apply hysteresis to mode transitions
+            current_time = time.time()
+            mode_stable_duration = current_time - self.last_mode_change_time
+            
+            # Only change modes if:
+            # 1. We've been in the current mode for at least mode_stability_time seconds
+            # 2. The new mode is different AND the CPU load exceeds the threshold plus hysteresis
+            should_change_mode = False
+            
             if new_mode != self.performance_mode:
+                if mode_stable_duration >= self.mode_stability_time:
+                    # Add hysteresis to thresholds - require more significant changes to switch modes
+                    if new_mode == "MINIMAL" and smoothed_cpu > self.high_load_threshold + self.mode_transition_hysteresis:
+                        should_change_mode = True
+                    elif new_mode == "NORMAL" and smoothed_cpu < self.low_load_threshold - self.mode_transition_hysteresis:
+                        should_change_mode = True
+                    elif new_mode == "EFFICIENT" and (
+                        (self.performance_mode == "NORMAL" and smoothed_cpu > self.low_load_threshold + self.mode_transition_hysteresis) or
+                        (self.performance_mode == "MINIMAL" and smoothed_cpu < self.high_load_threshold - self.mode_transition_hysteresis)
+                    ):
+                        should_change_mode = True
+            
+            # Apply the mode change if conditions are met
+            if should_change_mode:
+                # Log mode changes
                 self.get_logger().info(
                     f"Performance mode change: {self.performance_mode} -> {new_mode} "
-                    f"(CPU: {self.current_cpu_load:.1f}%, Memory: {self.current_memory_usage:.1f}%)"
+                    f"(CPU: {smoothed_cpu:.1f}%, Memory: {self.current_memory_usage:.1f}%, "
+                    f"stable for {mode_stable_duration:.1f}s)"
                 )
+                
                 self.performance_mode = new_mode
+                self.last_mode_change_time = current_time
+                
+                # Adjust diagnostic timer for high load
+                if new_mode == "MINIMAL":
+                    self.diagnostics_timer.timer_period_ns = int(self.diagnostics_interval_high_load * 1e9)
+                else:
+                    # Restore normal diagnostic frequency if coming from high load
+                    if self.performance_mode != "MINIMAL":
+                        self.diagnostics_timer.timer_period_ns = int(self.diagnostics_interval_normal * 1e9)
             
             # Publish system load for other nodes
             load_msg = Float32()
-            load_msg.data = float(self.current_cpu_load)
+            load_msg.data = float(smoothed_cpu)
             self.load_publisher.publish(load_msg)
             
         except Exception as e:
             self.get_logger().warn(f"Error monitoring resources: {str(e)}")
+            
+    def determine_performance_mode(self, cpu_load):
+        """
+        Determine the appropriate performance mode based on CPU load.
+        Separates the decision logic from the mode transition logic.
+        
+        Args:
+            cpu_load: Current CPU load percentage
+            
+        Returns:
+            str: The appropriate performance mode ("NORMAL", "EFFICIENT", or "MINIMAL")
+        """
+        if cpu_load > self.high_load_threshold:
+            return "MINIMAL"
+        elif cpu_load > self.low_load_threshold:
+            return "EFFICIENT"
+        else:
+            return "NORMAL"
 
     def scan_callback(self, msg):
         """
         Process LaserScan messages from the LIDAR.
         
         Converts polar coordinates to Cartesian coordinates.
+        Implements intelligent sampling to preserve ball detection accuracy under load.
         """
         try:
             # If system is under very high load, we might skip processing some scans
@@ -531,8 +635,244 @@ class BasketballLidarDetector(Node):
                 elif self.performance_mode == "MINIMAL":
                     point_limit = self.max_point_limit // 4
             
-            # Sample points if there are too many (improves performance)
-            if len(valid_ranges) > point_limit:
+            # Intelligent sampling: Create regions of interest based on recent detections and movement patterns
+            # Initialize all points as non-priority to start
+            priority_weights = np.ones_like(valid_ranges)
+            prioritize_regions = False
+            
+            # Convert scan to Cartesian for region analysis
+            x_all = valid_ranges * np.cos(angles)
+            y_all = valid_ranges * np.sin(angles)
+            
+            # Define regions of interest with different priority levels
+            roi_regions = []
+            
+            # Region 1: Previous ball detection (highest priority)
+            if self.previous_ball_position is not None:
+                prev_ball_x = self.previous_ball_position[0]
+                prev_ball_y = self.previous_ball_position[1]
+                
+                # Distance from each point to previous detection
+                distances_to_prev = np.sqrt((x_all - prev_ball_x)**2 + (y_all - prev_ball_y)**2)
+                
+                # Critical region: points very close to previous detection (highest weight)
+                critical_mask = distances_to_prev < self.critical_point_radius
+                
+                # Extended region: slightly wider area around previous detection
+                extended_mask = distances_to_prev < self.critical_point_radius * 2.0
+                
+                # Add critical region with highest weight
+                roi_regions.append({"mask": critical_mask, "weight": 10.0, "name": "previous_detection"})
+                
+                # Add extended region with medium-high weight
+                roi_regions.append({"mask": extended_mask & ~critical_mask, "weight": 5.0, "name": "extended_previous"})
+                
+                # Flag that we have meaningful regions to prioritize
+                prioritize_regions = True
+            
+            # Region 2: Predicted movement direction (medium priority)
+            # Use velocity history to predict where the ball is likely moving
+            if len(self.position_history) >= 2 and len(self.velocity_history) > 0:
+                # Get last two positions to determine direction
+                last_pos = self.position_history[-1]
+                prev_pos = self.position_history[-2] if len(self.position_history) >= 2 else None
+                
+                if prev_pos is not None and last_pos is not None:
+                    # Calculate movement direction vector
+                    movement_dir = last_pos[:2] - prev_pos[:2]
+                    movement_mag = np.linalg.norm(movement_dir)
+                    
+                    # Only use direction if we have meaningful movement
+                    if movement_mag > 0.05:
+                        # Normalize direction vector
+                        movement_dir = movement_dir / movement_mag
+                        
+                        # Average recent velocity
+                        avg_velocity = np.mean(self.velocity_history)
+                        
+                        # Predict next position (simple linear extrapolation)
+                        # Using multiple time horizons to create a path prediction
+                        time_horizons = [0.2, 0.4, 0.6]  # Look ahead 0.2, 0.4, 0.6 seconds
+                        
+                        for dt in time_horizons:
+                            # Calculate predicted position
+                            pred_x = last_pos[0] + movement_dir[0] * avg_velocity * dt
+                            pred_y = last_pos[1] + movement_dir[1] * avg_velocity * dt
+                            
+                            # Define search radius - wider for further predictions
+                            search_radius = self.critical_point_radius * (1.0 + dt)
+                            
+                            # Calculate distances to this predicted position
+                            distances_to_pred = np.sqrt((x_all - pred_x)**2 + (y_all - pred_y)**2)
+                            
+                            # Create mask for points near this prediction
+                            pred_mask = distances_to_pred < search_radius
+                            
+                            # Add this prediction region with weight that decreases with time horizon
+                            weight = 8.0 / (1.0 + dt * 5.0)  # Decreases for further predictions
+                            roi_regions.append({
+                                "mask": pred_mask, 
+                                "weight": weight, 
+                                "name": f"prediction_{dt:.1f}s"
+                            })
+                            
+                        # Flag that we have meaningful regions to prioritize
+                        prioritize_regions = True
+            
+            # Region 3: Edge detection - find potential circular patterns (medium priority)
+            # This helps detect new basketballs not related to previous detections
+            # Only do this in NORMAL mode as it's more computationally expensive
+            if self.performance_mode == "NORMAL" and len(valid_ranges) > 20:
+                try:
+                    # Quick and simple edge detection using range differences
+                    range_diffs = np.abs(np.diff(valid_ranges, prepend=valid_ranges[0]))
+                    
+                    # Find significant jumps in range values (potential edges)
+                    edge_threshold = 0.1  # 10cm jumps can indicate object edges
+                    edge_points = range_diffs > edge_threshold
+                    
+                    # Dilate the edge points slightly to capture surrounding points
+                    # Simple dilation by considering neighbors
+                    edge_dilated = np.zeros_like(edge_points)
+                    for i in range(1, len(edge_points)-1):
+                        if edge_points[i-1] or edge_points[i] or edge_points[i+1]:
+                            edge_dilated[i] = True
+                    
+                    # Add edge regions with medium weight
+                    if np.any(edge_dilated):
+                        roi_regions.append({"mask": edge_dilated, "weight": 4.0, "name": "edges"})
+                        prioritize_regions = True
+                except Exception as e:
+                    # Skip edge detection if it fails
+                    self.get_logger().debug(f"Edge detection skipped: {str(e)}")
+            
+            # Region 4: Uniform sampling across entire scan (lowest priority)
+            # Ensure we sample some points from the entire scan for global awareness
+            # Give uniform low weight to all points
+            roi_regions.append({"mask": np.ones_like(valid_ranges, dtype=bool), "weight": 1.0, "name": "uniform"})
+            
+            # Apply ROI weights to create priority sampling weights
+            if prioritize_regions:
+                # Start with base weights
+                priority_weights = np.ones_like(valid_ranges, dtype=float)
+                
+                # Apply each region's weights
+                for region in roi_regions:
+                    # Add weights where the mask is True
+                    priority_weights[region["mask"]] += region["weight"]
+                
+                # Count points in high priority regions
+                high_priority_mask = priority_weights > 2.0  # Points with more than base+2 weight
+                high_priority_count = np.sum(high_priority_mask)
+                
+                # Log information about high-priority points (if not in MINIMAL mode)
+                if self.performance_mode != "MINIMAL" and high_priority_count > 0:
+                    region_counts = {}
+                    for region in roi_regions:
+                        if region["name"] != "uniform":  # Skip logging uniform region
+                            region_counts[region["name"]] = np.sum(region["mask"])
+                    
+                    self.get_logger().debug(
+                        f"Smart sampling: {high_priority_count} high-priority points. "
+                        f"Regions: {region_counts}"
+                    )
+            
+            # Sample points based on priority weights if we need to reduce
+            if len(valid_ranges) > point_limit and prioritize_regions:
+                # For weighted sampling without replacement
+                # Normalize weights to probability distribution
+                p = priority_weights / np.sum(priority_weights)
+                
+                # Set minimum count for high-priority points 
+                high_priority_mask = priority_weights > 2.0
+                high_priority_count = np.sum(high_priority_mask)
+                
+                # Ensure we keep a minimum number of critical points, select the rest with weighted sampling
+                if high_priority_count > 0:
+                    # Determine how many high-priority points to keep
+                    # Ensure we keep at least min_critical_points of high priority points
+                    critical_points_to_keep = min(high_priority_count, 
+                                                max(self.min_critical_points, int(point_limit * 0.7)))
+                    
+                    # Directly select all high-priority points if there are few enough
+                    if high_priority_count <= critical_points_to_keep:
+                        critical_indices = np.where(high_priority_mask)[0]
+                        remaining_count = point_limit - high_priority_count
+                    else:
+                        # Otherwise, sample from high-priority points weighted by their importance
+                        high_priority_indices = np.where(high_priority_mask)[0]
+                        high_priority_weights = priority_weights[high_priority_mask]
+                        high_priority_p = high_priority_weights / np.sum(high_priority_weights)
+                        
+                        # Sample critical_points_to_keep from high-priority points
+                        critical_indices = np.random.choice(
+                            high_priority_indices, 
+                            size=critical_points_to_keep, 
+                            replace=False, 
+                            p=high_priority_p
+                        )
+                        remaining_count = point_limit - critical_points_to_keep
+                    
+                    # Sample the remaining points from all points with distance-weighted probabilities
+                    if remaining_count > 0:
+                        # Create mask for non-critical points
+                        non_critical_mask = np.ones(len(valid_ranges), dtype=bool)
+                        non_critical_mask[critical_indices] = False
+                        
+                        # Get indices of non-critical points
+                        non_critical_indices = np.where(non_critical_mask)[0]
+                        
+                        # No remaining points case
+                        if len(non_critical_indices) == 0:
+                            # Just use the critical indices
+                            selected_indices = critical_indices
+                        else:
+                            # Get weights for non-critical points
+                            non_critical_weights = priority_weights[non_critical_mask]
+                            
+                            # Normalize to probability
+                            if np.sum(non_critical_weights) > 0:
+                                non_critical_p = non_critical_weights / np.sum(non_critical_weights)
+                            else:
+                                non_critical_p = None  # Uniform sampling if all weights are zero
+                            
+                            # Sample remaining points from non-critical points
+                            remaining_indices = np.random.choice(
+                                non_critical_indices,
+                                size=min(remaining_count, len(non_critical_indices)),
+                                replace=False,
+                                p=non_critical_p
+                            )
+                            
+                            # Combine critical and remaining indices
+                            selected_indices = np.concatenate([critical_indices, remaining_indices])
+                    else:
+                        # Only use critical indices if no room for other points
+                        selected_indices = critical_indices
+                    
+                    # Sort indices to preserve original order (improves spatial coherence)
+                    selected_indices = np.sort(selected_indices)
+                    
+                    # Select final points using these indices
+                    valid_ranges = valid_ranges[selected_indices]
+                    angles = angles[selected_indices]
+                else:
+                    # Fallback to weighted sampling if no high-priority points
+                    selected_indices = np.random.choice(
+                        len(valid_ranges),
+                        size=point_limit,
+                        replace=False,
+                        p=p
+                    )
+                    
+                    # Sort indices to preserve original order
+                    selected_indices = np.sort(selected_indices)
+                    
+                    # Select final points using these indices
+                    valid_ranges = valid_ranges[selected_indices]
+                    angles = angles[selected_indices]
+            elif len(valid_ranges) > point_limit:
+                # Fallback to uniform sampling if we have no priority regions
                 sample_step = len(valid_ranges) // point_limit
                 valid_ranges = valid_ranges[::sample_step]
                 angles = angles[::sample_step]
@@ -758,6 +1098,7 @@ class BasketballLidarDetector(Node):
         best_center = None
         best_inlier_count = 0
         best_quality = 0
+        best_distance = 0
         
         # Try RANSAC with each seed point
         for seed_point in seed_points:
@@ -776,6 +1117,9 @@ class BasketballLidarDetector(Node):
             # Get points near seed
             nearby_points = self.points_array[nearby_indices]
             
+            # Calculate distance from LIDAR for quality adaptation
+            seed_distance = np.sqrt(seed_point[0]**2 + seed_point[1]**2)
+            
             # Determine iterations based on system load
             max_iterations = self.ransac_max_iterations
             if self.dynamic_ransac_iterations:
@@ -788,7 +1132,8 @@ class BasketballLidarDetector(Node):
             center, inlier_count, quality = self.ransac_circle_fit(
                 nearby_points, 
                 max_iterations,
-                self.ransac_inlier_threshold
+                self.ransac_inlier_threshold,
+                distance=seed_distance  # Pass distance for quality adaptation
             )
             
             # Check if this is better than current best
@@ -796,9 +1141,16 @@ class BasketballLidarDetector(Node):
                 best_center = center
                 best_inlier_count = inlier_count
                 best_quality = quality
+                best_distance = seed_distance
         
-        # Return result if found
-        if best_center is not None and best_quality >= self.quality_low:
+        # Calculate adaptive quality threshold based on detection conditions
+        adaptive_threshold = self.calculate_adaptive_quality_threshold(best_distance, best_inlier_count if best_center is not None else 0)
+        
+        # Return result if found and exceeds adaptive threshold
+        if best_center is not None and best_quality >= adaptive_threshold:
+            # Add quality score to history for trend analysis
+            self.quality_history.append(best_quality)
+            
             # Store the position for future reference
             self.previous_ball_position = best_center
             
@@ -811,10 +1163,87 @@ class BasketballLidarDetector(Node):
         
         return []
     
-    def ransac_circle_fit(self, points, max_iterations=30, threshold=0.02):
+    def calculate_adaptive_quality_threshold(self, distance, point_count):
+        """
+        Calculate an adaptive quality threshold based on detection conditions.
+        
+        Args:
+            distance: Distance to the detected ball in meters
+            point_count: Number of inlier points in the detection
+            
+        Returns:
+            float: Adaptive quality threshold
+        """
+        # Base threshold from configuration
+        base_threshold = self.quality_low
+        
+        # Distance-based adjustment: closer objects need higher quality (more reliable)
+        # and farther objects can accept lower quality (harder to detect reliably)
+        if distance < 0.5:
+            # Require higher quality for very close detections (can be noisy)
+            distance_adjustment = self.quality_distance_factor * 1.0
+        elif distance < 1.0:
+            # Slight increase for close detections
+            distance_adjustment = self.quality_distance_factor * 0.5
+        elif distance > 2.0:
+            # Allow lower quality for far detections
+            distance_adjustment = -self.quality_distance_factor * (min(distance, 4.0) - 2.0)
+        else:
+            # Neutral zone - no adjustment
+            distance_adjustment = 0.0
+            
+        # Point count adjustment: more points should yield more reliable detection
+        # Linear scaling based on point count
+        if point_count > 20:
+            # With many points, we can require higher quality
+            point_adjustment = self.quality_point_count_factor * min(point_count, 50) / 10.0
+        elif point_count < 10:
+            # With few points, accept lower quality
+            point_adjustment = -self.quality_point_count_factor * (10 - point_count) / 2.0
+        else:
+            # Neutral zone - no adjustment
+            point_adjustment = 0.0
+            
+        # Recent quality trend adjustment
+        trend_adjustment = 0.0
+        if len(self.quality_history) > 3:
+            # Look at recent quality trend
+            recent_avg = sum(list(self.quality_history)[-3:]) / 3.0
+            if recent_avg > 0.7:
+                # If recent detections were high quality, slightly increase threshold
+                trend_adjustment = 0.05
+            elif recent_avg < 0.5:
+                # If recent detections were poor, slightly decrease threshold
+                trend_adjustment = -0.05
+                
+        # Calculate final adaptive threshold with constraints
+        adaptive_threshold = base_threshold + distance_adjustment + point_adjustment + trend_adjustment
+        
+        # Clamp to configured min/max
+        adaptive_threshold = max(self.quality_min_threshold, min(self.quality_max_threshold, adaptive_threshold))
+        
+        # Log the adaptive threshold calculation if not in MINIMAL mode
+        if self.performance_mode != "MINIMAL":
+            self.get_logger().debug(
+                f"Adaptive quality threshold: {adaptive_threshold:.3f} = Base({base_threshold:.2f}) + "
+                f"Distance({distance_adjustment:.2f}) + Points({point_adjustment:.2f}) + Trend({trend_adjustment:.2f})"
+            )
+            
+        return adaptive_threshold
+
+    def ransac_circle_fit(self, points, max_iterations=30, threshold=0.02, distance=1.0):
         """
         Use RANSAC to fit a circle to points, robust to outliers.
-        Optimized for performance.
+        Optimized for performance with adaptive quality assessment based on distance and point conditions.
+        
+        Args:
+            points: Array of points to fit circle to
+            max_iterations: Maximum RANSAC iterations
+            threshold: Inlier threshold distance
+            distance: Distance of the points from LIDAR (for quality adaptation)
+            
+        Returns:
+            tuple: (center, inlier_count, quality) or (None, 0, 0) if no fit found
         """
         if points is None or len(points) < 3:
             return None, 0, 0
@@ -831,6 +1260,36 @@ class BasketballLidarDetector(Node):
         x_coords = points[:, 0]
         y_coords = points[:, 1]
         
+        # Pre-compute average distance to adjust radius tolerance
+        avg_distance = np.mean(np.sqrt(x_coords**2 + y_coords**2))
+        
+        # Adjust inlier threshold based on distance
+        # For closer points, we need tighter thresholds as measurement density is higher
+        distance_adjusted_threshold = threshold * (1.0 + 0.5 * min(avg_distance, 3.0))
+        
+        # Calculate adaptive radius tolerance based on distance
+        # Allow more variation at closer ranges due to perspective effects and partial views
+        base_radius_tolerance = 0.5  # Original tolerance was 0.5 (50%)
+        # Closer distances need more flexibility as perspective effects are stronger
+        distance_factor = 1.0
+        if avg_distance < 1.0:
+            # Increase tolerance for close objects (up to 2x at very close range)
+            distance_factor = 2.0 - avg_distance
+        elif avg_distance > 2.0:
+            # Slightly tighter tolerance for distant objects
+            distance_factor = 0.9
+            
+        radius_tolerance = base_radius_tolerance * distance_factor
+        
+        # Increase minimum inliers based on distance
+        # For closer objects we expect more inliers
+        min_inliers = self.ransac_min_inliers
+        if avg_distance < 1.0:
+            min_inliers = max(min_inliers + 2, 7)  # More inliers expected when close
+        
+        # Track multiple candidate fits with different quality metrics
+        candidates = []
+        
         for _ in range(actual_iterations):
             # Randomly sample 3 points
             if len(points) < 3:
@@ -843,9 +1302,35 @@ class BasketballLidarDetector(Node):
             try:
                 center, radius = self.fit_circle(sample_points)
                 
-                # Skip if radius is too different from expected
-                if abs(radius - self.ball_radius) > self.ball_radius * 0.5:
-                    continue
+                # Apply adaptive radius tolerance check
+                radius_error = abs(radius - self.ball_radius) / self.ball_radius
+                
+                # Adjust expected radius based on distance (perspective correction)
+                # Very close balls may appear larger in scan data
+                expected_radius = self.ball_radius
+                if avg_distance < 0.8:
+                    # Adjust expected radius for very close objects
+                    # At very close range, apparent radius can be larger
+                    expected_radius = self.ball_radius * (1.0 + (0.8 - avg_distance) * 0.2)
+                    
+                # Check against adjusted radius with adaptive tolerance
+                adjusted_radius_error = abs(radius - expected_radius) / expected_radius
+                
+                # Allow more flexibility for partial circle detection
+                # Instead of immediately skipping bad radii, score them but with penalty
+                use_sample = True
+                radius_penalty = 0.0
+                
+                # Apply base check with adaptive tolerance
+                if adjusted_radius_error > radius_tolerance:
+                    # For significant deviations:
+                    if adjusted_radius_error > radius_tolerance * 1.5:
+                        # Too far off - skip this sample
+                        continue
+                    else:
+                        # Borderline case - accept but with penalty
+                        radius_penalty = adjusted_radius_error / radius_tolerance
+                        use_sample = True
                 
                 # Count inliers using vectorized operations for speed
                 distances = np.sqrt(
@@ -854,25 +1339,144 @@ class BasketballLidarDetector(Node):
                 )
                 
                 # Inliers are points close to the expected circle
-                inliers = np.abs(distances - radius) < threshold
+                inliers = np.abs(distances - radius) < distance_adjusted_threshold
                 inlier_count = np.sum(inliers)
                 
-                if inlier_count > best_inlier_count:
+                # Calculate coverage angle to detect partial circles
+                if inlier_count >= min_inliers:
+                    # Get angles of inlier points relative to center
+                    inlier_angles = np.arctan2(
+                        y_coords[inliers] - center[1],
+                        x_coords[inliers] - center[0]
+                    )
+                    
+                    # Normalize angles to 0-2π range
+                    inlier_angles = (inlier_angles + 2*np.pi) % (2*np.pi)
+                    
+                    # Sort angles to find gaps
+                    sorted_angles = np.sort(inlier_angles)
+                    
+                    # Calculate gaps between consecutive angles
+                    angle_diffs = np.diff(sorted_angles)
+                    angle_diffs = np.append(angle_diffs, sorted_angles[0] + 2*np.pi - sorted_angles[-1])
+                    
+                    # Find largest gap
+                    max_gap = np.max(angle_diffs)
+                    
+                    # Calculate coverage (percent of full circle)
+                    coverage = 1.0 - max_gap / (2*np.pi)
+                    
+                    # Adjust inlier count based on coverage for partial circles
+                    adjusted_inlier_count = inlier_count
+                    
+                    # Track both the raw and adjusted candidate with quality metrics
+                    if use_sample:
+                        # Calculate base quality
+                        inlier_ratio = inlier_count / len(points)
+                        
+                        # NEW: Multi-factor quality scoring
+                        # 1. Inlier ratio (how many points fit the model)
+                        # 2. Radius accuracy (how close to expected radius)
+                        # 3. Coverage (how completely the circle is detected)
+                        # 4. Point density (higher density = better detection)
+                        # 5. Distance-based weighting (closer = more reliable, with exceptions)
+                        
+                        # Calculate point density factor (points per radian)
+                        point_density = inlier_count / (2 * np.pi)
+                        density_factor = min(1.0, point_density / 5.0)  # Normalize with max at ~5 points per radian
+                        
+                        # Distance factor - higher weight for medium distances (not too close, not too far)
+                        if distance < 0.5:
+                            # Very close can be noisy due to occlusion effects
+                            distance_weight = 0.8
+                        elif distance < 1.2:
+                            # Medium distance is ideal
+                            distance_weight = 1.0
+                        elif distance < 2.5:
+                            # Farther is less reliable but still good
+                            distance_weight = 0.9 - (distance - 1.2) * 0.1
+                        else:
+                            # Very far is least reliable
+                            distance_weight = 0.8
+                        
+                        # Weight components differently based on their reliability
+                        quality = (0.4 * inlier_ratio +                # Inlier ratio (most important)
+                                  0.2 * (1.0 - min(adjusted_radius_error, 1.0)) +  # Radius accuracy
+                                  0.15 * coverage +                    # Circle completeness
+                                  0.15 * density_factor +              # Point density
+                                  0.1 * distance_weight)               # Distance reliability
+                        
+                        # Apply radius penalty if it was borderline
+                        quality -= radius_penalty * 0.2
+                        
+                        # Store this candidate
+                        candidates.append({
+                            'center': center,
+                            'radius': radius,
+                            'inlier_count': inlier_count,
+                            'quality': quality,
+                            'coverage': coverage,
+                            'radius_error': adjusted_radius_error,
+                            'distance': avg_distance
+                        })
+                
+                # Also track best model directly for backward compatibility
+                if inlier_count > best_inlier_count and adjusted_radius_error <= radius_tolerance:
                     best_inlier_count = inlier_count
                     best_center = center
                     best_radius = radius
             except Exception:
                 continue
         
-        if best_center is None:
+        # Choose the best candidate from the tracked list
+        if candidates:
+            # Sort candidates by quality
+            candidates.sort(key=lambda x: x['quality'], reverse=True)
+            best_candidate = candidates[0]
+            
+            # Update best_center if we found a better candidate
+            if best_candidate['quality'] > 0.0:
+                best_center = best_candidate['center']
+                best_inlier_count = best_candidate['inlier_count']
+                best_quality = best_candidate['quality']
+                
+                # Add z-coordinate for 3D position
+                center_3d = np.array([best_center[0], best_center[1], self.ball_center_height])
+                
+                # Log candidate details if not in MINIMAL mode
+                if self.performance_mode != "MINIMAL" and len(candidates) > 1:
+                    self.get_logger().debug(
+                        f"Selected best of {len(candidates)} circle candidates: "
+                        f"quality={best_candidate['quality']:.2f}, "
+                        f"inliers={best_candidate['inlier_count']}, "
+                        f"coverage={best_candidate['coverage']:.2f}, "
+                        f"radius_error={best_candidate['radius_error']:.2f}, "
+                        f"distance={best_candidate['distance']:.2f}m"
+                    )
+                
+                return center_3d, best_inlier_count, best_quality
+        
+        # Original fallback code
+        if best_center is None or best_inlier_count < min_inliers:
             return None, 0, 0
         
         # Refine with all inliers if we have enough
-        if best_inlier_count >= 5:
+        if best_inlier_count >= min_inliers:
             # Calculate quality metrics
             inlier_ratio = best_inlier_count / len(points)
             radius_error = abs(best_radius - self.ball_radius) / self.ball_radius
-            quality = 0.7 * inlier_ratio + 0.3 * (1.0 - min(radius_error, 1.0))
+            
+            # Enhanced quality metric with distance weighting
+            distance_factor = 1.0
+            if distance < 0.5:
+                distance_factor = 0.8  # Lower weight for very close detections
+            elif distance > 2.0:
+                distance_factor = 0.9 - min(0.2, (distance - 2.0) * 0.1)  # Lower for far detections
+                
+            # Combine factors for final quality score    
+            quality = (0.6 * inlier_ratio + 
+                     0.3 * (1.0 - min(radius_error, 1.0)) +
+                     0.1 * distance_factor)
             
             # Add z-coordinate for 3D position - reuse existing array
             center_3d = np.array([best_center[0], best_center[1], self.ball_center_height])
@@ -926,7 +1530,7 @@ class BasketballLidarDetector(Node):
         mean_x = np.mean(points_2d[:, 0])
         mean_y = np.mean(points_2d[:, 1])
         x = points_2d[:, 0] - mean_x
-        y = points_2d[:, 1] - mean_y
+        y = points_2d[:, 1]
         
         # Simplified matrix calculations - avoid full matrix ops when possible
         sum_x2 = np.sum(x**2)
@@ -963,23 +1567,52 @@ class BasketballLidarDetector(Node):
         """
         Publish the detected basketball position.
         Assumes basketball is always on the ground (z-height is ball radius).
+        Includes temporal smoothing and consistency checking to reduce sudden jumps.
         """
-        # Always set z to basketball radius since ball rolls on ground
-        # This ensures we always assume basketball center is 5 inches above ground
+        # Always set z to basketball center height since ball rolls on ground
+        # This ensures we always assume basketball center is at the correct height above ground
         center[2] = self.ball_center_height
         
-        # Calculate distance and reliability
+        # Calculate distance
         distance = np.sqrt(center[0]**2 + center[1]**2)
-        is_reliable = distance >= self.min_reliable_distance
         
-        # Adjust quality based on distance
-        if not is_reliable:
-            distance_factor = max(0.1, distance / self.min_reliable_distance)
-            adjusted_quality = circle_quality * distance_factor
-            reliability_text = f"UNRELIABLE ({distance:.2f}m < {self.min_reliable_distance:.1f}m)"
+        # Apply position smoothing and consistency checks
+        filtered_position = self.apply_position_smoothing(center, timestamp)
+        
+        # Calculate reliability score using a quality-weighted assessment instead of a fixed threshold
+        # For close-range detections, use a different quality threshold
+        if distance < self.close_range_threshold:
+            # Special case for close-range: use quality assessment
+            is_reliable = circle_quality >= self.close_range_min_quality
+            reliability_score = circle_quality
+            
+            # Add to reliability history for hysteresis
+            self.reliability_history.append(is_reliable)
+            
+            # Apply hysteresis: require multiple consecutive reliable or unreliable detections to change state
+            if len(self.reliability_history) >= 3:
+                # Consider reliable if majority of recent detections were reliable
+                is_reliable = sum(self.reliability_history) > len(self.reliability_history) / 2
+            
+            if is_reliable:
+                reliability_text = f"RELIABLE (Quality: {circle_quality:.2f})"
+            else:
+                reliability_text = f"UNRELIABLE (Quality: {circle_quality:.2f} < {self.close_range_min_quality:.2f})"
         else:
-            adjusted_quality = circle_quality
-            reliability_text = "RELIABLE"
+            # For normal range: use a graduated reliability scale
+            distance_factor = 1.0
+            if distance < self.min_reliable_distance:
+                # Scale reliability based on how close to threshold
+                distance_factor = max(0.5, distance / self.min_reliable_distance)
+            
+            # Combined reliability score (quality and distance)
+            reliability_score = circle_quality * distance_factor
+            is_reliable = reliability_score >= 0.4  # Lower threshold for combined score
+            
+            if is_reliable:
+                reliability_text = f"RELIABLE (Score: {reliability_score:.2f})"
+            else:
+                reliability_text = f"UNRELIABLE (Score: {reliability_score:.2f} < 0.4)"
         
         # Skip unreliable detections if configured to do so
         if not is_reliable and not self.publish_unreliable:
@@ -989,14 +1622,14 @@ class BasketballLidarDetector(Node):
         
         # Filter position using the shared ground position filter
         current_time = time.time()
-        filtered_position = self.position_filter.update(center, current_time)
+        filtered_position = self.position_filter.update(filtered_position, current_time)
         
         # Log the detection - only in normal or efficient modes
         if self.performance_mode != "MINIMAL":
             self.get_logger().info(
                 f"LIDAR: Basketball at ({filtered_position[0]:.2f}, {filtered_position[1]:.2f}, {filtered_position[2]:.2f}) meters | "
                 f"Distance: {distance:.2f}m | {reliability_text} | "
-                f"Quality: {adjusted_quality:.2f} | Triggered by: {trigger_source}"
+                f"Quality: {circle_quality:.2f} | Triggered by: {trigger_source}"
             )
         
         # Create and publish position message
@@ -1022,10 +1655,6 @@ class BasketballLidarDetector(Node):
         # Only visualize if enabled and not in MINIMAL mode
         if self.visualization_enabled and self.marker_publisher is not None and self.performance_mode != "MINIMAL":
             self.visualize_detection(filtered_position, circle_quality, trigger_source)
-        
-        # With the lock, update position history
-        with self.lock:
-            self.position_history.append(filtered_position)
     
     def visualize_detection(self, center, quality, source):
         """
@@ -1465,6 +2094,298 @@ class BasketballLidarDetector(Node):
                     
         except Exception as e:
             self.get_logger().warn(f"Error processing YOLO bbox: {str(e)}")
+
+    def apply_position_smoothing(self, new_position, timestamp=None):
+        """
+        Apply temporal smoothing to position estimates to reduce sudden jumps.
+        Also implements velocity-based position prediction and consistency checking.
+        
+        Args:
+            new_position: The newly detected position [x, y, z]
+            timestamp: Optional timestamp for velocity calculation
+            
+        Returns:
+            np.array: Smoothed/filtered position
+        """
+        # Initialize with the new position if no history
+        if not self.position_history:
+            self.position_history.append(new_position)
+            self.previous_timestamp = time.time() if timestamp is None else timestamp.sec + timestamp.nanosec/1e9
+            return new_position
+        
+        # Get the current position from history
+        current_position = self.position_history[-1]
+        current_time = time.time() if timestamp is None else timestamp.sec + timestamp.nanosec/1e9
+        
+        # Calculate time delta for velocity-based checks
+        if self.previous_timestamp is not None:
+            dt = current_time - self.previous_timestamp
+        else:
+            dt = 0.1  # Default if no previous timestamp
+        
+        # Prevent division by zero or negative time
+        dt = max(dt, 0.01)
+        
+        # Consistency check 1: Maximum position jump
+        position_delta = np.linalg.norm(new_position[:2] - current_position[:2])
+        
+        # Calculate current velocity and check if jump is physically plausible
+        current_velocity = position_delta / dt
+        
+        # Check if the jump exceeds maximum allowed distance
+        if position_delta > self.max_position_jump:
+            # Log suspect movement (only in normal mode)
+            if self.performance_mode != "MINIMAL":
+                self.get_logger().warn(
+                    f"Position jump too large: {position_delta:.2f}m > {self.max_position_jump:.2f}m, "
+                    f"velocity: {current_velocity:.2f}m/s"
+                )
+            
+            # Velocity-based prediction: If we have velocity history, use it
+            if len(self.velocity_history) > 0:
+                avg_velocity = np.mean(self.velocity_history)
+                # Consider if current velocity is physically plausible compared to recent
+                if current_velocity > avg_velocity * 2 and current_velocity > self.max_speed:
+                    # Position is likely bad, use predicted position instead
+                    if self.performance_mode != "MINIMAL":
+                        self.get_logger().info(f"Using velocity-based prediction instead of suspect position")
+                    
+                    # Predict position based on prior velocity, limiting to max speed
+                    limited_velocity = min(avg_velocity, self.max_speed) 
+                    
+                    # Calculate predicted position based on prior movements
+                    if len(self.position_history) >= 2:
+                        last_pos = self.position_history[-1]
+                        prev_pos = self.position_history[-2]
+                        movement_dir = last_pos[:2] - prev_pos[:2]
+                        if np.linalg.norm(movement_dir) > 0.01:  # Ensure we have meaningful direction
+                            movement_dir = movement_dir / np.linalg.norm(movement_dir)
+                            
+                            # Create predicted position
+                            pred_x = last_pos[0] + movement_dir[0] * limited_velocity * dt
+                            pred_y = last_pos[1] + movement_dir[1] * limited_velocity * dt
+                            pred_z = self.ball_center_height  # Ball always rolls on ground
+                            
+                            predicted_position = np.array([pred_x, pred_y, pred_z])
+                            
+                            # Store prediction for debugging
+                            self.predicted_position = predicted_position
+                            
+                            # Use smoothed position between prediction and new position (closer to prediction)
+                            filtered_position = 0.8 * predicted_position + 0.2 * new_position
+                            
+                            # Store for future reference
+                            self.position_history.append(filtered_position)
+                            self.previous_timestamp = current_time
+                            
+                            return filtered_position
+            
+            # If we can't predict based on velocity, use stronger smoothing
+            self.smoothing_alpha = 0.2  # Use stronger smoothing for suspect jumps
+        else:
+            # Normal smoothing for reasonable movement
+            self.smoothing_alpha = 0.3
+        
+        # Apply exponential smoothing filter
+        filtered_position = (
+            self.smoothing_alpha * new_position + 
+            (1 - self.smoothing_alpha) * current_position
+        )
+        
+        # Calculate and store velocity for future checks
+        if dt > 0:
+            velocity = position_delta / dt
+            self.velocity_history.append(velocity)
+        
+        # Store position and timestamp for next iteration
+        self.position_history.append(filtered_position)
+        self.previous_timestamp = current_time
+        
+        return filtered_position
+
+    def autonomous_detection_callback(self):
+        """
+        Periodically try to find the basketball without camera detection triggers.
+        Implements autonomous basketball tracking with quality-weighted confidence.
+        """
+        # Skip if disabled or if we're under high load
+        if not self.autonomous_detection_enabled or self.performance_mode == "MINIMAL":
+            return
+            
+        # Skip if no valid scan data
+        if self.points_array is None or len(self.points_array) == 0:
+            return
+        
+        try:
+            # Try to find the basketball using RANSAC
+            ball_results = self.find_basketball_ransac()
+            
+            # Process the result if found
+            if ball_results and len(ball_results) > 0:
+                # Get the best match
+                best_match = ball_results[0]
+                center, cluster_size, circle_quality = best_match
+                
+                # Get current time
+                current_time = time.time()
+                
+                # Calculate distance from LIDAR
+                distance = np.sqrt(center[0]**2 + center[1]**2)
+                
+                # Calculate detection confidence based on quality and distance
+                # For independent detections, we apply a distance-based scaling
+                distance_factor = 1.0
+                if distance < 1.0:
+                    distance_factor = 1.2  # Higher confidence for close detections
+                elif distance > 2.0:
+                    distance_factor = 0.8  # Lower confidence for far detections
+                
+                # Weigh quality by distance factor for final confidence
+                detection_confidence = min(1.0, circle_quality * distance_factor)
+                
+                # Only update tracking state if we have a good confidence
+                if detection_confidence >= 0.5:
+                    # Update timers
+                    self.last_independent_detection_time = current_time
+                    
+                    # Update independent confidence
+                    if self.independent_confidence < 0.9:
+                        # Gradually increase confidence with successful detections
+                        self.independent_confidence += 0.1
+                    
+                    # Publish ball position with AUTONOMOUS source
+                    self.publish_ball_position(center, cluster_size, circle_quality, "AUTONOMOUS")
+                    
+                    # Reset recovery attempts
+                    self.recovery_attempts = 0
+                else:
+                    # Lower confidence detection, don't publish but update detection time
+                    # This helps track when we last saw anything
+                    if detection_confidence >= 0.3:  # At least some reasonable confidence
+                        self.last_independent_detection_time = current_time
+                        
+                        # Log low confidence detection
+                        if self.performance_mode != "MINIMAL":
+                            self.get_logger().debug(
+                                f"Low confidence autonomous detection: {detection_confidence:.2f}, "
+                                f"quality: {circle_quality:.2f}, distance: {distance:.2f}m"
+                            )
+            else:
+                # No ball found, handle recovery if we've had recent detections
+                current_time = time.time()
+                time_since_last_detection = current_time - self.last_independent_detection_time
+                
+                # If we recently had autonomous detections but lost them, try recovery
+                if (time_since_last_detection < 2.0 and 
+                    self.recovery_attempts < self.max_recovery_attempts and
+                    self.previous_ball_position is not None):
+                    
+                    if self.performance_mode != "MINIMAL":
+                        self.get_logger().info(
+                            f"Attempting recovery of recent autonomous detection "
+                            f"(attempt {self.recovery_attempts+1}/{self.max_recovery_attempts})"
+                        )
+                    
+                    # Try a targeted search around the last known position
+                    # This could expand the search radius or use prediction
+                    recovery_results = self.attempt_recovery()
+                    
+                    if recovery_results:
+                        # Handle successful recovery similarly to regular detection
+                        rec_center, rec_cluster_size, rec_quality = recovery_results
+                        
+                        # Lower quality threshold for recovery, but still maintain standards
+                        if rec_quality >= 0.3:  # Lower threshold during recovery
+                            if self.performance_mode != "MINIMAL":
+                                self.get_logger().info("Successfully recovered autonomous detection")
+                                
+                            # Publish the recovered position
+                            self.publish_ball_position(
+                                rec_center, rec_cluster_size, rec_quality, "AUTONOMOUS_RECOVERY"
+                            )
+                            
+                            # Update timers
+                            self.last_independent_detection_time = current_time
+                            
+                            # Reset recovery attempts after success
+                            self.recovery_attempts = 0
+                            return
+                    
+                    # Increment recovery attempts
+                    self.recovery_attempts += 1
+                
+        except Exception as e:
+            self.log_error(f"Error in autonomous detection: {str(e)}")
+    
+    def attempt_recovery(self):
+        """
+        Attempt to recover a recently lost basketball detection.
+        Uses expanded search parameters and relaxed criteria.
+        
+        Returns:
+            tuple: (center, cluster_size, quality) if successful, None otherwise
+        """
+        # Need a previous position to attempt recovery
+        if self.previous_ball_position is None:
+            return None
+        
+        try:
+            # Create expanded search parameters
+            prev_pos = self.previous_ball_position
+            
+            # Get all points near the previous position
+            if self.points_array is None or len(self.points_array) == 0:
+                return None
+                
+            # Use a larger search radius for recovery
+            recovery_radius = self.max_distance * 5  # Much larger radius
+            
+            # Find all points near previous position - vectorized for speed
+            distances = np.sqrt(
+                (self.points_array[:, 0] - prev_pos[0])**2 + 
+                (self.points_array[:, 1] - prev_pos[1])**2
+            )
+            
+            nearby_indices = np.where(distances < recovery_radius)[0]
+            
+            if len(nearby_indices) < self.min_points:
+                return None
+                
+            # Get points near previous position
+            nearby_points = self.points_array[nearby_indices]
+            
+            # Calculate distance from LIDAR for quality adaptation
+            prev_distance = np.sqrt(prev_pos[0]**2 + prev_pos[1]**2)
+            
+            # Try fitting a circle with more iterations and looser thresholds
+            center, inlier_count, quality = self.ransac_circle_fit(
+                nearby_points,
+                self.ransac_max_iterations * 2,  # Use more iterations for recovery
+                self.ransac_inlier_threshold * 1.5,  # Looser threshold
+                distance=prev_distance
+            )
+            
+            # Check if we found anything
+            if center is not None and inlier_count >= self.min_points:
+                # Calculate distance from previous position for continuity check
+                recovery_jump = np.sqrt(
+                    (center[0] - prev_pos[0])**2 + 
+                    (center[1] - prev_pos[1])**2
+                )
+                
+                # Only accept recovery if it's not too far from previous position
+                # Allow larger jumps for longer time since detection
+                time_since_last = time.time() - self.last_independent_detection_time
+                max_allowed_jump = 0.3 + time_since_last * 0.5  # Allow 30cm + 50cm/s * time
+                
+                if recovery_jump <= max_allowed_jump:
+                    return (center, inlier_count, quality)
+            
+            return None
+            
+        except Exception as e:
+            self.get_logger().warn(f"Recovery attempt failed: {str(e)}")
+            return None
 
 def main(args=None):
     """Main entry point."""
