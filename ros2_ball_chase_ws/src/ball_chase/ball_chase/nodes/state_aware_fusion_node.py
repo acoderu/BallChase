@@ -1744,7 +1744,18 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.log_error(f"Error in {source} bbox callback: {str(e)}")
 
     def initialize_filter_with_measurement(self, msg, source):
-        """Initialize the filter with a specific measurement."""
+        """
+        Initialize the filter with a specific measurement using the blank slate approach.
+        This treats the first reliable measurement as ground truth with high confidence.
+        But first confirms agreement between multiple sensors or consistent readings.
+        
+        Args:
+            msg (PointStamped): The point message for initialization
+            source (str): Sensor source identifier
+            
+        Returns:
+            bool: Whether initialization was successful
+        """
         try:
             # Ensure message is in the reference frame
             if msg.header.frame_id != self.reference_frame:
@@ -1754,35 +1765,222 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     return False
                 msg = transformed
             
-            # Initialize with this measurement
-            self.state[0:3] = [
-                msg.point.x,
-                msg.point.y,
-                msg.point.z
-            ]
-            self.state[3:6] = [0.0, 0.0, 0.0]  # Start with zero velocity
+            # Initialize sensor agreement tracking if it doesn't exist
+            if not hasattr(self, 'initialization_candidates'):
+                self.initialization_candidates = {}
+                self.initialization_start_time = time.time()
+                self.initialization_consensus = None
+                self.initialization_confidence = 0.0
+                self.initialization_required_time = 2.0  # Require 2 seconds of agreement
+                self.initialization_required_sensors = 2  # Require at least 2 sensors to agree
+                self.initialization_distance_threshold = 0.15  # 15cm agreement threshold
             
-            # Reset covariance with reasonable values
-            self.covariance = np.eye(6)
-            self.covariance[0:3, 0:3] *= 0.1  # Position uncertainty
-            self.covariance[3:6, 3:6] *= 1.0  # Velocity uncertainty
+            current_time = time.time()
             
-            self.initialized = True
-            self.last_update_time = time.time()
+            # Add this measurement to candidates
+            if source not in self.initialization_candidates:
+                self.initialization_candidates[source] = {
+                    'position': [msg.point.x, msg.point.y, msg.point.z],
+                    'last_update': current_time,
+                    'first_seen': current_time,
+                    'update_count': 1
+                }
+            else:
+                # Update existing candidate
+                self.initialization_candidates[source]['position'] = [msg.point.x, msg.point.y, msg.point.z]
+                self.initialization_candidates[source]['last_update'] = current_time
+                self.initialization_candidates[source]['update_count'] += 1
             
-            self.get_logger().info(
-                f"Filter initialized with {source} measurement: ({msg.point.x:.2f}, "
-                f"{msg.point.y:.2f}, {msg.point.z:.2f})"
-            )
+            # Remove stale candidates (older than 2 seconds)
+            stale_sources = []
+            for s, data in self.initialization_candidates.items():
+                if current_time - data['last_update'] > 2.0:
+                    stale_sources.append(s)
             
-            # Update position uncertainty for status tracking
-            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:3, 0:3]) / 3.0)
-            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[3:6, 3:6]) / 3.0)
+            for s in stale_sources:
+                del self.initialization_candidates[s]
             
-            # Start active tracking
-            self.get_logger().info("Kalman filter initialized - beginning active tracking")
+            # Find agreement between sensors
+            agreement_groups = []
+            for s1, data1 in self.initialization_candidates.items():
+                group = [s1]
+                pos1 = data1['position']
+                
+                for s2, data2 in self.initialization_candidates.items():
+                    if s1 == s2:
+                        continue
+                    
+                    pos2 = data2['position']
+                    # Calculate distance between positions (x,y only for ground plane)
+                    distance = math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
+                    
+                    if distance < self.initialization_distance_threshold:
+                        group.append(s2)
+                
+                if len(group) >= self.initialization_required_sensors:
+                    agreement_groups.append(group)
             
-            return True
+            # Sort groups by size (largest first)
+            agreement_groups.sort(key=len, reverse=True)
+            
+            if agreement_groups:
+                # Get the largest agreement group
+                largest_group = agreement_groups[0]
+                
+                # Calculate average position from this group
+                avg_x, avg_y, avg_z = 0, 0, 0
+                for s in largest_group:
+                    pos = self.initialization_candidates[s]['position']
+                    avg_x += pos[0]
+                    avg_y += pos[1]
+                    avg_z += pos[2]
+                
+                avg_x /= len(largest_group)
+                avg_y /= len(largest_group)
+                avg_z /= len(largest_group)
+                
+                # Check if we have a consensus position
+                if self.initialization_consensus is None:
+                    # First consensus
+                    self.initialization_consensus = [avg_x, avg_y, avg_z]
+                    self.initialization_consensus_time = current_time
+                    self.initialization_consensus_group = largest_group
+                    self.get_logger().info(
+                        f"Initial consensus found between {len(largest_group)} sensors: "
+                        f"position=({avg_x:.2f}, {avg_y:.2f})"
+                    )
+                else:
+                    # Check if this consensus is consistent with previous one
+                    prev_x, prev_y, _ = self.initialization_consensus
+                    consensus_distance = math.sqrt((avg_x - prev_x)**2 + (avg_y - prev_y)**2)
+                    
+                    if consensus_distance < self.initialization_distance_threshold:
+                        # Consistent consensus - update the running average
+                        alpha = 0.3  # Weight for new measurement
+                        self.initialization_consensus[0] = (1-alpha) * self.initialization_consensus[0] + alpha * avg_x
+                        self.initialization_consensus[1] = (1-alpha) * self.initialization_consensus[1] + alpha * avg_y
+                        self.initialization_consensus[2] = self.basketball_z_height  # Always use standard height
+                        
+                        # Check if we've had consistent consensus for the required time
+                        consensus_duration = current_time - self.initialization_consensus_time
+                        
+                        if consensus_duration >= self.initialization_required_time:
+                            # We have enough consensus over time - initialize the filter
+                            self.get_logger().info(
+                                f"Initialization criteria met! {len(largest_group)} sensors agree for {consensus_duration:.1f}s"
+                            )
+                            
+                            # --- Blank slate initialization approach ---
+                            # Extract x and y position from the consensus position
+                            # For a 4D state vector [x, y, vx, vy]
+                            self.state = np.zeros(4, dtype=np.float32)
+                            self.state[0] = self.initialization_consensus[0]  # x position
+                            self.state[1] = self.initialization_consensus[1]  # y position
+                            # Initialize velocities to zero
+                            self.state[2] = 0.0  # vx (zero initial velocity)
+                            self.state[3] = 0.0  # vy (zero initial velocity)
+                            
+                            # Set covariance with high confidence (very low uncertainty) in position
+                            # and moderate uncertainty in velocity
+                            self.covariance = np.eye(4, dtype=np.float32)
+                            
+                            # Very high confidence in position (low uncertainty values)
+                            # More sensors = higher confidence
+                            position_variance = 0.01 / min(1.0, len(largest_group) / 3.0)
+                            self.covariance[0, 0] = position_variance  # x position variance
+                            self.covariance[1, 1] = position_variance  # y position variance
+                            
+                            # Moderate uncertainty in velocity (we don't know velocity yet)
+                            self.covariance[2, 2] = 0.5   # vx velocity variance
+                            self.covariance[3, 3] = 0.5   # vy velocity variance
+                            
+                            self.initialized = True
+                            self.last_update_time = current_time
+                            
+                            # Record initialization details
+                            self.initialization_source = "+".join(largest_group)
+                            self.initialization_time = current_time
+                            
+                            # Update uncertainty metrics
+                            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
+                            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
+                            
+                            self.get_logger().info(
+                                f"Filter initialized using consensus from {len(largest_group)} sensors: "
+                                f"position=({self.initialization_consensus[0]:.2f}, {self.initialization_consensus[1]:.2f}), "
+                                f"uncertainty={self.position_uncertainty:.3f}m"
+                            )
+                            
+                            # Temporarily disable motion state protection during initial measurement
+                            if hasattr(self, 'motion_state_protection'):
+                                self.motion_state_protection['initialization_mode'] = True
+                                
+                            # Start active tracking
+                            self.get_logger().info("Filter initialized with high confidence - beginning active tracking")
+                            
+                            return True
+                        else:
+                            # Still waiting for required duration
+                            if hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 10 == 0:
+                                self.get_logger().info(
+                                    f"Building initialization consensus: {len(largest_group)} sensors agree for {consensus_duration:.1f}s "
+                                    f"(need {self.initialization_required_time:.1f}s)"
+                                )
+                    else:
+                        # Consensus changed significantly - reset timer
+                        self.initialization_consensus = [avg_x, avg_y, avg_z]
+                        self.initialization_consensus_time = current_time
+                        self.initialization_consensus_group = largest_group
+                        self.get_logger().info(
+                            f"Consensus position changed - restarting initialization timer. New position: ({avg_x:.2f}, {avg_y:.2f})"
+                        )
+            else:
+                # Not enough sensors agree yet
+                if hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 30 == 0:
+                    self.get_logger().info(
+                        f"Waiting for sensor agreement for initialization. Have {len(self.initialization_candidates)} candidates."
+                    )
+            
+            # If we've been trying to initialize for too long (10+ seconds), fall back to simpler initialization
+            if (current_time - self.initialization_start_time > 10.0) and not self.initialized:
+                self.get_logger().warn("Falling back to single-sensor initialization after 10s without consensus")
+                
+                # --- Simple initialization with current measurement ---
+                self.state = np.zeros(4, dtype=np.float32)
+                self.state[0] = msg.point.x  # x position
+                self.state[1] = msg.point.y  # y position
+                self.state[2] = 0.0  # vx (zero initial velocity)
+                self.state[3] = 0.0  # vy (zero initial velocity)
+                
+                # Set covariance with moderate confidence
+                self.covariance = np.eye(4, dtype=np.float32)
+                self.covariance[0, 0] = 0.05  # Higher uncertainty than consensus initialization
+                self.covariance[1, 1] = 0.05
+                self.covariance[2, 2] = 0.8
+                self.covariance[3, 3] = 0.8
+                
+                self.initialized = True
+                self.last_update_time = current_time
+                self.initialization_source = f"{source} (fallback)"
+                self.initialization_time = current_time
+                
+                # Update uncertainty metrics
+                self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
+                self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
+                
+                self.get_logger().info(
+                    f"Filter initialized with fallback method using {source}: "
+                    f"position=({msg.point.x:.2f}, {msg.point.y:.2f}), "
+                    f"uncertainty={self.position_uncertainty:.3f}m"
+                )
+                
+                # Start active tracking
+                self.get_logger().info("Filter initialized with fallback method - beginning active tracking")
+                
+                return True
+            
+            return False  # Not initialized yet
+            
         except Exception as e:
             self.get_logger().error(f"Error during filter initialization: {str(e)}")
             return False
