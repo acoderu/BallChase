@@ -666,6 +666,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # PHASE 1: Initialize transform system
             self.init_transform_system()
             
+            # Cache static transforms
+            self.cache_static_transforms()
+            
             # Add verification of transform tree
             self.create_timer(2.0, self.check_transform_availability, callback_group=None)
             
@@ -891,6 +894,10 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         
         # Remove static transform broadcaster
         # self.tf_static_broadcaster = StaticTransformBroadcaster(self)
+        
+        # Initialize cached transform variables
+        self.tf_camera_to_base = None
+        self.tf_lidar_to_base = None
         
         self.get_logger().info("Transform system initialized - waiting for transforms")
     
@@ -2745,13 +2752,26 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             if point_msg.header.frame_id == target_frame:
                 return point_msg
             
-            # Get transform from source to target frame with appropriate timeout
-            transform = self.tf_buffer.lookup_transform(
-                target_frame,
-                point_msg.header.frame_id,
-                rclpy.time.Time(),
-                rclpy.duration.Duration(seconds=0.2)
-            )
+            # Use cached transforms for static relationships
+            transform = None
+            if point_msg.header.frame_id == 'ascamera_color_0' and target_frame == self.reference_frame and self.tf_camera_to_base is not None:
+                # Use cached camera to base transform
+                transform = self.tf_camera_to_base
+                if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 50 == 0:
+                    self.get_logger().debug("Using cached camera to base transform")
+            elif point_msg.header.frame_id == 'lidar_frame' and target_frame == self.reference_frame and self.tf_lidar_to_base is not None:
+                # Use cached lidar to base transform
+                transform = self.tf_lidar_to_base
+                if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 50 == 0:
+                    self.get_logger().debug("Using cached lidar to base transform")
+            else:
+                # Fall back to standard transform lookup for non-cached relationships
+                transform = self.tf_buffer.lookup_transform(
+                    target_frame,
+                    point_msg.header.frame_id,
+                    rclpy.time.Time(),
+                    rclpy.duration.Duration(seconds=0.2)
+                )
             
             # For 2D points, set z=0 before transform then restore confidence value after transform
             if is_2d:
@@ -4018,6 +4038,40 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.get_logger().error(f"Error estimating 3D from YOLO 2D: {str(e)}")
             self.get_logger().error(traceback.format_exc())
             return None
+
+    def cache_static_transforms(self):
+        """Cache static transforms to avoid repeated lookups during execution."""
+        self.get_logger().info("Caching static transforms...")
+
+        try:
+            # Cache camera to base transform
+            self.tf_camera_to_base = self.tf_buffer.lookup_transform(
+                self.reference_frame, 'ascamera_color_0', 
+                rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=1)
+            )
+            self.get_logger().info(
+                f"Cached static transform: ascamera_color_0 → {self.reference_frame}: "
+                f"trans=({self.tf_camera_to_base.transform.translation.x:.3f}, "
+                f"{self.tf_camera_to_base.transform.translation.y:.3f}, "
+                f"{self.tf_camera_to_base.transform.translation.z:.3f})"
+            )
+            
+            # Cache lidar to base transform
+            self.tf_lidar_to_base = self.tf_buffer.lookup_transform(
+                self.reference_frame, 'lidar_frame', 
+                rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=1)
+            )
+            self.get_logger().info(
+                f"Cached static transform: lidar_frame → {self.reference_frame}: "
+                f"trans=({self.tf_lidar_to_base.transform.translation.x:.3f}, "
+                f"{self.tf_lidar_to_base.transform.translation.y:.3f}, "
+                f"{self.tf_lidar_to_base.transform.translation.z:.3f})"
+            )
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to cache static transforms: {str(e)}")
+            self.tf_camera_to_base = None
+            self.tf_lidar_to_base = None
 
 def main(args=None):
     rclpy.init(args=args)
