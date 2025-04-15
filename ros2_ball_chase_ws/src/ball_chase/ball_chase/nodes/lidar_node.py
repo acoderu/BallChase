@@ -821,9 +821,55 @@ class BasketballLidarDetector(Node):
             if self.performance_mode != "MINIMAL":
                 self.get_logger().info("No ball found with RANSAC, using camera seed point as fallback")
             
-            # Create 3D point and assign a medium-low quality
+            # Collect any available LiDAR points near the estimated position for fusion
+            filtered_lidar_points = []
+            if filtered_points is not None and len(filtered_points) > 0:
+                # Find points close to the camera seed point for fusion
+                px = filtered_points[:, 0]
+                py = filtered_points[:, 1]
+                distances = np.sqrt((px - camera_seed_point[0])**2 + (py - camera_seed_point[1])**2)
+                
+                # Collect points within reasonable distance of the seed
+                fusion_distance_threshold = self.ball_radius * 3.0  # Use a larger threshold for fusion
+                close_indices = np.where(distances < fusion_distance_threshold)[0]
+                
+                # Add valid points to our collection
+                if len(close_indices) > 0:
+                    for idx in close_indices:
+                        # Add z-coordinate for 3D position
+                        point = np.array([filtered_points[idx, 0], filtered_points[idx, 1], self.ball_center_height])
+                        filtered_lidar_points.append(point)
+            
+            # Default fallback is the camera seed point
             fallback_center = np.array([camera_seed_point[0], camera_seed_point[1], self.ball_center_height])
             fallback_quality = self.quality_low * 0.8  # Lower quality than normal detection
+            
+            # If we have LiDAR points, fuse with YOLO estimate
+            if len(filtered_lidar_points) > 0:
+                # Compute average of LiDAR points
+                lidar_avg = np.mean(np.array(filtered_lidar_points), axis=0)
+                
+                # Combine with YOLO position using weighted average
+                w_yolo = 0.7  # YOLO weight
+                w_lidar = 0.3  # LiDAR weight
+                fused_position = (
+                    w_yolo * fallback_center +
+                    w_lidar * lidar_avg
+                )
+                fallback_center = fused_position
+                
+                # Slightly higher quality for fused result
+                fallback_quality = self.quality_low * 0.9
+                
+                if self.performance_mode != "MINIMAL":
+                    self.get_logger().info(
+                        f"Using fused YOLO+LiDAR fallback position with {len(filtered_lidar_points)} points: "
+                        f"({fallback_center[0]:.2f}, {fallback_center[1]:.2f}, {fallback_center[2]:.2f})"
+                    )
+            else:
+                # If no LiDAR points, fallback to YOLO only
+                if self.performance_mode != "MINIMAL":
+                    self.get_logger().info("Using YOLO-only fallback position (no LiDAR points)")
             
             # Store for future reference
             self.previous_ball_position = fallback_center
@@ -1353,17 +1399,27 @@ class BasketballLidarDetector(Node):
             focal_length_pixels = 345.58  # Calibrated focal length for camera
             distance = (basketball_diameter_meters * focal_length_pixels) / ball_diameter_pixels
             
+            # Enhanced logging with all intermediate values for distance calculation
+            self.get_logger().info(
+                f"YOLO bbox: {bbox_width:.1f}x{bbox_height:.1f} pixels | "
+                f"Pixel diameter (√w·h): {ball_diameter_pixels:.2f} px | "
+                f"Focal length: {focal_length_pixels:.2f} px | "
+                f"Ball real diameter: {basketball_diameter_meters:.2f} m | "
+                f"Estimated distance: {distance:.2f} m"
+            )
+            
             # Apply EMA smoothing to the distance
+            raw_distance = distance
             if self.smoothed_yolo_distance is None:
-                self.smoothed_yolo_distance = distance
+                self.smoothed_yolo_distance = raw_distance
             else:
-                self.smoothed_yolo_distance = (self.ema_alpha * distance +
+                self.smoothed_yolo_distance = (self.ema_alpha * raw_distance +
                                               (1 - self.ema_alpha) * self.smoothed_yolo_distance)
             distance = self.smoothed_yolo_distance
-            
-            # Optional logging of both raw and smoothed distance
-            self.get_logger().info(f"YOLO raw distance={distance:.2f}m | Smoothed={self.smoothed_yolo_distance:.2f}m")
-            
+
+            # Log both raw and smoothed distance values
+            self.get_logger().info(f"YOLO Distance (raw): {raw_distance:.2f} m | YOLO Distance (smoothed): {self.smoothed_yolo_distance:.2f} m")
+
             # Get camera frame
             camera_frame = detection_msg.header.frame_id or "ascamera_color_0"
             
