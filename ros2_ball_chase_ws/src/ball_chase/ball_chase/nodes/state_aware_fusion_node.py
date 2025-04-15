@@ -3426,19 +3426,23 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         # IMPROVEMENT 7: Slower covariance growth for stationary objects
         motion_state = self.detect_motion_state()
         
-        # Use advanced growth model based on sensor coverage and status
+        # FIX: Use more conservative growth rates based on sensor availability
         if active_3d_sensors >= 2:
             # With multiple 3D sensors, use modest growth rate
-            growth_rate = 1.05 + (avg_gap_level * 0.15)  # 1.05-1.20 range
+            # Reduced from 1.05-1.20 range to 1.02-1.12 range
+            growth_rate = 1.02 + (avg_gap_level * 0.10)
         elif active_3d_sensors == 1:
             # With single 3D sensor, slightly higher growth
-            growth_rate = 1.1 + (avg_gap_level * 0.2)  # 1.10-1.30 range
+            # Reduced from 1.10-1.30 range to 1.05-1.20 range
+            growth_rate = 1.05 + (avg_gap_level * 0.15)
         elif active_2d_sensors > 0:
             # Only 2D sensors active, faster growth
-            growth_rate = 1.15 + (avg_gap_level * 0.25)  # 1.15-1.40 range
+            # Reduced from 1.15-1.40 range to 1.08-1.28 range
+            growth_rate = 1.08 + (avg_gap_level * 0.20)
         else:
             # No active sensors, use much faster growth
-            growth_rate = 1.2 + (avg_gap_level * 0.6)  # 1.20-1.80 range
+            # Reduced from 1.20-1.80 range to 1.10-1.50 range
+            growth_rate = 1.10 + (avg_gap_level * 0.40)
             
         # IMPROVEMENT 7: Reduce covariance growth for stationary objects
         if motion_state in ["stationary", "long_stationary"]:
@@ -3476,9 +3480,11 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             for i in range(4):
                 self.covariance[i, i] = max(0.01, self.covariance[i, i])
             
-            # Add maximum cap on uncertainty growth to prevent excessive uncertainty
-            max_pos_uncertainty = 0.5  # Maximum position uncertainty during gaps
-            max_vel_uncertainty = 2.0  # Maximum velocity uncertainty during gaps
+            # FIX: Add motion-specific uncertainty caps to prevent excessive uncertainty
+            # Get motion-based uncertainty caps
+            uncertainty_caps = self.get_motion_based_uncertainty_caps(motion_state)
+            max_pos_uncertainty = uncertainty_caps["position_uncertainty_cap"]
+            max_vel_uncertainty = uncertainty_caps["velocity_uncertainty_cap"]
             
             # Calculate current uncertainties - FIX: add max(0.0, ...) to avoid negative values due to numerical errors
             current_pos_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))
@@ -3499,9 +3505,47 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Debug log for significant growth
             if growth_rate > 1.2 and self.debug_level > 1:
                 self.get_logger().debug(
-                    f"Covariance adjusted: growth={growth_rate:.2f}, gap_level={avg_gap_level:.2f}, "
-                    f"sensors={active_3d_sensors}(3D)+{active_2d_sensors}(2D)"
+                    f"Applying covariance growth: rate={growth_rate:.3f}, "
+                    f"pos_uncertainty={current_pos_uncertainty:.3f}m, caps=({max_pos_uncertainty:.1f}, {max_vel_uncertainty:.1f})"
                 )
+    
+    # New method to provide motion-based uncertainty caps
+    def get_motion_based_uncertainty_caps(self, motion_state):
+        """
+        Returns maximum uncertainty caps based on the current motion state.
+        Different motion states allow for different maximum uncertainty values.
+        
+        Args:
+            motion_state (str): Current motion state of the basketball
+            
+        Returns:
+            dict: Dictionary with position and velocity uncertainty caps
+        """
+        if motion_state == "stationary":
+            return {
+                "position_uncertainty_cap": 0.5,  # Tight cap for stationary
+                "velocity_uncertainty_cap": 1.0
+            }
+        elif motion_state == "long_stationary":
+            return {
+                "position_uncertainty_cap": 0.4,  # Even tighter cap for long-term stationary
+                "velocity_uncertainty_cap": 0.8
+            }
+        elif motion_state == "small_movement":
+            return {
+                "position_uncertainty_cap": 0.8,  # Medium cap for small movements
+                "velocity_uncertainty_cap": 1.5
+            }
+        elif motion_state == "medium_fast":
+            return {
+                "position_uncertainty_cap": 1.2,  # Higher but still reasonable cap
+                "velocity_uncertainty_cap": 2.0
+            }
+        else:  # unknown or other states
+            return {
+                "position_uncertainty_cap": 1.0,  # Default caps
+                "velocity_uncertainty_cap": 1.8
+            }
 
     # ENHANCEMENT 8: Confidence-Based Tracking
     def update_tracking_status(self):
@@ -4283,6 +4327,126 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.get_logger().error(f"Failed to cache static transforms: {str(e)}")
             self.tf_camera_to_base = None
             self.tf_lidar_to_base = None
+
+    def calculate_velocity_consistency(self):
+        """
+        Calculate how consistent the recent velocity patterns are to determine predictability of motion.
+        Returns a damping factor between 0.5-1.0 where higher values indicate more consistent motion.
+        """
+        # Default value if we don't have enough history
+        if not hasattr(self, 'velocity_history') or len(self.velocity_history) < 5:
+            return 0.7  # Default mid-range value
+        
+        # Get recent velocity history (last 5 measurements)
+        recent_velocities = list(self.velocity_history)[-5:]
+        
+        # Filter out invalid velocities
+        valid_velocities = []
+        for vel in recent_velocities:
+            if isinstance(vel, (list, tuple, np.ndarray)) and len(vel) >= 2:
+                valid_velocities.append(vel)
+        
+        # If we don't have enough valid velocities, return default
+        if len(valid_velocities) < 3:
+            return 0.7
+        
+        # Calculate velocity magnitudes and directions
+        magnitudes = []
+        directions = []
+        
+        for vel in valid_velocities:
+            # For 2D velocities (x,y components)
+            vx, vy = vel[0], vel[1]
+            magnitude = math.sqrt(vx**2 + vy**2)
+            
+            # Only calculate direction for non-zero velocities
+            if magnitude > 0.02:  # Ignore very small magnitudes for direction
+                direction = math.atan2(vy, vx)  # Range: -PI to PI
+                directions.append(direction)
+            
+            magnitudes.append(magnitude)
+        
+        # Calculate statistics about velocity magnitudes
+        avg_magnitude = sum(magnitudes) / len(magnitudes)
+        if avg_magnitude < 0.01:  # Effectively stationary
+            return 0.9  # High consistency for stationary objects
+        
+        # Calculate std dev of magnitudes
+        magnitude_variance = sum((m - avg_magnitude)**2 for m in magnitudes) / len(magnitudes)
+        magnitude_std_dev = math.sqrt(magnitude_variance)
+        
+        # Normalize to 0-1 range (lower std_dev = higher consistency)
+        # Avoid division by zero
+        if avg_magnitude > 0:
+            magnitude_consistency = 1.0 - min(1.0, magnitude_std_dev / avg_magnitude)
+        else:
+            magnitude_consistency = 1.0
+        
+        # Calculate direction consistency if we have enough direction data
+        if len(directions) >= 3:
+            # Calculate circular statistics for directions
+            # Convert directions to unit vectors, then average
+            x_sum, y_sum = 0, 0
+            for direction in directions:
+                x_sum += math.cos(direction)
+                y_sum += math.sin(direction)
+            
+            # Calculate mean resultant length (measure of circular variance)
+            mean_resultant_length = math.sqrt(x_sum**2 + y_sum**2) / len(directions)
+            
+            # Convert to a measure of dispersion (0 = perfectly consistent, 1 = completely random)
+            direction_dispersion = 1.0 - mean_resultant_length
+            
+            # Invert to get consistency (higher is better)
+            direction_consistency = 1.0 - direction_dispersion
+        else:
+            # Not enough direction data
+            direction_consistency = 0.5
+        
+        # Combine with higher weight on direction consistency
+        combined_consistency = (0.4 * magnitude_consistency) + (0.6 * direction_consistency)
+        
+        # Map to damping factor between 0.5-1.0
+        damping_factor = 0.5 + (combined_consistency * 0.5)
+        
+        if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
+            self.get_logger().debug(
+                f"Velocity consistency: magnitude={magnitude_consistency:.2f}, direction={direction_consistency:.2f}, "
+                f"combined={combined_consistency:.2f}, damping={damping_factor:.2f}"
+            )
+        
+        return damping_factor
+
+    def calculate_blended_motion_factors(self, average_velocity):
+        """
+        Calculate continuous blending factors between stationary and moving states.
+        Returns factors that add up to 1.0 for smooth transitions between motion states.
+        
+        Args:
+            average_velocity (float): The average velocity magnitude
+            
+        Returns:
+            dict: Dictionary with stationary_factor and movement_factor that sum to 1.0
+        """
+        # Calculate a continuous scale from 0 (stationary) to 1 (fast)
+        # Use a threshold of 0.5 m/s as the cutoff for full movement
+        velocity_scale = min(1.0, max(0.0, average_velocity / 0.5))
+        
+        # Calculate motion state factors that add up to 1.0
+        stationary_factor = 1.0 - velocity_scale
+        movement_factor = velocity_scale
+        
+        # Occasionally log the factors for debugging
+        if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
+            self.get_logger().debug(
+                f"Motion factors: velocity={average_velocity:.3f}m/s, stationary={stationary_factor:.2f}, "
+                f"movement={movement_factor:.2f}"
+            )
+        
+        return {
+            "stationary_factor": stationary_factor,
+            "movement_factor": movement_factor
+        }
 
 def main(args=None):
     rclpy.init(args=args)
