@@ -1062,6 +1062,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.base_measurement_noise_yolo_2d = self.measurement_noise_yolo_2d
             self.base_measurement_noise_hsv_2d_est3d = self.measurement_noise_hsv_2d_est3d
             self.base_measurement_noise_yolo_2d_est3d = self.measurement_noise_yolo_2d_est3d
+
+            # Add configurable parameter for maximum message age
+            self.max_message_age = diag_params.get('max_message_age', 1.0)  # Default to 1.0 second
             
             self.get_logger().info("Configuration loaded successfully")
         except Exception as e:
@@ -1107,6 +1110,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.base_measurement_noise_yolo_2d = self.measurement_noise_yolo_2d
             self.base_measurement_noise_hsv_2d_est3d = self.measurement_noise_hsv_2d_est3d
             self.base_measurement_noise_yolo_2d_est3d = self.measurement_noise_yolo_2d_est3d
+
+            # Add default for maximum message age
+            self.max_message_age = 1.0
 
     def init_state_tracking(self):
         """Initialize state tracking variables with 4D state optimized for ground-only basketball movement."""
@@ -3868,8 +3874,8 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             current_time = time.time()
             
             # Check if bbox data is recent enough
-            if current_time - bbox_data.get('timestamp', 0) > 1.0:
-                self.get_logger().warn(f"Bbox data too old: {current_time - bbox_data.get('timestamp', 0):.2f}s > 1.0s")
+            if current_time - bbox_data.get('timestamp', 0) > 2.0:  # Increased from 1.0 to 2.0 seconds
+                self.get_logger().warn(f"Bbox data too old: {current_time - bbox_data.get('timestamp', 0):.2f}s > 2.0s")
                 return None
                 
             # Get bounding box dimensions
