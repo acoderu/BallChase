@@ -984,6 +984,12 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             if self._transform_available_count >= 3:
                 self.transform_confirmed = True
                 self.get_logger().info("Transform availability confirmed after multiple consecutive checks")
+                
+                # Disable the transform check timer since transforms are static
+                if hasattr(self, '_transform_check_timer'):
+                    self.destroy_timer(self._transform_check_timer)
+                    self._transform_check_timer = None
+                    self.get_logger().info("Transform check timer disabled - transforms are static")
         elif not transforms_available and hasattr(self, '_transform_available_count'):
             self._transform_available_count = 0
         
@@ -1543,8 +1549,8 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         if active_sensors:
             self.get_logger().info(f"Sensor data: {' | '.join(active_sensors)}")
         elif self.initialized:  # Only show warning if we're initialized
-            self.get_logger().warn("No sensor data received - check if sensor nodes are running")
-
+            self.get_logger().warn("No sensor data received - check if sensor nodes are running")    
+    
     def setup_timers(self):
         """Set up regular processing timers."""
         # Status timer (1 Hz)
@@ -1561,8 +1567,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         
         # Transform check timer (5 Hz) - only keep until transform confirmed
         if not self.transform_confirmed:
-            transform_check_timer = self.create_timer(5.0, self.check_transform_availability)
-            self._timer_list.append(transform_check_timer)
+            self._transform_check_timer = self.create_timer(5.0, self.check_transform_availability)
+            self._timer_list.append(self._transform_check_timer)
+            self.get_logger().info("Transform check timer started - will be disabled once transforms are confirmed")
         
         self.get_logger().info("Processing timers initialized")
 
