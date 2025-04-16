@@ -1340,7 +1340,10 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         
         # ENHANCEMENT 6: Initialize sensor reliability tracker
         self.sensor_reliability_tracker = SensorReliabilityTracker(self.expected_sensors)
-        
+
+        # NEW: Initialize consecutive rejection tracking per sensor
+        self.consecutive_rejections_per_sensor = {sensor: 0 for sensor in self.expected_sensors}
+
         # ENHANCEMENT 6: Initialize smoothed state estimator
         self.smoothed_state_estimator = SmoothedStateEstimator(window_size=5)
 
@@ -1713,7 +1716,6 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             if source == 'lidar':
                 self.lidar_msg_counter += 1
                 if self.lidar_msg_counter % 3 == 0:
-                    self.get_logger().info(f"Received {self.lidar_msg_counter} lidar messages so far")
                     # Log detailed lidar position data once after every 3 messages
                     self.get_logger().info(f"[state_aware_fusion_node]: Received lidar detection #{self.lidar_msg_counter}: ({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame")
         except Exception as e:
@@ -1739,12 +1741,20 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 height = msg.data[3]  # height is the 4th value (index 3)
                 
                 # Store the bounding box data with timestamp
-                if source in self.bbox_data:
+                if source in self.bbox_data:                
                     self.bbox_data[source]['width'] = width
                     self.bbox_data[source]['height'] = height
                     self.bbox_data[source]['timestamp'] = time.time()
                     
-                    self.get_logger().info(f"Received {source} bbox: {width:.1f}x{height:.1f}")
+                    # Initialize counter if not present
+                    if not hasattr(self, '_bbox_log_counter'):
+                        self._bbox_log_counter = {}
+                    if source not in self._bbox_log_counter:self._bbox_log_counter[source] = 0
+                    
+                    # Increment counter and log details every 3 times
+                    self._bbox_log_counter[source] += 1
+                    if self._bbox_log_counter[source] % 3 == 0:
+                        self.get_logger().info(f"Received {source} bbox: {width:.1f}x{height:.1f}")
             else:
                 self.get_logger().warn(f"Invalid format for {source} bounding box message")
                 
@@ -2668,11 +2678,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 
                 # IMPROVEMENT 3: Record sensor reliability
                 for sensor in measurements.keys():
-                    self.sensor_reliability_tracker.record_measurement(sensor, successful_update)
-            
-            # Update last update time
+                    self.sensor_reliability_tracker.record_measurement(sensor, successful_update)            # Update last update time
             self.last_update_time = current_time
-            
+                
             # Update uncertainty metrics - FIX: Use [0:2, 0:2] for position part of 4D state
             self.position_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))
             self.velocity_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[2:4, 2:4]) / 2.0))
@@ -2831,8 +2839,8 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.covariance = np.dot(np.dot(self._F_matrix, self.covariance), self._F_matrix.T) + self._Q_matrix
         
         # Ensure covariance remains symmetric
-        self.covariance = 0.5 * (self.covariance + self.covariance.T)
-
+        self.covariance = 0.5 * (self.covariance + self.covariance.T)    
+    
     def update_state(self, measurements):
         """
         Update the state with synchronized measurements (4D state version).
@@ -2853,10 +2861,43 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         motion_state = self.detect_motion_state()
         
         for sensor, msg in measurements.items():
-            # Transform measurement to reference frame
-            transformed = self.transform_point(msg, self.reference_frame, sensor.endswith('_2d'))
-            if not transformed:
-                continue
+            transformed = None # Initialize transformed variable
+            is_2d_sensor = sensor.endswith('_2d')
+
+            # For 2D sensors, estimate 3D position first
+            if is_2d_sensor:
+                # For 2D sensors, estimate 3D position first
+                if sensor in self.bbox_data:
+                    transformed = self.estimate_3d_from_2d(msg, self.bbox_data[sensor])
+                    if transformed is None:
+                        if self.debug_level >= 1:
+                            self.get_logger().warn(f"Failed to estimate 3D position for {sensor}, skipping measurement.")
+                        continue # Skip this measurement if estimation failed
+                    # Note: transformed is already in the reference_frame
+                else:
+                    if self.debug_level >= 1:
+                        self.get_logger().warn(f"No bounding box data available for {sensor}, cannot estimate 3D position.")
+                    continue # Skip if no bbox data
+            else:
+                # For 3D sensors, transform the point as before
+                transformed = self.transform_point(msg, self.reference_frame, False)
+                if not transformed:
+                    continue # Skip if transformation failed
+
+            # --- BEGIN ADDITION: Hard Position Limits ---
+            max_coord = 5.0 # Maximum plausible distance from origin (e.g., 5 meters)
+            if abs(transformed.point.x) > max_coord or abs(transformed.point.y) > max_coord:
+                self.get_logger().warn(
+                    f"Rejecting {sensor} measurement outside hard limits: "
+                    f"pos=({transformed.point.x:.2f}, {transformed.point.y:.2f}), limits=±{max_coord}m"
+                )
+                # Increment rejection counter and potentially increase covariance slightly
+                self.consecutive_rejections_per_sensor[sensor] = self.consecutive_rejections_per_sensor.get(sensor, 0) + 1
+                # Optional: Slightly increase covariance on hard rejection
+                # self.covariance[0:2, 0:2] *= 1.01
+                # self.covariance = 0.5 * (self.covariance + self.covariance.T)
+                continue # Skip this measurement
+            # --- END ADDITION ---
             
             # For ground-only basketball movement, we need special handling for measurements
             # 1. For 3D sensors, we use x,y and ignore z (basketball is always at fixed height)
@@ -2913,23 +2954,60 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             
             # Apply dynamic measurement validation based on motion state
             threshold = self.get_innovation_threshold(sensor, motion_state)
+
+            # --- BEGIN ADDITION: Cap the Mahalanobis Threshold ---
+            max_threshold = 25.0 # Set a maximum allowable threshold
+            original_threshold = threshold
+            threshold = min(threshold, max_threshold)
+            # --- END ADDITION ---
             
             # Compute Mahalanobis distance for validation
             try:
                 S_inv = np.linalg.inv(S)
                 mahalanobis_dist = np.sqrt(np.dot(np.dot(y.T, S_inv), y))
                 
+                # --- BEGIN ADDITION: Debug Logging ---
+                if self.debug_level >= 2:
+                    self.get_logger().debug(
+                        f"Validation Check [{sensor}]: "
+                        f"Measurement z=({z[0]:.2f}, {z[1]:.2f}), "
+                        f"Innovation y=({y[0]:.2f}, {y[1]:.2f}), "
+                        f"Mahalanobis dist={mahalanobis_dist:.2f}, "
+                        f"Threshold={threshold:.2f} (Original={original_threshold:.2f}, Cap={max_threshold:.1f})"
+                    )
+                # --- END ADDITION ---
+
                 # Store innovation for diagnostic purposes
                 if hasattr(self, 'innovation_history'):
                     self.innovation_history.append(mahalanobis_dist)
                 
                 # Skip measurement if it fails validation
                 if mahalanobis_dist > threshold:
+                    # --- MODIFIED LOG ---
                     self.get_logger().debug(
                         f"Rejecting {sensor} measurement: innovation {mahalanobis_dist:.2f} > threshold {threshold:.2f}"
                     )
+                    # --- END MODIFIED LOG ---
+                    # --- BEGIN MODIFICATION ---
+                    # Increment consecutive rejection counter for this sensor
+                    self.consecutive_rejections_per_sensor[sensor] = self.consecutive_rejections_per_sensor.get(sensor, 0) + 1
+
+                    # Increase covariance slightly when rejecting to reduce confidence
+                    rejection_growth_factor = 1.02 # Small increase (2%)
+                    self.covariance[0:2, 0:2] *= rejection_growth_factor # Increase position uncertainty
+                    self.covariance[2:4, 2:4] *= rejection_growth_factor # Increase velocity uncertainty
+                    # Ensure symmetry
+                    self.covariance = 0.5 * (self.covariance + self.covariance.T)
+                    # Reset consecutive updates counter on rejection
+                    self.consecutive_updates = 0
+                    # --- END MODIFICATION ---
                     continue
-                    
+
+                # --- BEGIN MODIFICATION ---
+                # Reset consecutive rejection counter for this sensor on successful validation
+                self.consecutive_rejections_per_sensor[sensor] = 0
+                # --- END MODIFICATION ---
+
                 # Update consecutive updates counter for threshold adjustment
                 self.consecutive_updates += 1
                 
@@ -3044,10 +3122,70 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Increment failure counter
             self.transform_failures += 1
             self.get_logger().warn(f"Transform error: {str(e)}")
-            return None
-
+            return None    
+    
     def get_measurement_noise(self, sensor, is_2d):
         """
+        Get measurement noise values for a sensor, factoring in quality information.
+        
+        Args:
+            sensor (str): Sensor name
+            is_2d (bool): Whether the sensor is 2D
+            
+        Returns:
+            numpy.ndarray: Measurement noise covariance matrix
+        """
+        # Start with base noise values
+        if sensor == 'lidar':
+            base_noise = self.base_measurement_noise_lidar
+        elif sensor == 'hsv_3d':
+            base_noise = self.base_measurement_noise_hsv_3d
+        elif sensor == 'yolo_3d': 
+            base_noise = self.base_measurement_noise_yolo_3d
+        elif sensor == 'hsv_2d':
+            base_noise = self.base_measurement_noise_hsv_2d
+        elif sensor == 'yolo_2d':
+            base_noise = self.base_measurement_noise_yolo_2d
+        elif sensor == 'hsv_2d_est3d':
+            base_noise = self.base_measurement_noise_hsv_2d_est3d
+        elif sensor == 'yolo_2d_est3d':
+            base_noise = self.base_measurement_noise_yolo_2d_est3d
+        else:
+            base_noise = 0.1  # Default fallback
+        
+        # Get sensor confidence based on quality
+        confidence = self.get_measurement_confidence(sensor)
+        
+        # Adjust noise based on confidence - higher confidence = lower noise
+        if confidence > 0.8:
+            # High confidence - reduce noise
+            adjusted_noise = base_noise * 0.7
+        elif confidence < 0.4:
+            # Low confidence - increase noise
+            adjusted_noise = base_noise * 2.0
+        else:
+            # Moderate confidence - linear scaling
+            factor = 2.0 - 1.5 * confidence  # Maps 0.4->1.4, 0.8->0.8
+            adjusted_noise = base_noise * factor
+            
+        # Get current motion state for additional adjustment
+        motion_state = self.detect_motion_state()
+        
+        # Adjust for motion state
+        if motion_state == "medium_fast":
+            adjusted_noise *= 1.2  # Increase noise during fast motion
+        elif motion_state == "long_stationary":
+            adjusted_noise *= 0.8  # Decrease noise when stationary for long periods
+            
+        # Create appropriate noise matrix based on sensor dimensionality
+        if is_2d:
+            # 2D measurements - 2x2 noise matrix
+            R = np.eye(2, dtype=np.float32) * adjusted_noise
+        else:
+            # 3D measurements - 3x3 noise matrix
+            R = np.eye(3, dtype=np.float32) * adjusted_noise
+            
+        return R"""
         Get the measurement noise covariance matrix for a sensor.
         
         Args:
@@ -3416,135 +3554,142 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         """
         Adjust the filter covariance based on sensor gap patterns,
         using a refined approach optimized for 4D state.
+        NOW CONSIDERS REJECTED MEASUREMENTS.
         """
         # Need sensors to be initialized first
-        if not hasattr(self, 'sensor_gap_detection'):
+        if not hasattr(self, 'sensor_gap_detection') or not hasattr(self, 'consecutive_rejections_per_sensor'):
             return
-            
+
         current_time = time.time()
-        
+
         # Count active sensors and their gap levels
         active_3d_sensors = 0
         active_2d_sensors = 0
-        total_gap_level = 0.0  # Initialize total_gap_level here
+        total_gap_level = 0.0
         sensor_count = 0
-        
+        rejected_sensor_count = 0 # Track sensors rejected consecutively
+        rejection_threshold = 3 # Consider sensor 'gapped' after this many consecutive rejections
+
         for sensor, gap_info in self.sensor_gap_detection.items():
             last_time = self.last_detection_time.get(sensor, 0)
             gap_duration = current_time - last_time
-            
+
             # Skip sensors we've never seen
             if self.sensor_counts.get(sensor, 0) == 0:
                 continue
-                
+
             sensor_count += 1
-            
-            # Calculate effective gap level
-            if gap_duration < 0.1:
-                gap_level = 0.0  # Very recent update - no gap
-            elif gap_duration < 0.5:
-                gap_level = gap_duration / 0.5  # Linear increase to 1.0
+
+            # --- BEGIN MODIFICATION ---
+            # Check for consecutive rejections
+            rejections = self.consecutive_rejections_per_sensor.get(sensor, 0)
+            is_rejected = rejections >= rejection_threshold
+            is_gap = gap_duration > 0.5 # Standard gap definition
+
+            gap_level = 0.0
+            contributes_to_gap = False
+
+            if is_gap:
+                # Calculate gap level based on duration
+                if gap_duration < 0.1:
+                    gap_level = 0.0
+                elif gap_duration < 1.5: # Extend time range for gap level calculation
+                    gap_level = gap_duration / 1.5
+                else:
+                    gap_level = 1.0
+                contributes_to_gap = True
+            elif is_rejected:
+                # Assign a moderate gap level for rejected sensors even if data is recent
+                gap_level = 0.5 + (min(rejections, 10) * 0.05) # Increase gap level slightly with more rejections, capped
+                gap_level = min(gap_level, 1.0) # Cap at 1.0
+                rejected_sensor_count += 1
+                contributes_to_gap = True
+
+            if contributes_to_gap:
+                total_gap_level += gap_level
             else:
-                gap_level = 1.0  # Full gap level
-                
-            total_gap_level += gap_level
-            
-            # Count active sensors by type (with recent enough data)
-            if gap_duration < 1.0:
+                # Count active sensors only if data is recent AND not consistently rejected
                 if not sensor.endswith('_2d'):
                     active_3d_sensors += 1
                 else:
                     active_2d_sensors += 1
-        
-        # Calculate average gap level
+            # --- END MODIFICATION ---
+
+        # Calculate average gap level (considering actual gaps and rejections)
         avg_gap_level = total_gap_level / max(1, sensor_count)
-        
+
         # IMPROVEMENT 7: Slower covariance growth for stationary objects
         motion_state = self.detect_motion_state()
-        
-        # FIX: Use more conservative growth rates based on sensor availability
+
+        # FIX: Use more conservative growth rates based on *effective* sensor availability
         if active_3d_sensors >= 2:
-            # With multiple 3D sensors, use modest growth rate
-            # Reduced from 1.05-1.20 range to 1.02-1.12 range
             growth_rate = 1.02 + (avg_gap_level * 0.10)
         elif active_3d_sensors == 1:
-            # With single 3D sensor, slightly higher growth
-            # Reduced from 1.10-1.30 range to 1.05-1.20 range
             growth_rate = 1.05 + (avg_gap_level * 0.15)
         elif active_2d_sensors > 0:
-            # Only 2D sensors active, faster growth
-            # Reduced from 1.15-1.40 range to 1.08-1.28 range
             growth_rate = 1.08 + (avg_gap_level * 0.20)
-        else:
-            # No active sensors, use much faster growth
-            # Reduced from 1.20-1.80 range to 1.10-1.50 range
+        else: # No effectively active sensors (all gapped or rejected)
             growth_rate = 1.10 + (avg_gap_level * 0.40)
-            
+
+        # --- BEGIN MODIFICATION ---
+        # Further increase growth rate if many sensors are being rejected
+        if rejected_sensor_count >= 2:
+             growth_rate *= (1.0 + 0.05 * rejected_sensor_count) # Boost growth by 5% per rejected sensor (capped implicitly)
+             if self.debug_level >= 2:
+                 self.get_logger().debug(f"Boosting growth rate due to {rejected_sensor_count} rejected sensors: new rate={growth_rate:.3f}")
+        # --- END MODIFICATION ---
+
         # IMPROVEMENT 7: Reduce covariance growth for stationary objects
         if motion_state in ["stationary", "long_stationary"]:
-            # Further reduce growth rate for stationary objects
-            # Changed from 40% to 30% of normal growth rate
-            growth_rate = 1.0 + ((growth_rate - 1.0) * 0.3)  
-            
-            # For long-term stationary objects, even slower growth
-            # Changed from 25% to 15% of normal growth rate
+            # ... existing code to reduce growth_rate for stationary ...
+            growth_rate = 1.0 + ((growth_rate - 1.0) * 0.3)
             if motion_state == "long_stationary":
                 growth_rate = 1.0 + ((growth_rate - 1.0) * 0.15)
-                
-            # Log this adjustment occasionally
             if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 30 == 0:
                 self.get_logger().debug(f"Reduced covariance growth for {motion_state} object: {growth_rate:.3f}")
-        
+
         # Apply growth limit based on uncertainties
-        # Don't let position uncertainty exceed reasonable bounds
-        pos_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))  # Updated for 4D state, added max(0.0, ...)
+        # ... existing code ...
+        pos_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))
         if pos_uncertainty > 0.5:
-            # Limit further growth when already uncertain
             growth_rate = min(growth_rate, 1.1)
-        
+
         # Apply growth factor
         if growth_rate > 1.0:
-            # Apply different rates to position and velocity parts of the covariance
-            self.covariance[0:2, 0:2] *= growth_rate  # Position part (x,y)
-            self.covariance[2:4, 2:4] *= (growth_rate * 1.05)  # Reduced from 1.1 to 1.05 for velocity
-            
-            # Keep covariance symmetric
+            # ... existing code to apply growth_rate to covariance ...
+            self.covariance[0:2, 0:2] *= growth_rate
+            self.covariance[2:4, 2:4] *= (growth_rate * 1.05)
             self.covariance = 0.5 * (self.covariance + self.covariance.T)
-            
-            # Force positive semi-definiteness
-            # Ensure diagonal elements are positive
             for i in range(4):
                 self.covariance[i, i] = max(0.01, self.covariance[i, i])
-            
+
             # FIX: Add motion-specific uncertainty caps to prevent excessive uncertainty
-            # Get motion-based uncertainty caps
+            # ... existing code to get caps ...
             uncertainty_caps = self.get_motion_based_uncertainty_caps(motion_state)
             max_pos_uncertainty = uncertainty_caps["position_uncertainty_cap"]
             max_vel_uncertainty = uncertainty_caps["velocity_uncertainty_cap"]
-            
-            # Calculate current uncertainties - FIX: add max(0.0, ...) to avoid negative values due to numerical errors
+            # ... existing code to calculate current uncertainties ...
             current_pos_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))
             current_vel_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[2:4, 2:4]) / 2.0))
-            
-            # Apply caps if needed
+            # ... existing code to apply caps ...
             if current_pos_uncertainty > max_pos_uncertainty:
                 scale = (max_pos_uncertainty / current_pos_uncertainty) ** 2
                 self.covariance[0:2, 0:2] *= scale
-                
             if current_vel_uncertainty > max_vel_uncertainty:
                 scale = (max_vel_uncertainty / current_vel_uncertainty) ** 2
                 self.covariance[2:4, 2:4] *= scale
-                
-            # Keep covariance symmetric after capping
             self.covariance = 0.5 * (self.covariance + self.covariance.T)
-            
+
             # Debug log for significant growth
-            if growth_rate > 1.2 and self.debug_level > 1:
+            # --- MODIFIED LOG ---
+            if growth_rate > 1.1 and self.debug_level >= 1: # Log even at level 1 if growth is significant
                 self.get_logger().debug(
-                    f"Applying covariance growth: rate={growth_rate:.3f}, "
+                    f"Applying covariance growth: rate={growth_rate:.3f}, avg_gap_level={avg_gap_level:.2f}, "
+                    f"rejected_sensors={rejected_sensor_count}, "
                     f"pos_uncertainty={current_pos_uncertainty:.3f}m, caps=({max_pos_uncertainty:.1f}, {max_vel_uncertainty:.1f})"
                 )
-    
+            # --- END MODIFIED LOG ---
+
     # New method to provide motion-based uncertainty caps
     def get_motion_based_uncertainty_caps(self, motion_state):
         """
@@ -4214,7 +4359,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 )
                 
                 # Log transform details for debugging
-                self.get_logger().info(f"Transform details for {detection_msg.header.frame_id}: translation=[{transform.transform.translation.x:.4f}, {transform.transform.translation.y:.4f}, {transform.transform.translation.z:.4f}]")
+                #self.get_logger().info(f"Transform details for {detection_msg.header.frame_id}: translation=[{transform.transform.translation.x:.4f}, {transform.transform.translation.y:.4f}, {transform.transform.translation.z:.4f}]")
             except Exception as te:
                 self.get_logger().error(f"Transform lookup failed: {str(te)}")
                 return None
@@ -4315,13 +4460,19 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             estimated_point.point.y = est_y
             estimated_point.point.z = est_z
             
-            # Enhanced debugging for 3D estimation
-            self.get_logger().info(
-                f"3D estimation details: bbox={bbox_width}x{bbox_height}, "
-                f"distance={estimated_distance:.2f}m, "
-                f"camera_dir=({camera_dir_x:.2f}, {camera_dir_y:.2f}, {camera_dir_z:.2f}), "
-                f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
-            )
+            # Initialize estimation counter if not present
+            if not hasattr(self, '_3d_estimation_counter'):
+                self._3d_estimation_counter = 0
+            
+            # Increment counter and log details every 3 times
+            self._3d_estimation_counter += 1
+            if self._3d_estimation_counter % 3 == 0:
+                self.get_logger().info(
+                    f"3D estimation details: bbox={bbox_width}x{bbox_height}, "
+                    f"distance={estimated_distance:.2f}m, "
+                    f"camera_dir=({camera_dir_x:.2f}, {camera_dir_y:.2f}, {camera_dir_z:.2f}), "
+                    f"pos=({est_x:.2f}, {est_y:.2f}, {est_z:.2f})"
+                )
                 
             return estimated_point
             
@@ -4484,6 +4635,34 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             "movement_factor": movement_factor
         }
 
+    def get_measurement_confidence(self, sensor):
+        """
+        Get confidence value for a sensor based on recent quality measurements.
+        
+        Args:
+            sensor (str): Sensor name
+            
+        Returns:
+            float: Confidence value between 0.0 and 1.0
+        """
+        # Default confidence
+        confidence = 0.5
+        
+        # For lidar, use the quality value provided directly in the message
+        if sensor == 'lidar' and hasattr(self, 'lidar_quality_history') and len(self.lidar_quality_history) > 0:
+            # Use average of recent qualities
+            confidence = sum(self.lidar_quality_history) / len(self.lidar_quality_history)
+            
+            # Ensure it's in 0-1 range
+            confidence = min(1.0, max(0.0, confidence))
+        
+        # For other sensors, use the reliability tracker if available
+        elif hasattr(self, 'sensor_reliability_tracker'):
+            confidence = self.sensor_reliability_tracker.get_reliability(sensor)
+        
+        return confidence
+    
+    
 def main(args=None):
     rclpy.init(args=args)
     
