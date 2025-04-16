@@ -2987,8 +2987,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 # Store innovation for diagnostic purposes
                 if hasattr(self, 'innovation_history'):
                     self.innovation_history.append(mahalanobis_dist)
-                
-                # Skip measurement if it fails validation
+                  # Skip measurement if it fails validation
                 if mahalanobis_dist > threshold:
                     # --- MODIFIED LOG ---
                     self.get_logger().debug(
@@ -2997,12 +2996,24 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     # --- END MODIFIED LOG ---
                     # --- BEGIN MODIFICATION ---
                     # Increment consecutive rejection counter for this sensor
-                    self.consecutive_rejections_per_sensor[sensor] = self.consecutive_rejections_per_sensor.get(sensor, 0) + 1
+                    consecutive_rejections = self.consecutive_rejections_per_sensor.get(sensor, 0) + 1
+                    self.consecutive_rejections_per_sensor[sensor] = consecutive_rejections
 
-                    # Increase covariance slightly when rejecting to reduce confidence
-                    rejection_growth_factor = 1.02 # Small increase (2%)
-                    self.covariance[0:2, 0:2] *= rejection_growth_factor # Increase position uncertainty
-                    self.covariance[2:4, 2:4] *= rejection_growth_factor # Increase velocity uncertainty
+                    # Adaptive rejection growth - increase factor with more consecutive rejections
+                    base_growth = 1.02  # Base growth factor (2%)
+                    adaptive_factor = min(3.0, 1.0 + (consecutive_rejections * 0.05))  # Scale up to 3x with more rejections
+                    rejection_growth_factor = base_growth * adaptive_factor
+
+                    # Log when rejection count is significant
+                    if consecutive_rejections >= 3 and self.debug_level >= 1:
+                        self.get_logger().info(
+                            f"Increasing uncertainty after {consecutive_rejections} consecutive rejections for {sensor}: "
+                            f"factor={rejection_growth_factor:.2f}"
+                        )
+
+                    # Apply larger growth for position than velocity during rejections
+                    self.covariance[0:2, 0:2] *= rejection_growth_factor  # Position uncertainty
+                    self.covariance[2:4, 2:4] *= (rejection_growth_factor * 0.8)  # Slightly less for velocity
                     # Ensure symmetry
                     self.covariance = 0.5 * (self.covariance + self.covariance.T)
                     # Reset consecutive updates counter on rejection
