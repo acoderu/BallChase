@@ -121,7 +121,7 @@ class BasketballLidarDetector(Node):
         
         # Performance adaptation settings
         self.adaptive_processing = perf_config.get('adaptive_processing', True)
-        self.high_load_threshold = perf_config.get('high_load_threshold', 80.0)  # CPU %
+        self.high_load_threshold = perf_config.get('high_load_threshold', 95.0)  # CPU %
         self.low_load_threshold = perf_config.get('low_load_threshold', 50.0)    # CPU %
         
         # Processing settings
@@ -292,7 +292,8 @@ class BasketballLidarDetector(Node):
         # Core parameters - ensure basketball sized (9 inch diameter, updated from 10 inch)
         self.ball_radius = basketball_config.get('radius', 0.1143)  # 4.5 inches (9 inch diameter)
         self.max_distance = basketball_config.get('max_distance', 0.2)
-        self.min_points = basketball_config.get('min_points', 6)
+        self.min_points = basketball_config.get('min_points', 3)
+        
         self.detection_samples = basketball_config.get('detection_samples', 30)
         
         # Quality thresholds
@@ -687,7 +688,9 @@ class BasketballLidarDetector(Node):
         
         # If camera detection provided a transformed point, prioritize it
         filtered_points = None
+        
         if camera_seed_point is not None and len(camera_seed_point) >= 2:
+            
             # Use only x,y coordinates for 2D search in LIDAR data
             seed_points.append([camera_seed_point[0], camera_seed_point[1], 0])
             
@@ -717,6 +720,7 @@ class BasketballLidarDetector(Node):
             mask = valid_dist & valid_angle
             filtered_points = self.points_array[mask]
             
+            print(f"min points!!! {self.min_points}")
             if len(filtered_points) >= self.min_points:
                 if self.performance_mode != "MINIMAL":
                     self.get_logger().info(

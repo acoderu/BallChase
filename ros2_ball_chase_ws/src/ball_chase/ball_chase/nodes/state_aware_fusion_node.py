@@ -587,6 +587,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         self.is_ready = False  # Flag to track if the node is ready for processing
         self._transform_available_count = 0
         
+        # Counter for lidar messages
+        self.lidar_msg_counter = 0
+        
         # Initialize publishers list with a different name to avoid conflicts
         self._publishers = []
         
@@ -1702,16 +1705,21 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 transformed = self.transform_point(msg, self.reference_frame, False)  # 3D data, so is_2d=False
                 if transformed:
                     self.initialize_filter_with_measurement(transformed, source)
-            
             if self.debug_level >= 2:
                 self.get_logger().debug(
                     f"{source} detection: ({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame"
                 )
+            # Increment lidar message counter and log every 5 messages
+            if source == 'lidar':
+                self.lidar_msg_counter += 1
+                if self.lidar_msg_counter % 3 == 0:
+                    self.get_logger().info(f"Received {self.lidar_msg_counter} lidar messages so far")
+                    # Log detailed lidar position data once after every 3 messages
+                    self.get_logger().info(f"[state_aware_fusion_node]: Received lidar detection #{self.lidar_msg_counter}: ({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame")
         except Exception as e:
             self.log_error(f"Error in {source} callback: {str(e)}")
                 
     def bbox_callback(self, msg, source):
-        print ("bbox....")
         """
         Callback for bounding box messages.
         
