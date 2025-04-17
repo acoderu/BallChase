@@ -2908,10 +2908,72 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         
         return self.motion_state
 
-    # ENHANCEMENT 3: Dynamic Measurement Validation
+    # ENHANCEMENT 3: Dynamic Measurement Validation    
+    def check_filter_divergence(self):
+        """
+        Check for filter divergence and reset if needed.
+        This helps recover from situations where validation thresholds 
+        have allowed bad measurements to corrupt the filter state.
+        """
+        if not self.initialized:
+            return
+            
+        # Check for persistent measurement rejections
+        excessive_rejections = False
+        if hasattr(self, 'consecutive_rejections_per_sensor'):
+            # Count sensors with excessive rejections
+            excessive_count = 0
+            for sensor, count in self.consecutive_rejections_per_sensor.items():
+                if count > 5:  # 5+ consecutive rejections indicates a problem
+                    excessive_count += 1
+            
+            # If multiple sensors are being consistently rejected, we may have diverged
+            if excessive_count >= 2:
+                excessive_rejections = True
+                self.get_logger().warn(
+                    f"Detected filter divergence: {excessive_count} sensors with excessive rejections"
+                )
+        
+        # Check for excessively high uncertainty
+        high_uncertainty = self.position_uncertainty > 1.5  # Very high position uncertainty
+        
+        # If we have both excessive rejections and high uncertainty, reset the filter
+        if excessive_rejections and high_uncertainty:
+            self.get_logger().error("Filter divergence detected - reinitializing filter")
+            
+            # Save the current state for comparison
+            old_state = self.state.copy()
+            
+            # Get latest available data for reinitialization
+            lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
+            yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
+            
+            # Attempt to reinitialize with sensor data
+            if lidar_msg or (yolo_2d_msg and 'yolo_2d' in self.bbox_data):
+                # Reset filter to default state
+                self.initialize_filter_with_defaults()
+                
+                # Log the change in position
+                new_distance = math.sqrt(self.state[0]**2 + self.state[1]**2)
+                old_distance = math.sqrt(old_state[0]**2 + old_state[1]**2)
+                self.get_logger().info(
+                    f"Filter reinitialized: old=({old_state[0]:.2f}, {old_state[1]:.2f}), "
+                    f"new=({self.state[0]:.2f}, {self.state[1]:.2f}), "
+                    f"distance_change={new_distance-old_distance:.2f}m"
+                )
+                
+                # Reset all consecutive rejection counters
+                for sensor in self.consecutive_rejections_per_sensor:
+                    self.consecutive_rejections_per_sensor[sensor] = 0
+                
+                return True
+        
+        return False
+        
     def get_innovation_threshold(self, source, motion_state):
         """
         Get adaptive innovation threshold based on sensor type and motion state.
+        Modified to use more moderate threshold values to avoid accepting bad measurements.
         
         Args:
             source (str): Sensor source identifier
@@ -2929,27 +2991,28 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             sensor_type = "2d"
         
         # Base thresholds for each sensor type and motion state
+        # Reduced upper thresholds to prevent excessive validation relaxation
         base_thresholds = {
             "lidar": {
                 "stationary": (3.0, 1.5),  # (initial_threshold, min_threshold)
-                "long_stationary": (2.5, 1.2),  # Even more permissive for long-term stationary objects
-                "small_movement": (5.0, 2.0),
-                "medium_fast": (8.0, 3.0),
-                "unknown": (10.0, 3.0)
+                "long_stationary": (2.5, 1.2),  # More permissive for long-term stationary objects
+                "small_movement": (4.5, 2.0),   # Reduced from 5.0
+                "medium_fast": (6.0, 3.0),      # Reduced from 8.0
+                "unknown": (7.0, 3.0)           # Reduced from 10.0
             },
             "3d_vision": {
-                "stationary": (6.0, 2.0),
-                "long_stationary": (5.0, 1.8),  # More permissive for long-term stationary
-                "small_movement": (9.0, 3.0),
-                "medium_fast": (12.0, 4.0),
-                "unknown": (15.0, 5.0)
+                "stationary": (5.0, 2.0),       # Reduced from 6.0
+                "long_stationary": (4.5, 1.8),  # Reduced from 5.0
+                "small_movement": (7.0, 3.0),   # Reduced from 9.0
+                "medium_fast": (9.0, 4.0),      # Reduced from 12.0
+                "unknown": (10.0, 5.0)          # Reduced from 15.0
             },
             "2d": {
-                "stationary": (10.0, 3.0),
-                "long_stationary": (8.0, 2.5),  # More permissive for long-term stationary
-                "small_movement": (15.0, 5.0),
-                "medium_fast": (20.0, 8.0),
-                "unknown": (25.0, 10.0)
+                "stationary": (8.0, 3.0),       # Reduced from 10.0
+                "long_stationary": (7.0, 2.5),  # Reduced from 8.0
+                "small_movement": (10.0, 5.0),  # Reduced from 15.0
+                "medium_fast": (12.0, 8.0),     # Reduced from 20.0
+                "unknown": (15.0, 10.0)         # Reduced from 25.0
             }
         }
         
@@ -3169,9 +3232,11 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                             self.sync_quality_metrics['sensor_availability'][sensor] = 1
                         else:
                             self.sync_quality_metrics['sensor_availability'][sensor] += 1
-            
-            # Predict state forward to current time
+              # Predict state forward to current time
             self.predict_state(dt)
+            
+            # Check for filter divergence
+            self.check_filter_divergence()
             
             # Update state with measurements if available
             successful_update = False
@@ -3522,19 +3587,53 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             try:
                 S_inv = np.linalg.inv(S)
                 mahalanobis_dist = np.sqrt(np.dot(np.dot(y.T, S_inv), y))
-                
-                # Check if we're in initialization phase for more permissive validation
+                  # Check if we're in initialization phase for more permissive validation
                 initialization_phase = hasattr(self, 'in_initialization_phase') and self.in_initialization_phase
                 if initialization_phase:
-                    # Significantly increase validation threshold during initialization phase
+                    # Use more moderate threshold during initialization phase
                     initial_threshold = threshold
-                    threshold = threshold * 5.0  # 5x more permissive during initialization
                     
-                    # Log that we're using a more permissive threshold
-                    if self.debug_level >= 1:
-                        self.get_logger().info(
-                            f"Initialization phase: using relaxed validation threshold={threshold:.2f} for {sensor} (was {initial_threshold:.2f})"
-                        )
+                    # Cap the maximum threshold multiplier at 3.0 (was 5.0)
+                    # Also add an absolute maximum threshold value
+                    threshold = threshold * 3.0  # 3x more permissive during initialization
+                    
+                    # Hard cap on maximum thresholds regardless of sensor
+                    max_init_threshold = 10.0  # Maximum allowed threshold value
+                    if threshold > max_init_threshold:
+                        threshold = max_init_threshold
+                        # Log that we're capping the threshold
+                        if self.debug_level >= 1:
+                            self.get_logger().info(
+                                f"Capping initialization threshold at {max_init_threshold:.2f} for {sensor} "
+                                f"(would have been {initial_threshold * 3.0:.2f})"
+                            )
+                    else:
+                        # Log that we're using a more permissive threshold
+                        if self.debug_level >= 1:
+                            self.get_logger().info(
+                                f"Initialization phase: using relaxed validation threshold={threshold:.2f} for {sensor} "
+                                f"(was {initial_threshold:.2f})"
+                            )
+                    
+                    # Progressive threshold relaxation based on accepted measurements
+                    # This makes the system gradually less permissive as it gets more data
+                    if initialization_phase and hasattr(self, 'initialization_accepted_measurements'):
+                        accepted_count = self.initialization_accepted_measurements
+                        
+                        # After each accepted measurement, make the threshold 10% less permissive
+                        if accepted_count > 0:
+                            # Calculate relaxation factor: starts at 1.0, decreases by 0.1 per measurement, min 0.5
+                            relaxation_factor = max(0.5, 1.0 - (accepted_count * 0.1))
+                            
+                            # Adjust threshold downward based on number of accepted measurements
+                            old_threshold = threshold
+                            threshold = initial_threshold + (threshold - initial_threshold) * relaxation_factor
+                            
+                            if self.debug_level >= 2 and old_threshold > threshold + 0.1:
+                                self.get_logger().debug(
+                                    f"Progressive threshold reduction: {old_threshold:.2f} -> {threshold:.2f} "
+                                    f"after {accepted_count} accepted measurements"
+                                )
                 
                 # --- BEGIN ADDITION: Debug Logging ---
                 if self.debug_level >= 2:
@@ -3549,14 +3648,29 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
 
                 # Store innovation for diagnostic purposes
                 if hasattr(self, 'innovation_history'):
-                    self.innovation_history.append(mahalanobis_dist)
-                  # Skip measurement if it fails validation
+                    self.innovation_history.append(mahalanobis_dist)                # Skip measurement if it fails validation
                 if mahalanobis_dist > threshold:
-                    # --- MODIFIED LOG ---
-                    self.get_logger().debug(
-                        f"Rejecting {sensor} measurement: innovation {mahalanobis_dist:.2f} > threshold {threshold:.2f}"
-                    )
-                    # --- END MODIFIED LOG ---
+                    # Enhanced rejection logging with more context
+                    rejection_msg = f"Rejecting {sensor} measurement: innovation {mahalanobis_dist:.2f} > threshold {threshold:.2f}"
+                    
+                    # Add context about the actual innovation values
+                    if isinstance(y, np.ndarray) and len(y) >= 2:
+                        rejection_msg += f", innovation_values=({y[0]:.2f}, {y[1]:.2f})"
+                    
+                    # Add context about the measurement vs. state
+                    if sensor.endswith('_2d'):
+                        rejection_msg += f", measurement=({z[0]:.2f}, {z[1]:.2f}), state=({self.state[0]:.2f}, {self.state[1]:.2f})"
+                    
+                    # Add context about current uncertainty
+                    rejection_msg += f", uncertainty={self.position_uncertainty:.3f}"
+                    
+                    # Log with appropriate level based on severity of the innovation
+                    if mahalanobis_dist > (threshold * 2):
+                        # Extreme rejection - log as warning
+                        self.get_logger().warn(rejection_msg)
+                    else:
+                        # Normal rejection - log as debug
+                        self.get_logger().debug(rejection_msg)
                     
                     # Record validation decision (assume correct for now)
                     if hasattr(self, 'validation_manager'):
