@@ -1788,23 +1788,255 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self._timer_list.append(self._transform_check_timer)
             self.get_logger().info("Transform check timer started - will be disabled once transforms are confirmed")
         
-        self.get_logger().info("Processing timers initialized")    
-    
+        self.get_logger().info("Processing timers initialized")        
+
     def initialize_filter_with_defaults(self):
         """
-        Initialize filter with default values, prioritizing direct sensor measurements over estimates.
-        Modified to ensure initial position closely matches sensor readings.
+        Enhanced initialization that prioritizes actual sensor measurements and stays in
+        a lookup state until reliable measurements are available.
+        Modified to ensure initial position precisely matches sensor readings.
         """
         try:
-            # First attempt: check for LiDAR data (most reliable direct 3D measurement)
-            lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
-            # Second attempt: check for YOLO 2D data for 3D estimation
-            yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
+            # Create a special initialization state that we'll maintain until we have reliable data
+            if not hasattr(self, 'initialization_state'):
+                self.initialization_state = "LOOKUP"
+                self.initialization_sensor_buffer = {}
+                self.initialization_attempts = 0
+                self.get_logger().info("Entering LOOKUP initialization state - collecting sensor data")
+                
+                # Initialize state with high uncertainty
+                self.state = np.zeros(4, dtype=np.float32)
+                self.covariance = np.eye(4, dtype=np.float32)
+                self.covariance[0:2, 0:2] *= 20.0  # Extremely high position uncertainty (doubled)
+                self.covariance[2:4, 2:4] *= 10.0  # Very high velocity uncertainty
+                
+                # We will still be "initialized" but not reliable until we have good sensor data
+                self.initialized = True
+                self.in_initialization_phase = True
+                self.tracking_reliable = False
+                
+                # Update uncertainty metrics
+                self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
+                self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
+                
+                self.last_update_time = time.time()
+                return True
+                
+            # If we're already in LOOKUP state, collect sensor data and check if we have enough
+            if self.initialization_state == "LOOKUP":
+                self.initialization_attempts += 1
+                
+                # Collect all available sensor data
+                lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
+                yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
+                hsv_2d_msg = self.sensor_buffer.get_latest_measurement('hsv_2d')
+                yolo_3d_msg = self.sensor_buffer.get_latest_measurement('yolo_3d')
+                hsv_3d_msg = self.sensor_buffer.get_latest_measurement('hsv_3d')
+                
+                # Log current state of sensor data collection
+                sensors_found = []
+                if lidar_msg: sensors_found.append("lidar")
+                if yolo_2d_msg: sensors_found.append("yolo_2d")
+                if hsv_2d_msg: sensors_found.append("hsv_2d")
+                if yolo_3d_msg: sensors_found.append("yolo_3d")
+                if hsv_3d_msg: sensors_found.append("hsv_3d")
+                
+                # Process LiDAR measurements
+                if lidar_msg:
+                    transformed = self.transform_point(lidar_msg, self.reference_frame, False)
+                    if transformed:
+                        if 'lidar' not in self.initialization_sensor_buffer:
+                            self.initialization_sensor_buffer['lidar'] = []
+                        
+                        # Add to the buffer
+                        self.initialization_sensor_buffer['lidar'].append({
+                            'x': transformed.point.x,
+                            'y': transformed.point.y,
+                            'z': transformed.point.z,
+                            'time': time.time()
+                        })
+                        
+                        # Limit buffer size
+                        if len(self.initialization_sensor_buffer['lidar']) > 5:
+                            self.initialization_sensor_buffer['lidar'] = self.initialization_sensor_buffer['lidar'][-5:]
+                
+                # Process 2D YOLO measurements with distance estimation
+                if yolo_2d_msg and 'yolo_2d' in self.bbox_data:
+                    estimated_3d = self.estimate_3d_from_2d(yolo_2d_msg, self.bbox_data['yolo_2d'])
+                    if estimated_3d:
+                        if 'yolo_2d_est3d' not in self.initialization_sensor_buffer:
+                            self.initialization_sensor_buffer['yolo_2d_est3d'] = []
+                        
+                        # Add to the buffer
+                        self.initialization_sensor_buffer['yolo_2d_est3d'].append({
+                            'x': estimated_3d.point.x,
+                            'y': estimated_3d.point.y,
+                            'z': estimated_3d.point.z,
+                            'time': time.time()
+                        })
+                        
+                        # Limit buffer size
+                        if len(self.initialization_sensor_buffer['yolo_2d_est3d']) > 5:
+                            self.initialization_sensor_buffer['yolo_2d_est3d'] = self.initialization_sensor_buffer['yolo_2d_est3d'][-5:]
+                
+                # Process 3D measurements from other sensors
+                for sensor_name, msg in [('yolo_3d', yolo_3d_msg), ('hsv_3d', hsv_3d_msg)]:
+                    if msg:
+                        transformed = self.transform_point(msg, self.reference_frame, False)
+                        if transformed:
+                            if sensor_name not in self.initialization_sensor_buffer:
+                                self.initialization_sensor_buffer[sensor_name] = []
+                            
+                            # Add to the buffer
+                            self.initialization_sensor_buffer[sensor_name].append({
+                                'x': transformed.point.x,
+                                'y': transformed.point.y,
+                                'z': transformed.point.z,
+                                'time': time.time()
+                            })
+                            
+                            # Limit buffer size
+                            if len(self.initialization_sensor_buffer[sensor_name]) > 5:
+                                self.initialization_sensor_buffer[sensor_name] = self.initialization_sensor_buffer[sensor_name][-5:]
+                
+                # Check if we have enough data to make a reliable initialization
+                sensors_with_data = [s for s, data in self.initialization_sensor_buffer.items() if len(data) >= 2]
+                
+                # Exit conditions from LOOKUP state
+                max_attempts = 10
+                if len(sensors_with_data) >= 1 and self.initialization_attempts >= 3:
+                    # We have enough data from at least one reliable sensor
+                    # Prefer LiDAR, then 3D sensors, then 2D-estimated
+                    if 'lidar' in sensors_with_data:
+                        primary_sensor = 'lidar'
+                    elif 'yolo_3d' in sensors_with_data:
+                        primary_sensor = 'yolo_3d'
+                    elif 'hsv_3d' in sensors_with_data:
+                        primary_sensor = 'hsv_3d'
+                    elif 'yolo_2d_est3d' in sensors_with_data:
+                        primary_sensor = 'yolo_2d_est3d'
+                    else:
+                        # Shouldn't reach here due to our conditions, but just in case
+                        primary_sensor = sensors_with_data[0]
+                    
+                    # Calculate average position from the primary sensor
+                    positions = self.initialization_sensor_buffer[primary_sensor]
+                    avg_x = sum([p['x'] for p in positions]) / len(positions)
+                    avg_y = sum([p['y'] for p in positions]) / len(positions)
+                    avg_z = self.basketball_z_height  # Always use standard height
+                    
+                    # Check for consistency in measurements
+                    max_deviation = max([math.sqrt((p['x'] - avg_x)**2 + (p['y'] - avg_y)**2) for p in positions])
+                    
+                    if max_deviation < 0.5 or self.initialization_attempts >= max_attempts:
+                        # Measurements are consistent or we've tried enough - initialize!
+                        self.state = np.zeros(4, dtype=np.float32)
+                        self.state[0] = avg_x  # x position
+                        self.state[1] = avg_y  # y position
+                        # Keep zero velocity for stationary initialization
+                        
+                        # Set appropriate uncertainty based on data quality
+                        self.covariance = np.eye(4, dtype=np.float32)
+                        if max_deviation < 0.3:
+                            # Good consistency - low uncertainty
+                            self.covariance[0:2, 0:2] *= 0.1
+                        else:
+                            # Moderate consistency - higher uncertainty
+                            self.covariance[0:2, 0:2] *= 0.25
+                        
+                        # Always moderate velocity uncertainty
+                        self.covariance[2:4, 2:4] *= 1.0
+                        
+                        # Update uncertainty metrics
+                        self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
+                        self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
+                        
+                        # Transition out of initialization phase
+                        self.in_initialization_phase = False
+                        self.tracking_reliable = True
+                        self.initialization_state = "ACTIVE"
+                        
+                        # Calculate distance for logging
+                        distance = math.sqrt(avg_x**2 + avg_y**2)
+                        direction = math.degrees(math.atan2(avg_y, avg_x))
+                        
+                        self.get_logger().info(
+                            f"Successfully initialized with {primary_sensor} data: "
+                            f"position=({avg_x:.2f}, {avg_y:.2f}, {avg_z:.2f}), "
+                            f"distance={distance:.2f}m, direction={direction:.1f}°, "
+                            f"uncertainty={self.position_uncertainty:.3f}m"
+                        )
+                        
+                        return True
+                    else:
+                        # Measurements not consistent enough yet
+                        self.get_logger().info(
+                            f"Still collecting consistent measurements: {primary_sensor} deviation={max_deviation:.2f}m "
+                            f"(need <0.5m)"
+                        )
+                else:
+                    # Not enough data yet
+                    self.get_logger().info(
+                        f"Initialization in progress: found {len(sensors_with_data)}/{len(self.expected_sensors)} sensors "
+                        f"with data, attempt {self.initialization_attempts}/{max_attempts}"
+                    )
+                    
+                    if self.initialization_attempts >= max_attempts:
+                        # We've tried enough times - use whatever data we have
+                        self.get_logger().warn(f"Max initialization attempts reached - using best available data")
+                        
+                        # If we have any data at all, use it
+                        if sensors_with_data:
+                            # Use the first available sensor
+                            primary_sensor = sensors_with_data[0]
+                            positions = self.initialization_sensor_buffer[primary_sensor]
+                            avg_x = sum([p['x'] for p in positions]) / len(positions)
+                            avg_y = sum([p['y'] for p in positions]) / len(positions)
+                            avg_z = self.basketball_z_height
+                            
+                            self.state = np.zeros(4, dtype=np.float32)
+                            self.state[0] = avg_x
+                            self.state[1] = avg_y
+                            
+                            # Set fairly high uncertainty due to limited data
+                            self.covariance = np.eye(4, dtype=np.float32)
+                            self.covariance[0:2, 0:2] *= 0.5
+                            self.covariance[2:4, 2:4] *= 1.5
+                            
+                            # Transition out of initialization
+                            self.in_initialization_phase = False
+                            self.tracking_reliable = True
+                            self.initialization_state = "ACTIVE"
+                            
+                            # Calculate distance for logging
+                            distance = math.sqrt(avg_x**2 + avg_y**2)
+                            direction = math.degrees(math.atan2(avg_y, avg_x))
+                            
+                            self.get_logger().info(
+                                f"Initialized with limited {primary_sensor} data: "
+                                f"position=({avg_x:.2f}, {avg_y:.2f}, {avg_z:.2f}), "
+                                f"distance={distance:.2f}m, direction={direction:.1f}°"
+                            )
+                            
+                            # Update uncertainty metrics
+                            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
+                            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
+                            
+                            return True
+                
+                # Stay in LOOKUP state if we haven't met exit conditions
+                return True
+                
+            # We shouldn't reach here if the initialization logic is working correctly
+            self.get_logger().warn("Unexpected initialization state - resetting to LOOKUP")
+            self.initialization_state = "LOOKUP"
+            return self.initialize_filter_with_defaults()
             
-            # Track which type of initialization we're using
-            init_type = "default"
-            
-            # Initialize position from sensor data if available
+        except Exception as e:
+            self.get_logger().error(f"Error during filter initialization: {str(e)}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+            return False
             if lidar_msg:
                 transformed = self.transform_point(lidar_msg, self.reference_frame, False)
                 if transformed:
