@@ -184,8 +184,8 @@ class SensorBuffer:
     
     def _ros_time_to_float(self, timestamp):
         """Convert ROS timestamp to float seconds."""
-        return timestamp.sec + timestamp.nanosec / 1e9
-
+        return timestamp.sec + timestamp.nanosec / 1e9    
+    
     def interpolate_measurement(self, sensor, target_time):
         """
         Interpolate sensor measurement at the target time.
@@ -240,6 +240,94 @@ class SensorBuffer:
             quality = 1.0 - min(t, 1.0-t)  # 1.0 at measurements, 0.5 halfway between
             return result, quality
         
+        return None, 0.0
+        
+    def synthesize_measurement(self, sensor_name, target_time, state_predictor_callback=None):
+        """
+        Synthesize a measurement for a sensor when real data is unavailable.
+        
+        Args:
+            sensor_name (str): The sensor to synthesize data for
+            target_time (float): The target timestamp
+            state_predictor_callback: Optional function to provide state prediction
+            
+        Returns:
+            tuple: (synthesized_measurement, confidence)
+        """
+        # Default low confidence
+        confidence = 0.3
+        
+        # Method 1: Interpolation from existing measurements
+        interpolated, interp_quality = self.interpolate_measurement(sensor_name, target_time)
+        if interpolated is not None:
+            # Interpolation successful
+            return interpolated, interp_quality
+            
+        # Method 2: Extrapolation from recent measurements
+        if sensor_name in self.buffers and len(self.buffers[sensor_name]) >= 2:
+            # Get two most recent measurements
+            measurements = list(self.buffers[sensor_name])
+            measurements.sort(key=lambda x: x[0])  # Sort by timestamp
+            
+            if len(measurements) >= 2:
+                time1, data1 = measurements[-2]
+                time2, data2 = measurements[-1]
+                
+                # Simple linear extrapolation
+                if time2 > time1:  # Ensure time moved forward
+                    dt_orig = time2 - time1
+                    dt_extrap = target_time - time2
+                    
+                    # Don't extrapolate too far
+                    if dt_extrap < dt_orig * 2:
+                        # Create new message
+                        result = copy.deepcopy(data2)
+                        
+                        # Extrapolate position
+                        if hasattr(data1, 'point') and hasattr(data2, 'point'):
+                            # Calculate velocity
+                            vx = (data2.point.x - data1.point.x) / dt_orig
+                            vy = (data2.point.y - data1.point.y) / dt_orig
+                            vz = (data2.point.z - data1.point.z) / dt_orig
+                            
+                            # Extrapolate
+                            result.point.x = data2.point.x + vx * dt_extrap
+                            result.point.y = data2.point.y + vy * dt_extrap
+                            result.point.z = data2.point.z + vz * dt_extrap
+                            
+                            # Quality decreases with extrapolation distance
+                            confidence = max(0.1, 0.6 - (dt_extrap / dt_orig) * 0.3)
+                            
+                            return result, confidence
+        
+        # Method 3: Use state prediction if available
+        if state_predictor_callback is not None:
+            predicted_state = state_predictor_callback(target_time)
+            if predicted_state is not None:                # Create synthetic measurement from predicted state
+                if sensor_name.endswith('_2d'):
+                    # Create 2D point
+                    result = PointStamped()
+                    result.header.stamp.sec = int(target_time)
+                    result.header.stamp.nanosec = int((target_time - int(target_time)) * 1e9)
+                    result.header.frame_id = "prediction_frame"  # Special frame with flag for synthesized data
+                    result.point.x = predicted_state[0]  # x
+                    result.point.y = predicted_state[1]  # y
+                    result.point.z = 0.5  # Confidence score
+                else:
+                    # Create 3D point
+                    result = PointStamped()
+                    result.header.stamp.sec = int(target_time)
+                    result.header.stamp.nanosec = int((target_time - int(target_time)) * 1e9)
+                    result.header.frame_id = "prediction_frame"
+                    result.point.x = predicted_state[0]  # x
+                    result.point.y = predicted_state[1]  # y
+                    result.point.z = predicted_state[2] if len(predicted_state) > 2 else 0.11  # z
+                
+                # Lower confidence for prediction
+                confidence = 0.4
+                return result, confidence
+        
+        # No synthesis possible
         return None, 0.0
 
     def calculate_adaptive_time_thresholds(self):
@@ -1658,20 +1746,69 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     f"Received {source} detection #{self.sensor_counts[source]}: "
                     f"({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame"
                 )
-            
-            # For 2D YOLO data, estimate 3D position here instead of waiting until publish time
+              # For 2D YOLO data, estimate 3D position here instead of waiting until publish time
             if source == 'yolo_2d' and 'yolo_2d' in self.bbox_data:
                 try:
-                    # Only estimate 3D position if we have recent bbox data
-                    estimated_3d_point = self.estimate_3d_from_2d(msg, self.bbox_data['yolo_2d'])
-                    if estimated_3d_point:
-                        # Add estimated 3D point to the sensor buffer as a new sensor type
-                        self.sensor_buffer.add_measurement('yolo_2d_est3d', estimated_3d_point, msg.header.stamp)
+                    # Check if this is a redundant detection (same position as previous)
+                    is_redundant = False
+                    if hasattr(self, '_last_yolo_detection'):
+                        # Compare with previous detection
+                        prev_x = self._last_yolo_detection.get('x', 0)
+                        prev_y = self._last_yolo_detection.get('y', 0)
+                        prev_time = self._last_yolo_detection.get('time', 0)
                         
-                        # Initialize this sensor type in the reliability tracker if needed
-                        if hasattr(self, 'sensor_reliability_tracker'):
-                            if 'yolo_2d_est3d' not in self.sensor_reliability_tracker.sensors:
-                                self.sensor_reliability_tracker.add_sensor('yolo_2d_est3d')
+                        # If within small tolerance and recent, consider redundant
+                        x_diff = abs(msg.point.x - prev_x)
+                        y_diff = abs(msg.point.y - prev_y)
+                        time_diff = current_time - prev_time
+                        
+                        if x_diff < 0.1 and y_diff < 0.1 and time_diff < 0.1:
+                            # Highly likely to be a duplicate detection
+                            is_redundant = True
+                            
+                            # Use cached 3D estimate if available
+                            if 'estimated_3d' in self._last_yolo_detection:
+                                cached_3d = self._last_yolo_detection['estimated_3d']
+                                # Update timestamp to current time but keep position the same
+                                cached_3d.header.stamp = msg.header.stamp
+                                
+                                # Add to sensor buffer
+                                self.sensor_buffer.add_measurement('yolo_2d_est3d', cached_3d, msg.header.stamp)
+                                
+                                # Log occasional debug info for redundant detections
+                                if self.debug_level >= 2 and hasattr(self, 'sensor_counts') and self.sensor_counts.get('yolo_2d', 0) % 20 == 0:
+                                    self.get_logger().debug(f"Using cached 3D estimate for redundant YOLO detection")
+                                    
+                                # Skip expensive 3D estimation
+                                redundant_detections = getattr(self, '_redundant_detection_count', 0) + 1
+                                self._redundant_detection_count = redundant_detections
+                                
+                                if redundant_detections % 50 == 0:
+                                    self.get_logger().info(f"Avoided {redundant_detections} redundant 3D estimations")
+                    
+                    # Store current detection as the last one
+                    if not hasattr(self, '_last_yolo_detection'):
+                        self._last_yolo_detection = {}
+                        
+                    self._last_yolo_detection['x'] = msg.point.x
+                    self._last_yolo_detection['y'] = msg.point.y
+                    self._last_yolo_detection['time'] = current_time
+                    
+                    # Only perform 3D estimation for non-redundant detections
+                    if not is_redundant:
+                        # Perform normal 3D estimation
+                        estimated_3d_point = self.estimate_3d_from_2d(msg, self.bbox_data['yolo_2d'])
+                        if estimated_3d_point:
+                            # Cache this estimation
+                            self._last_yolo_detection['estimated_3d'] = estimated_3d_point
+                            
+                            # Add estimated 3D point to the sensor buffer
+                            self.sensor_buffer.add_measurement('yolo_2d_est3d', estimated_3d_point, msg.header.stamp)
+                            
+                            # Initialize this sensor type in the reliability tracker if needed
+                            if hasattr(self, 'sensor_reliability_tracker'):
+                                if 'yolo_2d_est3d' not in self.sensor_reliability_tracker.sensors:
+                                    self.sensor_reliability_tracker.add_sensor('yolo_2d_est3d')
                         
                         # Initialize gap tracking for this sensor type
                         if hasattr(self, 'sensor_gap_detection') and 'yolo_2d_est3d' not in self.sensor_gap_detection:
@@ -2736,12 +2873,67 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 dt = current_time - self.last_update_time
                 # Limit dt to reasonable values
                 dt = min(dt, 0.5)  # Cap at 0.5 seconds to prevent big jumps
-            
-            # IMPROVEMENT 7: Apply gap-aware covariance adjustment
+              # IMPROVEMENT 7: Apply gap-aware covariance adjustment
             self.adjust_covariance_for_gaps()
             
             # Find synchronized measurements
             measurements = self.sensor_buffer.find_synchronized_measurements(min_sensors=1)
+            
+            # Enhanced gap handling: If we don't have enough synchronized sensors, 
+            # try synthesizing measurements
+            if len(measurements) < 2:  # Not enough real sensors
+                current_time = time.time()
+                
+                # Check which sensors we need to synthesize
+                missing_sensors = []
+                for sensor in self.expected_sensors:
+                    if sensor not in measurements and self.sensor_counts.get(sensor, 0) > 0:
+                        last_time = self.last_detection_time.get(sensor, 0)
+                        gap_duration = current_time - last_time
+                        
+                        # Only consider sensors we've seen before and that have a gap
+                        if gap_duration > 0.5 and gap_duration < 3.0:
+                            missing_sensors.append(sensor)
+                
+                # Attempt to synthesize measurements for missing sensors
+                for sensor in missing_sensors:
+                    # Create a state predictor callback using current filter state
+                    def state_predictor(target_time):
+                        # Simple linear prediction from current state
+                        dt = target_time - self.last_update_time if self.last_update_time else 0.1
+                        predicted = [
+                            self.state[0] + self.state[2] * dt,  # x + vx*dt
+                            self.state[1] + self.state[3] * dt,  # y + vy*dt
+                            self.basketball_z_height  # z is fixed for basketball
+                        ]
+                        return predicted
+                      # Try to synthesize a measurement
+                    synth_measurement, confidence = self.sensor_buffer.synthesize_measurement(
+                        sensor, current_time, state_predictor
+                    )
+                    
+                    if synth_measurement is not None:
+                        # Since we can't add attributes to ROS messages, use a dictionary to track synthetic measurements
+                        if not hasattr(self, 'synthetic_measurement_info'):
+                            self.synthetic_measurement_info = {}
+                        
+                        # Store a unique ID for this measurement based on timestamp
+                        synth_id = f"{sensor}_synth_{current_time}"
+                        self.synthetic_measurement_info[synth_id] = {
+                            'is_synthesized': True,
+                            'synthesis_confidence': confidence,
+                            'timestamp': current_time
+                        }
+                        
+                        # Add to measurements dict with special key
+                        measurements[f"{sensor}_synthesized"] = synth_measurement
+                        
+                        # Log synthesis
+                        if self.debug_level >= 1:
+                            self.get_logger().info(
+                                f"Synthesized measurement for {sensor} during {current_time - self.last_detection_time.get(sensor, 0):.2f}s gap "
+                                f"with confidence={confidence:.2f}"
+                            )
             
             # Add debug logging for sensor synchronization
             #self.get_logger().info(f"Synchronized measurements found: {list(measurements.keys())}")
@@ -2932,7 +3124,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         
         # Ensure covariance remains symmetric
         self.covariance = 0.5 * (self.covariance + self.covariance.T)    
-    
+
     def update_state(self, measurements):
         """
         Update the state with synchronized measurements (4D state version).
@@ -2955,6 +3147,21 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         for sensor, msg in measurements.items():
             transformed = None # Initialize transformed variable
             is_2d_sensor = sensor.endswith('_2d')
+
+            # Special handling for synthesized measurements
+            is_synthesized = False
+            synth_confidence = 0.5
+            
+            if hasattr(msg, 'synthesized') and getattr(msg, 'synthesized', False):
+                is_synthesized = True
+                synth_confidence = getattr(msg, 'synthesis_confidence', 0.5)
+                
+                # Log this
+                if self.debug_level >= 2:
+                    self.get_logger().debug(
+                        f"Processing synthesized measurement for {sensor.replace('_synthesized', '')} "
+                        f"with confidence={synth_confidence:.2f}"
+                    )
 
             # For 2D sensors, estimate 3D position first
             if is_2d_sensor:
