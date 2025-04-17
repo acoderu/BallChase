@@ -1789,10 +1789,13 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self._timer_list.append(self._transform_check_timer)
             self.get_logger().info("Transform check timer started - will be disabled once transforms are confirmed")
         
-        self.get_logger().info("Processing timers initialized")
-
+        self.get_logger().info("Processing timers initialized")    
+    
     def initialize_filter_with_defaults(self):
-        """Initialize filter with default values, using first available sensor data if possible."""
+        """
+        Initialize filter with default values, using first available sensor data if possible.
+        Modified to use significantly higher uncertainty when no sensor data is available.
+        """
         try:
             # Check for any existing sensor data to use for initialization
             lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
@@ -1806,6 +1809,14 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     self.state[0] = transformed.point.x  # x position
                     self.state[1] = transformed.point.y  # y position
                     self.get_logger().info(f"Filter initialized with lidar data: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
+                    
+                    # Set moderate uncertainty for sensor-based initialization
+                    self.covariance = np.eye(4, dtype=np.float32)
+                    self.covariance[0:2, 0:2] *= 0.5  # Position uncertainty
+                    self.covariance[2:4, 2:4] *= 1.0  # Velocity uncertainty
+                    
+                    # We have sensor data, so no need for initialization phase
+                    self.in_initialization_phase = False
             elif yolo_2d_msg and 'yolo_2d' in self.bbox_data:
                 # Attempt to estimate 3D position from 2D yolo data
                 estimated_3d = self.estimate_3d_from_2d(yolo_2d_msg, self.bbox_data['yolo_2d'])
@@ -1814,15 +1825,28 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     self.state[0] = estimated_3d.point.x  # x position
                     self.state[1] = estimated_3d.point.y  # y position
                     self.get_logger().info(f"Filter initialized with estimated 3D from yolo_2d: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
+                    
+                    # Set moderate uncertainty for sensor-based initialization
+                    self.covariance = np.eye(4, dtype=np.float32)
+                    self.covariance[0:2, 0:2] *= 1.0  # Position uncertainty
+                    self.covariance[2:4, 2:4] *= 1.5  # Velocity uncertainty
+                    
+                    # We have sensor data, so no need for initialization phase
+                    self.in_initialization_phase = False
             else:
-                # Fall back to zeros if no sensor data available
+                # Fall back to zeros if no sensor data available, but with VERY HIGH uncertainty
                 self.state = np.zeros(4, dtype=np.float32)
                 self.get_logger().info("Filter initialized with zeros - waiting for sensor data to update position")
-            
-            # Set initial covariance (high uncertainty since this is a guess)
-            self.covariance = np.eye(4, dtype=np.float32)
-            self.covariance[0:2, 0:2] *= 1.0  # Position uncertainty
-            self.covariance[2:4, 2:4] *= 2.0  # Velocity uncertainty
+                
+                # Set extremely high uncertainty since this is just a placeholder
+                self.covariance = np.eye(4, dtype=np.float32)
+                self.covariance[0:2, 0:2] *= 10.0  # Very high position uncertainty (10x increase)
+                self.covariance[2:4, 2:4] *= 5.0  # Very high velocity uncertainty
+                
+                # Set flag to indicate we're in initialization phase
+                self.in_initialization_phase = True
+                self.initialization_accepted_measurements = 0
+                self.get_logger().info("Entering initialization phase with high uncertainty - accepting initial measurements")
             
             self.initialized = True
             self.last_update_time = time.time()
@@ -1832,7 +1856,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
             
             self.get_logger().info(
-                f"Filter initialized with default values. Beginning active tracking with higher uncertainty."
+                f"Filter initialized with default values. Beginning active tracking with uncertainty={self.position_uncertainty:.3f}."
             )
             return True
         except Exception as e:
@@ -2463,23 +2487,19 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                         acceleration = abs(vel2_mag - vel1_mag) / dt
 
             # Apply hysteresis for state classification based on current state
-            current_state = getattr(self, 'motion_state', 'unknown')
-
-            # Default thresholds
-            stationary_thresh = 0.02  # m/s
-            small_movement_thresh = 0.20  # m/s
-
-            # Apply hysteresis: harder to leave current state
+            current_state = getattr(self, 'motion_state', 'unknown')            # Default thresholds - lowered to be more responsive
+            stationary_thresh = 0.015  # m/s (reduced from 0.02)
+            small_movement_thresh = 0.15  # m/s (reduced from 0.20)            # Apply reduced hysteresis factors
             if current_state == "stationary":
-                # Higher threshold to leave stationary
-                stationary_thresh = 0.04  # Doubled
+                # Less hysteresis to leave stationary
+                stationary_thresh = 0.025  # Reduced from 0.04
             elif current_state == "small_movement":
                 # Adjusted thresholds for small_movement
-                stationary_thresh = 0.015  # Lower to stay in small_movement
-                small_movement_thresh = 0.25  # Higher to stay in small_movement
+                stationary_thresh = 0.01  # Lower to stay in small_movement
+                small_movement_thresh = 0.18  # Reduced from 0.25
             elif current_state == "medium_fast":
                 # Lower threshold to stay in medium_fast
-                small_movement_thresh = 0.18
+                small_movement_thresh = 0.13  # Reduced from 0.18
 
             # Use acceleration to detect rapid changes
             if acceleration > 2.0:  # Significant acceleration
@@ -2518,11 +2538,10 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         # ---------------------------------------------------------------------
         if hasattr(self, 'motion_state') and self.motion_state == "long_stationary":
             # Already in long_stationary state - this needs special protection
-            
-            # NEW: Add stronger override for clear movement detection
-            if base_motion_state in ["small_movement", "medium_fast"] and avg_velocity > 0.15:
-                # If clear movement detected, override protection immediately
-                self.get_logger().info(f"Movement override: velocity {avg_velocity:.2f}m/s exceeds threshold 0.15m/s")
+              # NEW: Add stronger override for clear movement detection
+            if base_motion_state in ["small_movement", "medium_fast"] and avg_velocity > 0.10:
+                # Reduced threshold from 0.15 to 0.10 for more responsive detection
+                self.get_logger().info(f"Movement override: velocity {avg_velocity:.2f}m/s exceeds threshold 0.10m/s")
                 return base_motion_state
             
             # Check if long_stationary is established in memory
@@ -2548,19 +2567,16 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 
                 if 'consecutive_stationary_after_long' not in self.motion_state_protection:
                     self.motion_state_protection['consecutive_stationary_after_long'] = 0
-                
-                # Determine if we should even consider this transition
+                  # More permissive consideration of state transitions
                 consider_transition = False
                 
-                # Check velocity stability 
-                if avg_velocity < 0.01:  # Very stable velocity
+                # Check velocity stability with more permissive threshold
+                if avg_velocity < 0.03:  # Increased from 0.01
                     # Get time since long_stationary was established
                     time_in_long_stationary = current_time - self.motion_state_protection.get('long_stationary_confirmed_time', 0)
                     
-                    # Only consider transitions if:
-                    # 1. Object has been in long_stationary for at least 20 seconds AND
-                    # 2. Velocity confidence is high
-                    if time_in_long_stationary > 20.0 and self.velocity_confidence > 0.8:
+                    # Reduced time requirement from 20 to 5 seconds
+                    if time_in_long_stationary > 5.0 and self.velocity_confidence > 0.6:  # Reduced confidence threshold
                         consider_transition = True
                 
                 # Skip all processing if transition isn't being considered
@@ -2582,9 +2598,8 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                             f"Long stationary -> stationary transition accepted after "
                             f"{self.motion_state_protection['consecutive_stationary_after_long']} consecutive stationary detections"
                         )
-                    
-                    # Reduce consecutive detection requirement from 5 to 2
-                    if self.motion_state_protection['consecutive_stationary_after_long'] < 2:
+                      # Reduce consecutive detection requirement from 2 to 1
+                    if self.motion_state_protection['consecutive_stationary_after_long'] < 1:
                         # Not enough evidence - remain in long_stationary
                         base_motion_state = "long_stationary"
                     else:
@@ -3155,6 +3170,36 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             
             # Update diagnostics
             self.update_diagnostics()
+              # Add detection for large position jumps during initialization
+            if hasattr(self, 'in_initialization_phase') and self.in_initialization_phase and hasattr(self, 'position_history') and len(self.position_history) >= 2:
+                # Get last two positions
+                prev_pos = list(self.position_history)[-2]
+                curr_pos = list(self.position_history)[-1]
+                
+                # Calculate distance between them
+                dx = curr_pos[0] - prev_pos[0]
+                dy = curr_pos[1] - prev_pos[1]
+                distance = math.sqrt(dx*dx + dy*dy)
+                
+                # If there's a large jump, it might be our first real detection
+                if distance > 1.0:  # Jump of more than 1 meter
+                    self.get_logger().info(
+                        f"Detected position jump of {distance:.2f}m during initialization - possible first real detection"
+                    )
+                    
+                    # Immediately accept the new position
+                    if hasattr(self, 'state'):
+                        # Update state to match the new position
+                        self.state[0] = curr_pos[0]
+                        self.state[1] = curr_pos[1]
+                        
+                        # Log the state correction
+                        self.get_logger().info(
+                            f"Adjusted state to match detected position: ({curr_pos[0]:.2f}, {curr_pos[1]:.2f})"
+                        )
+                        
+                        # Consider exiting initialization phase after a significant jump
+                        self.initialization_accepted_measurements = max(2, getattr(self, 'initialization_accepted_measurements', 0))
             
             # Apply flat ground constraints if needed
             self.apply_flat_ground_constraints()
@@ -3400,12 +3445,23 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             max_threshold = 25.0 # Set a maximum allowable threshold
             original_threshold = threshold
             threshold = min(threshold, max_threshold)
-            # --- END ADDITION ---
-            
-            # Compute Mahalanobis distance for validation
+            # --- END ADDITION ---                # Compute Mahalanobis distance for validation
             try:
                 S_inv = np.linalg.inv(S)
                 mahalanobis_dist = np.sqrt(np.dot(np.dot(y.T, S_inv), y))
+                
+                # Check if we're in initialization phase for more permissive validation
+                initialization_phase = hasattr(self, 'in_initialization_phase') and self.in_initialization_phase
+                if initialization_phase:
+                    # Significantly increase validation threshold during initialization phase
+                    initial_threshold = threshold
+                    threshold = threshold * 5.0  # 5x more permissive during initialization
+                    
+                    # Log that we're using a more permissive threshold
+                    if self.debug_level >= 1:
+                        self.get_logger().info(
+                            f"Initialization phase: using relaxed validation threshold={threshold:.2f} for {sensor} (was {initial_threshold:.2f})"
+                        )
                 
                 # --- BEGIN ADDITION: Debug Logging ---
                 if self.debug_level >= 2:
@@ -3481,8 +3537,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Kalman gain
             try:
                 K = np.dot(np.dot(self.covariance, H.T), np.linalg.inv(S))
-                
-                # Update state
+                  # Update state
                 self.state = self.state + np.dot(K, y)
                 
                 # Update covariance using Joseph form for numerical stability
@@ -3495,6 +3550,18 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 
                 # Mark that we had a successful update
                 successful_update = True
+                
+                # Track accepted measurements during initialization phase
+                initialization_phase = hasattr(self, 'in_initialization_phase') and self.in_initialization_phase
+                if successful_update and initialization_phase:
+                    if not hasattr(self, 'initialization_accepted_measurements'):
+                        self.initialization_accepted_measurements = 0
+                    self.initialization_accepted_measurements += 1
+                    
+                    # Exit initialization phase after accepting enough measurements
+                    if self.initialization_accepted_measurements >= 3:
+                        self.in_initialization_phase = False
+                        self.get_logger().info(f"Exiting initialization phase after accepting {self.initialization_accepted_measurements} measurements")
                 
                 # For logging
                 if self.debug_level >= 2:
@@ -4509,15 +4576,14 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                             f"Tracking lost: uncertainty={pos_uncertainty:.3f}m, sensors={active_3d_sensors}(3D)+{active_2d_sensors}(2D)"
                         )
         else:
-            # For moving objects, use standard criteria:
-            # Need 3/5 reliable to start tracking, need 4/5 unreliable to stop tracking
-            if not self.tracking_reliable and true_count >= 3:  # Need 3/5 reliable to start tracking
+            # For moving objects, use standard criteria:            # Reduced evidence requirements: 2/5 to start, 3/5 unreliable to stop
+            if not self.tracking_reliable and true_count >= 2:  # Reduced from 3 to 2
                 self.tracking_reliable = True
                 if self.last_tracking_state != self.tracking_reliable:
                     self.get_logger().info(
                         f"Tracking started: uncertainty={pos_uncertainty:.3f}m, sensors={active_3d_sensors}(3D)+{active_2d_sensors}(2D)"
                     )
-            elif self.tracking_reliable and true_count <= 1:  # Need 4/5 unreliable to stop tracking (more conservative)
+            elif self.tracking_reliable and true_count <= 2:  # Changed from 1 to 2 (need 3/5 unreliable)
                 self.tracking_reliable = False
                 if self.last_tracking_state != self.tracking_reliable:
                     self.get_logger().info(
@@ -4861,14 +4927,14 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
 
             # Set age threshold based on motion state
             if motion_state == "stationary":
-                max_bbox_age = 3.0  # Allow older bbox data for stationary objects
+                max_bbox_age = 5.0  # Allow older bbox data for stationary objects
             elif motion_state == "long_stationary":
-                max_bbox_age = 5.0  # Even longer for long-term stationary objects
+                max_bbox_age = 7.0  # Even longer for long-term stationary objects
             elif motion_state == "small_movement":
-                max_bbox_age = 2.5  # Slightly increased for slow movement
+                max_bbox_age = 3  # Slightly increased for slow movement
             else:  # medium_fast or unknown
-                max_bbox_age = 2.0  # Keep default for fast movement
-
+                max_bbox_age = 2.5  # Keep default for fast movement
+            
             # Get the actual age
             bbox_age = current_time - bbox_data.get('timestamp', 0)
 
