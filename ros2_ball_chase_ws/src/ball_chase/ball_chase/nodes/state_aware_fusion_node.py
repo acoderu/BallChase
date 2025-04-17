@@ -126,8 +126,7 @@ class SensorBuffer:
         sensors_with_data = [s for s, b in self.buffers.items() if len(b) > 0]
         if len(sensors_with_data) < min_sensors:
             return {}
-        
-        # Find sensor to use as reference time
+          # Find sensor to use as reference time
         if primary_sensor and primary_sensor in sensors_with_data:
             ref_sensor = primary_sensor
         else:
@@ -1793,13 +1792,17 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
     
     def initialize_filter_with_defaults(self):
         """
-        Initialize filter with default values, using first available sensor data if possible.
-        Modified to use significantly higher uncertainty when no sensor data is available.
+        Initialize filter with default values, prioritizing direct sensor measurements over estimates.
+        Modified to ensure initial position closely matches sensor readings.
         """
         try:
-            # Check for any existing sensor data to use for initialization
+            # First attempt: check for LiDAR data (most reliable direct 3D measurement)
             lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
+            # Second attempt: check for YOLO 2D data for 3D estimation
             yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
+            
+            # Track which type of initialization we're using
+            init_type = "default"
             
             # Initialize position from sensor data if available
             if lidar_msg:
@@ -1808,15 +1811,54 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     self.state = np.zeros(4, dtype=np.float32)
                     self.state[0] = transformed.point.x  # x position
                     self.state[1] = transformed.point.y  # y position
-                    self.get_logger().info(f"Filter initialized with lidar data: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
+                    init_type = "lidar"
                     
-                    # Set moderate uncertainty for sensor-based initialization
+                    # Set very low uncertainty for LiDAR-based initialization
+                    # This ensures the initial position is trusted
                     self.covariance = np.eye(4, dtype=np.float32)
-                    self.covariance[0:2, 0:2] *= 0.5  # Position uncertainty
+                    self.covariance[0:2, 0:2] *= 0.1  # Very low position uncertainty (was 0.5)
                     self.covariance[2:4, 2:4] *= 1.0  # Velocity uncertainty
                     
-                    # We have sensor data, so no need for initialization phase
+                    # We have direct 3D data, so no need for initialization phase
                     self.in_initialization_phase = False
+                    
+                    # Verify the position is reasonable (not close to origin if sensors detect otherwise)
+                    # This prevents the system from initializing with incorrect values
+                    initialized_distance = math.sqrt(self.state[0]**2 + self.state[1]**2)
+                    expected_distance = 0.0
+
+                    # Calculate expected distance from available sensors
+                    if lidar_msg and transformed:
+                        lidar_distance = math.sqrt(transformed.point.x**2 + transformed.point.y**2)
+                        expected_distance = lidar_distance
+                        self.get_logger().info(f"Expected distance from LiDAR: {lidar_distance:.2f}m")
+                    elif yolo_2d_msg and 'yolo_2d' in self.bbox_data:
+                        # Get estimated distance from bounding box dimensions
+                        bbox_width = self.bbox_data['yolo_2d'].get('width', 0)
+                        if bbox_width > 0:
+                            # Calculate expected distance based on apparent size
+                            basketball_diameter_meters = self.basketball_radius * 2
+                            focal_length_pixels = 345.58  # From camera calibration
+                            yolo_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
+                            expected_distance = yolo_distance
+                            self.get_logger().info(f"Expected distance from YOLO bbox: {yolo_distance:.2f}m")
+
+                    # Check for significant discrepancy
+                    if expected_distance > 0.5 and abs(initialized_distance - expected_distance) > 0.5:
+                        self.get_logger().warn(
+                            f"Significant initialization discrepancy detected: initialized={initialized_distance:.2f}m, "
+                            f"expected={expected_distance:.2f}m from {init_type} - correcting position"
+                        )
+                        
+                        # Scale the position to match expected distance
+                        if initialized_distance > 0.01:  # Avoid division by zero
+                            scale_factor = expected_distance / initialized_distance
+                            self.state[0] *= scale_factor
+                            self.state[1] *= scale_factor
+                            self.get_logger().info(
+                                f"Corrected initial position: ({self.state[0]:.2f}, {self.state[1]:.2f}), "
+                                f"distance={math.sqrt(self.state[0]**2 + self.state[1]**2):.2f}m"
+                            )
             elif yolo_2d_msg and 'yolo_2d' in self.bbox_data:
                 # Attempt to estimate 3D position from 2D yolo data
                 estimated_3d = self.estimate_3d_from_2d(yolo_2d_msg, self.bbox_data['yolo_2d'])
@@ -1824,15 +1866,46 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     self.state = np.zeros(4, dtype=np.float32)
                     self.state[0] = estimated_3d.point.x  # x position
                     self.state[1] = estimated_3d.point.y  # y position
-                    self.get_logger().info(f"Filter initialized with estimated 3D from yolo_2d: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
+                    init_type = "yolo_2d"
                     
-                    # Set moderate uncertainty for sensor-based initialization
+                    # Double-check the estimated distance
+                    estimated_distance = math.sqrt(estimated_3d.point.x**2 + estimated_3d.point.y**2)
+                    
+                    # Calculate a direct distance estimate from bounding box for verification
+                    bbox_width = self.bbox_data['yolo_2d'].get('width', 0)
+                    if bbox_width > 0:
+                        basketball_diameter_meters = self.basketball_radius * 2
+                        focal_length_pixels = 345.58
+                        direct_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
+                        
+                        # Log the comparative distances for diagnosis
+                        self.get_logger().info(
+                            f"YOLO distance estimates: 3D-estimated={estimated_distance:.2f}m, "
+                            f"direct-calculation={direct_distance:.2f}m, bbox={bbox_width:.1f}px"
+                        )
+                        
+                        # If there's a significant difference, use the direct calculation
+                        if abs(estimated_distance - direct_distance) > 0.5:
+                            self.get_logger().warn(
+                                f"Correcting YOLO distance estimate: {estimated_distance:.2f}m -> {direct_distance:.2f}m"
+                            )
+                            
+                            # Scale the position to match the direct distance
+                            if estimated_distance > 0.01:  # Avoid division by zero
+                                scale_factor = direct_distance / estimated_distance
+                                self.state[0] *= scale_factor
+                                self.state[1] *= scale_factor
+                    
+                    self.get_logger().info(f"Filter initialized with YOLO 2D data: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
+                    
+                    # Set appropriate uncertainty based on estimation method
                     self.covariance = np.eye(4, dtype=np.float32)
-                    self.covariance[0:2, 0:2] *= 1.0  # Position uncertainty
+                    self.covariance[0:2, 0:2] *= 0.3  # Reduced from 1.0 to trust position more
                     self.covariance[2:4, 2:4] *= 1.5  # Velocity uncertainty
                     
-                    # We have sensor data, so no need for initialization phase
-                    self.in_initialization_phase = False
+                    # We have sensor data, but still use a short initialization phase
+                    self.in_initialization_phase = True
+                    self.initialization_accepted_measurements = 0
             else:
                 # Fall back to zeros if no sensor data available, but with VERY HIGH uncertainty
                 self.state = np.zeros(4, dtype=np.float32)
