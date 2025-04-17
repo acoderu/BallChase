@@ -966,12 +966,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
     
     def on_activate(self, state):
         """
-        Lifecycle activate callback - called when transitioning from Inactive to Active.
-        Check transform availability and set up publishers, subscribers, and timers.
-        
-        Returns:
-            TransitionCallbackReturn: Success if activation completes successfully,
-                                    FAILURE if transforms are not available
+        Modified lifecycle activate callback to prioritize fast initialization
         """
         self.get_logger().info("Lifecycle transition: on_activate")
         
@@ -983,59 +978,143 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             return TransitionCallbackReturn.FAILURE
         
         try:
-            # PHASE 4: Set up publishers (these can be managed by lifecycle node)
+            # PHASE 4: Set up publishers
             self.setup_publishers()
             
-            # Activate lifecycle publishers - fix by passing state parameter
+            # Activate lifecycle publishers
             for pub in self._publishers:
                 pub.on_activate(state)
             
-            # PHASE 5: Set up subscriptions (only now that transform is available)
+            # PHASE 5: Set up subscriptions
             self.setup_subscriptions()
             
-            # DO NOT initialize filter here - instead, set a flag for delayed initialization
+            # Set flag for fast initialization
             self.pending_initialization = True
             self.initialization_attempts = 0
+            
+            # Set flag for refinement phase (will be used after initialization)
+            self.in_refinement_phase = False
+            self.refinement_measurements = 0
+            self.refinement_start_time = 0.0
             
             # PHASE 7: Set up processing timers
             self.setup_timers()
             
-            # Add a one-shot timer to attempt initialization after callbacks have had time to run
-            self.create_timer(0.5, self.delayed_initialization, callback_group=None)
+            # Add a one-shot timer for initialization attempt, but with shorter delay
+            self.create_timer(0.2, self.delayed_initialization, callback_group=None)
             
             # Mark as activated and ready
             self.is_activated = True
             self.is_ready = True
             
-            self.get_logger().info("Node activated - waiting for sensor data to initialize filter")
+            self.get_logger().info("Node activated - will attempt fast initialization with first sensor data")
             
             return TransitionCallbackReturn.SUCCESS
+        
         except Exception as e:
             self.get_logger().error(f"Error during activation: {str(e)}")
             return TransitionCallbackReturn.ERROR
 
+    def assess_sensor_data_quality(self, measurement, source):
+        """
+        Assess the quality of a sensor measurement for initialization purposes.
+        
+        Args:
+            measurement (PointStamped): The measurement to assess
+            source (str): Source of the measurement
+            
+        Returns:
+            tuple: (quality_score, is_valid)
+                quality_score: 0.0-1.0 quality assessment
+                is_valid: Boolean indicating if measurement is valid
+        """
+        # Default score
+        quality_score = 0.5
+        is_valid = True
+        
+        # Check valid range
+        max_valid_range = 5.0  # Maximum valid range in meters
+        measurement_distance = math.sqrt(
+            measurement.point.x**2 + measurement.point.y**2 + measurement.point.z**2
+        )
+        
+        if measurement_distance > max_valid_range:
+            self.get_logger().warn(
+                f"Measurement distance {measurement_distance:.2f}m exceeds valid range {max_valid_range:.1f}m"
+            )
+            is_valid = False
+            return 0.0, False
+        
+        # Check for NaN or inf values
+        if (math.isnan(measurement.point.x) or math.isnan(measurement.point.y) or 
+            math.isinf(measurement.point.x) or math.isinf(measurement.point.y)):
+            self.get_logger().warn(f"Measurement contains NaN or Inf values")
+            is_valid = False
+            return 0.0, False
+        
+        # Source-specific quality assessment
+        if source == 'lidar':
+            # LiDAR is generally more reliable
+            quality_score = 0.9
+            
+            # Check if position is reasonable (e.g., z height)
+            if abs(measurement.point.z - self.basketball_z_height) > 0.2:
+                quality_score *= 0.7  # Reduce score if height is off
+        
+        elif source == 'yolo_2d_est3d':
+            # Estimated 3D position is less reliable
+            quality_score = 0.7
+            
+            # Check bbox age
+            if hasattr(self, 'bbox_data') and 'yolo_2d' in self.bbox_data:
+                bbox_age = time.time() - self.bbox_data['yolo_2d'].get('timestamp', 0)
+                if bbox_age > 1.0:
+                    quality_score *= 0.8  # Reduce score for older bbox data
+        
+        # Log quality assessment
+        self.get_logger().debug(
+            f"Sensor quality assessment: {source} quality={quality_score:.2f}, valid={is_valid}"
+        )
+        
+        return quality_score, is_valid
+
     def delayed_initialization(self):
-        """Attempt delayed initialization after sensors have had time to provide data."""
+        """Modified delayed initialization that uses fast initialization"""
         if not self.initialized and self.pending_initialization:
             lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
             yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
             
-            if lidar_msg or (yolo_2d_msg and 'yolo_2d' in self.bbox_data):
-                # We have sensor data - initialize now
-                self.initialize_filter_with_defaults()
-                self.pending_initialization = False
-                self.get_logger().info("Delayed initialization completed with sensor data")
+            # First priority: try with LiDAR
+            if lidar_msg:
+                # Transform to reference frame
+                transformed = self.transform_point(lidar_msg, self.reference_frame, False)
+                if transformed:
+                    self.get_logger().info("Attempting fast initialization with LiDAR data")
+                    # Try fast initialization with LiDAR
+                    if self.fast_initialize_with_first_measurement(transformed, 'lidar'):
+                        self.pending_initialization = False
+                        return
+            
+            # Second priority: try with YOLO 2D if bbox data available
+            if not self.initialized and yolo_2d_msg and 'yolo_2d' in self.bbox_data:
+                # Estimate 3D position from 2D detection
+                estimated_3d = self.estimate_3d_from_2d(yolo_2d_msg, self.bbox_data['yolo_2d'])
+                if estimated_3d:
+                    self.get_logger().info("Attempting fast initialization with estimated 3D from YOLO 2D")
+                    # Try fast initialization with estimated 3D
+                    if self.fast_initialize_with_first_measurement(estimated_3d, 'yolo_2d_est3d'):
+                        self.pending_initialization = False
+                        return
+            
+            # If we're still not initialized, try again later (up to a limit)
+            self.initialization_attempts += 1
+            if self.initialization_attempts < 5:
+                self.get_logger().info(f"No sensor data yet for initialization (attempt {self.initialization_attempts})")
+                self.create_timer(0.5, self.delayed_initialization, callback_group=None)
             else:
-                # Try again if we haven't made too many attempts
-                self.initialization_attempts += 1
-                if self.initialization_attempts < 5:
-                    self.get_logger().info(f"No sensor data yet for initialization (attempt {self.initialization_attempts})")
-                    self.create_timer(0.5, self.delayed_initialization, callback_group=None)
-                else:
-                    # Fall back to default initialization after multiple attempts
-                    self.get_logger().warn("No sensor data available after multiple attempts - initializing with defaults")
-                    self.initialize_filter_with_defaults()
-                    self.pending_initialization = False
+                # Fall back to default initialization after multiple attempts
+                self.get_logger().warn("No sensor data available after multiple attempts - initializing with defaults")                
+                self.pending_initialization = False
     
     def retry_activation(self):
         """
@@ -1357,6 +1436,66 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Add default for maximum message age
             self.max_message_age = 1.0
 
+    def fast_initialize_with_first_measurement(self, measurement, source):
+        """
+        Quickly initialize the filter with the first reliable measurement.
+        
+        Args:
+            measurement (PointStamped): The first reliable measurement
+            source (str): Source of the measurement (e.g., 'lidar', 'yolo_2d')
+            
+        Returns:
+            bool: True if initialization succeeded, False otherwise
+        """
+        # Ensure measurement is in reference frame
+        if measurement.header.frame_id != self.reference_frame:
+            transformed = self.transform_point(measurement, self.reference_frame, source.endswith('_2d'))
+            if transformed is None:
+                self.get_logger().warn(f"Cannot fast-initialize filter - transform failed")
+                return False
+            measurement = transformed
+        
+        # Initialize state vector with measurement
+        # For 4D state [x, y, vx, vy]
+        self.state = np.zeros(4, dtype=np.float32)
+        self.state[0] = measurement.point.x  # x position
+        self.state[1] = measurement.point.y  # y position
+        # Velocities are initialized to zero
+        
+        # For LiDAR, trust the measurement more
+        if source == 'lidar':
+            position_variance = 0.05  # Lower variance = higher confidence
+        else:
+            position_variance = 0.1   # Higher variance for other sensors
+        
+        # Create covariance matrix with appropriate initial uncertainties
+        self.covariance = np.eye(4, dtype=np.float32)
+        self.covariance[0:2, 0:2] *= position_variance  # Position uncertainty
+        self.covariance[2:4, 2:4] *= 1.0  # Velocity uncertainty
+        
+        # Mark as initialized
+        self.initialized = True
+        self.last_update_time = time.time()
+        self.initialization_source = f"fast_init_{source}"
+        
+        # Update uncertainty metrics
+        self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
+        self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
+        
+        # Set flag to indicate we're in refinement phase
+        self.in_refinement_phase = True
+        self.refinement_measurements = 0
+        self.refinement_start_time = time.time()
+        
+        # Log the initialization
+        self.get_logger().info(
+            f"Fast initialization with {source}: position=({measurement.point.x:.2f}, "
+            f"{measurement.point.y:.2f}), uncertainty={self.position_uncertainty:.3f}m"
+        )
+        
+        # Start active tracking
+        return True
+    
     def init_state_tracking(self):
         """Initialize state tracking variables with 4D state optimized for ground-only basketball movement."""
         # Kalman filter state: [x, y, vx, vy] - reduced from 6D to 4D
@@ -1790,392 +1929,8 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         
         self.get_logger().info("Processing timers initialized")        
 
-    def initialize_filter_with_defaults(self):
-        """
-        Enhanced initialization that prioritizes actual sensor measurements and stays in
-        a lookup state until reliable measurements are available.
-        Modified to ensure initial position precisely matches sensor readings.
-        """
-        try:
-            # Create a special initialization state that we'll maintain until we have reliable data
-            if not hasattr(self, 'initialization_state'):
-                self.initialization_state = "LOOKUP"
-                self.initialization_sensor_buffer = {}
-                self.initialization_attempts = 0
-                self.get_logger().info("Entering LOOKUP initialization state - collecting sensor data")
-                
-                # Initialize state with high uncertainty
-                self.state = np.zeros(4, dtype=np.float32)
-                self.covariance = np.eye(4, dtype=np.float32)
-                self.covariance[0:2, 0:2] *= 20.0  # Extremely high position uncertainty (doubled)
-                self.covariance[2:4, 2:4] *= 10.0  # Very high velocity uncertainty
-                
-                # We will still be "initialized" but not reliable until we have good sensor data
-                self.initialized = True
-                self.in_initialization_phase = True
-                self.tracking_reliable = False
-                
-                # Update uncertainty metrics
-                self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
-                self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
-                
-                self.last_update_time = time.time()
-                return True
-                
-            # If we're already in LOOKUP state, collect sensor data and check if we have enough
-            if self.initialization_state == "LOOKUP":
-                self.initialization_attempts += 1
-                
-                # Collect all available sensor data
-                lidar_msg = self.sensor_buffer.get_latest_measurement('lidar')
-                yolo_2d_msg = self.sensor_buffer.get_latest_measurement('yolo_2d')
-                hsv_2d_msg = self.sensor_buffer.get_latest_measurement('hsv_2d')
-                yolo_3d_msg = self.sensor_buffer.get_latest_measurement('yolo_3d')
-                hsv_3d_msg = self.sensor_buffer.get_latest_measurement('hsv_3d')
-                
-                # Log current state of sensor data collection
-                sensors_found = []
-                if lidar_msg: sensors_found.append("lidar")
-                if yolo_2d_msg: sensors_found.append("yolo_2d")
-                if hsv_2d_msg: sensors_found.append("hsv_2d")
-                if yolo_3d_msg: sensors_found.append("yolo_3d")
-                if hsv_3d_msg: sensors_found.append("hsv_3d")
-                
-                # Process LiDAR measurements
-                if lidar_msg:
-                    transformed = self.transform_point(lidar_msg, self.reference_frame, False)
-                    if transformed:
-                        if 'lidar' not in self.initialization_sensor_buffer:
-                            self.initialization_sensor_buffer['lidar'] = []
-                        
-                        # Add to the buffer
-                        self.initialization_sensor_buffer['lidar'].append({
-                            'x': transformed.point.x,
-                            'y': transformed.point.y,
-                            'z': transformed.point.z,
-                            'time': time.time()
-                        })
-                        
-                        # Limit buffer size
-                        if len(self.initialization_sensor_buffer['lidar']) > 5:
-                            self.initialization_sensor_buffer['lidar'] = self.initialization_sensor_buffer['lidar'][-5:]
-                
-                # Process 2D YOLO measurements with distance estimation
-                if yolo_2d_msg and 'yolo_2d' in self.bbox_data:
-                    estimated_3d = self.estimate_3d_from_2d(yolo_2d_msg, self.bbox_data['yolo_2d'])
-                    if estimated_3d:
-                        if 'yolo_2d_est3d' not in self.initialization_sensor_buffer:
-                            self.initialization_sensor_buffer['yolo_2d_est3d'] = []
-                        
-                        # Add to the buffer
-                        self.initialization_sensor_buffer['yolo_2d_est3d'].append({
-                            'x': estimated_3d.point.x,
-                            'y': estimated_3d.point.y,
-                            'z': estimated_3d.point.z,
-                            'time': time.time()
-                        })
-                        
-                        # Limit buffer size
-                        if len(self.initialization_sensor_buffer['yolo_2d_est3d']) > 5:
-                            self.initialization_sensor_buffer['yolo_2d_est3d'] = self.initialization_sensor_buffer['yolo_2d_est3d'][-5:]
-                
-                # Process 3D measurements from other sensors
-                for sensor_name, msg in [('yolo_3d', yolo_3d_msg), ('hsv_3d', hsv_3d_msg)]:
-                    if msg:
-                        transformed = self.transform_point(msg, self.reference_frame, False)
-                        if transformed:
-                            if sensor_name not in self.initialization_sensor_buffer:
-                                self.initialization_sensor_buffer[sensor_name] = []
-                            
-                            # Add to the buffer
-                            self.initialization_sensor_buffer[sensor_name].append({
-                                'x': transformed.point.x,
-                                'y': transformed.point.y,
-                                'z': transformed.point.z,
-                                'time': time.time()
-                            })
-                            
-                            # Limit buffer size
-                            if len(self.initialization_sensor_buffer[sensor_name]) > 5:
-                                self.initialization_sensor_buffer[sensor_name] = self.initialization_sensor_buffer[sensor_name][-5:]
-                
-                # Check if we have enough data to make a reliable initialization
-                sensors_with_data = [s for s, data in self.initialization_sensor_buffer.items() if len(data) >= 2]
-                
-                # Exit conditions from LOOKUP state
-                max_attempts = 10
-                if len(sensors_with_data) >= 1 and self.initialization_attempts >= 3:
-                    # We have enough data from at least one reliable sensor
-                    # Prefer LiDAR, then 3D sensors, then 2D-estimated
-                    if 'lidar' in sensors_with_data:
-                        primary_sensor = 'lidar'
-                    elif 'yolo_3d' in sensors_with_data:
-                        primary_sensor = 'yolo_3d'
-                    elif 'hsv_3d' in sensors_with_data:
-                        primary_sensor = 'hsv_3d'
-                    elif 'yolo_2d_est3d' in sensors_with_data:
-                        primary_sensor = 'yolo_2d_est3d'
-                    else:
-                        # Shouldn't reach here due to our conditions, but just in case
-                        primary_sensor = sensors_with_data[0]
-                    
-                    # Calculate average position from the primary sensor
-                    positions = self.initialization_sensor_buffer[primary_sensor]
-                    avg_x = sum([p['x'] for p in positions]) / len(positions)
-                    avg_y = sum([p['y'] for p in positions]) / len(positions)
-                    avg_z = self.basketball_z_height  # Always use standard height
-                    
-                    # Check for consistency in measurements
-                    max_deviation = max([math.sqrt((p['x'] - avg_x)**2 + (p['y'] - avg_y)**2) for p in positions])
-                    
-                    if max_deviation < 0.5 or self.initialization_attempts >= max_attempts:
-                        # Measurements are consistent or we've tried enough - initialize!
-                        self.state = np.zeros(4, dtype=np.float32)
-                        self.state[0] = avg_x  # x position
-                        self.state[1] = avg_y  # y position
-                        # Keep zero velocity for stationary initialization
-                        
-                        # Set appropriate uncertainty based on data quality
-                        self.covariance = np.eye(4, dtype=np.float32)
-                        if max_deviation < 0.3:
-                            # Good consistency - low uncertainty
-                            self.covariance[0:2, 0:2] *= 0.1
-                        else:
-                            # Moderate consistency - higher uncertainty
-                            self.covariance[0:2, 0:2] *= 0.25
-                        
-                        # Always moderate velocity uncertainty
-                        self.covariance[2:4, 2:4] *= 1.0
-                        
-                        # Update uncertainty metrics
-                        self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
-                        self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
-                        
-                        # Transition out of initialization phase
-                        self.in_initialization_phase = False
-                        self.tracking_reliable = True
-                        self.initialization_state = "ACTIVE"
-                        
-                        # Calculate distance for logging
-                        distance = math.sqrt(avg_x**2 + avg_y**2)
-                        direction = math.degrees(math.atan2(avg_y, avg_x))
-                        
-                        self.get_logger().info(
-                            f"Successfully initialized with {primary_sensor} data: "
-                            f"position=({avg_x:.2f}, {avg_y:.2f}, {avg_z:.2f}), "
-                            f"distance={distance:.2f}m, direction={direction:.1f}°, "
-                            f"uncertainty={self.position_uncertainty:.3f}m"
-                        )
-                        
-                        return True
-                    else:
-                        # Measurements not consistent enough yet
-                        self.get_logger().info(
-                            f"Still collecting consistent measurements: {primary_sensor} deviation={max_deviation:.2f}m "
-                            f"(need <0.5m)"
-                        )
-                else:
-                    # Not enough data yet
-                    self.get_logger().info(
-                        f"Initialization in progress: found {len(sensors_with_data)}/{len(self.expected_sensors)} sensors "
-                        f"with data, attempt {self.initialization_attempts}/{max_attempts}"
-                    )
-                    
-                    if self.initialization_attempts >= max_attempts:
-                        # We've tried enough times - use whatever data we have
-                        self.get_logger().warn(f"Max initialization attempts reached - using best available data")
-                        
-                        # If we have any data at all, use it
-                        if sensors_with_data:
-                            # Use the first available sensor
-                            primary_sensor = sensors_with_data[0]
-                            positions = self.initialization_sensor_buffer[primary_sensor]
-                            avg_x = sum([p['x'] for p in positions]) / len(positions)
-                            avg_y = sum([p['y'] for p in positions]) / len(positions)
-                            avg_z = self.basketball_z_height
-                            
-                            self.state = np.zeros(4, dtype=np.float32)
-                            self.state[0] = avg_x
-                            self.state[1] = avg_y
-                            
-                            # Set fairly high uncertainty due to limited data
-                            self.covariance = np.eye(4, dtype=np.float32)
-                            self.covariance[0:2, 0:2] *= 0.5
-                            self.covariance[2:4, 2:4] *= 1.5
-                            
-                            # Transition out of initialization
-                            self.in_initialization_phase = False
-                            self.tracking_reliable = True
-                            self.initialization_state = "ACTIVE"
-                            
-                            # Calculate distance for logging
-                            distance = math.sqrt(avg_x**2 + avg_y**2)
-                            direction = math.degrees(math.atan2(avg_y, avg_x))
-                            
-                            self.get_logger().info(
-                                f"Initialized with limited {primary_sensor} data: "
-                                f"position=({avg_x:.2f}, {avg_y:.2f}, {avg_z:.2f}), "
-                                f"distance={distance:.2f}m, direction={direction:.1f}°"
-                            )
-                            
-                            # Update uncertainty metrics
-                            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
-                            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
-                            
-                            return True
-                
-                # Stay in LOOKUP state if we haven't met exit conditions
-                return True
-                
-            # We shouldn't reach here if the initialization logic is working correctly
-            self.get_logger().warn("Unexpected initialization state - resetting to LOOKUP")
-            self.initialization_state = "LOOKUP"
-            return self.initialize_filter_with_defaults()
-            
-        except Exception as e:
-            self.get_logger().error(f"Error during filter initialization: {str(e)}")
-            import traceback
-            self.get_logger().error(traceback.format_exc())
-            return False
-            if lidar_msg:
-                transformed = self.transform_point(lidar_msg, self.reference_frame, False)
-                if transformed:
-                    self.state = np.zeros(4, dtype=np.float32)
-                    self.state[0] = transformed.point.x  # x position
-                    self.state[1] = transformed.point.y  # y position
-                    init_type = "lidar"
-                    
-                    # Set very low uncertainty for LiDAR-based initialization
-                    # This ensures the initial position is trusted
-                    self.covariance = np.eye(4, dtype=np.float32)
-                    self.covariance[0:2, 0:2] *= 0.1  # Very low position uncertainty (was 0.5)
-                    self.covariance[2:4, 2:4] *= 1.0  # Velocity uncertainty
-                    
-                    # We have direct 3D data, so no need for initialization phase
-                    self.in_initialization_phase = False
-                    
-                    # Verify the position is reasonable (not close to origin if sensors detect otherwise)
-                    # This prevents the system from initializing with incorrect values
-                    initialized_distance = math.sqrt(self.state[0]**2 + self.state[1]**2)
-                    expected_distance = 0.0
-
-                    # Calculate expected distance from available sensors
-                    if lidar_msg and transformed:
-                        lidar_distance = math.sqrt(transformed.point.x**2 + transformed.point.y**2)
-                        expected_distance = lidar_distance
-                        self.get_logger().info(f"Expected distance from LiDAR: {lidar_distance:.2f}m")
-                    elif yolo_2d_msg and 'yolo_2d' in self.bbox_data:
-                        # Get estimated distance from bounding box dimensions
-                        bbox_width = self.bbox_data['yolo_2d'].get('width', 0)
-                        if bbox_width > 0:
-                            # Calculate expected distance based on apparent size
-                            basketball_diameter_meters = self.basketball_radius * 2
-                            focal_length_pixels = 345.58  # From camera calibration
-                            yolo_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
-                            expected_distance = yolo_distance
-                            self.get_logger().info(f"Expected distance from YOLO bbox: {yolo_distance:.2f}m")
-
-                    # Check for significant discrepancy
-                    if expected_distance > 0.5 and abs(initialized_distance - expected_distance) > 0.5:
-                        self.get_logger().warn(
-                            f"Significant initialization discrepancy detected: initialized={initialized_distance:.2f}m, "
-                            f"expected={expected_distance:.2f}m from {init_type} - correcting position"
-                        )
-                        
-                        # Scale the position to match expected distance
-                        if initialized_distance > 0.01:  # Avoid division by zero
-                            scale_factor = expected_distance / initialized_distance
-                            self.state[0] *= scale_factor
-                            self.state[1] *= scale_factor
-                            self.get_logger().info(
-                                f"Corrected initial position: ({self.state[0]:.2f}, {self.state[1]:.2f}), "
-                                f"distance={math.sqrt(self.state[0]**2 + self.state[1]**2):.2f}m"
-                            )
-            elif yolo_2d_msg and 'yolo_2d' in self.bbox_data:
-                # Attempt to estimate 3D position from 2D yolo data
-                estimated_3d = self.estimate_3d_from_2d(yolo_2d_msg, self.bbox_data['yolo_2d'])
-                if estimated_3d:
-                    self.state = np.zeros(4, dtype=np.float32)
-                    self.state[0] = estimated_3d.point.x  # x position
-                    self.state[1] = estimated_3d.point.y  # y position
-                    init_type = "yolo_2d"
-                    
-                    # Double-check the estimated distance
-                    estimated_distance = math.sqrt(estimated_3d.point.x**2 + estimated_3d.point.y**2)
-                    
-                    # Calculate a direct distance estimate from bounding box for verification
-                    bbox_width = self.bbox_data['yolo_2d'].get('width', 0)
-                    if bbox_width > 0:
-                        basketball_diameter_meters = self.basketball_radius * 2
-                        focal_length_pixels = 345.58
-                        direct_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
-                        
-                        # Log the comparative distances for diagnosis
-                        self.get_logger().info(
-                            f"YOLO distance estimates: 3D-estimated={estimated_distance:.2f}m, "
-                            f"direct-calculation={direct_distance:.2f}m, bbox={bbox_width:.1f}px"
-                        )
-                        
-                        # If there's a significant difference, use the direct calculation
-                        if abs(estimated_distance - direct_distance) > 0.5:
-                            self.get_logger().warn(
-                                f"Correcting YOLO distance estimate: {estimated_distance:.2f}m -> {direct_distance:.2f}m"
-                            )
-                            
-                            # Scale the position to match the direct distance
-                            if estimated_distance > 0.01:  # Avoid division by zero
-                                scale_factor = direct_distance / estimated_distance
-                                self.state[0] *= scale_factor
-                                self.state[1] *= scale_factor
-                    
-                    self.get_logger().info(f"Filter initialized with YOLO 2D data: pos=({self.state[0]:.2f}, {self.state[1]:.2f})")
-                    
-                    # Set appropriate uncertainty based on estimation method
-                    self.covariance = np.eye(4, dtype=np.float32)
-                    self.covariance[0:2, 0:2] *= 0.3  # Reduced from 1.0 to trust position more
-                    self.covariance[2:4, 2:4] *= 1.5  # Velocity uncertainty
-                    
-                    # We have sensor data, but still use a short initialization phase
-                    self.in_initialization_phase = True
-                    self.initialization_accepted_measurements = 0
-            else:
-                # Fall back to zeros if no sensor data available, but with VERY HIGH uncertainty
-                self.state = np.zeros(4, dtype=np.float32)
-                self.get_logger().info("Filter initialized with zeros - waiting for sensor data to update position")
-                
-                # Set extremely high uncertainty since this is just a placeholder
-                self.covariance = np.eye(4, dtype=np.float32)
-                self.covariance[0:2, 0:2] *= 10.0  # Very high position uncertainty (10x increase)
-                self.covariance[2:4, 2:4] *= 5.0  # Very high velocity uncertainty
-                
-                # Set flag to indicate we're in initialization phase
-                self.in_initialization_phase = True
-                self.initialization_accepted_measurements = 0
-                self.get_logger().info("Entering initialization phase with high uncertainty - accepting initial measurements")
-            
-            self.initialized = True
-            self.last_update_time = time.time()
-            
-            # Update uncertainty metrics
-            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
-            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
-            
-            self.get_logger().info(
-                f"Filter initialized with default values. Beginning active tracking with uncertainty={self.position_uncertainty:.3f}."
-            )
-            return True
-        except Exception as e:
-            self.get_logger().error(f"Error during default filter initialization: {str(e)}")
-            return False
-
     def sensor_callback(self, msg, source):
-        """
-        Common callback for all sensor measurements.
-        
-        Args:
-            msg (PointStamped): The point message from sensor
-            source (str): Sensor source identifier
-        """
+        """Modified sensor callback with early initialization"""
         # Skip if not active yet
         if not self.is_activated:
             return
@@ -2184,7 +1939,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Get current time for timing statistics
             current_time = time.time()
             
-            # Update statistics
+            # Update sensor statistics
             self.sensor_counts[source] += 1
             self.last_detection_time[source] = current_time
             
@@ -2193,11 +1948,37 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             
             # Calculate FPS based on recent frames
             if len(self.sensor_frame_times[source]) >= 2:
-                # Use time difference between oldest and newest frame
                 time_span = current_time - self.sensor_frame_times[source][0]
                 if time_span > 0:
-                    # Calculate frames per second (number of frames - 1) / time span
                     self.sensor_fps[source] = (len(self.sensor_frame_times[source]) - 1) / time_span
+            
+            # Add to synchronization buffer
+            self.sensor_buffer.add_measurement(source, msg, msg.header.stamp)
+            
+            # If not initialized yet, try EARLY fast initialization
+            if not self.initialized:
+                # Check if LiDAR measurement (prioritize)
+                if source == 'lidar':
+                    self.get_logger().info(f"Received first {source} data - attempting fast initialization")
+                    transformed = self.transform_point(msg, self.reference_frame, False)
+                    if transformed:
+                        # Try immediate initialization with first LiDAR measurement
+                        self.fast_initialize_with_first_measurement(transformed, source)
+                
+                # If not LiDAR and still not initialized, try with 2D measurement
+                elif not self.initialized and source == 'yolo_2d' and 'yolo_2d' in self.bbox_data:
+                    self.get_logger().info(f"Received first {source} data - attempting fast initialization with 2D sensor")
+                    # Estimate 3D position from 2D detection
+                    estimated_3d = self.estimate_3d_from_2d(msg, self.bbox_data['yolo_2d'])
+                    if estimated_3d:
+                        # Try initialization with estimated 3D position from 2D
+                        self.fast_initialize_with_first_measurement(estimated_3d, f"{source}_est3d")
+            
+            # For 2D YOLO data, also estimate 3D position
+            if source == 'yolo_2d' and 'yolo_2d' in self.bbox_data:
+                estimated_3d_point = self.estimate_3d_from_2d(msg, self.bbox_data['yolo_2d'])
+                if estimated_3d_point:
+                    self.sensor_buffer.add_measurement('yolo_2d_est3d', estimated_3d_point, msg.header.stamp)
             
             # Log first few detections with more detail
             if self.sensor_counts[source] <= 3:
@@ -2205,122 +1986,15 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     f"Received {source} detection #{self.sensor_counts[source]}: "
                     f"({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame"
                 )
-              # For 2D YOLO data, estimate 3D position here instead of waiting until publish time
-            if source == 'yolo_2d' and 'yolo_2d' in self.bbox_data:
-                try:
-                    # Check if this is a redundant detection (same position as previous)
-                    is_redundant = False
-                    if hasattr(self, '_last_yolo_detection'):
-                        # Compare with previous detection
-                        prev_x = self._last_yolo_detection.get('x', 0)
-                        prev_y = self._last_yolo_detection.get('y', 0)
-                        prev_time = self._last_yolo_detection.get('time', 0)
-                        
-                        # If within small tolerance and recent, consider redundant
-                        x_diff = abs(msg.point.x - prev_x)
-                        y_diff = abs(msg.point.y - prev_y)
-                        time_diff = current_time - prev_time
-                        
-                        if x_diff < 0.1 and y_diff < 0.1 and time_diff < 0.1:
-                            # Highly likely to be a duplicate detection
-                            is_redundant = True
-                            
-                            # Use cached 3D estimate if available
-                            if 'estimated_3d' in self._last_yolo_detection:
-                                cached_3d = self._last_yolo_detection['estimated_3d']
-                                # Update timestamp to current time but keep position the same
-                                cached_3d.header.stamp = msg.header.stamp
-                                
-                                # Add to sensor buffer
-                                self.sensor_buffer.add_measurement('yolo_2d_est3d', cached_3d, msg.header.stamp)
-                                
-                                # Log occasional debug info for redundant detections
-                                if self.debug_level >= 2 and hasattr(self, 'sensor_counts') and self.sensor_counts.get('yolo_2d', 0) % 20 == 0:
-                                    self.get_logger().debug(f"Using cached 3D estimate for redundant YOLO detection")
-                                    
-                                # Skip expensive 3D estimation
-                                redundant_detections = getattr(self, '_redundant_detection_count', 0) + 1
-                                self._redundant_detection_count = redundant_detections
-                                
-                                if redundant_detections % 50 == 0:
-                                    self.get_logger().info(f"Avoided {redundant_detections} redundant 3D estimations")
-                    
-                    # Store current detection as the last one
-                    if not hasattr(self, '_last_yolo_detection'):
-                        self._last_yolo_detection = {}
-                        
-                    self._last_yolo_detection['x'] = msg.point.x
-                    self._last_yolo_detection['y'] = msg.point.y
-                    self._last_yolo_detection['time'] = current_time
-                    
-                    # Only perform 3D estimation for non-redundant detections
-                    if not is_redundant:
-                        # Perform normal 3D estimation
-                        estimated_3d_point = self.estimate_3d_from_2d(msg, self.bbox_data['yolo_2d'])
-                        if estimated_3d_point:
-                            # Cache this estimation
-                            self._last_yolo_detection['estimated_3d'] = estimated_3d_point
-                            
-                            # Add estimated 3D point to the sensor buffer
-                            self.sensor_buffer.add_measurement('yolo_2d_est3d', estimated_3d_point, msg.header.stamp)
-                            
-                            # Initialize this sensor type in the reliability tracker if needed
-                            if hasattr(self, 'sensor_reliability_tracker'):
-                                if 'yolo_2d_est3d' not in self.sensor_reliability_tracker.sensors:
-                                    self.sensor_reliability_tracker.add_sensor('yolo_2d_est3d')
-                        
-                        # Initialize gap tracking for this sensor type
-                        if hasattr(self, 'sensor_gap_detection') and 'yolo_2d_est3d' not in self.sensor_gap_detection:
-                            self.sensor_gap_detection['yolo_2d_est3d'] = {
-                                'gap_detected': False,
-                                'gap_start_time': 0.0,
-                                'gap_level': 0.0,
-                                'recent_gaps': deque(maxlen=5)
-                            }
-                            
-                        # Also update last detection time for this derived sensor
-                        if hasattr(self, 'last_detection_time'):
-                            self.last_detection_time['yolo_2d_est3d'] = current_time
-                            
-                        # Initialize counts if needed
-                        if 'yolo_2d_est3d' not in self.sensor_counts:
-                            self.sensor_counts['yolo_2d_est3d'] = 0
-                        self.sensor_counts['yolo_2d_est3d'] += 1
-                        
-                        # Initialize FPS tracking
-                        if 'yolo_2d_est3d' not in self.sensor_frame_times:
-                            self.sensor_frame_times['yolo_2d_est3d'] = deque(maxlen=40)
-                        self.sensor_frame_times['yolo_2d_est3d'].append(current_time)
-                        
-                        # Log occasionally for debugging
-                        if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
-                            self.get_logger().debug(
-                                f"Created 3D estimate from YOLO 2D: pos=({estimated_3d_point.point.x:.2f}, "
-                                f"{estimated_3d_point.point.y:.2f}, {estimated_3d_point.point.z:.2f})"
-                            )
-                except Exception as e:
-                    if self.debug_level >= 1:
-                        self.get_logger().warn(f"Error creating 3D estimate from YOLO 2D: {str(e)}")
             
-            # Add to synchronization buffer (always add original measurement too)
-            self.sensor_buffer.add_measurement(source, msg, msg.header.stamp)
-            
-            # If this is a 3D source and we're not initialized yet, try initializing
-            if not self.initialized and not source.endswith('_2d'):
-                self.get_logger().info(f"Received {source} data - attempting initialization")
-                transformed = self.transform_point(msg, self.reference_frame, False)  # 3D data, so is_2d=False
-                if transformed:
-                    self.initialize_filter_with_measurement(transformed, source)
-            if self.debug_level >= 2:
-                self.get_logger().debug(
-                    f"{source} detection: ({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame"
-                )
             # Increment lidar message counter and log every 5 messages
             if source == 'lidar':
                 self.lidar_msg_counter += 1
                 if self.lidar_msg_counter % 3 == 0:
-                    # Log detailed lidar position data once after every 3 messages
-                    self.get_logger().info(f"[state_aware_fusion_node]: Received lidar detection #{self.lidar_msg_counter}: ({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame")
+                    self.get_logger().info(
+                        f"Received lidar detection #{self.lidar_msg_counter}: "
+                        f"({msg.point.x:.2f}, {msg.point.y:.2f}, {msg.point.z:.2f}) in {msg.header.frame_id} frame"
+                    )
         except Exception as e:
             self.log_error(f"Error in {source} callback: {str(e)}")
                 
@@ -2364,248 +2038,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         except Exception as e:
             self.log_error(f"Error in {source} bbox callback: {str(e)}")
 
-    def initialize_filter_with_measurement(self, msg, source):
-        """
-        Initialize the filter with a specific measurement using the blank slate approach.
-        This treats the first reliable measurement as ground truth with high confidence.
-        But first confirms agreement between multiple sensors or consistent readings.
-        
-        Args:
-            msg (PointStamped): The point message for initialization
-            source (str): Sensor source identifier
-            
-        Returns:
-            bool: Whether initialization was successful
-        """
-        try:
-            # Ensure message is in the reference frame
-            if msg.header.frame_id != self.reference_frame:
-                transformed = self.transform_point(msg, self.reference_frame, source.endswith('_2d'))
-                if transformed is None:
-                    self.get_logger().warn(f"Cannot initialize filter - transform failed from {msg.header.frame_id} to {self.reference_frame}")
-                    return False
-                msg = transformed
-            
-            # Initialize sensor agreement tracking if it doesn't exist
-            if not hasattr(self, 'initialization_candidates'):
-                self.initialization_candidates = {}
-                self.initialization_start_time = time.time()
-                self.initialization_consensus = None
-                self.initialization_confidence = 0.0
-                self.initialization_required_time = 2.0  # Require 2 seconds of agreement
-                self.initialization_required_sensors = 2  # Require at least 2 sensors to agree
-                self.initialization_distance_threshold = 0.15  # 15cm agreement threshold
-            
-            current_time = time.time()
-            
-            # Add this measurement to candidates
-            if source not in self.initialization_candidates:
-                self.initialization_candidates[source] = {
-                    'position': [msg.point.x, msg.point.y, msg.point.z],
-                    'last_update': current_time,
-                    'first_seen': current_time,
-                    'update_count': 1
-                }
-            else:
-                # Update existing candidate
-                self.initialization_candidates[source]['position'] = [msg.point.x, msg.point.y, msg.point.z]
-                self.initialization_candidates[source]['last_update'] = current_time
-                self.initialization_candidates[source]['update_count'] += 1
-            
-            # Remove stale candidates (older than 2 seconds)
-            stale_sources = []
-            for s, data in self.initialization_candidates.items():
-                if current_time - data['last_update'] > 2.0:
-                    stale_sources.append(s)
-            
-            for s in stale_sources:
-                del self.initialization_candidates[s]
-            
-            # Find agreement between sensors
-            agreement_groups = []
-            for s1, data1 in self.initialization_candidates.items():
-                group = [s1]
-                pos1 = data1['position']
-                
-                for s2, data2 in self.initialization_candidates.items():
-                    if s1 == s2:
-                        continue
-                    
-                    pos2 = data2['position']
-                    # Calculate distance between positions (x,y only for ground plane)
-                    distance = math.sqrt((pos1[0] - pos2[0])**2 + (pos1[1] - pos2[1])**2)
-                    
-                    if distance < self.initialization_distance_threshold:
-                        group.append(s2)
-                
-                if len(group) >= self.initialization_required_sensors:
-                    agreement_groups.append(group)
-            
-            # Sort groups by size (largest first)
-            agreement_groups.sort(key=len, reverse=True)
-            
-            if agreement_groups:
-                # Get the largest agreement group
-                largest_group = agreement_groups[0]
-                
-                # Calculate average position from this group
-                avg_x, avg_y, avg_z = 0, 0, 0
-                for s in largest_group:
-                    pos = self.initialization_candidates[s]['position']
-                    avg_x += pos[0]
-                    avg_y += pos[1]
-                    avg_z += pos[2]
-                
-                avg_x /= len(largest_group)
-                avg_y /= len(largest_group)
-                avg_z /= len(largest_group)
-                
-                # Check if we have a consensus position
-                if self.initialization_consensus is None:
-                    # First consensus
-                    self.initialization_consensus = [avg_x, avg_y, avg_z]
-                    self.initialization_consensus_time = current_time
-                    self.initialization_consensus_group = largest_group
-                    self.get_logger().info(
-                        f"Initial consensus found between {len(largest_group)} sensors: "
-                        f"position=({avg_x:.2f}, {avg_y:.2f})"
-                    )
-                else:
-                    # Check if this consensus is consistent with previous one
-                    prev_x, prev_y, _ = self.initialization_consensus
-                    consensus_distance = math.sqrt((avg_x - prev_x)**2 + (avg_y - prev_y)**2)
-                    
-                    if consensus_distance < self.initialization_distance_threshold:
-                        # Consistent consensus - update the running average
-                        alpha = 0.3  # Weight for new measurement
-                        self.initialization_consensus[0] = (1-alpha) * self.initialization_consensus[0] + alpha * avg_x
-                        self.initialization_consensus[1] = (1-alpha) * self.initialization_consensus[1] + alpha * avg_y
-                        self.initialization_consensus[2] = self.basketball_z_height  # Always use standard height
-                        
-                        # Check if we've had consistent consensus for the required time
-                        consensus_duration = current_time - self.initialization_consensus_time
-                        
-                        if consensus_duration >= self.initialization_required_time:
-                            # We have enough consensus over time - initialize the filter
-                            self.get_logger().info(
-                                f"Initialization criteria met! {len(largest_group)} sensors agree for {consensus_duration:.1f}s"
-                            )
-                            
-                            # --- Blank slate initialization approach ---
-                            # Extract x and y position from the consensus position
-                            # For a 4D state vector [x, y, vx, vy]
-                            self.state = np.zeros(4, dtype=np.float32)
-                            self.state[0] = self.initialization_consensus[0]  # x position
-                            self.state[1] = self.initialization_consensus[1]  # y position
-                            # Initialize velocities to zero
-                            self.state[2] = 0.0  # vx (zero initial velocity)
-                            self.state[3] = 0.0  # vy (zero initial velocity)
-                            
-                            # Set covariance with high confidence (very low uncertainty) in position
-                            # and moderate uncertainty in velocity
-                            self.covariance = np.eye(4, dtype=np.float32)
-                            
-                            # Very high confidence in position (low uncertainty values)
-                            # More sensors = higher confidence
-                            position_variance = 0.01 / min(1.0, len(largest_group) / 3.0)
-                            self.covariance[0, 0] = position_variance  # x position variance
-                            self.covariance[1, 1] = position_variance  # y position variance
-                            
-                            # Moderate uncertainty in velocity (we don't know velocity yet)
-                            self.covariance[2, 2] = 0.5   # vx velocity variance
-                            self.covariance[3, 3] = 0.5   # vy velocity variance
-                            
-                            self.initialized = True
-                            self.last_update_time = current_time
-                            
-                            # Record initialization details
-                            self.initialization_source = "+".join(largest_group)
-                            self.initialization_time = current_time
-                            
-                            # Update uncertainty metrics
-                            self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
-                            self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
-                            
-                            self.get_logger().info(
-                                f"Filter initialized using consensus from {len(largest_group)} sensors: "
-                                f"position=({self.initialization_consensus[0]:.2f}, {self.initialization_consensus[1]:.2f}), "
-                                f"uncertainty={self.position_uncertainty:.3f}m"
-                            )
-                            
-                            # Temporarily disable motion state protection during initial measurement
-                            if hasattr(self, 'motion_state_protection'):
-                                self.motion_state_protection['initialization_mode'] = True
-                                
-                            # Start active tracking
-                            self.get_logger().info("Filter initialized with high confidence - beginning active tracking")
-                            
-                            return True
-                        else:
-                            # Still waiting for required duration
-                            if hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 10 == 0:
-                                self.get_logger().info(
-                                    f"Building initialization consensus: {len(largest_group)} sensors agree for {consensus_duration:.1f}s "
-                                    f"(need {self.initialization_required_time:.1f}s)"
-                                )
-                    else:
-                        # Consensus changed significantly - reset timer
-                        self.initialization_consensus = [avg_x, avg_y, avg_z]
-                        self.initialization_consensus_time = current_time
-                        self.initialization_consensus_group = largest_group
-                        self.get_logger().info(
-                            f"Consensus position changed - restarting initialization timer. New position: ({avg_x:.2f}, {avg_y:.2f})"
-                        )
-            else:
-                # Not enough sensors agree yet
-                if hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 30 == 0:
-                    self.get_logger().info(
-                        f"Waiting for sensor agreement for initialization. Have {len(self.initialization_candidates)} candidates."
-                    )
-            
-            # If we've been trying to initialize for too long (10+ seconds), fall back to simpler initialization
-            if (current_time - self.initialization_start_time > 10.0) and not self.initialized:
-                self.get_logger().warn("Falling back to single-sensor initialization after 10s without consensus")
-                
-                # --- Simple initialization with current measurement ---
-                self.state = np.zeros(4, dtype=np.float32)
-                self.state[0] = msg.point.x  # x position
-                self.state[1] = msg.point.y  # y position
-                self.state[2] = 0.0  # vx (zero initial velocity)
-                self.state[3] = 0.0  # vy (zero initial velocity)
-                
-                # Set covariance with moderate confidence
-                self.covariance = np.eye(4, dtype=np.float32)
-                self.covariance[0, 0] = 0.05  # Higher uncertainty than consensus initialization
-                self.covariance[1, 1] = 0.05
-                self.covariance[2, 2] = 0.8
-                self.covariance[3, 3] = 0.8
-                
-                self.initialized = True
-                self.last_update_time = current_time
-                self.initialization_source = f"{source} (fallback)"
-                self.initialization_time = current_time
-                
-                # Update uncertainty metrics
-                self.position_uncertainty = math.sqrt(np.trace(self.covariance[0:2, 0:2]) / 2.0)
-                self.velocity_uncertainty = math.sqrt(np.trace(self.covariance[2:4, 2:4]) / 2.0)
-                
-                self.get_logger().info(
-                    f"Filter initialized with fallback method using {source}: "
-                    f"position=({msg.point.x:.2f}, {msg.point.y:.2f}), "
-                    f"uncertainty={self.position_uncertainty:.3f}m"
-                )
-                
-                # Start active tracking
-                self.get_logger().info("Filter initialized with fallback method - beginning active tracking")
-                
-                return True
-            
-            return False  # Not initialized yet
-            
-        except Exception as e:
-            self.get_logger().error(f"Error during filter initialization: {str(e)}")
-            return False
-
+    
     # ENHANCEMENT 8: Enhanced Motion State Detection with State Protection
     def detect_motion_state(self):
         """
@@ -3367,10 +2800,7 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     self.sensor_gap_detection[sensor]['gap_level'] = 0.0
 
     def filter_update(self):
-        """
-        Perform a Kalman filter update based on synchronized sensor measurements.
-        Enhanced with new reliability tracking and smoothing capabilities.
-        """
+        """Modified filter update method to handle refinement phase"""
         # Skip if not active or not initialized
         if not self.is_activated or not self.initialized:
             return
@@ -3385,52 +2815,51 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             else:
                 dt = current_time - self.last_update_time
                 # Limit dt to reasonable values
-                dt = min(dt, 0.5)  # Cap at 0.5 seconds to prevent big jumps
-              # IMPROVEMENT 7: Apply gap-aware covariance adjustment
+                dt = min(dt, 0.5)  # Cap at 0.5 seconds
+            
+            # Apply gap-aware covariance adjustment
             self.adjust_covariance_for_gaps()
             
             # Find synchronized measurements
             measurements = self.sensor_buffer.find_synchronized_measurements(min_sensors=1)
             
-            # Enhanced gap handling: If we don't have enough synchronized sensors, 
-            # try synthesizing measurements
-            if len(measurements) < 2:  # Not enough real sensors
+            # Handle synthesizing measurements during gaps
+            if len(measurements) < 2:
+                # Try to synthesize measurements for missing sensors
                 current_time = time.time()
                 
-                # Check which sensors we need to synthesize
                 missing_sensors = []
                 for sensor in self.expected_sensors:
                     if sensor not in measurements and self.sensor_counts.get(sensor, 0) > 0:
                         last_time = self.last_detection_time.get(sensor, 0)
                         gap_duration = current_time - last_time
                         
-                        # Only consider sensors we've seen before and that have a gap
                         if gap_duration > 0.5 and gap_duration < 3.0:
                             missing_sensors.append(sensor)
                 
-                # Attempt to synthesize measurements for missing sensors
+                # Attempt to synthesize measurements
                 for sensor in missing_sensors:
-                    # Create a state predictor callback using current filter state
+                    # Create a state predictor callback
                     def state_predictor(target_time):
-                        # Simple linear prediction from current state
                         dt = target_time - self.last_update_time if self.last_update_time else 0.1
                         predicted = [
                             self.state[0] + self.state[2] * dt,  # x + vx*dt
                             self.state[1] + self.state[3] * dt,  # y + vy*dt
-                            self.basketball_z_height  # z is fixed for basketball
+                            self.basketball_z_height  # z is fixed
                         ]
                         return predicted
-                      # Try to synthesize a measurement
+                    
+                    # Try to synthesize a measurement
                     synth_measurement, confidence = self.sensor_buffer.synthesize_measurement(
                         sensor, current_time, state_predictor
                     )
                     
                     if synth_measurement is not None:
-                        # Since we can't add attributes to ROS messages, use a dictionary to track synthetic measurements
+                        # Track synthetic measurement
                         if not hasattr(self, 'synthetic_measurement_info'):
                             self.synthetic_measurement_info = {}
                         
-                        # Store a unique ID for this measurement based on timestamp
+                        # Store information about this measurement
                         synth_id = f"{sensor}_synth_{current_time}"
                         self.synthetic_measurement_info[synth_id] = {
                             'is_synthesized': True,
@@ -3438,24 +2867,24 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                             'timestamp': current_time
                         }
                         
-                        # Add to measurements dict with special key
+                        # Add to measurements
                         measurements[f"{sensor}_synthesized"] = synth_measurement
                         
                         # Log synthesis
                         if self.debug_level >= 1:
                             self.get_logger().info(
-                                f"Synthesized measurement for {sensor} during {current_time - self.last_detection_time.get(sensor, 0):.2f}s gap "
+                                f"Synthesized measurement for {sensor} during "
+                                f"{current_time - self.last_detection_time.get(sensor, 0):.2f}s gap "
                                 f"with confidence={confidence:.2f}"
                             )
-            
-            # Add debug logging for sensor synchronization
-            #self.get_logger().info(f"Synchronized measurements found: {list(measurements.keys())}")
             
             # Update sync quality metrics
             self.sync_quality_metrics['attempt_counts'] += 1
             if measurements:
                 self.sync_quality_metrics['sync_counts'] += 1
-                self.sync_quality_metrics['success_rate'] = self.sync_quality_metrics['sync_counts'] / self.sync_quality_metrics['attempt_counts']
+                self.sync_quality_metrics['success_rate'] = (
+                    self.sync_quality_metrics['sync_counts'] / self.sync_quality_metrics['attempt_counts']
+                )
                 
                 # Track sensor availability
                 for sensor in self.expected_sensors:
@@ -3464,75 +2893,66 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                             self.sync_quality_metrics['sensor_availability'][sensor] = 1
                         else:
                             self.sync_quality_metrics['sensor_availability'][sensor] += 1
-              # Predict state forward to current time
+            
+            # Predict state forward to current time
             self.predict_state(dt)
             
             # Check for filter divergence
             self.check_filter_divergence()
+            
+            # Check if we're in refinement phase
+            in_refinement = getattr(self, 'in_refinement_phase', False)
             
             # Update state with measurements if available
             successful_update = False
             if measurements:
                 successful_update = self.update_state(measurements)
                 
-                # IMPROVEMENT 3: Record sensor reliability
+                # Record sensor reliability
                 for sensor in measurements.keys():
-                    self.sensor_reliability_tracker.record_measurement(sensor, successful_update)            # Update last update time
+                    self.sensor_reliability_tracker.record_measurement(sensor, successful_update)
+            
+            # Update last update time
             self.last_update_time = current_time
-                
-            # Update uncertainty metrics - FIX: Use [0:2, 0:2] for position part of 4D state
+            
+            # Update uncertainty metrics
             self.position_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))
             self.velocity_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[2:4, 2:4]) / 2.0))
             
-            # Store current state in history buffers - FIX: Handle 4D state properly for history tracking
+            # Store state in history buffers
             if hasattr(self, 'position_history'):
-                # For position history, create a 3D position with fixed z-height
+                # Create 3D position with fixed z-height
                 pos_3d = [self.state[0], self.state[1], self.basketball_z_height]
                 self.position_history.append(pos_3d)
-                
+            
             if hasattr(self, 'velocity_history'):
-                # For velocity history, create a 3D velocity with zero z component
+                # Create 3D velocity with zero z component
                 vel_3d = [self.state[2], self.state[3], 0.0]
                 self.velocity_history.append(vel_3d)
-                
+            
             if hasattr(self, 'time_history'):
                 self.time_history.append(current_time)
             
-            # IMPROVEMENT 3: Add current state to smoother
+            # Add state to smoother
             if hasattr(self, 'smoothed_state_estimator'):
-                # Create 3D position and velocity vectors for the smoother
                 pos_3d = np.array([self.state[0], self.state[1], self.basketball_z_height])
                 vel_3d = np.array([self.state[2], self.state[3], 0.0])
                 
                 self.smoothed_state_estimator.add_state(
-                    pos_3d,
-                    vel_3d,
-                    self.position_uncertainty,
-                    current_time
+                    pos_3d, vel_3d, self.position_uncertainty, current_time
                 )
                 
-                # Get smoothed state if available
+                # Get smoothed state
                 smoothed = self.smoothed_state_estimator.get_smoothed_state()
                 if smoothed and self.position_uncertainty > 0.1:
-                    # Use smoothed state for final output to reduce uncertainty spikes
-                    # But only if current uncertainty is significant
-                    # FIX: Only copy x,y to 4D state
+                    # Use smoothed state for output
                     self.state[0:2] = smoothed['position'][0:2].copy()
                     self.state[2:4] = smoothed['velocity'][0:2].copy()
-                    
-                    if self.debug_level >= 2:
-                        smoothed_uncertainty = smoothed['uncertainty']
-                        self.get_logger().debug(
-                            f"Applied smoothing: uncertainty {self.position_uncertainty:.3f}m -> {smoothed_uncertainty:.3f}m"
-                        )
             
-            # IMPROVEMENT 8: Update tracking status using confidence-based approach
+            # Update tracking status
             self.update_tracking_status()
             
-            # Log the state before publishing
-            #self.get_logger().info(f"State before publishing: pos=({self.state[0]:.2f}, {self.state[1]:.2f}), velocity=({self.state[2]:.2f}, {self.state[3]:.2f})")
-            
-            # Publish fused position and velocity
+            # Publish state
             self.publish_state()
             
             # Publish uncertainty
@@ -3540,38 +2960,8 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             
             # Update diagnostics
             self.update_diagnostics()
-              # Add detection for large position jumps during initialization
-            if hasattr(self, 'in_initialization_phase') and self.in_initialization_phase and hasattr(self, 'position_history') and len(self.position_history) >= 2:
-                # Get last two positions
-                prev_pos = list(self.position_history)[-2]
-                curr_pos = list(self.position_history)[-1]
-                
-                # Calculate distance between them
-                dx = curr_pos[0] - prev_pos[0]
-                dy = curr_pos[1] - prev_pos[1]
-                distance = math.sqrt(dx*dx + dy*dy)
-                
-                # If there's a large jump, it might be our first real detection
-                if distance > 1.0:  # Jump of more than 1 meter
-                    self.get_logger().info(
-                        f"Detected position jump of {distance:.2f}m during initialization - possible first real detection"
-                    )
-                    
-                    # Immediately accept the new position
-                    if hasattr(self, 'state'):
-                        # Update state to match the new position
-                        self.state[0] = curr_pos[0]
-                        self.state[1] = curr_pos[1]
-                        
-                        # Log the state correction
-                        self.get_logger().info(
-                            f"Adjusted state to match detected position: ({curr_pos[0]:.2f}, {curr_pos[1]:.2f})"
-                        )
-                        
-                        # Consider exiting initialization phase after a significant jump
-                        self.initialization_accepted_measurements = max(2, getattr(self, 'initialization_accepted_measurements', 0))
             
-            # Apply flat ground constraints if needed
+            # Apply flat ground constraints
             self.apply_flat_ground_constraints()
             
             # Handle sensor recovery
@@ -3580,10 +2970,10 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Update motion state
             self.detect_motion_state()
             
-            # Decay reliability for unused sensors
+            # Decay sensor reliability
             if hasattr(self, 'sensor_reliability_tracker'):
                 self.sensor_reliability_tracker.decay_unused_sensors()
-                
+            
         except Exception as e:
             self.get_logger().error(f"Error during filter update: {str(e)}")
             import traceback
@@ -3672,104 +3062,67 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
 
     def update_state(self, measurements):
         """
-        Update the state with synchronized measurements (4D state version).
-        
-        Args:
-            measurements (dict): Dictionary of {sensor_name: measurement}
-            
-        Returns:
-            bool: Whether any measurements were successfully processed
+        Modified update_state method with refinement phase handling
         """
-        # Store successful update flag to track if any measurements were processed
+        # Store successful update flag
         successful_update = False
         
-        # Add debug log for synchronized measurements
-        #self.get_logger().info(f"Synchronized measurements found: {list(measurements.keys())}")
+        # Check if we're in the refinement phase after fast initialization
+        in_refinement = getattr(self, 'in_refinement_phase', False)
         
-        # Motion state for adaptive validation
+        # Get current motion state
         motion_state = self.detect_motion_state()
         
+        # For each measurement in the synchronized set
         for sensor, msg in measurements.items():
-            transformed = None # Initialize transformed variable
+            # Transform measurement to reference frame
             is_2d_sensor = sensor.endswith('_2d')
-
-            # Special handling for synthesized measurements
-            is_synthesized = False
-            synth_confidence = 0.5
             
-            if hasattr(msg, 'synthesized') and getattr(msg, 'synthesized', False):
-                is_synthesized = True
-                synth_confidence = getattr(msg, 'synthesis_confidence', 0.5)
-                
-                # Log this
-                if self.debug_level >= 2:
-                    self.get_logger().debug(
-                        f"Processing synthesized measurement for {sensor.replace('_synthesized', '')} "
-                        f"with confidence={synth_confidence:.2f}"
-                    )
-
-            # For 2D sensors, estimate 3D position first
+            # For 2D sensors, estimate 3D position
             if is_2d_sensor:
-                # For 2D sensors, estimate 3D position first
                 if sensor in self.bbox_data:
                     transformed = self.estimate_3d_from_2d(msg, self.bbox_data[sensor])
                     if transformed is None:
-                        if self.debug_level >= 1:
-                            self.get_logger().warn(f"Failed to estimate 3D position for {sensor}, skipping measurement.")
-                        continue # Skip this measurement if estimation failed
-                    # Note: transformed is already in the reference_frame
+                        continue
                 else:
-                    if self.debug_level >= 1:
-                        self.get_logger().warn(f"No bounding box data available for {sensor}, cannot estimate 3D position.")
-                    continue # Skip if no bbox data
+                    continue
             else:
-                # For 3D sensors, transform the point as before
+                # For 3D sensors, transform point
                 transformed = self.transform_point(msg, self.reference_frame, False)
-                if not transformed:
-                    continue # Skip if transformation failed
-
-            # --- BEGIN ADDITION: Hard Position Limits ---
-            max_coord = 5.0 # Maximum plausible distance from origin (e.g., 5 meters)
+                if transformed is None:
+                    continue
+            
+            # Check hard position limits
+            max_coord = 5.0
             if abs(transformed.point.x) > max_coord or abs(transformed.point.y) > max_coord:
                 self.get_logger().warn(
                     f"Rejecting {sensor} measurement outside hard limits: "
                     f"pos=({transformed.point.x:.2f}, {transformed.point.y:.2f}), limits=±{max_coord}m"
                 )
-                # Increment rejection counter and potentially increase covariance slightly
                 self.consecutive_rejections_per_sensor[sensor] = self.consecutive_rejections_per_sensor.get(sensor, 0) + 1
-                # Optional: Slightly increase covariance on hard rejection
-                # self.covariance[0:2, 0:2] *= 1.01
-                # self.covariance = 0.5 * (self.covariance + self.covariance.T)
-                continue # Skip this measurement
-            # --- END ADDITION ---
+                continue
             
-            # For ground-only basketball movement, we need special handling for measurements
-            # 1. For 3D sensors, we use x,y and ignore z (basketball is always at fixed height)
-            # 2. For 2D sensors, we use x,y coordinates
-            
+            # Setup measurement and matrices
             if sensor.endswith('_2d'):
-                # For 2D sensors, we create a 2x4 measurement matrix that only extracts x,y
                 z = np.array([transformed.point.x, transformed.point.y], dtype=np.float32)
-                H = np.zeros((2, 4), dtype=np.float32)  # 2x4 matrix for 2D sensors with 4D state
+                H = np.zeros((2, 4), dtype=np.float32)
                 H[0, 0] = 1.0  # Extract x position
                 H[1, 1] = 1.0  # Extract y position
                 
-                # Get appropriate noise matrix
+                # Get noise matrix
                 if sensor == 'hsv_2d':
                     R = np.diag([self.measurement_noise_hsv_2d, self.measurement_noise_hsv_2d]).astype(np.float32)
                 elif sensor == 'yolo_2d':
                     R = np.diag([self.measurement_noise_yolo_2d, self.measurement_noise_yolo_2d]).astype(np.float32)
                 else:
-                    R = np.diag([50.0, 50.0]).astype(np.float32)  # Default noise
+                    R = np.diag([50.0, 50.0]).astype(np.float32)
             else:
-                # For 3D sensors, we extract x,y and optionally use z as a consistency check
-                # (since basketball is always at a known height)
                 z = np.array([transformed.point.x, transformed.point.y], dtype=np.float32)
-                H = np.zeros((2, 4), dtype=np.float32)  # 2x4 matrix for position-only with 4D state
-                H[0, 0] = 1.0  # Extract x position
-                H[1, 1] = 1.0  # Extract y position
+                H = np.zeros((2, 4), dtype=np.float32)
+                H[0, 0] = 1.0
+                H[1, 1] = 1.0
                 
-                # Get appropriate noise matrix based on sensor type
+                # Get noise matrix
                 if sensor == 'lidar':
                     R = np.diag([self.measurement_noise_lidar, self.measurement_noise_lidar]).astype(np.float32)
                 elif sensor == 'hsv_3d':
@@ -3777,176 +3130,79 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 elif sensor == 'yolo_3d':
                     R = np.diag([self.measurement_noise_yolo_3d, self.measurement_noise_yolo_3d]).astype(np.float32)
                 else:
-                    R = np.diag([0.1, 0.1]).astype(np.float32)  # Default noise
-                
-                # Optional check if z-height is reasonable (within tolerance of expected height)
-                # Skip if the measurement's z-value is too far from expected basketball height
-                z_tolerance = 0.1  # 10cm tolerance for z-height
-                if abs(transformed.point.z - self.basketball_z_height) > z_tolerance:
-                    if self.debug_level >= 2:
-                        self.get_logger().debug(
-                            f"Skipping {sensor} measurement with unusual z-height: "
-                            f"{transformed.point.z:.3f}m (expected: {self.basketball_z_height:.3f}m ±{z_tolerance:.2f}m)"
-                        )
-                    continue
+                    R = np.diag([0.1, 0.1]).astype(np.float32)
             
-            # Calculate innovation (measurement residual)
+            # Innovation (measurement residual)
             y = z - np.dot(H, self.state)
             
             # Innovation covariance
             S = np.dot(np.dot(H, self.covariance), H.T) + R
-              # Update validation context if validation manager exists
+            
+            # Get validation threshold
             if hasattr(self, 'validation_manager'):
-                validation_context = {
-                    'motion_state': motion_state,
-                    'uncertainty': self.position_uncertainty,
-                    'sensor_gaps': self.sensor_gap_detection,
-                    'consecutive_rejections': self.consecutive_rejections_per_sensor
-                }
-                self.validation_manager.update_context(validation_context)
-                
-                # Get adaptive threshold using validation manager
                 threshold = self.validation_manager.get_validation_threshold(sensor)
             else:
-                # Fall back to original method if no validation manager
                 threshold = self.get_innovation_threshold(sensor, motion_state)
-
-            # --- BEGIN ADDITION: Cap the Mahalanobis Threshold ---
-            max_threshold = 25.0 # Set a maximum allowable threshold
+            
+            # Cap threshold
+            max_threshold = 25.0
             original_threshold = threshold
             threshold = min(threshold, max_threshold)
-            # --- END ADDITION ---                # Compute Mahalanobis distance for validation
+            
+            # IMPORTANT: Use much more permissive validation during refinement phase
+            if in_refinement:
+                # Double the threshold during refinement phase
+                threshold *= 3.0
+                
+                # Log this adjustment
+                if self.debug_level >= 2:
+                    self.get_logger().debug(
+                        f"Using permissive validation during refinement: {original_threshold:.2f} -> {threshold:.2f}"
+                    )
+            
+            # Mahalanobis distance calculation
             try:
                 S_inv = np.linalg.inv(S)
                 mahalanobis_dist = np.sqrt(np.dot(np.dot(y.T, S_inv), y))
-                  # Check if we're in initialization phase for more permissive validation
+                
+                # Check if in initialization phase for permissive validation
                 initialization_phase = hasattr(self, 'in_initialization_phase') and self.in_initialization_phase
                 if initialization_phase:
-                    # Use more moderate threshold during initialization phase
-                    initial_threshold = threshold
-                    
-                    # Cap the maximum threshold multiplier at 3.0 (was 5.0)
-                    # Also add an absolute maximum threshold value
-                    threshold = threshold * 3.0  # 3x more permissive during initialization
-                    
-                    # Hard cap on maximum thresholds regardless of sensor
-                    max_init_threshold = 10.0  # Maximum allowed threshold value
+                    # Use more permissive threshold during initialization
+                    threshold *= 3.0
+                    max_init_threshold = 10.0
                     if threshold > max_init_threshold:
                         threshold = max_init_threshold
-                        # Log that we're capping the threshold
-                        if self.debug_level >= 1:
-                            self.get_logger().info(
-                                f"Capping initialization threshold at {max_init_threshold:.2f} for {sensor} "
-                                f"(would have been {initial_threshold * 3.0:.2f})"
-                            )
-                    else:
-                        # Log that we're using a more permissive threshold
-                        if self.debug_level >= 1:
-                            self.get_logger().info(
-                                f"Initialization phase: using relaxed validation threshold={threshold:.2f} for {sensor} "
-                                f"(was {initial_threshold:.2f})"
-                            )
-                    
-                    # Progressive threshold relaxation based on accepted measurements
-                    # This makes the system gradually less permissive as it gets more data
-                    if initialization_phase and hasattr(self, 'initialization_accepted_measurements'):
-                        accepted_count = self.initialization_accepted_measurements
-                        
-                        # After each accepted measurement, make the threshold 10% less permissive
-                        if accepted_count > 0:
-                            # Calculate relaxation factor: starts at 1.0, decreases by 0.1 per measurement, min 0.5
-                            relaxation_factor = max(0.5, 1.0 - (accepted_count * 0.1))
-                            
-                            # Adjust threshold downward based on number of accepted measurements
-                            old_threshold = threshold
-                            threshold = initial_threshold + (threshold - initial_threshold) * relaxation_factor
-                            
-                            if self.debug_level >= 2 and old_threshold > threshold + 0.1:
-                                self.get_logger().debug(
-                                    f"Progressive threshold reduction: {old_threshold:.2f} -> {threshold:.2f} "
-                                    f"after {accepted_count} accepted measurements"
-                                )
                 
-                # --- BEGIN ADDITION: Debug Logging ---
-                if self.debug_level >= 2:
-                    self.get_logger().debug(
-                        f"Validation Check [{sensor}]: "
-                        f"Measurement z=({z[0]:.2f}, {z[1]:.2f}), "
-                        f"Innovation y=({y[0]:.2f}, {y[1]:.2f}), "
-                        f"Mahalanobis dist={mahalanobis_dist:.2f}, "
-                        f"Threshold={threshold:.2f} (Original={original_threshold:.2f}, Cap={max_threshold:.1f})"
-                    )
-                # --- END ADDITION ---
-
-                # Store innovation for diagnostic purposes
-                if hasattr(self, 'innovation_history'):
-                    self.innovation_history.append(mahalanobis_dist)                # Skip measurement if it fails validation
+                # Skip measurement if it fails validation
                 if mahalanobis_dist > threshold:
-                    # Enhanced rejection logging with more context
-                    rejection_msg = f"Rejecting {sensor} measurement: innovation {mahalanobis_dist:.2f} > threshold {threshold:.2f}"
-                    
-                    # Add context about the actual innovation values
-                    if isinstance(y, np.ndarray) and len(y) >= 2:
-                        rejection_msg += f", innovation_values=({y[0]:.2f}, {y[1]:.2f})"
-                    
-                    # Add context about the measurement vs. state
-                    if sensor.endswith('_2d'):
-                        rejection_msg += f", measurement=({z[0]:.2f}, {z[1]:.2f}), state=({self.state[0]:.2f}, {self.state[1]:.2f})"
-                    
-                    # Add context about current uncertainty
-                    rejection_msg += f", uncertainty={self.position_uncertainty:.3f}"
-                    
-                    # Log with appropriate level based on severity of the innovation
+                    # Log rejection
                     if mahalanobis_dist > (threshold * 2):
-                        # Extreme rejection - log as warning
-                        self.get_logger().warn(rejection_msg)
+                        self.get_logger().warn(
+                            f"Rejecting {sensor} measurement: innovation {mahalanobis_dist:.2f} > threshold {threshold:.2f}"
+                        )
                     else:
-                        # Normal rejection - log as debug
-                        self.get_logger().debug(rejection_msg)
+                        self.get_logger().debug(
+                            f"Rejecting {sensor} measurement: innovation {mahalanobis_dist:.2f} > threshold {threshold:.2f}"
+                        )
                     
-                    # Record validation decision (assume correct for now)
+                    # Record validation decision
                     if hasattr(self, 'validation_manager'):
-                        self.validation_manager.record_validation_result(
-                            sensor, mahalanobis_dist, False, True
-                        )
-                    # --- BEGIN MODIFICATION ---
-                    # Increment consecutive rejection counter for this sensor
-                    consecutive_rejections = self.consecutive_rejections_per_sensor.get(sensor, 0) + 1
-                    self.consecutive_rejections_per_sensor[sensor] = consecutive_rejections
-
-                    # Adaptive rejection growth - increase factor with more consecutive rejections
-                    base_growth = 1.02  # Base growth factor (2%)
-                    adaptive_factor = min(3.0, 1.0 + (consecutive_rejections * 0.05))  # Scale up to 3x with more rejections
-                    rejection_growth_factor = base_growth * adaptive_factor
-
-                    # Log when rejection count is significant
-                    if consecutive_rejections >= 3 and self.debug_level >= 1:
-                        self.get_logger().info(
-                            f"Increasing uncertainty after {consecutive_rejections} consecutive rejections for {sensor}: "
-                            f"factor={rejection_growth_factor:.2f}"
-                        )
-
-                    # Apply larger growth for position than velocity during rejections
-                    self.covariance[0:2, 0:2] *= rejection_growth_factor  # Position uncertainty
-                    self.covariance[2:4, 2:4] *= (rejection_growth_factor * 0.8)  # Slightly less for velocity
-                    # Ensure symmetry
-                    self.covariance = 0.5 * (self.covariance + self.covariance.T)
-                    # Reset consecutive updates counter on rejection
+                        self.validation_manager.record_validation_result(sensor, mahalanobis_dist, False, True)
+                    
+                    # Increment rejection counter
+                    self.consecutive_rejections_per_sensor[sensor] = self.consecutive_rejections_per_sensor.get(sensor, 0) + 1
                     self.consecutive_updates = 0
-                    # --- END MODIFICATION ---
                     continue
-
-                # --- BEGIN MODIFICATION ---                # Reset consecutive rejection counter for this sensor on successful validation
-                self.consecutive_rejections_per_sensor[sensor] = 0
-                # --- END MODIFICATION ---
                 
-                # Record validation acceptance (assume correct for now)
+                # Reset rejection counter
+                self.consecutive_rejections_per_sensor[sensor] = 0
+                
+                # Record validation acceptance
                 if hasattr(self, 'validation_manager'):
-                    self.validation_manager.record_validation_result(
-                        sensor, mahalanobis_dist, True, True
-                    )
-
-                # Update consecutive updates counter for threshold adjustment
+                    self.validation_manager.record_validation_result(sensor, mahalanobis_dist, True, True)
+                
+                # Update consecutive updates counter
                 self.consecutive_updates += 1
                 
             except np.linalg.LinAlgError:
@@ -3956,31 +3212,61 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             # Kalman gain
             try:
                 K = np.dot(np.dot(self.covariance, H.T), np.linalg.inv(S))
-                  # Update state
-                self.state = self.state + np.dot(K, y)
+                
+                # Special handling for refinement phase
+                if in_refinement:
+                    # During refinement, trust measurements more to converge quickly
+                    # Add this check if we're still in refinement phase
+                    current_time = time.time()
+                    refinement_duration = current_time - getattr(self, 'refinement_start_time', current_time)
+                    self.refinement_measurements = getattr(self, 'refinement_measurements', 0) + 1
+                    
+                    # Calculate a blend factor that gives more weight to measurements
+                    # Start at 0.7 (70% measurement influence) and decrease with each measurement
+                    max_refinement_time = 2.0  # Maximum 2 seconds in refinement phase
+                    max_refinement_measurements = 5  # Exit after 5 measurements
+                    
+                    # Determine if we should exit refinement
+                    if (refinement_duration > max_refinement_time or 
+                        self.refinement_measurements >= max_refinement_measurements):
+                        # Exit refinement phase
+                        self.in_refinement_phase = False
+                        self.get_logger().info(
+                            f"Exiting refinement phase after {self.refinement_measurements} measurements and "
+                            f"{refinement_duration:.1f}s"
+                        )
+                        # Normal update
+                        self.state = self.state + np.dot(K, y)
+                    else:
+                        # Still in refinement - use blended update
+                        # Calculate blend factor based on measurement count (0.7 -> 0.3)
+                        blend_factor = max(0.3, 0.7 - (0.1 * self.refinement_measurements))
+                        
+                        # Blend between direct measurement and Kalman update for position
+                        direct_influence = np.zeros_like(self.state)
+                        direct_influence[0:2] = y[0:2] * blend_factor
+                        
+                        # Apply blended update
+                        self.state = self.state + np.dot(K, y) + direct_influence
+                        
+                        self.get_logger().debug(
+                            f"Refinement update {self.refinement_measurements}: "
+                            f"blend_factor={blend_factor:.2f}, direct_influence={direct_influence[0]:.3f}, {direct_influence[1]:.3f}"
+                        )
+                else:
+                    # Normal update outside of refinement phase
+                    self.state = self.state + np.dot(K, y)
                 
                 # Update covariance using Joseph form for numerical stability
                 I = np.eye(self.state.shape[0], dtype=np.float32)
                 self.covariance = np.dot(np.dot(I - np.dot(K, H), self.covariance), 
                                         (I - np.dot(K, H)).T) + np.dot(np.dot(K, R), K.T)
                 
-                # Ensure covariance remains symmetric and positive definite
+                # Ensure covariance remains symmetric
                 self.covariance = 0.5 * (self.covariance + self.covariance.T)
                 
                 # Mark that we had a successful update
                 successful_update = True
-                
-                # Track accepted measurements during initialization phase
-                initialization_phase = hasattr(self, 'in_initialization_phase') and self.in_initialization_phase
-                if successful_update and initialization_phase:
-                    if not hasattr(self, 'initialization_accepted_measurements'):
-                        self.initialization_accepted_measurements = 0
-                    self.initialization_accepted_measurements += 1
-                    
-                    # Exit initialization phase after accepting enough measurements
-                    if self.initialization_accepted_measurements >= 3:
-                        self.in_initialization_phase = False
-                        self.get_logger().info(f"Exiting initialization phase after accepting {self.initialization_accepted_measurements} measurements")
                 
                 # For logging
                 if self.debug_level >= 2:
@@ -3992,37 +3278,6 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             except np.linalg.LinAlgError:
                 self.get_logger().warn(f"Matrix inversion failed during Kalman update for {sensor}")
                 continue
-        
-        # Add debug log for state after update
-        #self.get_logger().info(
-        #    f"State after update: pos=({self.state[0]:.2f}, {self.state[1]:.2f}), uncertainty={self.position_uncertainty:.2f}"
-        #)
-          # Return flag indicating if any measurements were successfully processed
-        
-        # Post-update validation assessment
-        # Determine correctness of previous validation decisions
-        if hasattr(self, 'validation_manager') and hasattr(self, 'innovation_history'):
-            # Assess decisions after update by looking at resulting system consistency
-            if len(self.innovation_history) >= 3:
-                recent_innovations = list(self.innovation_history)[-3:]
-                avg_post_innovation = sum(recent_innovations) / len(recent_innovations)
-                
-                # If recent innovations are consistently high, our "accepted" decisions may be wrong
-                # If they are low, our "rejected" decisions may be wrong
-                is_consistent = avg_post_innovation < 5.0
-                
-                # Update previous decisions' correctness assessments
-                for sensor in self.validation_manager.sensors:
-                    if sensor in self.validation_manager.validation_history:
-                        history = self.validation_manager.validation_history[sensor]
-                        if history:
-                            for record in list(history)[-3:]:
-                                if record['accepted']:
-                                    # Accepted measurements: correct if system is consistent
-                                    record['correct'] = is_consistent
-                                else:
-                                    # Rejected measurements: correct if system is inconsistent
-                                    record['correct'] = not is_consistent
         
         return successful_update
 
