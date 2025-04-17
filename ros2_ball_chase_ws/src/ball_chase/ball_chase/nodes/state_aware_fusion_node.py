@@ -556,6 +556,133 @@ class SensorReliabilityTracker:
             return base_noise * factor
 
 
+class AdaptiveValidationManager:
+    """
+    Manages adaptive validation thresholds for different sensors and conditions.
+    Uses learning from past measurements to improve validation decisions.
+    """
+    
+    def __init__(self, sensors=None):
+        """Initialize with a list of expected sensors."""
+        self.sensors = sensors or []
+        
+        # Validation history for each sensor
+        self.validation_history = {sensor: deque(maxlen=50) for sensor in self.sensors}
+        
+        # Performance metrics
+        self.false_positive_rate = {sensor: 0.0 for sensor in self.sensors}
+        self.false_negative_rate = {sensor: 0.0 for sensor in self.sensors}
+        
+        # Adaptive thresholds with learning
+        self.base_thresholds = {sensor: 5.0 for sensor in self.sensors}
+        self.adaptive_thresholds = {sensor: 5.0 for sensor in self.sensors}
+        
+        # Contextual factors
+        self.context = {
+            'motion_state': 'unknown',
+            'uncertainty': 1.0,
+            'sensor_gaps': {},
+            'consecutive_rejections': {}
+        }
+        
+    def add_sensor(self, sensor_name):
+        """Add a new sensor to track."""
+        if sensor_name not in self.sensors:
+            self.sensors.append(sensor_name)
+            self.validation_history[sensor_name] = deque(maxlen=50)
+            self.false_positive_rate[sensor_name] = 0.0
+            self.false_negative_rate[sensor_name] = 0.0
+            self.base_thresholds[sensor_name] = 5.0
+            self.adaptive_thresholds[sensor_name] = 5.0
+    
+    def record_validation_result(self, sensor, innovation, was_accepted, was_correct):
+        """
+        Record the result of a validation decision.
+        
+        Args:
+            sensor (str): Sensor name
+            innovation (float): Innovation/residual value
+            was_accepted (bool): Whether the measurement was accepted
+            was_correct (bool): Whether the decision was correct (determined later)
+        """
+        if sensor not in self.sensors:
+            self.add_sensor(sensor)
+            
+        # Store result in history
+        self.validation_history[sensor].append({
+            'innovation': innovation,
+            'accepted': was_accepted,
+            'correct': was_correct
+        })
+        
+        # Update error rates
+        false_positives = sum(1 for r in self.validation_history[sensor] 
+                              if r['accepted'] and not r['correct'])
+        false_negatives = sum(1 for r in self.validation_history[sensor] 
+                             if not r['accepted'] and r['correct'])
+        total = len(self.validation_history[sensor])
+        
+        if total > 0:
+            self.false_positive_rate[sensor] = false_positives / total
+            self.false_negative_rate[sensor] = false_negatives / total
+            
+        # Adjust thresholds based on error rates
+        # Higher false negative rate -> lower threshold to accept more
+        # Higher false positive rate -> higher threshold to reject more
+        adjustment = 1.0 + (self.false_negative_rate[sensor] - self.false_positive_rate[sensor])
+        self.adaptive_thresholds[sensor] = self.base_thresholds[sensor] * adjustment
+    
+    def update_context(self, context_dict):
+        """Update contextual factors that affect validation."""
+        self.context.update(context_dict)
+        
+    def get_validation_threshold(self, sensor, innovation=None):
+        """
+        Get adaptive validation threshold for a sensor.
+        
+        Args:
+            sensor (str): Sensor name
+            innovation (float, optional): Current innovation/residual
+            
+        Returns:
+            float: Adaptive threshold value
+        """
+        if sensor not in self.sensors:
+            self.add_sensor(sensor)
+            
+        # Start with adaptive threshold from learning
+        threshold = self.adaptive_thresholds[sensor]
+        
+        # Apply contextual adjustments
+        
+        # 1. Motion state adjustment
+        motion_state = self.context.get('motion_state', 'unknown')
+        if motion_state == 'stationary':
+            threshold *= 0.8  # More strict during stationary
+        elif motion_state == 'long_stationary':
+            threshold *= 0.7  # Even more strict for long-term stationary
+        elif motion_state == 'medium_fast':
+            threshold *= 1.5  # More permissive during fast motion
+        
+        # 2. Uncertainty adjustment
+        uncertainty = self.context.get('uncertainty', 1.0)
+        threshold *= max(1.0, min(3.0, uncertainty))  # Scale with uncertainty
+        
+        # 3. Sensor gap adjustment
+        sensor_gaps = self.context.get('sensor_gaps', {})
+        if sensor in sensor_gaps and sensor_gaps[sensor]:
+            # More permissive after gaps
+            gap_level = sensor_gaps[sensor].get('gap_level', 0.0)
+            threshold *= (1.0 + gap_level)
+        
+        # 4. Consecutive rejections adjustment
+        consecutive_rejections = self.context.get('consecutive_rejections', {}).get(sensor, 0)
+        if consecutive_rejections > 2:
+            # Increase threshold with more rejections to prevent lockout
+            threshold *= (1.0 + (consecutive_rejections * 0.1))
+        
+        return threshold
+
 class SmoothedStateEstimator:
     """
     Provides temporal smoothing for state estimates to reduce uncertainty spikes
@@ -1374,8 +1501,8 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             "small_movement": 0.5, 
             "medium_fast": 0.5,
             "unknown": 0.5
-        }
-
+        }    
+    
     def init_sensor_synchronization(self):
         """Initialize sensor synchronization system with extended buffer sizes."""
         """Initialize sensor synchronization system with extended buffer sizes."""
@@ -1386,6 +1513,9 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         
         # Define all expected sensors
         self.expected_sensors = ['lidar', 'hsv_3d', 'yolo_3d', 'hsv_2d', 'yolo_2d']
+        
+        # Initialize adaptive validation manager
+        self.validation_manager = AdaptiveValidationManager(self.expected_sensors)
         
         # ENHANCEMENT 6: Increase buffer sizes for predictive buffering
         buffer_sizes = {
@@ -3250,9 +3380,21 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
             
             # Innovation covariance
             S = np.dot(np.dot(H, self.covariance), H.T) + R
-            
-            # Apply dynamic measurement validation based on motion state
-            threshold = self.get_innovation_threshold(sensor, motion_state)
+              # Update validation context if validation manager exists
+            if hasattr(self, 'validation_manager'):
+                validation_context = {
+                    'motion_state': motion_state,
+                    'uncertainty': self.position_uncertainty,
+                    'sensor_gaps': self.sensor_gap_detection,
+                    'consecutive_rejections': self.consecutive_rejections_per_sensor
+                }
+                self.validation_manager.update_context(validation_context)
+                
+                # Get adaptive threshold using validation manager
+                threshold = self.validation_manager.get_validation_threshold(sensor)
+            else:
+                # Fall back to original method if no validation manager
+                threshold = self.get_innovation_threshold(sensor, motion_state)
 
             # --- BEGIN ADDITION: Cap the Mahalanobis Threshold ---
             max_threshold = 25.0 # Set a maximum allowable threshold
@@ -3286,6 +3428,12 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                         f"Rejecting {sensor} measurement: innovation {mahalanobis_dist:.2f} > threshold {threshold:.2f}"
                     )
                     # --- END MODIFIED LOG ---
+                    
+                    # Record validation decision (assume correct for now)
+                    if hasattr(self, 'validation_manager'):
+                        self.validation_manager.record_validation_result(
+                            sensor, mahalanobis_dist, False, True
+                        )
                     # --- BEGIN MODIFICATION ---
                     # Increment consecutive rejection counter for this sensor
                     consecutive_rejections = self.consecutive_rejections_per_sensor.get(sensor, 0) + 1
@@ -3313,10 +3461,15 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                     # --- END MODIFICATION ---
                     continue
 
-                # --- BEGIN MODIFICATION ---
-                # Reset consecutive rejection counter for this sensor on successful validation
+                # --- BEGIN MODIFICATION ---                # Reset consecutive rejection counter for this sensor on successful validation
                 self.consecutive_rejections_per_sensor[sensor] = 0
                 # --- END MODIFICATION ---
+                
+                # Record validation acceptance (assume correct for now)
+                if hasattr(self, 'validation_manager'):
+                    self.validation_manager.record_validation_result(
+                        sensor, mahalanobis_dist, True, True
+                    )
 
                 # Update consecutive updates counter for threshold adjustment
                 self.consecutive_updates += 1
@@ -3358,8 +3511,33 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         #self.get_logger().info(
         #    f"State after update: pos=({self.state[0]:.2f}, {self.state[1]:.2f}), uncertainty={self.position_uncertainty:.2f}"
         #)
+          # Return flag indicating if any measurements were successfully processed
         
-        # Return flag indicating if any measurements were successfully processed
+        # Post-update validation assessment
+        # Determine correctness of previous validation decisions
+        if hasattr(self, 'validation_manager') and hasattr(self, 'innovation_history'):
+            # Assess decisions after update by looking at resulting system consistency
+            if len(self.innovation_history) >= 3:
+                recent_innovations = list(self.innovation_history)[-3:]
+                avg_post_innovation = sum(recent_innovations) / len(recent_innovations)
+                
+                # If recent innovations are consistently high, our "accepted" decisions may be wrong
+                # If they are low, our "rejected" decisions may be wrong
+                is_consistent = avg_post_innovation < 5.0
+                
+                # Update previous decisions' correctness assessments
+                for sensor in self.validation_manager.sensors:
+                    if sensor in self.validation_manager.validation_history:
+                        history = self.validation_manager.validation_history[sensor]
+                        if history:
+                            for record in list(history)[-3:]:
+                                if record['accepted']:
+                                    # Accepted measurements: correct if system is consistent
+                                    record['correct'] = is_consistent
+                                else:
+                                    # Rejected measurements: correct if system is inconsistent
+                                    record['correct'] = not is_consistent
+        
         return successful_update
 
     def transform_point(self, point_msg, target_frame, is_2d=False):
@@ -3785,10 +3963,15 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         """Publish the position uncertainty."""
         msg = Float32()
         msg.data = self.position_uncertainty
-        self.uncertainty_pub.publish(msg)
-
+        self.uncertainty_pub.publish(msg)    
+    
     def publish_diagnostics(self):
         """Publish diagnostic information."""
+        # Log validation performance periodically
+        if hasattr(self, 'validation_manager') and hasattr(self, 'sync_quality_metrics'):
+            if self.sync_quality_metrics.get('attempt_counts', 0) % 50 == 0:
+                self.log_validation_performance()
+                
         # Create a diagnostics dictionary
         diag = {
             'filter_health': self.filter_health,
