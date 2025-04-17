@@ -5215,6 +5215,79 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         return confidence
     
     
+    def log_validation_performance(self):
+        """
+        Log statistics about the validation system's performance.
+        Shows false positive/negative rates and adaptive thresholds.
+        """
+        if not hasattr(self, 'validation_manager'):
+            return
+            
+        try:
+            # Get a summary of false positive and negative rates
+            false_positive_rates = []
+            false_negative_rates = []
+            
+            # Collect statistics for each sensor
+            sensor_stats = []
+            for sensor in self.validation_manager.sensors:
+                fp_rate = self.validation_manager.false_positive_rate.get(sensor, 0.0)
+                fn_rate = self.validation_manager.false_negative_rate.get(sensor, 0.0)
+                
+                if hasattr(self.validation_manager, 'adaptive_thresholds'):
+                    threshold = self.validation_manager.adaptive_thresholds.get(sensor, 0.0)
+                else:
+                    threshold = 0.0
+                    
+                false_positive_rates.append(fp_rate)
+                false_negative_rates.append(fn_rate)
+                
+                # Track validation history counts
+                history_count = 0
+                if sensor in self.validation_manager.validation_history:
+                    history_count = len(self.validation_manager.validation_history[sensor])
+                
+                # Add to sensor-specific stats
+                sensor_stats.append(f"{sensor}: FP={fp_rate:.2f}, FN={fn_rate:.2f}, threshold={threshold:.1f}, samples={history_count}")
+                
+            # Calculate average rates across all sensors
+            avg_fp_rate = sum(false_positive_rates) / max(1, len(false_positive_rates))
+            avg_fn_rate = sum(false_negative_rates) / max(1, len(false_negative_rates))
+            
+            # Log the overall performance
+            self.get_logger().info(
+                f"Validation performance: Avg FP rate={avg_fp_rate:.2f}, Avg FN rate={avg_fn_rate:.2f}"
+            )
+            
+            # Log per-sensor statistics
+            for stat in sensor_stats:
+                self.get_logger().info(f"  {stat}")
+                
+            # Get current motion state for context
+            motion_state = self.detect_motion_state() if hasattr(self, 'detect_motion_state') else "unknown"
+            
+            # Update context information for validation manager
+            if hasattr(self, 'sensor_gap_detection'):
+                # Count active gaps
+                gap_count = sum(1 for sensor, gap_info in self.sensor_gap_detection.items() 
+                                if gap_info.get('gap_detected', False))
+                
+                if gap_count > 0:
+                    self.get_logger().info(f"  Currently {gap_count} sensor gaps detected during {motion_state} state")
+                    
+            # Log number of consecutive rejections
+            if hasattr(self, 'consecutive_rejections_per_sensor'):
+                reject_sensors = []
+                for sensor, count in self.consecutive_rejections_per_sensor.items():
+                    if count > 1:  # Only log if more than 1 rejection
+                        reject_sensors.append(f"{sensor}={count}")
+                        
+                if reject_sensors:
+                    self.get_logger().info(f"  Consecutive rejections: {', '.join(reject_sensors)}")
+                
+        except Exception as e:
+            self.get_logger().error(f"Error in log_validation_performance: {str(e)}")
+    
 def main(args=None):
     rclpy.init(args=args)
     
