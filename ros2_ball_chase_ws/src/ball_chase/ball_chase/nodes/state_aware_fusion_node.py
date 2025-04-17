@@ -3670,16 +3670,51 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         # ... existing code ...
         pos_uncertainty = math.sqrt(max(0.0, np.trace(self.covariance[0:2, 0:2]) / 2.0))
         if pos_uncertainty > 0.5:
-            growth_rate = min(growth_rate, 1.1)
-
-        # Apply growth factor
-        if growth_rate > 1.0:
-            # ... existing code to apply growth_rate to covariance ...
-            self.covariance[0:2, 0:2] *= growth_rate
-            self.covariance[2:4, 2:4] *= (growth_rate * 1.05)
-            self.covariance = 0.5 * (self.covariance + self.covariance.T)
-            for i in range(4):
-                self.covariance[i, i] = max(0.01, self.covariance[i, i])
+            growth_rate = min(growth_rate, 1.1)            # Apply growth factor
+            if growth_rate > 1.0:
+                # Get current position and calculate unit vector for direction
+                x, y = self.state[0], self.state[1]
+                distance = math.sqrt(x*x + y*y)
+                
+                # Only apply special handling if ball is not near origin
+                if distance > 0.3:
+                    # Calculate unit vector components for current direction
+                    unit_x, unit_y = x/distance, y/distance
+                    
+                    # Create rotation matrix for transforming covariance to radial coordinates
+                    rot = np.array([
+                        [unit_x, unit_y],
+                        [-unit_y, unit_x]
+                    ], dtype=np.float32)
+                    rot_T = rot.T
+                    
+                    # Transform position covariance to radial coordinates
+                    radial_cov = np.dot(np.dot(rot, self.covariance[0:2, 0:2]), rot_T)
+                    
+                    # Apply growth differently: more for distance, less for direction
+                    radial_cov[0, 0] *= growth_rate               # Radial (distance) uncertainty
+                    radial_cov[1, 1] *= (1.0 + (growth_rate-1.0) * 0.3)  # Angular uncertainty (much less growth)
+                    
+                    # Transform back to cartesian coordinates
+                    self.covariance[0:2, 0:2] = np.dot(np.dot(rot_T, radial_cov), rot)
+                    
+                    # Apply normal growth to velocity
+                    self.covariance[2:4, 2:4] *= (growth_rate * 1.05)
+                else:
+                    # For positions near origin, apply standard growth
+                    self.covariance[0:2, 0:2] *= growth_rate
+                    self.covariance[2:4, 2:4] *= (growth_rate * 1.05)
+                
+                # Ensure symmetry and minimum values
+                self.covariance = 0.5 * (self.covariance + self.covariance.T)
+                for i in range(4):
+                    self.covariance[i, i] = max(0.01, self.covariance[i, i])
+                    
+                # Add debug log for significant direction-preserving growth
+                if growth_rate > 1.1 and self.debug_level >= 1:
+                    self.get_logger().debug(
+                        f"Applied direction-preserving covariance growth: rate={growth_rate:.3f}"
+                    )
 
             # FIX: Add motion-specific uncertainty caps to prevent excessive uncertainty
             # ... existing code to get caps ...
@@ -4346,11 +4381,33 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
         """
         try:
             current_time = time.time()
-            
+              # Get current motion state for adaptive threshold
+            motion_state = self.detect_motion_state() if hasattr(self, 'detect_motion_state') else "unknown"
+
+            # Set age threshold based on motion state
+            if motion_state == "stationary":
+                max_bbox_age = 3.0  # Allow older bbox data for stationary objects
+            elif motion_state == "long_stationary":
+                max_bbox_age = 5.0  # Even longer for long-term stationary objects
+            elif motion_state == "small_movement":
+                max_bbox_age = 2.5  # Slightly increased for slow movement
+            else:  # medium_fast or unknown
+                max_bbox_age = 2.0  # Keep default for fast movement
+
+            # Get the actual age
+            bbox_age = current_time - bbox_data.get('timestamp', 0)
+
             # Check if bbox data is recent enough
-            if current_time - bbox_data.get('timestamp', 0) > 2.0:  # Increased from 1.0 to 2.0 seconds
-                self.get_logger().warn(f"Bbox data too old: {current_time - bbox_data.get('timestamp', 0):.2f}s > 2.0s")
+            if bbox_age > max_bbox_age:
+                self.get_logger().warn(f"Bbox data too old: {bbox_age:.2f}s > {max_bbox_age:.1f}s threshold ({motion_state} state)")
                 return None
+
+            # For slightly outdated bbox data, apply a confidence penalty
+            age_penalty = 1.0
+            if bbox_age > (max_bbox_age * 0.75):
+                # If we're using the data despite it being somewhat old, log this
+                age_penalty = 1.0 + (bbox_age / max_bbox_age) * 0.2  # Up to 20% penalty
+                self.get_logger().debug(f"Using older bbox data: {bbox_age:.2f}s (applying {(age_penalty-1.0)*100:.1f}% distance penalty)")
                 
             # Get bounding box dimensions
             bbox_width = bbox_data.get('width', 0)
@@ -4362,10 +4419,12 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 
             # Known basketball diameter in meters
             basketball_diameter_meters = self.basketball_radius * 2
-            
-            # Calculate distance based on apparent size vs actual size
+              # Calculate distance based on apparent size vs actual size
             focal_length_pixels = 345.58  # Calibrated focal length for camera
             estimated_distance = (basketball_diameter_meters * focal_length_pixels) / bbox_width
+            
+            # Apply age penalty to increase distance estimate for older data
+            estimated_distance *= age_penalty
             
             # Get camera to reference frame transform
             try:
