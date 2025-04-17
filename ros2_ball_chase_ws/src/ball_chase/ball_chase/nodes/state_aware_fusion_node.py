@@ -2180,14 +2180,54 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                 base_motion_state = "small_movement"
             else:
                 base_motion_state = "medium_fast"
-        else:
-            # RELAXED: Normal thresholds when confidence is normal
-            if avg_velocity < 0.02:  # Reduced from 0.03 to be more sensitive
+        else:        # Get average acceleration using velocity history
+            acceleration = 0.0
+            if len(self.velocity_history) >= 3 and len(self.time_history) >= 3:
+                recent_vels = list(self.velocity_history)[-3:]
+                recent_times = list(self.time_history)[-3:]
+                
+                if len(recent_vels) >= 2 and len(recent_times) >= 2:
+                    # Calculate change in velocity magnitude over time
+                    vel1_mag = math.sqrt(recent_vels[-2][0]**2 + recent_vels[-2][1]**2)
+                    vel2_mag = math.sqrt(recent_vels[-1][0]**2 + recent_vels[-1][1]**2)
+                    dt = recent_times[-1] - recent_times[-2]
+                    
+                    if dt > 0:
+                        acceleration = abs(vel2_mag - vel1_mag) / dt
+
+            # Apply hysteresis for state classification based on current state
+            current_state = getattr(self, 'motion_state', 'unknown')
+
+            # Default thresholds
+            stationary_thresh = 0.02  # m/s
+            small_movement_thresh = 0.20  # m/s
+
+            # Apply hysteresis: harder to leave current state
+            if current_state == "stationary":
+                # Higher threshold to leave stationary
+                stationary_thresh = 0.04  # Doubled
+            elif current_state == "small_movement":
+                # Adjusted thresholds for small_movement
+                stationary_thresh = 0.015  # Lower to stay in small_movement
+                small_movement_thresh = 0.25  # Higher to stay in small_movement
+            elif current_state == "medium_fast":
+                # Lower threshold to stay in medium_fast
+                small_movement_thresh = 0.18
+
+            # Use acceleration to detect rapid changes
+            if acceleration > 2.0:  # Significant acceleration
+                # Skip intermediate states for rapid acceleration
+                base_motion_state = "medium_fast"
+            elif avg_velocity < stationary_thresh:
                 base_motion_state = "stationary"
-            elif avg_velocity < 0.20:  # Reduced from 0.25 to be more sensitive
+            elif avg_velocity < small_movement_thresh:
                 base_motion_state = "small_movement"
             else:
                 base_motion_state = "medium_fast"
+                
+            # Log acceleration for debugging
+            if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 10 == 0:
+                self.get_logger().debug(f"Motion detection: velocity={avg_velocity:.3f}m/s, acceleration={acceleration:.2f}m/s², state={base_motion_state}")
         
         # IMPROVEMENT 3: Add transition inertia - require consistent evidence for state changes
         # Initialize state transition evidence if not already present
