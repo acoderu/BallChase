@@ -2381,41 +2381,86 @@ class EnhancedFusionLifecycleNode(LifecycleNode):
                         self.last_long_stationary_log = current_time
                 else:
                     motion_state = "stationary"
-        else:
+        else:            # ---------------------------------------------------------------------
+            # Enhanced protection for long_stationary state
             # ---------------------------------------------------------------------
-            # RELAXED: Check for minimum time requirement in long_stationary state
-            # ---------------------------------------------------------------------
-            if hasattr(self, 'motion_state') and self.motion_state == "long_stationary" and hasattr(self, 'motion_state_protection'):
-                # Get time since long_stationary was established
-                time_in_long_stationary = current_time - self.motion_state_protection.get('long_stationary_confirmed_time', 0)
-                min_time_required = self.motion_state_protection.get('min_time_in_long_stationary', 1.0)  # Reduced from 2.0 to 1.0
+            if hasattr(self, 'motion_state') and self.motion_state == "long_stationary":
+                # Ensure required fields exist
+                if not hasattr(self, 'motion_state_protection'):
+                    self.motion_state_protection = {}
                 
-                if time_in_long_stationary < min_time_required:
-                    # Not been in long_stationary state long enough to leave it for movement
-                    # Only apply this protection for actual movement transitions, not back to stationary
-                    if base_motion_state not in ["stationary", "unknown"]:
-                        # Check if movement is very significant, which would override protection
-                        if avg_velocity > 0.5:  # Clear movement detected
-                            motion_state = base_motion_state
-                            # Log this special override
-                            self.get_logger().info(
-                                f"Significant movement (v={avg_velocity:.2f}m/s) overriding long_stationary protection"
-                            )
-                        else:
-                            # Movement not significant enough - maintain long_stationary
-                            motion_state = "long_stationary"
-                            
-                            # Log this protection occasionally
-                            if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
-                                self.get_logger().debug(
-                                    f"Protected long_stationary state (established for {time_in_long_stationary:.1f}s < required {min_time_required:.1f}s)"
-                                )
-                    else:
-                        # For non-movement transitions, use normal logic
-                        motion_state = base_motion_state
-                else:
-                    # Been in long_stationary state long enough, normal transitions allowed
+                if 'long_stationary_established' not in self.motion_state_protection:
+                    self.motion_state_protection['long_stationary_established'] = True
+                    self.motion_state_protection['long_stationary_confirmed_time'] = current_time
+                    self.get_logger().info("Long stationary state established and protected")
+                
+                # Get time in long_stationary state
+                time_in_long = current_time - self.motion_state_protection.get('long_stationary_confirmed_time', 0)
+                
+                # Clear movement counter if exists 
+                # (used to track consecutive movement detections)
+                if 'consecutive_movement_detections' in self.motion_state_protection:
+                    self.motion_state_protection['consecutive_movement_detections'] = 0
+                
+                # Add confidence tracking for state
+                long_conf = self.motion_state_confidence.get("long_stationary", 0.5)
+                new_conf = self.motion_state_confidence.get(base_motion_state, 0.5)
+                
+                # Only allow transition if:
+                # 1. Very significant velocity detected OR
+                # 2. New state confidence is significantly higher than long_stationary confidence
+                if avg_velocity > 0.8:  # Very significant movement
+                    # Log the override
+                    self.get_logger().info(f"Significant velocity ({avg_velocity:.2f}m/s) overrides long_stationary protection")
                     motion_state = base_motion_state
+                elif new_conf > (long_conf * 1.5):  # New state has 50% higher confidence
+                    # Log the confidence-based override
+                    self.get_logger().info(f"State confidence override: {base_motion_state}={new_conf:.2f} vs long_stationary={long_conf:.2f}")
+                    motion_state = base_motion_state
+                else:
+                    # Maintain long_stationary
+                    motion_state = "long_stationary"
+                    
+                    # Boost confidence to reinforce state
+                    self.motion_state_confidence["long_stationary"] = min(1.0, long_conf + 0.05)
+                    
+                    # If debugging enabled, periodically log protection
+                    if self.debug_level >= 2 and hasattr(self, 'sync_quality_metrics') and self.sync_quality_metrics.get('attempt_counts', 0) % 20 == 0:
+                        self.get_logger().debug(
+                            f"Protected long_stationary state: for={time_in_long:.1f}s, confidence={self.motion_state_confidence['long_stationary']:.2f}"
+                        )
+            elif base_motion_state == "long_stationary":
+                # New transition to long_stationary - establish it now
+                if not hasattr(self, 'motion_state_protection'):
+                    self.motion_state_protection = {}
+                    
+                self.motion_state_protection['long_stationary_established'] = True
+                self.motion_state_protection['long_stationary_confirmed_time'] = current_time
+                self.get_logger().info("Long stationary state established and protected")
+                
+                motion_state = "long_stationary"
+                
+                # Boost initial confidence
+                self.motion_state_confidence["long_stationary"] = 0.8
+            elif base_motion_state in ["small_movement", "medium_fast"] and hasattr(self, 'motion_state') and self.motion_state == "stationary":
+                # For transitions from regular stationary to movement, track consecutive detections
+                if not hasattr(self, 'motion_state_protection'):
+                    self.motion_state_protection = {}
+                    
+                if 'consecutive_movement_detections' not in self.motion_state_protection:
+                    self.motion_state_protection['consecutive_movement_detections'] = 0
+                    
+                # Increment counter
+                self.motion_state_protection['consecutive_movement_detections'] += 1
+                
+                # Require 2 consecutive movement detections to confirm transition
+                if self.motion_state_protection['consecutive_movement_detections'] >= 2:
+                    motion_state = base_motion_state
+                    # Reset counter
+                    self.motion_state_protection['consecutive_movement_detections'] = 0
+                else:
+                    # Not enough consecutive detections yet
+                    motion_state = self.motion_state
             else:
                 # Reset stationary timer when moving
                 self.stationary_start_time = None
