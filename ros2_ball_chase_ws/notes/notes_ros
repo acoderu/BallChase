@@ -6,9 +6,9 @@ source install/setup.bash
 
 ros2 run ball_chase yolo_ball_node
 
-ros2 lifecycle set /state_aware_fusion_node configure
+ros2 lifecycle set /optimized_fusion_node configure
 
-ros2 lifecycle set /state_aware_fusion_node activate
+ros2 lifecycle set /optimized_fusion_node activate
 
 docker exec -it MentorPi bash
 ....

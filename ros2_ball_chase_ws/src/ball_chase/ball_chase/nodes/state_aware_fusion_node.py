@@ -1097,142 +1097,8 @@ class OptimizedFusionNode(LifecycleNode):
                 level="error"
             )
             return None
+
     
-    def filter_update(self):
-        """
-        Optimized Kalman filter update with reduced operations.
-        Core algorithm split into stages for better organization.
-        """
-        if not self.is_activated:
-            return
-            
-        current_time = time.time()
-        
-        # Skip if not initialized yet (wait for initialization)
-        if not self.initialized:
-            # Try initialization with sensor data
-            for sensor in ['lidar', 'yolo_3d']:
-                msg = self.sensor_manager.get_latest(sensor)
-                if msg:
-                    transformed = self.transform_point(msg, self.reference_frame)
-                    if transformed:
-                        if self.initialize_with_measurement(transformed, sensor):
-                            break
-            
-            # Try with 2D sensors if 3D not available
-            if not self.initialized:
-                for sensor in ['yolo_2d', 'hsv_2d']:
-                    if sensor in self.bbox_data and self.bbox_data[sensor]['timestamp'] > 0:
-                        msg = self.sensor_manager.get_latest(sensor)
-                        if msg:
-                            estimated_3d = self.estimate_3d_from_2d(msg, self.bbox_data[sensor])
-                            if estimated_3d:
-                                self.initialize_with_measurement(estimated_3d, f"{sensor}_est3d")
-                                break
-            
-            return
-        
-        try:
-            # Calculate time step
-            if not hasattr(self, 'last_update_time') or self.last_update_time is None:
-                dt = 0.1  # Default time step
-            else:
-                dt = current_time - self.last_update_time
-                # Limit dt to reasonable values
-                dt = min(dt, 0.5)  # Cap at 0.5 seconds
-            
-            # 1. Prediction stage
-            self.predict_state(dt)
-            
-            # 2. Update stage
-            self.process_sensor_data()
-            
-            # 3. Update motion state
-            self.update_motion_state()
-            
-            # 4. Apply physics constraints
-            self.apply_physics_constraints()
-            
-            # 5. Update uncertainty metrics
-            self.update_uncertainty_metrics()
-            
-            # Update tracking status
-            self.update_tracking_status()
-            
-            # Update last update time
-            self.last_update_time = current_time
-            
-        except Exception as e:
-            self.get_logger().error(f"Filter update error: {str(e)}")
-    
-    def predict_state(self, dt):
-        """Optimized state prediction with minimal matrix operations."""
-        # Update state transition matrix for current dt
-        self._F[0, 2] = dt  # x += vx*dt
-        self._F[1, 3] = dt  # y += vy*dt
-        
-        # Reset process noise matrix
-        self._Q.fill(0.0)
-        
-        # Get motion state-based scaling
-        motion_state = self.motion_manager.current_state
-        motion_scale = 1.0
-        
-        if motion_state == MotionStateManager.STATIONARY:
-            motion_scale = 0.8
-        elif motion_state == MotionStateManager.LONG_STATIONARY:
-            motion_scale = 0.6
-        elif motion_state == MotionStateManager.SMALL_MOVEMENT:
-            motion_scale = 1.0
-        elif motion_state == MotionStateManager.MEDIUM_FAST:
-            motion_scale = 1.2
-        
-        # Process noise parameters
-        q_pos = self.process_noise_pos * dt * motion_scale
-        q_vel = self.process_noise_vel * dt * motion_scale
-        
-        # Apply friction based on state
-        if motion_state != MotionStateManager.MEDIUM_FAST:
-            # Calculate current velocity
-            vx, vy = self.state[2], self.state[3]
-            current_velocity = math.sqrt(vx*vx + vy*vy)
-            
-            if current_velocity > 0.01:
-                # Apply friction based on state
-                friction_coef = 0.01
-                if motion_state == MotionStateManager.STATIONARY:
-                    friction_coef = 0.02
-                elif motion_state == MotionStateManager.LONG_STATIONARY:
-                    friction_coef = 0.03
-                
-                # Calculate deceleration
-                deceleration = friction_coef * 9.81  # μg
-                dv = min(current_velocity, deceleration * dt)
-                
-                # Apply proportional deceleration
-                if dv > 0 and current_velocity > 0:
-                    factor = 1.0 - (dv / current_velocity)
-                    self.state[2] *= factor
-                    self.state[3] *= factor
-        
-        # Fill in process noise with optimized access
-        # Position variances
-        self._Q[0, 0] = q_pos * dt * dt / 3.0
-        self._Q[1, 1] = q_pos * dt * dt / 3.0
-        
-        # Velocity variances
-        self._Q[2, 2] = q_vel * dt
-        self._Q[3, 3] = q_vel * dt
-        
-        # Covariances
-        self._Q[0, 2] = self._Q[2, 0] = q_pos * dt * dt / 2.0
-        self._Q[1, 3] = self._Q[3, 1] = q_pos * dt * dt / 2.0
-        
-        # Predict state with optimized operations
-        self.state = np.dot(self._F, self.state)
-        
-        # Predict covariance
-        self.covariance = np.dot(np.dot(self._F, self.covariance), self._F.T) + self._Q
     
     def process_sensor_data(self):
         """Process sensor data by priority order."""
@@ -1595,45 +1461,6 @@ class OptimizedFusionNode(LifecycleNode):
         # This is a basketball that rolls on the ground, so z is fixed
         # Note: z is not in our state vector, but we enforce it in published messages
     
-    def update_uncertainty_metrics(self):
-        """Update uncertainty metrics from covariance matrix."""
-        # Position uncertainty from position covariance
-        self.position_uncertainty = math.sqrt((self.covariance[0, 0] + self.covariance[1, 1]) / 2.0)
-        
-        # Velocity uncertainty from velocity covariance
-        self.velocity_uncertainty = math.sqrt((self.covariance[2, 2] + self.covariance[3, 3]) / 2.0)
-        
-        # Apply state-based uncertainty caps
-        if hasattr(self, 'motion_manager'):
-            motion_state = self.motion_manager.current_state
-            
-            if motion_state == MotionStateManager.STATIONARY:
-                max_pos_uncertainty = 0.8
-                max_vel_uncertainty = 1.5
-            elif motion_state == MotionStateManager.LONG_STATIONARY:
-                max_pos_uncertainty = 0.7
-                max_vel_uncertainty = 1.2
-            elif motion_state == MotionStateManager.SMALL_MOVEMENT:
-                max_pos_uncertainty = 1.2
-                max_vel_uncertainty = 2.0
-            elif motion_state == MotionStateManager.MEDIUM_FAST:
-                max_pos_uncertainty = 1.5
-                max_vel_uncertainty = 2.5
-            else:  # unknown
-                max_pos_uncertainty = 1.5
-                max_vel_uncertainty = 2.2
-                
-            # Apply caps with scale factors
-            if self.position_uncertainty > max_pos_uncertainty:
-                scale = (max_pos_uncertainty / self.position_uncertainty) ** 2
-                self.covariance[0:2, 0:2] *= scale
-                self.position_uncertainty = max_pos_uncertainty
-                
-            if self.velocity_uncertainty > max_vel_uncertainty:
-                scale = (max_vel_uncertainty / self.velocity_uncertainty) ** 2
-                self.covariance[2:4, 2:4] *= scale
-                self.velocity_uncertainty = max_vel_uncertainty
-                
     def update_tracking_status(self):
         """Update tracking reliability status."""
         # Count active sensors
@@ -1902,7 +1729,312 @@ class OptimizedFusionNode(LifecycleNode):
         else:
             self.get_logger().info(message)
 
+    def dynamic_uncertainty_recovery(self):
+        """Implement adaptive uncertainty recovery to improve tracking stability during sensor gaps."""
+        # Only apply when uncertainty exceeds normal thresholds
+        if self.position_uncertainty < 0.3:  # Lowered from 0.4 to be closer to normal operation
+            return False
+            
+        # Check sensor health
+        current_time = time.time()
+        active_sensors = self.sensor_manager.get_active_sensor_count()
+        
+        # Get motion state for context
+        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else "unknown"
+        
+        # Apply different strategies based on sensor availability
+        if active_sensors == 0:
+            # No active sensors - use last known good velocity with damping
+            # Calculate time since last sensor update
+            time_since_update = 0.0
+            if hasattr(self.sensor_manager, 'last_update_time') and self.sensor_manager.last_update_time:
+                last_update_times = list(self.sensor_manager.last_update_time.values())
+                if last_update_times:
+                    time_since_update = min(current_time - max(last_update_times), 2.0)
+            
+            # Apply damping to velocity based on time without updates
+            damping_factor = max(0.0, 1.0 - (time_since_update / 1.5))  # More aggressive damping
+            self.state[2] *= damping_factor  # Dampen vx
+            self.state[3] *= damping_factor  # Dampen vy
+            
+            # Gradually reduce uncertainty with a floor - more aggressive reduction
+            if self.position_uncertainty > 0.25:
+                # Use a more aggressive recovery rate (0.95 instead of 0.98)
+                recovery_rate = 0.95  # Faster recovery rate
+                
+                # Lower uncertainty floor based on motion state
+                if motion_state == MotionStateManager.STATIONARY:
+                    uncertainty_floor = 0.2  # Lower floor for stationary objects
+                else:
+                    uncertainty_floor = 0.25  # Slightly higher for moving objects
+                
+                # Calculate new uncertainty with more aggressive reduction
+                new_uncertainty = max(
+                    self.position_uncertainty * recovery_rate,
+                    uncertainty_floor
+                )
+                
+                # Only log and apply if actually changed
+                if abs(new_uncertainty - self.position_uncertainty) > 0.001:
+                    # Apply to covariance
+                    scale = (new_uncertainty / self.position_uncertainty) ** 2
+                    self.covariance[0:2, 0:2] *= scale
+                    
+                    # Store original for logging
+                    old_uncertainty = self.position_uncertainty
+                    
+                    # Update uncertainty metric
+                    self.position_uncertainty = new_uncertainty
+                    
+                    self.get_logger().info(
+                        f"{self.get_time_prefix()}[RECOVERY] Uncertainty adjusted from "
+                        f"{old_uncertainty:.3f}m to {new_uncertainty:.3f}m"
+                    )
+                    return True
+        elif active_sensors < 2:
+            # Limited sensors - apply milder recovery
+            if self.position_uncertainty > 0.35:
+                recovery_rate = 0.97  # Milder recovery
+                uncertainty_floor = 0.25
+                
+                # Calculate new uncertainty
+                new_uncertainty = max(
+                    self.position_uncertainty * recovery_rate,
+                    uncertainty_floor
+                )
+                
+                # Only apply if actually changed
+                if abs(new_uncertainty - self.position_uncertainty) > 0.001:
+                    # Apply to covariance
+                    scale = (new_uncertainty / self.position_uncertainty) ** 2
+                    self.covariance[0:2, 0:2] *= scale
+                    
+                    # Store original for logging
+                    old_uncertainty = self.position_uncertainty
+                    
+                    # Update uncertainty metric
+                    self.position_uncertainty = new_uncertainty
+                    
+                    self.get_logger().info(
+                        f"{self.get_time_prefix()}[RECOVERY] Partial uncertainty recovery: "
+                        f"{old_uncertainty:.3f}m to {new_uncertainty:.3f}m (limited sensors)"
+                    )
+                    return True
+        
+        return False
 
+    def update_uncertainty_metrics(self):
+        """Update uncertainty metrics from covariance matrix with improved heuristics."""
+        # Original position uncertainty calculation from position covariance
+        raw_position_uncertainty = math.sqrt((self.covariance[0, 0] + self.covariance[1, 1]) / 2.0)
+        
+        # Apply a smoothing factor to avoid rapid changes
+        if hasattr(self, 'position_uncertainty'):
+            smoothing_factor = 0.8  # Weight toward previous value for stability
+            self.position_uncertainty = smoothing_factor * self.position_uncertainty + (1 - smoothing_factor) * raw_position_uncertainty
+        else:
+            self.position_uncertainty = raw_position_uncertainty
+        
+        # Velocity uncertainty from velocity covariance
+        self.velocity_uncertainty = math.sqrt((self.covariance[2, 2] + self.covariance[3, 3]) / 2.0)
+        
+        # Apply state-based uncertainty caps
+        if hasattr(self, 'motion_manager'):
+            motion_state = self.motion_manager.current_state
+            
+            if motion_state == MotionStateManager.STATIONARY:
+                max_pos_uncertainty = 0.6  # Reduced from 0.8
+                max_vel_uncertainty = 1.2  # Reduced from 1.5
+            elif motion_state == MotionStateManager.LONG_STATIONARY:
+                max_pos_uncertainty = 0.5  # Reduced from 0.7
+                max_vel_uncertainty = 1.0  # Reduced from 1.2
+            elif motion_state == MotionStateManager.SMALL_MOVEMENT:
+                max_pos_uncertainty = 0.8  # Reduced from 1.2
+                max_vel_uncertainty = 1.5  # Reduced from 2.0
+            elif motion_state == MotionStateManager.MEDIUM_FAST:
+                max_pos_uncertainty = 1.0  # Reduced from 1.5
+                max_vel_uncertainty = 2.0  # Reduced from 2.5
+            else:  # unknown
+                max_pos_uncertainty = 1.0  # Reduced from 1.5
+                max_vel_uncertainty = 1.8  # Reduced from 2.2
+                
+            # Apply caps with scale factors
+            if self.position_uncertainty > max_pos_uncertainty:
+                scale = (max_pos_uncertainty / self.position_uncertainty) ** 2
+                self.covariance[0:2, 0:2] *= scale
+                self.position_uncertainty = max_pos_uncertainty
+                
+            if self.velocity_uncertainty > max_vel_uncertainty:
+                scale = (max_vel_uncertainty / self.velocity_uncertainty) ** 2
+                self.covariance[2:4, 2:4] *= scale
+                self.velocity_uncertainty = max_vel_uncertainty
+                
+            # Add minimum uncertainty floors to avoid overconfidence
+            if self.position_uncertainty < 0.1:
+                floor_scale = (0.1 / self.position_uncertainty) ** 2
+                self.covariance[0:2, 0:2] *= floor_scale
+                self.position_uncertainty = 0.1
+
+    def filter_update(self):
+        """
+        Optimized Kalman filter update with reduced operations.
+        Core algorithm split into stages for better organization.
+        """
+        if not self.is_activated:
+            return
+            
+        current_time = time.time()
+        
+        # Skip if not initialized yet (wait for initialization)
+        if not self.initialized:
+            # Try initialization with sensor data
+            for sensor in ['lidar', 'yolo_3d']:
+                msg = self.sensor_manager.get_latest(sensor)
+                if msg:
+                    transformed = self.transform_point(msg, self.reference_frame)
+                    if transformed:
+                        if self.initialize_with_measurement(transformed, sensor):
+                            break
+            
+            # Try with 2D sensors if 3D not available
+            if not self.initialized:
+                for sensor in ['yolo_2d', 'hsv_2d']:
+                    if sensor in self.bbox_data and self.bbox_data[sensor]['timestamp'] > 0:
+                        msg = self.sensor_manager.get_latest(sensor)
+                        if msg:
+                            estimated_3d = self.estimate_3d_from_2d(msg, self.bbox_data[sensor])
+                            if estimated_3d:
+                                self.initialize_with_measurement(estimated_3d, f"{sensor}_est3d")
+                                break
+            
+            return
+        
+        try:
+            # Calculate time step
+            if not hasattr(self, 'last_update_time') or self.last_update_time is None:
+                dt = 0.1  # Default time step
+            else:
+                dt = current_time - self.last_update_time
+                # Limit dt to reasonable values
+                dt = min(dt, 0.25)  # Reduced cap from 0.5 to 0.25 seconds
+            
+            # Check sensor health before prediction
+            self.sensor_manager.update_sensor_health(current_time)
+            active_sensors = self.sensor_manager.get_active_sensor_count()
+            
+            # Apply preliminary uncertainty damping if no sensors active
+            # This prevents runaway uncertainty during prediction when no sensors
+            if active_sensors == 0 and self.position_uncertainty > 0.3:
+                # Pre-recovery for prediction phase
+                self.state[2] *= 0.9  # Dampen velocity before prediction
+                self.state[3] *= 0.9
+                
+            # 1. Prediction stage
+            self.predict_state(dt)
+            
+            # 2. Update stage
+            self.process_sensor_data()
+            
+            # 3. Update motion state
+            self.update_motion_state()
+            
+            # 4. Apply physics constraints
+            self.apply_physics_constraints()
+            
+            # 5. Update uncertainty metrics
+            self.update_uncertainty_metrics()
+            
+            # 6. Apply dynamic uncertainty recovery for improved stability
+            self.dynamic_uncertainty_recovery()
+            
+            # 7. Update tracking status
+            self.update_tracking_status()
+            
+            # Update last update time
+            self.last_update_time = current_time
+            
+        except Exception as e:
+            self.get_logger().error(f"Filter update error: {str(e)}")
+
+    def predict_state(self, dt):
+        """Optimized state prediction with minimal matrix operations and improved motion-aware processing."""
+        # Update state transition matrix for current dt
+        self._F[0, 2] = dt  # x += vx*dt
+        self._F[1, 3] = dt  # y += vy*dt
+        
+        # Reset process noise matrix
+        self._Q.fill(0.0)
+        
+        # Get motion state-based scaling with more precise tuning
+        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else "unknown"
+        motion_scale = 1.0
+        
+        if motion_state == MotionStateManager.STATIONARY:
+            motion_scale = 0.7  # Reduced from 0.8
+        elif motion_state == MotionStateManager.LONG_STATIONARY:
+            motion_scale = 0.5  # Reduced from 0.6
+        elif motion_state == MotionStateManager.SMALL_MOVEMENT:
+            motion_scale = 0.9  # Reduced from 1.0
+        elif motion_state == MotionStateManager.MEDIUM_FAST:
+            motion_scale = 1.1  # Reduced from 1.2
+        
+        # Process noise parameters
+        q_pos = self.process_noise_pos * dt * motion_scale
+        q_vel = self.process_noise_vel * dt * motion_scale
+        
+        # Apply friction based on state with improved physics
+        if motion_state != MotionStateManager.MEDIUM_FAST:
+            # Calculate current velocity
+            vx, vy = self.state[2], self.state[3]
+            current_velocity = math.sqrt(vx*vx + vy*vy)
+            
+            if current_velocity > 0.01:
+                # Apply friction based on state - more aggressive for stationary
+                friction_coef = 0.015  # Increased from 0.01
+                if motion_state == MotionStateManager.STATIONARY:
+                    friction_coef = 0.03  # Increased from 0.02
+                elif motion_state == MotionStateManager.LONG_STATIONARY:
+                    friction_coef = 0.04  # Increased from 0.03
+                
+                # Adjust friction based on uncertainty
+                if hasattr(self, 'position_uncertainty') and self.position_uncertainty > 0.3:
+                    # Apply stronger friction during high uncertainty
+                    friction_coef *= 1.5
+                
+                # Calculate deceleration
+                deceleration = friction_coef * 9.81  # μg
+                dv = min(current_velocity, deceleration * dt)
+                
+                # Apply proportional deceleration
+                if dv > 0 and current_velocity > 0:
+                    factor = 1.0 - (dv / current_velocity)
+                    self.state[2] *= factor
+                    self.state[3] *= factor
+        
+        # Fill in process noise with optimized access
+        # Position variances
+        self._Q[0, 0] = q_pos * dt * dt / 3.0
+        self._Q[1, 1] = q_pos * dt * dt / 3.0
+        
+        # Velocity variances
+        self._Q[2, 2] = q_vel * dt
+        self._Q[3, 3] = q_vel * dt
+        
+        # Covariances
+        self._Q[0, 2] = self._Q[2, 0] = q_pos * dt * dt / 2.0
+        self._Q[1, 3] = self._Q[3, 1] = q_pos * dt * dt / 2.0
+        
+        # Check for uncertainty-based scaling - limit growth for high uncertainty
+        if hasattr(self, 'position_uncertainty') and self.position_uncertainty > 0.3:
+            # Scale down process noise when uncertainty is already high
+            uncertainty_factor = 0.3 / self.position_uncertainty
+            self._Q *= max(0.5, uncertainty_factor)
+        
+        # Predict state with optimized operations
+        self.state = np.dot(self._F, self.state)
+        
+        # Predict covariance
+        self.covariance = np.dot(np.dot(self._F, self.covariance), self._F.T) + self._Q
 def main(args=None):
     """Main function with optimized executor."""
     rclpy.init(args=args)
