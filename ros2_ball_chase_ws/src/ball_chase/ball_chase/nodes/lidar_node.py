@@ -5,7 +5,7 @@ Basketball Tracking Robot - Optimized LIDAR Detection Node
 =========================================================
 
 This node processes 2D LIDAR data to detect a basketball and provide 3D position information.
-It correlates LIDAR data with camera-based detections from YOLO and HSV nodes.
+It correlates LIDAR data with camera-based detections from YOLO.
 
 Key optimizations:
 - Lightweight buffer implementation with fixed memory allocation
@@ -638,10 +638,8 @@ class BasketballLidarDetector(Node):
         
         # Use LightweightBuffer instead of deque
         self.detection_times = LightweightBuffer(max_size=20)
-        
-        # Detection sources
+          # Detection sources
         self.yolo_detections = 0
-        self.hsv_detections = 0
         
         # Position tracking with LightweightBuffer
         self.position_history = LightweightBuffer(max_size=10)
@@ -852,16 +850,7 @@ class BasketballLidarDetector(Node):
             queue_size,
             callback_group=self.subscription_cb_group
         )
-        
-        # HSV detection subscription
-        hsv_topic = input_topics.get('hsv_detection', '/basketball/hsv/position')
-        self.hsv_subscription = self.create_subscription(
-            PointStamped,
-            hsv_topic,
-            lambda msg: self.sensor_callback(msg, 'hsv'),
-            queue_size,
-            callback_group=self.subscription_cb_group
-        )
+          # HSV subscription removed
         
         # YOLO bounding box subscription for 3D position estimation
         from std_msgs.msg import Float32MultiArray
@@ -1763,12 +1752,8 @@ class BasketballLidarDetector(Node):
         
         # Set color based on source and motion state for better visualization
         motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else "unknown"
-        
-        # Base color on source
-        if source.lower().startswith("yolo"):
-            color_config = colors.get('yolo', {'r': 0.0, 'g': 1.0, 'b': 0.3, 'base_alpha': 0.5})
-        else:  # HSV or others
-            color_config = colors.get('hsv', {'r': 1.0, 'g': 0.6, 'b': 0.0, 'base_alpha': 0.5})
+          # Always use YOLO color config since HSV is removed
+        color_config = colors.get('yolo', {'r': 0.0, 'g': 1.0, 'b': 0.3, 'base_alpha': 0.5})
         
         # Adjust color based on motion state
         if motion_state == MotionStateManager.STATIONARY:
@@ -2129,10 +2114,8 @@ class BasketballLidarDetector(Node):
                     "processing_skips": self.processing_skips,
                     "scan_rate": scan_rate,
                     "detection_rate": detection_rate,
-                    "avg_processing_time_ms": avg_time * 1000 if avg_time else 0,
-                    "sources": {
-                        "yolo_detections": self.yolo_detections,
-                        "hsv_detections": self.hsv_detections
+                    "avg_processing_time_ms": avg_time * 1000 if avg_time else 0,                    "sources": {
+                        "yolo_detections": self.yolo_detections
                     }
                 },
                 "config": {
