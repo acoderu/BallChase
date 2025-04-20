@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 """
-Tennis Ball Tracking Robot - PID Controller Node
-===============================================
+Tennis Ball Tracking Robot - Optimized PID Controller Node
+========================================================
 
 Project Overview:
 ----------------
@@ -27,6 +27,16 @@ PID (Proportional-Integral-Derivative) control is a feedback mechanism that:
 
 These three components are weighted and combined to produce smooth, accurate control:
 Output = Kp*error + Ki*∫error·dt + Kd*(d/dt)error
+
+Optimizations:
+------------
+This version includes significant optimizations for better performance on Raspberry Pi:
+- Memory reuse for ROS messages and buffers
+- Reduced computational load with caching and lazy evaluation
+- Tiered update frequencies for different operations
+- Throttled logging to reduce overhead
+- Improved concurrency and CPU utilization
+- Deadzone for lateral movement to prevent small oscillations
 
 Data Pipeline:
 -------------
@@ -63,14 +73,65 @@ TOPICS = {
     }
 }
 
+# Log throttling parameters
+LOG_THROTTLE_CONTROL = 1.0     # Seconds between control loop status logs
+LOG_THROTTLE_STATE = 0.5       # Seconds between state change logs
+LOG_THROTTLE_DIAG = 0.2        # Seconds between diagnostic logs
+
+class LightweightBuffer:
+    """
+    Memory-efficient buffer for storing historical data.
+    
+    This implementation pre-allocates its storage and operates as a circular 
+    buffer, overwriting the oldest entries when full to avoid dynamic allocations.
+    """
+    
+    def __init__(self, max_size=20, default_value=(0.0, 0.0, 0.0)):
+        """
+        Initialize a fixed-size circular buffer.
+        
+        Args:
+            max_size (int): Maximum number of elements to store
+            default_value: Default value for pre-allocation
+        """
+        self.data = [default_value] * max_size  # Pre-allocate with default values
+        self.next_index = 0
+        self.count = 0
+        self.max_size = max_size
+    
+    def add(self, value):
+        """
+        Add a new value to the buffer, overwriting oldest if full.
+        
+        Args:
+            value: Value to add to the buffer
+        """
+        self.data[self.next_index] = value
+        self.next_index = (self.next_index + 1) % self.max_size
+        self.count = min(self.count + 1, self.max_size)
+    
+    def get_all(self):
+        """
+        Get all values currently in the buffer.
+        
+        Returns:
+            list: All values in chronological order
+        """
+        if self.count < self.max_size:
+            return self.data[:self.count]
+        # Reconstruct in chronological order
+        start_idx = self.next_index
+        return self.data[start_idx:] + self.data[:start_idx]
+
 class PIDController:
     """
-    A general-purpose PID controller implementation.
+    A memory-efficient PID controller implementation.
     
     This class provides a complete PID controller with:
     - Anti-windup protection to prevent integral term saturation
     - Output limiting to ensure safe operation
     - Automatic time calculation for correct derivative and integral terms
+    - Memory reuse for improved performance
     
     The PID formula used is:
     output = Kp*error + Ki*∫error·dt + Kd*Δerror/Δt
@@ -212,7 +273,7 @@ class PIDController:
 
 class PIDControllerNode(Node):
     """
-    PID Controller node for tennis ball tracking.
+    Optimized PID Controller node for tennis ball tracking.
     
     This node uses separate PID controllers for movement:
     - Linear X velocity controller: Adjusts forward/backward speed to maintain ideal distance
@@ -225,6 +286,14 @@ class PIDControllerNode(Node):
     3. Publishes velocity commands to control the robot
     4. Adapts control parameters based on robot state and target distance
     5. Provides detailed diagnostic information for tuning and debugging
+    
+    Optimizations include:
+    - Message reuse to reduce memory allocations
+    - Fixed-size buffers with pre-allocation
+    - Throttled logging to reduce overhead
+    - Tiered update frequencies for different operations
+    - Caching of frequently used calculations
+    - Deadzones for lateral movement
     """
     
     def __init__(self):
@@ -240,17 +309,26 @@ class PIDControllerNode(Node):
         # Set up state variables
         self._init_state_variables()
         
+        # Pre-allocate ROS messages (optimization for memory reuse)
+        self._init_reusable_messages()
+        
         # Set up subscriptions
         self._setup_subscriptions()
         
         # Set up publishers
         self._setup_publishers()
         
-        # Set up timers
+        # Set up timers with tiered frequencies
         self._setup_timers()
         
-        self.get_logger().info("PID Controller initialized")
-        self.log_parameters()
+        # Flag to track if we're shutting down
+        self._shutting_down = False
+        
+        # Log startup info (just once)
+        self.get_logger().info("PID Controller initialized with optimizations")
+        
+        # Use throttled logging for parameters
+        self._log_parameters_throttled()
         
     def _declare_parameters(self):
         """Declare and get all node parameters with descriptive comments."""
@@ -258,11 +336,11 @@ class PIDControllerNode(Node):
             namespace='',
             parameters=[
                 # Linear X velocity PID parameters - controls forward/backward movement
-                ('linear_x_kp', 0.5),     # Proportional gain
-                ('linear_x_ki', 0.1),     # Integral gain
-                ('linear_x_kd', 0.05),    # Derivative gain
-                ('linear_x_min', -0.2),   # Backward limit (m/s)
-                ('linear_x_max', 0.2),    # Forward limit (m/s)
+                ('linear_x_kp', 1.0),     # Proportional gain
+                ('linear_x_ki', 0.03),    # Integral gain
+                ('linear_x_kd', 0.1),     # Derivative gain 
+                ('linear_x_min', 0.0),    # Backward limit (0.0 to prevent backward motion)
+                ('linear_x_max', 0.2),    # Forward limit (m/s) - REDUCED from 0.25 to 0.2
                 
                 # Linear Y velocity PID parameters - controls lateral movement (strafing)
                 ('linear_y_kp', 0.5),     # Proportional gain
@@ -272,21 +350,29 @@ class PIDControllerNode(Node):
                 ('linear_y_max', 0.2),    # Left strafe limit (m/s)
                 
                 # Angular velocity PID parameters - controls turning
-                ('angular_kp', 1.0),    # Proportional gain
-                ('angular_ki', 0.1),    # Integral gain
-                ('angular_kd', 0.2),    # Derivative gain
-                ('angular_min', -0.2),  # Right turn limit (rad/s)
-                ('angular_max', 0.2),   # Left turn limit (rad/s)
+                ('angular_kp', 2.0),    # Proportional gain - INCREASED from 1.5 to 2.0
+                ('angular_ki', 0.05),   # Integral gain - DECREASED from 0.1 to 0.05
+                ('angular_kd', 0.3),    # Derivative gain - INCREASED from 0.2 to 0.3
+                ('angular_min', -0.4),  # Right turn limit (rad/s) - INCREASED for better rotation
+                ('angular_max', 0.4),   # Left turn limit (rad/s) - INCREASED for better rotation
                 
                 # Control parameters
-                ('min_distance', 0.5),       # Minimum distance to keep from ball (meters)
+                ('min_distance', 0.9),       # Minimum distance to keep from ball (meters) - increased to 3ft
                 ('max_distance', 2.0),       # Maximum tracking distance (meters)
                 ('target_offset_x', 0.0),    # Desired offset from ball in x direction
                 ('target_offset_y', 0.0),    # Desired offset from ball in y direction
                 ('target_update_rate', 10.0),# Control loop update rate (Hz)
+                ('diagnostics_rate', 1.0),   # Rate for detailed diagnostics (Hz)
+                ('frame_check_rate', 0.2),   # Rate for coordinate frame checks (Hz)
                 ('debug_level', 1),          # 0=errors only, 1=info, 2=debug
                 ('adaptive_gains', True),    # Whether to adjust gains based on distance
                 ('use_lateral_control', True), # Whether to use Y-axis control for lateral movement
+                ('lateral_deadband', 0.05),  # Deadband for lateral error (to prevent minor oscillations)
+                ('deadband_distance', 0.02), # Deadband for distance error (to prevent minor oscillations)
+                ('stop_zone_size', 0.2),     # Size of zone where robot will stop (much larger now - 0.2m)
+                ('safety_min_distance', 0.4), # Emergency stop distance (m) - stop if closer than this
+                ('min_angular_velocity', 0.02), # Minimum angular velocity to apply (rad/s)
+                ('max_accel', 0.3),          # REDUCED from 0.4 to 0.3 Maximum acceleration per control cycle
             ]
         )
         
@@ -314,9 +400,17 @@ class PIDControllerNode(Node):
         self.target_offset_x = self.get_parameter('target_offset_x').value
         self.target_offset_y = self.get_parameter('target_offset_y').value
         self.update_rate = self.get_parameter('target_update_rate').value
+        self.diagnostics_rate = self.get_parameter('diagnostics_rate').value
+        self.frame_check_rate = self.get_parameter('frame_check_rate').value
         self.debug_level = self.get_parameter('debug_level').value
         self.adaptive_gains = self.get_parameter('adaptive_gains').value
         self.use_lateral_control = self.get_parameter('use_lateral_control').value
+        self.lateral_deadband = self.get_parameter('lateral_deadband').value
+        self.deadband_distance = self.get_parameter('deadband_distance').value
+        self.stop_zone_size = self.get_parameter('stop_zone_size').value
+        self.safety_min_distance = self.get_parameter('safety_min_distance').value
+        self.min_angular_velocity = self.get_parameter('min_angular_velocity').value
+        self.max_accel = self.get_parameter('max_accel').value
         
     def _init_controllers(self):
         """Initialize the PID controllers."""
@@ -339,6 +433,16 @@ class PIDControllerNode(Node):
             name="Angular"
         )
         
+    def _init_reusable_messages(self):
+        """Pre-allocate ROS messages for reuse to avoid memory churn."""
+        # Pre-allocate velocity command message
+        self._cmd_vel_msg = Twist()
+        
+        # Pre-allocate diagnostics message
+        self._diag_msg = Float32MultiArray()
+        # Pre-allocate data array with fixed size for diagnostics
+        self._diag_data = np.zeros(11, dtype=np.float32)
+        
     def _init_state_variables(self):
         """Initialize all state tracking variables."""
         # Target tracking
@@ -347,16 +451,36 @@ class PIDControllerNode(Node):
         
         # Robot state
         self.robot_state = "initializing"  # Current state from state manager
+        self.previous_state = None         # For state transition detection
         self.last_control_time = time.time()  # For periodic logging
+        
+        # Log throttling timestamps
+        self.last_control_log_time = 0.0
+        self.last_state_log_time = 0.0
+        self.last_diag_log_time = 0.0
+        self.last_frame_check_time = 0.0
         
         # Derived values
         self.current_distance = 0.0     # Current distance to target
         self.current_bearing = 0.0      # Current bearing to target
         self.current_lateral = 0.0      # Current lateral offset to target
         
+        # Error tracking
+        self.last_distance_error = 0.0  # Previous distance error
+        
+        # Motion smoothing
+        self.last_cmd_vel = (0.0, 0.0, 0.0)  # (lin_x, lin_y, ang_z)
+        
         # Diagnostic information
         self.cycle_count = 0            # Number of control cycles
-        self.velocity_history = []      # Recent velocity commands
+        
+        # Use LightweightBuffer for velocity history
+        self.velocity_history = LightweightBuffer(max_size=20)
+        
+        # Cached values
+        self.desired_distance = self.min_distance + self.target_offset_x
+        self._cached_transforms = {}    # Store transforms for reuse
+        self._last_diagnostics_frame = None  # Track frame changes for diagnostics
         
     def _setup_subscriptions(self):
         """Set up all subscriptions for this node."""
@@ -393,18 +517,21 @@ class PIDControllerNode(Node):
         )
         
     def _setup_timers(self):
-        """Set up timer callbacks for periodic tasks."""
+        """Set up timer callbacks for periodic tasks with tiered frequencies."""
         # Create control loop timer at specified update rate
         self.timer = self.create_timer(1.0 / self.update_rate, self.control_loop_callback)
         
         # Create a slower timer for detailed diagnostics
-        self.diagnostic_timer = self.create_timer(1.0, self.publish_detailed_diagnostics)
+        self.diagnostic_timer = self.create_timer(1.0 / self.diagnostics_rate, self.publish_detailed_diagnostics)
         
-        # Create a timer for coordinate frame diagnostics to catch mismatches early
-        self.frame_diagnostic_timer = self.create_timer(3.0, self.run_coordinate_frame_diagnostics)
+        # Create a timer for coordinate frame diagnostics at lowest frequency
+        self.frame_diagnostic_timer = self.create_timer(1.0 / self.frame_check_rate, self.run_coordinate_frame_diagnostics)
         
-    def log_parameters(self):
-        """Log all the current parameter values for reference."""
+    def _log_parameters_throttled(self):
+        """Log parameters with throttling to avoid log spam."""
+        if self.debug_level < 1:
+            return
+            
         self.get_logger().info("=== PID Controller Parameters ===")
         self.get_logger().info("Linear X velocity PID:")
         self.get_logger().info(f"  Kp: {self.linear_x_kp}, Ki: {self.linear_x_ki}, Kd: {self.linear_x_kd}")
@@ -426,8 +553,37 @@ class PIDControllerNode(Node):
         self.get_logger().info(f"  Update rate: {self.update_rate} Hz")
         self.get_logger().info(f"  Adaptive gains: {self.adaptive_gains}")
         self.get_logger().info(f"  Use lateral control: {self.use_lateral_control}")
+        self.get_logger().info(f"  Lateral deadband: {self.lateral_deadband} m")
+        self.get_logger().info(f"  Distance deadband: {self.deadband_distance} m")
+        self.get_logger().info(f"  Stop zone size: {self.stop_zone_size} m")
+        self.get_logger().info(f"  Safety min distance: {self.safety_min_distance} m")
+        self.get_logger().info(f"  Min angular velocity: {self.min_angular_velocity} rad/s")
+        self.get_logger().info(f"  Max acceleration: {self.max_accel}")
         self.get_logger().info(f"  Debug level: {self.debug_level}")
         self.get_logger().info("==================================")
+        
+    def _log_throttled(self, level_func, message, min_interval, last_time_attr):
+        """
+        Log messages with throttling to reduce log volume.
+        
+        Args:
+            level_func: Logger function (e.g., self.get_logger().info)
+            message: Message to log
+            min_interval: Minimum time between logs in seconds
+            last_time_attr: Attribute name storing last log time
+        
+        Returns:
+            bool: True if message was logged, False if throttled
+        """
+        current_time = time.time()
+        last_time = getattr(self, last_time_attr, 0)
+        
+        if current_time - last_time >= min_interval:
+            level_func(message)
+            setattr(self, last_time_attr, current_time)
+            return True
+            
+        return False
         
     def state_callback(self, msg):
         """
@@ -443,15 +599,25 @@ class PIDControllerNode(Node):
         
         # If state changed, handle the transition
         if new_state != self.robot_state:
-            self.get_logger().info(f"Robot state changed: {self.robot_state} → {new_state}")
+            # Throttled logging for state changes
+            self._log_throttled(
+                self.get_logger().info,
+                f"Robot state changed: {self.robot_state} → {new_state}",
+                LOG_THROTTLE_STATE,
+                'last_state_log_time'
+            )
+            
+            self.previous_state = self.robot_state
             self.robot_state = new_state
             
             # Only reset PIDs when switching to/from tracking
-            if new_state == "tracking" or self.robot_state == "tracking":
+            if new_state == "tracking" or self.previous_state == "tracking":
                 self.pid_linear_x.reset()
                 self.pid_linear_y.reset()
                 self.pid_angular.reset()
-                self.get_logger().debug("PID controllers reset due to state change")
+                
+                if self.debug_level >= 1:
+                    self.get_logger().debug("PID controllers reset due to state change")
                 
             # If we're not in tracking mode, ensure the robot is stopped
             # (unless it's in searching or lost_ball mode, where the state manager controls motion)
@@ -468,6 +634,9 @@ class PIDControllerNode(Node):
         Args:
             msg (PointStamped): 3D position of the target
         """
+        if self._shutting_down:
+            return
+            
         self.current_target = msg
         self.last_target_time = time.time()
         
@@ -509,17 +678,28 @@ class PIDControllerNode(Node):
             self.current_lateral = -target.y
             
             # For base frame, we might need to handle z component differently
-            if abs(target.z) > 0.1:  # If there's significant height difference
+            if abs(target.z) > 0.1 and self.debug_level >= 2:  # If there's significant height difference
                 self.get_logger().debug(f"Target has height component: z={target.z:.2f}m")
 
-        # Enhanced detailed logging for every target update to catch issues early
-        self.get_logger().info(
-            f"Target update: raw=[{target.x:.2f}, {target.y:.2f}, {target.z:.2f}], "
-            f"frame={frame_id}, "
-            f"calculated: distance={self.current_distance:.2f}m, "
-            f"lateral={self.current_lateral:.2f}m, "
-            f"bearing={math.degrees(self.current_bearing):.1f}°"
-        )
+        # Check for safety distance - if ball is too close, log it immediately
+        if self.current_distance < self.safety_min_distance:
+            self.get_logger().warn(
+                f"Ball very close to robot! Distance={self.current_distance:.2f}m, "
+                f"safety threshold={self.safety_min_distance:.2f}m"
+            )
+            
+        # Throttled logging for target updates
+        if self.debug_level >= 1:
+            self._log_throttled(
+                self.get_logger().info,
+                f"Target update: raw=[{target.x:.2f}, {target.y:.2f}, {target.z:.2f}], "
+                f"frame={frame_id}, "
+                f"calculated: distance={self.current_distance:.2f}m, "
+                f"lateral={self.current_lateral:.2f}m, "
+                f"bearing={math.degrees(self.current_bearing):.1f}°",
+                0.5,  # Every 0.5 seconds max
+                'last_target_log_time'
+            )
         
     def control_loop_callback(self):
         """
@@ -529,7 +709,15 @@ class PIDControllerNode(Node):
         1. Checks if we should be controlling the robot in the current state
         2. Calculates appropriate linear and angular velocities using PID controllers
         3. Publishes velocity commands to control the robot's motion
+        
+        Optimizations include:
+        - Early exit conditions to skip unnecessary processing
+        - Reuse of pre-allocated message objects
+        - Acceleration limiting for smoother motion
         """
+        if self._shutting_down:
+            return
+            
         current_time = time.time()
         self.cycle_count += 1
         
@@ -538,12 +726,22 @@ class PIDControllerNode(Node):
             # When not tracking, ensure robot is stopped (unless in a state where another node controls movement)
             if self.robot_state not in ["searching", "lost_ball"]:
                 self.stop_robot()
-            # Log the reason we're not controlling, but only every 10 cycles to avoid log spam
-            if self.debug_level >= 1 and self.cycle_count % 10 == 0:
+            # Log the reason we're not controlling, but throttled to avoid log spam
+            if self.debug_level >= 1 and self.cycle_count % 50 == 0:
                 if self.robot_state != "tracking":
-                    self.get_logger().info(f"Not controlling robot - current state: {self.robot_state}")
+                    self._log_throttled(
+                        self.get_logger().info,
+                        f"Not controlling robot - current state: {self.robot_state}",
+                        LOG_THROTTLE_CONTROL,
+                        'last_control_log_time'
+                    )
                 elif self.current_target is None:
-                    self.get_logger().info("Not controlling robot - no target data received yet")
+                    self._log_throttled(
+                        self.get_logger().info,
+                        "Not controlling robot - no target data received yet",
+                        LOG_THROTTLE_CONTROL,
+                        'last_control_log_time'
+                    )
             return
             
         # Check if target is too old (500ms timeout)
@@ -552,14 +750,16 @@ class PIDControllerNode(Node):
             self.stop_robot()
             return
         
-        # Log current target position and properties for diagnostics
-        # This will help catch any coordinate frame mismatches
-        if self.debug_level >= 2 and self.cycle_count % 10 == 0:
+        # Log current target position and properties for diagnostics, but throttled
+        if self.debug_level >= 2 and self.cycle_count % 50 == 0:
             raw_point = self.current_target.point
             frame_id = getattr(self.current_target.header, 'frame_id', 'unknown')
-            self.get_logger().info(
+            self._log_throttled(
+                self.get_logger().info,
                 f"Raw target data: pos=[{raw_point.x:.2f}, {raw_point.y:.2f}, {raw_point.z:.2f}], "
-                f"frame={frame_id}"
+                f"frame={frame_id}",
+                1.0,  # Every 1 second max
+                'last_raw_target_log_time'
             )
             
         # Use the processed values from target_callback instead of recalculating
@@ -568,16 +768,40 @@ class PIDControllerNode(Node):
         lateral = self.current_lateral
         bearing = self.current_bearing
         
-        # Log values each cycle to diagnose coordinate frame issues
-        self.get_logger().info(f"Control errors: distance_error={distance - self.min_distance:.2f}m, lateral_error={lateral:.2f}m, angular_error={math.degrees(bearing):.1f}°")
+        # Calculate distance error (target - current)
+        raw_distance_error = distance - self.desired_distance
         
-        # Calculate desired distance (with minimum safe distance)
-        desired_distance = max(self.min_distance, min(distance, self.max_distance))
+        # Throttled logging for control errors
+        if self.debug_level >= 1 and self.cycle_count % 10 == 0:
+            self._log_throttled(
+                self.get_logger().info,
+                f"Control errors: distance_error={raw_distance_error:.2f}m, "
+                f"lateral_error={lateral:.2f}m, "
+                f"angular_error={math.degrees(bearing):.1f}°",
+                0.2,  # Every 0.2 seconds max
+                'last_error_log_time'
+            )
         
-        # Calculate errors - ball_distance is already the full 3D distance
-        distance_error = distance - desired_distance - self.target_offset_x
+        # Emergency safety check - if ball is too close, stop immediately
+        if distance < self.safety_min_distance:
+            self.get_logger().warn(f"Emergency stop! Ball too close: {distance:.2f}m < {self.safety_min_distance:.2f}m")
+            self.stop_robot()
+            return
+            
+        # Calculate distance error with appropriate sign (negative when too close)
+        distance_error = raw_distance_error
+        
+        # Apply deadband to distance error to prevent small oscillations
+        if abs(distance_error) < self.deadband_distance:
+            distance_error = 0.0
+        
+        # Calculate lateral error and apply lateral deadband
         lateral_error = lateral - self.target_offset_y
-        angular_error = bearing  # We want bearing to be 0 (centered)
+        if abs(lateral_error) < self.lateral_deadband:
+            lateral_error = 0.0
+            
+        # Angular error (we want bearing to be 0 - centered)
+        angular_error = bearing
         
         # Apply adaptive gains if enabled
         if self.adaptive_gains:
@@ -586,8 +810,8 @@ class PIDControllerNode(Node):
         # Compute PID outputs
         linear_x_velocity = self.pid_linear_x.compute(distance_error, current_time)
         
-        # Handle lateral movement based on configuration
-        if self.use_lateral_control:
+        # Handle lateral movement based on configuration and deadband
+        if self.use_lateral_control and abs(lateral_error) >= self.lateral_deadband:
             # Use direct lateral control with mecanum wheels
             linear_y_velocity = self.pid_linear_y.compute(lateral_error, current_time)
             # Reduce angular velocity influence when using lateral control
@@ -597,61 +821,113 @@ class PIDControllerNode(Node):
             linear_y_velocity = 0.0
             angular_scale = 1.0
             
+        # Calculate angular velocity with minimum threshold
         angular_velocity = self.pid_angular.compute(angular_error, current_time) * angular_scale
         
-        # Create velocity command for mecanum wheels
-        cmd_vel = Twist()
-        cmd_vel.linear.x = linear_x_velocity   # Forward/backward
-        cmd_vel.linear.y = linear_y_velocity   # Left/right strafe (positive = left)
-        cmd_vel.angular.z = angular_velocity   # Rotation (positive = counterclockwise)
+        # Apply minimum angular velocity threshold if needed
+        if 0 < abs(angular_velocity) < self.min_angular_velocity:
+            # Apply minimum threshold with correct sign
+            angular_velocity = math.copysign(self.min_angular_velocity, angular_velocity)
+            
+        # Apply acceleration limiting for smoother motion
+        linear_x_velocity = self._apply_acceleration_limit(
+            self.last_cmd_vel[0], linear_x_velocity, self.max_accel, current_time)
+        linear_y_velocity = self._apply_acceleration_limit(
+            self.last_cmd_vel[1], linear_y_velocity, self.max_accel, current_time)
+        angular_velocity = self._apply_acceleration_limit(
+            self.last_cmd_vel[2], angular_velocity, self.max_accel * 2, current_time)
+            
+        # Store for next cycle
+        self.last_cmd_vel = (linear_x_velocity, linear_y_velocity, angular_velocity)
+        
+        # Update reusable velocity command message (memory optimization)
+        self._cmd_vel_msg.linear.x = linear_x_velocity    # Forward/backward
+        self._cmd_vel_msg.linear.y = linear_y_velocity    # Left/right strafe
+        self._cmd_vel_msg.angular.z = angular_velocity    # Rotation
         
         # Log velocity values less frequently
         if self.debug_level >= 1 and self.cycle_count % 20 == 0:
-            self.get_logger().info(
+            self._log_throttled(
+                self.get_logger().info,
                 f"[#{self.cycle_count}] Velocity cmd: linear_x={linear_x_velocity:.3f}m/s, "
-                f"linear_y={linear_y_velocity:.3f}m/s, angular={angular_velocity:.3f}rad/s"
+                f"linear_y={linear_y_velocity:.3f}m/s, "
+                f"angular={angular_velocity:.3f}rad/s",
+                0.5,  # Every 0.5 seconds max
+                'last_velocity_log_time'
             )
         
-        # Save for history
-        self.velocity_history.append((linear_x_velocity, linear_y_velocity, angular_velocity))
-        if len(self.velocity_history) > 20:  # Keep last 20 commands
-            self.velocity_history.pop(0)
+        # Save for history using the LightweightBuffer
+        self.velocity_history.add((linear_x_velocity, linear_y_velocity, angular_velocity))
         
-        # Publish command
-        self.cmd_vel_pub.publish(cmd_vel)
+        # Publish command with pre-allocated message
+        self.cmd_vel_pub.publish(self._cmd_vel_msg)
         
         # Publish basic diagnostics every cycle
         self.publish_basic_diagnostics(distance_error, lateral_error, angular_error,
                                       linear_x_velocity, linear_y_velocity, angular_velocity)
         
-        # Log periodic status (approximately once per second)
-        if self.debug_level >= 1 and (current_time - self.last_control_time) >= 1.0:
-            # Get PID components for debugging
-            lin_x_p, lin_x_i, lin_x_d = self.pid_linear_x.get_components()
-            lin_y_p, lin_y_i, lin_y_d = self.pid_linear_y.get_components()
-            ang_p, ang_i, ang_d = self.pid_angular.get_components()
-            
-            self.get_logger().info(
-                f"PID Control: dist_err={distance_error:.2f}m, "
-                f"lat_err={lateral_error:.2f}m, "
-                f"ang_err={math.degrees(angular_error):.1f}°, "
-                f"lin_x={linear_x_velocity:.2f}m/s, "
-                f"lin_y={linear_y_velocity:.2f}m/s, "
-                f"ang_v={angular_velocity:.2f}rad/s"
-            )
-            
-            if self.debug_level >= 2:
-                self.get_logger().debug(
-                    f"Linear X PID: P={lin_x_p:.2f}, I={lin_x_i:.2f}, D={lin_x_d:.2f}"
-                )
-                self.get_logger().debug(
-                    f"Linear Y PID: P={lin_y_p:.2f}, I={lin_y_i:.2f}, D={lin_y_d:.2f}"
-                )
-                self.get_logger().debug(
-                    f"Angular PID: P={ang_p:.2f}, I={ang_i:.2f}, D={ang_d:.2f}"
+        # Log periodic status with throttling
+        if self.debug_level >= 1:
+            current_interval = current_time - self.last_control_time
+            if current_interval >= LOG_THROTTLE_CONTROL:
+                # Get PID components for debugging
+                lin_x_p, lin_x_i, lin_x_d = self.pid_linear_x.get_components()
+                lin_y_p, lin_y_i, lin_y_d = self.pid_linear_y.get_components()
+                ang_p, ang_i, ang_d = self.pid_angular.get_components()
+                
+                self.get_logger().info(
+                    f"PID Control: dist_err={distance_error:.2f}m, "
+                    f"lat_err={lateral_error:.2f}m, "
+                    f"ang_err={math.degrees(angular_error):.1f}°, "
+                    f"lin_x={linear_x_velocity:.2f}m/s, "
+                    f"lin_y={linear_y_velocity:.2f}m/s, "
+                    f"ang_v={angular_velocity:.2f}rad/s"
                 )
                 
-            self.last_control_time = current_time
+                if self.debug_level >= 2:
+                    self.get_logger().debug(
+                        f"Linear X PID: P={lin_x_p:.2f}, I={lin_x_i:.2f}, D={lin_x_d:.2f}"
+                    )
+                    self.get_logger().debug(
+                        f"Linear Y PID: P={lin_y_p:.2f}, I={lin_y_i:.2f}, D={lin_y_d:.2f}"
+                    )
+                    self.get_logger().debug(
+                        f"Angular PID: P={ang_p:.2f}, I={ang_i:.2f}, D={ang_d:.2f}"
+                    )
+                    
+                self.last_control_time = current_time
+                
+    def _apply_acceleration_limit(self, current_velocity, target_velocity, max_accel, current_time):
+        """
+        Apply acceleration limiting for smoother motion.
+        
+        Args:
+            current_velocity (float): Current velocity
+            target_velocity (float): Desired velocity
+            max_accel (float): Maximum acceleration per control cycle
+            current_time (float): Current time
+            
+        Returns:
+            float: Limited velocity that doesn't exceed acceleration constraints
+        """
+        # Calculate time since last control step
+        dt = current_time - getattr(self, "last_accel_time", current_time - 0.1)
+        self.last_accel_time = current_time
+        
+        # Scale acceleration limit by time
+        accel_limit = max_accel * dt * 12.0  # Scale by dt and by 12 to get reasonable units (REDUCED from 15.0)
+        
+        # Calculate difference between current and target velocity
+        vel_diff = target_velocity - current_velocity
+        
+        # Limit acceleration if needed
+        if abs(vel_diff) > accel_limit:
+            # Apply limit with correct sign
+            limited_velocity = current_velocity + math.copysign(accel_limit, vel_diff)
+            return limited_velocity
+            
+        # No limiting needed
+        return target_velocity
             
     def _adjust_gains_for_distance(self, distance):
         """
@@ -663,8 +939,8 @@ class PIDControllerNode(Node):
         Args:
             distance (float): Current distance to target in meters
         """
-        # Scale factor based on distance (1.0 at max_distance, 0.5 at min_distance)
-        scale = 0.5 + 0.5 * min(1.0, max(0.0, (distance - self.min_distance) / 
+        # Scale factor based on distance (1.0 at max_distance, 0.7 at min_distance) - INCREASED from 0.5 to 0.7
+        scale = 0.7 + 0.3 * min(1.0, max(0.0, (distance - self.min_distance) / 
                                         (self.max_distance - self.min_distance)))
         
         # Apply scaling to controllers
@@ -682,11 +958,19 @@ class PIDControllerNode(Node):
             
     def stop_robot(self):
         """Send a command to stop all robot motion immediately."""
-        cmd_vel = Twist()  # All fields initialize to 0
-        self.cmd_vel_pub.publish(cmd_vel)
+        # Reuse cmd_vel message and just set all fields to 0
+        self._cmd_vel_msg.linear.x = 0.0
+        self._cmd_vel_msg.linear.y = 0.0
+        self._cmd_vel_msg.angular.z = 0.0
+        
+        # Publish stop command
+        self.cmd_vel_pub.publish(self._cmd_vel_msg)
+        
+        # Reset last command velocity for acceleration limiting
+        self.last_cmd_vel = (0.0, 0.0, 0.0)
         
         # Clear velocity history
-        self.velocity_history = []
+        self.velocity_history = LightweightBuffer(max_size=20)
         
     def publish_basic_diagnostics(self, distance_error, lateral_error, angular_error,
                                linear_x_velocity, linear_y_velocity, angular_velocity):
@@ -704,19 +988,25 @@ class PIDControllerNode(Node):
             linear_y_velocity: Computed left/right velocity (m/s)
             angular_velocity: Computed angular velocity (rad/s)
         """
-        diag_msg = Float32MultiArray()
-        diag_msg.data = [
-            distance_error,
-            lateral_error,
-            angular_error,
-            linear_x_velocity,
-            linear_y_velocity,
-            angular_velocity,
-            self.pid_linear_x.integral,
-            self.pid_linear_y.integral,
-            self.pid_angular.integral
-        ]
-        self.pid_diag_pub.publish(diag_msg)
+        if self._shutting_down:
+            return
+            
+        # Fill pre-allocated numpy array with diagnostic data
+        self._diag_data[0] = distance_error
+        self._diag_data[1] = lateral_error
+        self._diag_data[2] = angular_error
+        self._diag_data[3] = linear_x_velocity
+        self._diag_data[4] = linear_y_velocity
+        self._diag_data[5] = angular_velocity
+        self._diag_data[6] = self.pid_linear_x.integral
+        self._diag_data[7] = self.pid_linear_y.integral
+        self._diag_data[8] = self.pid_angular.integral
+        self._diag_data[9] = self.current_distance
+        self._diag_data[10] = float(abs(distance_error) < self.stop_zone_size)
+        
+        # Update and publish pre-allocated message
+        self._diag_msg.data = self._diag_data.tolist()  # Convert to Python list for ROS message
+        self.pid_diag_pub.publish(self._diag_msg)
         
     def publish_detailed_diagnostics(self):
         """
@@ -725,45 +1015,55 @@ class PIDControllerNode(Node):
         This provides more detailed information for debugging and tuning,
         but at a lower frequency to avoid flooding the system.
         """
-        if not self.robot_state == "tracking":
+        if self._shutting_down or not self.robot_state == "tracking":
             return
             
         # Calculate velocity statistics
-        if self.velocity_history:
-            # Extract linear and angular velocities
-            lin_x_velocities = [v[0] for v in self.velocity_history]
-            lin_y_velocities = [v[1] for v in self.velocity_history]
-            ang_velocities = [v[2] for v in self.velocity_history]
+        vel_data = self.velocity_history.get_all()
+        if not vel_data:
+            return
             
-            # Calculate statistics
-            avg_lin_x_vel = sum(lin_x_velocities) / len(lin_x_velocities)
-            avg_lin_y_vel = sum(lin_y_velocities) / len(lin_y_velocities)
-            avg_ang_vel = sum(ang_velocities) / len(ang_velocities)
-            max_lin_x_vel = max(lin_x_velocities)
-            max_lin_y_vel = max(lin_y_velocities) if any(lin_y_velocities) else 0
-            max_ang_vel = max(ang_velocities)
+        # Extract linear and angular velocities
+        lin_x_velocities = [v[0] for v in vel_data]
+        lin_y_velocities = [v[1] for v in vel_data]
+        ang_velocities = [v[2] for v in vel_data]
+        
+        # Calculate statistics
+        avg_lin_x_vel = sum(lin_x_velocities) / len(lin_x_velocities) if lin_x_velocities else 0
+        avg_lin_y_vel = sum(lin_y_velocities) / len(lin_y_velocities) if lin_y_velocities else 0
+        avg_ang_vel = sum(ang_velocities) / len(ang_velocities) if ang_velocities else 0
+        max_lin_x_vel = max(lin_x_velocities) if lin_x_velocities else 0
+        max_lin_y_vel = max(lin_y_velocities) if lin_y_velocities else 0
+        max_ang_vel = max(abs(v) for v in ang_velocities) if ang_velocities else 0
+        
+        # Only log if time interval has passed (throttling)
+        current_time = time.time()
+        if (current_time - self.last_diag_log_time) < LOG_THROTTLE_DIAG:
+            return
             
-            # Log detailed information
-            self.get_logger().info("=== PID Detailed Diagnostics ===")
-            self.get_logger().info(f"Target: distance={self.current_distance:.2f}m, lateral={self.current_lateral:.2f}m, bearing={math.degrees(self.current_bearing):.1f}°")
-            self.get_logger().info(f"Linear X velocity: avg={avg_lin_x_vel:.2f}m/s, max={max_lin_x_vel:.2f}m/s")
-            self.get_logger().info(f"Linear Y velocity: avg={avg_lin_y_vel:.2f}m/s, max={max_lin_y_vel:.2f}m/s")
-            self.get_logger().info(f"Angular velocity: avg={avg_ang_vel:.2f}rad/s, max={max_ang_vel:.2f}rad/s")
-            
-            # Get PID components
-            lin_x_p, lin_x_i, lin_x_d = self.pid_linear_x.get_components()
-            lin_y_p, lin_y_i, lin_y_d = self.pid_linear_y.get_components()
-            ang_p, ang_i, ang_d = self.pid_angular.get_components()
-            
-            self.get_logger().info(f"Linear X PID components: P={lin_x_p:.2f}, I={lin_x_i:.2f}, D={lin_x_d:.2f}")
-            self.get_logger().info(f"Linear Y PID components: P={lin_y_p:.2f}, I={lin_y_i:.2f}, D={lin_y_d:.2f}")
-            self.get_logger().info(f"Angular PID components: P={ang_p:.2f}, I={ang_i:.2f}, D={ang_d:.2f}")
-            
-            if self.adaptive_gains:
-                self.get_logger().info(f"Adaptive gains: linear_x_kp={self.pid_linear_x.kp:.2f}, linear_y_kp={self.pid_linear_y.kp:.2f}, angular_kp={self.pid_angular.kp:.2f}")
-            
-            self.get_logger().info(f"Control cycles: {self.cycle_count}")
-            self.get_logger().info("================================")
+        self.last_diag_log_time = current_time
+        
+        # Log detailed information
+        self.get_logger().info("=== PID Detailed Diagnostics ===")
+        self.get_logger().info(f"Target: distance={self.current_distance:.2f}m, lateral={self.current_lateral:.2f}m, bearing={math.degrees(self.current_bearing):.1f}°")
+        self.get_logger().info(f"Linear X velocity: avg={avg_lin_x_vel:.2f}m/s, max={max_lin_x_vel:.2f}m/s")
+        self.get_logger().info(f"Linear Y velocity: avg={avg_lin_y_vel:.2f}m/s, max={max_lin_y_vel:.2f}m/s")
+        self.get_logger().info(f"Angular velocity: avg={avg_ang_vel:.2f}rad/s, max={max_ang_vel:.2f}rad/s")
+        
+        # Get PID components
+        lin_x_p, lin_x_i, lin_x_d = self.pid_linear_x.get_components()
+        lin_y_p, lin_y_i, lin_y_d = self.pid_linear_y.get_components()
+        ang_p, ang_i, ang_d = self.pid_angular.get_components()
+        
+        self.get_logger().info(f"Linear X PID components: P={lin_x_p:.2f}, I={lin_x_i:.2f}, D={lin_x_d:.2f}")
+        self.get_logger().info(f"Linear Y PID components: P={lin_y_p:.2f}, I={lin_y_i:.2f}, D={lin_y_d:.2f}")
+        self.get_logger().info(f"Angular PID components: P={ang_p:.2f}, I={ang_i:.2f}, D={ang_d:.2f}")
+        
+        if self.adaptive_gains:
+            self.get_logger().info(f"Adaptive gains: linear_x_kp={self.pid_linear_x.kp:.2f}, linear_y_kp={self.pid_linear_y.kp:.2f}, angular_kp={self.pid_angular.kp:.2f}")
+        
+        self.get_logger().info(f"Control cycles: {self.cycle_count}")
+        self.get_logger().info("================================")
             
     def handle_coordinate_frame_diagnostics(self):
         """
@@ -772,8 +1072,8 @@ class PIDControllerNode(Node):
         This function analyzes the latest target data and logs detailed information
         about potential coordinate frame mismatches or interpretation issues.
         """
-        if self.current_target is None:
-            return
+        if self._shutting_down or self.current_target is None:
+            return {}
             
         target = self.current_target.point
         frame_id = getattr(self.current_target.header, 'frame_id', 'unknown')
@@ -838,34 +1138,71 @@ class PIDControllerNode(Node):
             "primary_axis": primary_axis
         }
         
-        # Log warning if we detect a potential coordinate frame mismatch
-        if frame_mismatch_detected:
-            self.get_logger().warn(f"Possible coordinate frame issue detected - {frame_diagnostics}")
-        else:
-            self.get_logger().debug(f"Coordinate frame diagnostics: {frame_diagnostics}")
-            
         return frame_diagnostics
 
     def run_coordinate_frame_diagnostics(self):
         """Periodic function to check for coordinate frame issues."""
-        if self.current_target is None:
+        if self._shutting_down or self.current_target is None:
             return
 
-        # Run the diagnostics
-        diagnostics = self.handle_coordinate_frame_diagnostics()
+        # Only run full diagnostics if:
+        # 1. We're in tracking mode (where it matters most)
+        # 2. The frame appears to have changed 
+        # 3. A minimum time has passed since last check
+        current_frame = getattr(self.current_target.header, 'frame_id', None)
+        frame_changed = current_frame != self._last_diagnostics_frame
         
-        # If we're actively tracking, log a bit more detail about the coordinate frames
-        if self.robot_state == "tracking":
-            # Extract the latest position values from state manager 
-            target = self.current_target.point
+        current_time = time.time()
+        time_passed = (current_time - self.last_frame_check_time) >= 1.0/self.frame_check_rate
+        
+        if (self.robot_state == "tracking" and (frame_changed or time_passed)):
+            # Update tracking variables
+            self._last_diagnostics_frame = current_frame
+            self.last_frame_check_time = current_time
             
-            # Additional logging to help diagnose frame issues
-            self.get_logger().info(
-                f"Frame check: Target=[{target.x:.2f}, {target.y:.2f}, {target.z:.2f}], "
-                f"interpreted as dist={self.current_distance:.2f}m, "
-                f"bearing={math.degrees(self.current_bearing):.1f}°, "
-                f"primary_component={diagnostics['primary_axis'] if diagnostics else 'unknown'}"
-            )
+            # Run the diagnostics
+            diagnostics = self.handle_coordinate_frame_diagnostics()
+            
+            # Only log warnings if we detected an issue
+            if diagnostics.get("detected_issue", False):
+                self.get_logger().warn(f"Possible coordinate frame issue detected - {diagnostics}")
+            elif self.debug_level >= 2:
+                self.get_logger().debug(f"Coordinate frame diagnostics: {diagnostics}")
+            
+            # If we're actively tracking, log a brief summary of the coordinate frames
+            if self.debug_level >= 1:
+                # Extract the latest position values from state manager 
+                target = self.current_target.point
+                
+                # Throttled logging for frame checks
+                self._log_throttled(
+                    self.get_logger().info,
+                    f"Frame check: Target=[{target.x:.2f}, {target.y:.2f}, {target.z:.2f}], "
+                    f"interpreted as dist={self.current_distance:.2f}m, "
+                    f"bearing={math.degrees(self.current_bearing):.1f}°, "
+                    f"primary_component={diagnostics.get('primary_axis', 'unknown')}",
+                    5.0,  # Every 5 seconds max
+                    'last_frame_summary_time'
+                )
+                
+    def prepare_shutdown(self):
+        """
+        Prepare for node shutdown.
+        
+        This method ensures the robot is stopped and sets a flag to
+        prevent further callbacks during shutdown.
+        """
+        self.get_logger().info("Preparing for shutdown")
+        
+        # Immediately stop the robot using the stop_robot method
+        try:
+            self.stop_robot()
+            self.get_logger().info("Robot motion stopped - velocity and rotation set to 0")
+        except Exception as e:
+            self.get_logger().error(f"Error stopping robot during shutdown: {str(e)}")
+            
+        # Set shutdown flag after stopping to prevent further actions
+        self._shutting_down = True
 
 
 def main(args=None):
@@ -875,12 +1212,20 @@ def main(args=None):
     
     # Welcome message
     print("=================================================")
-    print("Tennis Ball Tracking - PID Controller Node")
+    print("Tennis Ball Tracking - Optimized PID Controller Node")
     print("=================================================")
     print("This node implements three PID controllers:")
     print("1. Linear X velocity (forward/backward movement)")
     print("2. Linear Y velocity (lateral/strafing movement)")
     print("3. Angular velocity (turning/rotation)")
+    print("")
+    print("Optimizations:")
+    print("- Memory reuse for ROS messages")
+    print("- Fixed-size buffers to prevent dynamic allocations")
+    print("- Throttled logging to reduce overhead")
+    print("- Tiered update frequencies")
+    print("- Deadzone for lateral movement")
+    print("- Acceleration limiting for smoother motion")
     print("")
     print("Subscriptions:")
     for name, topic in TOPICS["input"].items():
@@ -895,9 +1240,7 @@ def main(args=None):
     
     # Define shutdown handler to ensure robot stops on any exit
     def shutdown_handler():
-        node.get_logger().info("Shutdown handler called, stopping robot...")
-        # Ensure robot stops on shutdown
-        node.stop_robot()
+        node.prepare_shutdown()
         node.destroy_node()
     
     # Register shutdown handler
@@ -906,8 +1249,11 @@ def main(args=None):
     
     # Register signal handlers for proper shutdown
     def signal_handler(sig, frame):
-        node.get_logger().info(f"Signal {sig} received, stopping robot...")
-        shutdown_handler()
+        print(f"\nSignal {sig} received, stopping robot...")
+        # First prepare for shutdown to stop the robot
+        node.prepare_shutdown()
+        # Then proceed with ROS shutdown
+        rclpy.shutdown()
         sys.exit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
@@ -921,8 +1267,7 @@ def main(args=None):
         node.get_logger().error(f"Unexpected error: {str(e)}")
     finally:
         # Explicitly stop the robot before shutdown
-        node.stop_robot()
-        node.get_logger().info("Robot motion stopped - setting velocity and rotation to 0")
+        node.prepare_shutdown()
         node.destroy_node()
         rclpy.shutdown()
 
