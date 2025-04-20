@@ -154,7 +154,7 @@ class SensorManager:
     
     def get_active_high_quality_sensors(self):
         """Get the count of active high-quality (3D) sensors."""
-        return sum(1 for sensor in ['lidar', 'yolo_3d', 'hsv_3d'] 
+        return sum(1 for sensor in ['lidar', 'yolo_3d'] 
                   if sensor in self.sensor_active and self.sensor_active[sensor])
     
     def get_diagnostic_info(self):
@@ -426,15 +426,13 @@ class OptimizedFusionNode(LifecycleNode):
             
             # Initialize motion state manager
             self.motion_manager = MotionStateManager()
-            
-            # Initialize sensor manager with optimized buffers
-            self.sensors = ['lidar', 'yolo_3d', 'hsv_3d', 'yolo_2d', 'hsv_2d']
+              # Initialize sensor manager with optimized buffers
+            self.sensors = ['lidar', 'yolo_3d', 'yolo_2d']
             self.sensor_manager = SensorManager(self.sensors)
             
             # BBOX data storage with fixed memory allocation
             self.bbox_data = {
-                'yolo_2d': {'width': 0, 'height': 0, 'timestamp': 0},
-                'hsv_2d': {'width': 0, 'height': 0, 'timestamp': 0}
+                'yolo_2d': {'width': 0, 'height': 0, 'timestamp': 0}
             }
             
             # Pre-allocate matrices for filter operations
@@ -551,43 +549,32 @@ class OptimizedFusionNode(LifecycleNode):
         # Process noise
         self.process_noise_pos = 0.1
         self.process_noise_vel = 0.8
-        
-        # Measurement noise
+          # Measurement noise
         self.measurement_noise = {
             'lidar': 0.04,
             'yolo_3d': 0.06,
-            'hsv_3d': 0.08,
-            'yolo_2d': 0.15,
-            'hsv_2d': 0.20
+            'yolo_2d': 0.15
         }
         
         # Validation thresholds with lower values
         self.validation_threshold = {
             'lidar': 15.0,
             'yolo_3d': 20.0,
-            'hsv_3d': 25.0,
-            'yolo_2d': 30.0,
-            'hsv_2d': 35.0
+            'yolo_2d': 30.0
         }
-        
-        # Topic names with defaults
+          # Topic names with defaults
         self.topics = {
             'lidar': '/basketball/lidar/position',
             'yolo_3d': '/basketball/yolo/position_3d',
-            'hsv_3d': '/basketball/hsv/position_3d',
             'yolo_2d': '/basketball/yolo/position',
-            'hsv_2d': '/basketball/hsv/position',
-            'yolo_bbox': '/basketball/yolo/bbox',
-            'hsv_bbox': '/basketball/hsv/bbox'
+            'yolo_bbox': '/basketball/yolo/bbox'
         }
         
         # Maximum sensor gap durations for processing
         self.max_sensor_gap = {
             'lidar': 1.0,
             'yolo_3d': 1.5,
-            'hsv_3d': 2.0,
-            'yolo_2d': 1.5,
-            'hsv_2d': 2.0
+            'yolo_2d': 1.5
         }
         
         # Uncertainty thresholds
@@ -624,8 +611,7 @@ class OptimizedFusionNode(LifecycleNode):
                 self.destroy_timer(timer)
                 self._timer_list.remove(timer)
                 break
-        
-        # YOLO 3D subscription
+          # YOLO 3D subscription
         yolo_3d_sub = self.create_subscription(
             PointStamped,
             self.topics['yolo_3d'],
@@ -634,16 +620,6 @@ class OptimizedFusionNode(LifecycleNode):
             callback_group=self.subscription_cb_group
         )
         self.subscribers.append(yolo_3d_sub)
-        
-        # HSV 3D subscription 
-        hsv_3d_sub = self.create_subscription(
-            PointStamped,
-            self.topics['hsv_3d'],
-            lambda msg: self.sensor_callback(msg, 'hsv_3d'),
-            10,
-            callback_group=self.subscription_cb_group
-        )
-        self.subscribers.append(hsv_3d_sub)
         
         # YOLO 2D subscription
         yolo_2d_sub = self.create_subscription(
@@ -654,18 +630,7 @@ class OptimizedFusionNode(LifecycleNode):
             callback_group=self.subscription_cb_group
         )
         self.subscribers.append(yolo_2d_sub)
-        
-        # HSV 2D subscription
-        hsv_2d_sub = self.create_subscription(
-            PointStamped,
-            self.topics['hsv_2d'],
-            lambda msg: self.sensor_callback(msg, 'hsv_2d'),
-            10,
-            callback_group=self.subscription_cb_group
-        )
-        self.subscribers.append(hsv_2d_sub)
-        
-        # YOLO bbox subscription
+          # YOLO bbox subscription
         from std_msgs.msg import Float32MultiArray
         yolo_bbox_sub = self.create_subscription(
             Float32MultiArray,
@@ -675,20 +640,6 @@ class OptimizedFusionNode(LifecycleNode):
             callback_group=self.subscription_cb_group
         )
         self.subscribers.append(yolo_bbox_sub)
-        
-        # HSV bbox subscription
-        try:
-            from vision_msgs.msg import BoundingBox2D
-            hsv_bbox_sub = self.create_subscription(
-                BoundingBox2D,
-                self.topics['hsv_bbox'],
-                lambda msg: self.bbox_callback_standard(msg, 'hsv_2d'),
-                10,
-                callback_group=self.subscription_cb_group
-            )
-            self.subscribers.append(hsv_bbox_sub)
-        except ImportError:
-            self.get_logger().warn("vision_msgs not available - standard bbox processing disabled")
         
         self.get_logger().info("Remaining subscriptions set up")
     
@@ -1099,7 +1050,6 @@ class OptimizedFusionNode(LifecycleNode):
             return None
 
     
-    
     def process_sensor_data(self):
         """Process sensor data by priority order."""
         # Update sensor health status
@@ -1116,18 +1066,10 @@ class OptimizedFusionNode(LifecycleNode):
         if self.process_sensor('yolo_3d'):
             processed_any = True
         
-        # Then try HSV 3D
-        if self.process_sensor('hsv_3d'):
-            processed_any = True
-        
         # Process 2D sensors only if not enough 3D sensors
         if self.sensor_manager.get_active_high_quality_sensors() < 1:
             # Try YOLO 2D with 3D estimation
             if self.process_2d_sensor('yolo_2d'):
-                processed_any = True
-                
-            # Try HSV 2D with 3D estimation
-            if self.process_2d_sensor('hsv_2d'):
                 processed_any = True
         
         # If no sensor processed, increase covariance slightly
@@ -1465,7 +1407,7 @@ class OptimizedFusionNode(LifecycleNode):
         """Update tracking reliability status."""
         # Count active sensors
         active_3d = self.sensor_manager.get_active_high_quality_sensors()
-        active_2d = sum(1 for sensor in ['yolo_2d', 'hsv_2d'] 
+        active_2d = sum(1 for sensor in ['yolo_2d'] 
                       if sensor in self.sensor_manager.sensor_active and 
                       self.sensor_manager.sensor_active[sensor])
         
@@ -1573,10 +1515,9 @@ class OptimizedFusionNode(LifecycleNode):
             # Calculate uptime
             current_time = time.time()
             uptime = current_time - self.start_time
-            
-            # Count active sensors
+              # Count active sensors
             active_3d = self.sensor_manager.get_active_high_quality_sensors()
-            active_2d = sum(1 for sensor in ['yolo_2d', 'hsv_2d'] 
+            active_2d = sum(1 for sensor in ['yolo_2d'] 
                           if sensor in self.sensor_manager.sensor_active and 
                           self.sensor_manager.sensor_active[sensor])
             
@@ -1895,10 +1836,9 @@ class OptimizedFusionNode(LifecycleNode):
                     if transformed:
                         if self.initialize_with_measurement(transformed, sensor):
                             break
-            
-            # Try with 2D sensors if 3D not available
+              # Try with 2D sensors if 3D not available
             if not self.initialized:
-                for sensor in ['yolo_2d', 'hsv_2d']:
+                for sensor in ['yolo_2d']:
                     if sensor in self.bbox_data and self.bbox_data[sensor]['timestamp'] > 0:
                         msg = self.sensor_manager.get_latest(sensor)
                         if msg:
