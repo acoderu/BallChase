@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
-
 """
-Tennis Ball Tracking Robot - Optimized PID Controller Node
+Tennis Ball Tracking Robot - Improved PID Controller Node
 ========================================================
 
 Project Overview:
@@ -68,7 +66,7 @@ TOPICS = {
         "state": "/robot/state"
     },
     "output": {
-        "cmd_vel": "/cmd_vel",
+        "cmd_vel": "/controller/cmd_vel",  # Changed from "/cmd_vel" to "/controller/cmd_vel"
         "diagnostics": "/pid/diagnostics"
     }
 }
@@ -228,8 +226,16 @@ class PIDController:
         # Proportional term (proportional to error)
         p_term = self.kp * error
         
+        # FIXED: Improved integral term handling
         # Integral term (accumulates error over time)
-        self.integral += error * dt
+        # Only accumulate integral when error is significant
+        # This prevents integral windup when close to target
+        if abs(error) > 0.05:  # Small deadband for integral accumulation
+            self.integral += error * dt
+        else:
+            # Gradually reduce integral term when close to target
+            self.integral *= 0.95  # 5% decay rate when near target
+            
         i_term = self.ki * self.integral
         
         # Derivative term (rate of change of error)
@@ -242,13 +248,19 @@ class PIDController:
         # Apply output limits
         output_limited = max(self.output_min, min(self.output_max, output))
         
+        # FIXED: Enhanced anti-windup
         # Anti-windup: adjust integral term if output is saturated
         # This prevents integral windup when the controller cannot achieve the desired output
-        if self.anti_windup and output != output_limited:
-            # Reduce integral by the excess output scaled by Ki
-            if abs(self.ki) > 1e-10:  # Avoid division by zero
+        if self.anti_windup:
+            if output != output_limited and abs(self.ki) > 1e-10:  # Avoid division by zero
+                # Reduce integral by the excess output scaled by Ki
                 self.integral -= (output - output_limited) / self.ki
                 # Recalculate integral term
+                i_term = self.ki * self.integral
+            # Additional anti-windup when error changes sign
+            if error * self.prev_error < 0:  # Error changed sign
+                # Reduce integral to avoid overshooting
+                self.integral *= 0.5
                 i_term = self.ki * self.integral
                 
         # Save individual terms for diagnostics
@@ -343,36 +355,41 @@ class PIDControllerNode(Node):
                 ('linear_x_max', 0.2),    # Forward limit (m/s) - REDUCED from 0.25 to 0.2
                 
                 # Linear Y velocity PID parameters - controls lateral movement (strafing)
-                ('linear_y_kp', 0.5),     # Proportional gain
-                ('linear_y_ki', 0.1),     # Integral gain
+                ('linear_y_kp', 0.8),     # Proportional gain - INCREASED from 0.7 to 0.8
+                ('linear_y_ki', 0.15),    # Integral gain - INCREASED from 0.1 to 0.15
                 ('linear_y_kd', 0.05),    # Derivative gain
                 ('linear_y_min', -0.2),   # Right strafe limit (m/s)
                 ('linear_y_max', 0.2),    # Left strafe limit (m/s)
                 
                 # Angular velocity PID parameters - controls turning
-                ('angular_kp', 2.0),    # Proportional gain - INCREASED from 1.5 to 2.0
-                ('angular_ki', 0.05),   # Integral gain - DECREASED from 0.1 to 0.05
-                ('angular_kd', 0.3),    # Derivative gain - INCREASED from 0.2 to 0.3
-                ('angular_min', -0.4),  # Right turn limit (rad/s) - INCREASED for better rotation
-                ('angular_max', 0.4),   # Left turn limit (rad/s) - INCREASED for better rotation
+                ('angular_kp', 3.5),      # Proportional gain - INCREASED from 3.0 to 3.5
+                ('angular_ki', 0.15),     # Integral gain - INCREASED from 0.1 to 0.15
+                ('angular_kd', 0.3),      # Derivative gain
+                ('angular_min', -0.5),    # Right turn limit (rad/s)
+                ('angular_max', 0.5),     # Left turn limit (rad/s)
                 
                 # Control parameters
-                ('min_distance', 0.9),       # Minimum distance to keep from ball (meters) - increased to 3ft
+                ('min_distance', 0.9),       # Minimum distance to keep from ball (meters)
                 ('max_distance', 2.0),       # Maximum tracking distance (meters)
                 ('target_offset_x', 0.0),    # Desired offset from ball in x direction
                 ('target_offset_y', 0.0),    # Desired offset from ball in y direction
                 ('target_update_rate', 10.0),# Control loop update rate (Hz)
                 ('diagnostics_rate', 1.0),   # Rate for detailed diagnostics (Hz)
                 ('frame_check_rate', 0.2),   # Rate for coordinate frame checks (Hz)
-                ('debug_level', 1),          # 0=errors only, 1=info, 2=debug
+                ('debug_level', 1),          # 0=errors only, 1=info, 2=debug - REDUCED from 2 to 1 after debugging
                 ('adaptive_gains', True),    # Whether to adjust gains based on distance
                 ('use_lateral_control', True), # Whether to use Y-axis control for lateral movement
-                ('lateral_deadband', 0.05),  # Deadband for lateral error (to prevent minor oscillations)
+                ('lateral_deadband', 0.03),  # Deadband for lateral error - reduced from 0.05 to 0.03
                 ('deadband_distance', 0.02), # Deadband for distance error (to prevent minor oscillations)
-                ('stop_zone_size', 0.2),     # Size of zone where robot will stop (much larger now - 0.2m)
+                ('stop_zone_size', 0.2),     # Size of zone where robot will stop
                 ('safety_min_distance', 0.4), # Emergency stop distance (m) - stop if closer than this
-                ('min_angular_velocity', 0.02), # Minimum angular velocity to apply (rad/s)
-                ('max_accel', 0.3),          # REDUCED from 0.4 to 0.3 Maximum acceleration per control cycle
+                ('min_angular_velocity', 0.1), # Minimum angular velocity to apply (rad/s) - INCREASED from 0.01 to 0.1
+                ('max_accel', 0.4),          # Maximum acceleration per control cycle
+                ('max_angular_accel', 0.8),  # Maximum angular acceleration per control cycle
+                ('forward_scale_with_angle', True), # Whether to scale forward velocity based on angular error
+                ('angular_scale_threshold', 10.0),  # Angle error in degrees at which to start scaling forward velocity
+                ('always_use_angular_control', True), # Always use angular velocity for alignment
+                ('enable_debug_velocity_publish', False), # Whether to log velocity commands being published - DISABLED after debugging
             ]
         )
         
@@ -411,6 +428,11 @@ class PIDControllerNode(Node):
         self.safety_min_distance = self.get_parameter('safety_min_distance').value
         self.min_angular_velocity = self.get_parameter('min_angular_velocity').value
         self.max_accel = self.get_parameter('max_accel').value
+        self.max_angular_accel = self.get_parameter('max_angular_accel').value
+        self.forward_scale_with_angle = self.get_parameter('forward_scale_with_angle').value
+        self.angular_scale_threshold = self.get_parameter('angular_scale_threshold').value
+        self.always_use_angular_control = self.get_parameter('always_use_angular_control').value
+        self.enable_debug_velocity_publish = self.get_parameter('enable_debug_velocity_publish').value
         
     def _init_controllers(self):
         """Initialize the PID controllers."""
@@ -459,6 +481,7 @@ class PIDControllerNode(Node):
         self.last_state_log_time = 0.0
         self.last_diag_log_time = 0.0
         self.last_frame_check_time = 0.0
+        self.last_velocity_publish_log_time = 0.0
         
         # Derived values
         self.current_distance = 0.0     # Current distance to target
@@ -559,6 +582,11 @@ class PIDControllerNode(Node):
         self.get_logger().info(f"  Safety min distance: {self.safety_min_distance} m")
         self.get_logger().info(f"  Min angular velocity: {self.min_angular_velocity} rad/s")
         self.get_logger().info(f"  Max acceleration: {self.max_accel}")
+        self.get_logger().info(f"  Max angular acceleration: {self.max_angular_accel}")
+        self.get_logger().info(f"  Forward scale with angle: {self.forward_scale_with_angle}")
+        self.get_logger().info(f"  Angular scale threshold: {self.angular_scale_threshold} degrees")
+        self.get_logger().info(f"  Always use angular control: {self.always_use_angular_control}")
+        self.get_logger().info(f"  Enable debug velocity publish: {self.enable_debug_velocity_publish}")
         self.get_logger().info(f"  Debug level: {self.debug_level}")
         self.get_logger().info("==================================")
         
@@ -672,10 +700,20 @@ class PIDControllerNode(Node):
             self.current_lateral = target.x
         else:
             # Standard robot frame: X forward, Y left
+            # Keep same bearing calculation, but we'll invert the direction in the control logic
             self.current_bearing = math.atan2(target.y, target.x)
-            # FIX: In base_link frame, positive Y is left, but we need negative lateral for leftward movement
-            # Negating Y to maintain the correct sign convention (negative = right, positive = left)
-            self.current_lateral = -target.y
+            
+            # In base_link frame, positive Y is left
+            # To make lateral consistent: positive = ball is to the left
+            self.current_lateral = target.y
+            
+            # Enhanced logging for coordinate frame understanding
+            self.get_logger().debug(
+                f"Coordinate frame details: "
+                f"raw=[{target.x:.3f}, {target.y:.3f}, {target.z:.3f}], "
+                f"bearing={math.degrees(self.current_bearing):.2f}°, "
+                f"lateral={self.current_lateral:.3f}m"
+            )
             
             # For base frame, we might need to handle z component differently
             if abs(target.z) > 0.1 and self.debug_level >= 2:  # If there's significant height difference
@@ -791,12 +829,22 @@ class PIDControllerNode(Node):
         # Calculate distance error with appropriate sign (negative when too close)
         distance_error = raw_distance_error
         
-        # Apply deadband to distance error to prevent small oscillations
-        if abs(distance_error) < self.deadband_distance:
-            distance_error = 0.0
+        # FIXED: Improved deadband to prevent oscillations
+        # Apply larger deadband to distance error to prevent small oscillations
+        # Distance deadband is now implemented as a smooth transition
+        if abs(distance_error) < self.deadband_distance * 2.0:
+            # Scale down the error within the expanded deadband
+            if abs(distance_error) < self.deadband_distance:
+                distance_error = 0.0  # Zero when very close to target
+            else:
+                # Linear scaling for smoother transition at deadband edge
+                scale = (abs(distance_error) - self.deadband_distance) / self.deadband_distance
+                distance_error *= scale
         
         # Calculate lateral error and apply lateral deadband
         lateral_error = lateral - self.target_offset_y
+        
+        # FIXED: Reduced lateral deadband to improve responsiveness
         if abs(lateral_error) < self.lateral_deadband:
             lateral_error = 0.0
             
@@ -810,32 +858,99 @@ class PIDControllerNode(Node):
         # Compute PID outputs
         linear_x_velocity = self.pid_linear_x.compute(distance_error, current_time)
         
-        # Handle lateral movement based on configuration and deadband
-        if self.use_lateral_control and abs(lateral_error) >= self.lateral_deadband:
-            # Use direct lateral control with mecanum wheels
-            linear_y_velocity = self.pid_linear_y.compute(lateral_error, current_time)
-            # Reduce angular velocity influence when using lateral control
-            angular_scale = 0.7 
+        # Modified control strategy: always use angular control for alignment,
+        # and use lateral control when appropriate
+        
+        # Always compute lateral velocity if configured, regardless of deadband
+        # This ensures we compute the value for diagnostics even if we don't use it
+        lateral_velocity = self.pid_linear_y.compute(lateral_error, current_time)
+        
+        # Determine whether to use lateral velocity based on configuration and deadband
+        use_lateral = self.use_lateral_control and abs(lateral_error) >= self.lateral_deadband
+        
+        # Always compute angular velocity for alignment
+        angular_velocity = self.pid_angular.compute(angular_error, current_time)
+        
+        # When using both controls, slightly reduce the influence of each
+        # to prevent over-correction
+        if use_lateral and self.always_use_angular_control:
+            # Apply scaling factors - use both lateral and angular control together
+            lateral_scale = 0.8  # Scale down lateral velocity slightly when using both
+            angular_scale = 0.8  # Scale down angular velocity slightly when using both
+            linear_y_velocity = lateral_velocity * lateral_scale
+            angular_velocity = angular_velocity * angular_scale
+        elif use_lateral and not self.always_use_angular_control:
+            # Use only lateral control
+            linear_y_velocity = lateral_velocity
+            angular_velocity = 0.0
         else:
-            # No lateral control, use only angular velocity for alignment
+            # Use only angular control
             linear_y_velocity = 0.0
             angular_scale = 1.0
+            # No change to angular_velocity, already calculated above
             
-        # Calculate angular velocity with minimum threshold
-        angular_velocity = self.pid_angular.compute(angular_error, current_time) * angular_scale
-        
+        # FIXED: Add minimum lateral velocity threshold similar to angular
+        # Apply minimum lateral velocity threshold if needed
+        if 0 < abs(linear_y_velocity) < 0.05:  # Minimum lateral velocity to apply
+            # Apply minimum threshold with correct sign
+            linear_y_velocity = math.copysign(0.05, linear_y_velocity)
+            self.get_logger().info(
+                f"LATERAL CORRECTION: Forcing minimum lateral velocity: {linear_y_velocity:.3f} m/s "
+                f"(error: {lateral_error:.3f}m, direction: {'LEFT' if linear_y_velocity > 0 else 'RIGHT'})"
+            )
+            
         # Apply minimum angular velocity threshold if needed
         if 0 < abs(angular_velocity) < self.min_angular_velocity:
             # Apply minimum threshold with correct sign
             angular_velocity = math.copysign(self.min_angular_velocity, angular_velocity)
+        
+        # Optional: scale forward velocity based on angular error
+        # This makes the robot slow down when trying to turn to face the ball
+        if self.forward_scale_with_angle:
+            angular_error_degrees = math.degrees(abs(angular_error))
             
+            # Only scale forward velocity if angle error exceeds threshold
+            if angular_error_degrees > self.angular_scale_threshold:
+                # Scale factor: 1.0 at threshold, linearly decreasing to 0.3 at 45 degrees
+                forward_scale = max(0.3, 1.0 - ((angular_error_degrees - self.angular_scale_threshold) / (45.0 - self.angular_scale_threshold)))
+                # Apply scaling to forward velocity
+                linear_x_velocity *= forward_scale
+                
+                if self.debug_level >= 2 and self.cycle_count % 20 == 0:
+                    self.get_logger().info(
+                        f"Scaling forward velocity: angular_error={angular_error_degrees:.1f}°, "
+                        f"scale={forward_scale:.2f}, "
+                        f"adjusted_velocity={linear_x_velocity:.3f}m/s"
+                    )
+            
+        # Enhanced debugging for motion planning decisions
+        if self.debug_level >= 1:
+            self.get_logger().info(
+                f"MOTION PLANNING: dist_err={distance_error:.3f}m, "
+                f"lat_err={lateral_error:.3f}m, "
+                f"ang_err={math.degrees(angular_error):.2f}°, "
+                f"use_lateral={use_lateral}, "
+                f"raw_lat_vel={lateral_velocity:.3f}m/s, "
+                f"raw_ang_vel={angular_velocity:.3f}rad/s"
+            )
+            
+        # Debug log pre-acceleration limiting values
+        self.get_logger().info(f"PRE-LIMIT VELOCITIES: lin_x={linear_x_velocity:.3f}, lin_y={linear_y_velocity:.3f}, ang_z={angular_velocity:.3f}")
+        
         # Apply acceleration limiting for smoother motion
         linear_x_velocity = self._apply_acceleration_limit(
             self.last_cmd_vel[0], linear_x_velocity, self.max_accel, current_time)
+        
+        # FIXED: Apply higher acceleration limit for lateral movement
+        # This allows lateral movement to start more quickly from zero
         linear_y_velocity = self._apply_acceleration_limit(
-            self.last_cmd_vel[1], linear_y_velocity, self.max_accel, current_time)
+            self.last_cmd_vel[1], linear_y_velocity, self.max_accel * 1.5, current_time)
+        
         angular_velocity = self._apply_acceleration_limit(
-            self.last_cmd_vel[2], angular_velocity, self.max_accel * 2, current_time)
+            self.last_cmd_vel[2], angular_velocity, self.max_angular_accel, current_time)
+        
+        # Debug log post-acceleration limiting values
+        self.get_logger().info(f"POST-LIMIT VELOCITIES: lin_x={linear_x_velocity:.3f}, lin_y={linear_y_velocity:.3f}, ang_z={angular_velocity:.3f}")
             
         # Store for next cycle
         self.last_cmd_vel = (linear_x_velocity, linear_y_velocity, angular_velocity)
@@ -843,7 +958,66 @@ class PIDControllerNode(Node):
         # Update reusable velocity command message (memory optimization)
         self._cmd_vel_msg.linear.x = linear_x_velocity    # Forward/backward
         self._cmd_vel_msg.linear.y = linear_y_velocity    # Left/right strafe
-        self._cmd_vel_msg.angular.z = angular_velocity    # Rotation
+        
+        # IMPROVED ANGULAR VELOCITY HANDLING
+        # If there's a significant angular error but angular velocity is near zero, force it
+        if abs(angular_error) > 0.05 and abs(angular_velocity) < 0.1:  # About 3 degrees of error
+            # In base_link frame:
+            # - Positive Y means ball is to the LEFT of the robot
+            # - Negative Y means ball is to the RIGHT of the robot
+            # - For turning:
+            #   - Positive angular velocity turns LEFT (counterclockwise)
+            #   - Negative angular velocity turns RIGHT (clockwise)
+            # Therefore, we should turn:
+            # - LEFT (positive angular velocity) when ball is to the LEFT (positive Y)
+            # - RIGHT (negative angular velocity) when ball is to the RIGHT (negative Y)
+            
+            # Use the sign of the angular error directly for turning direction
+            forced_angular = math.copysign(self.min_angular_velocity, angular_error)
+            direction_text = 'LEFT' if forced_angular > 0 else 'RIGHT'
+            
+            self.get_logger().info(
+                f"ANGULAR CORRECTION: Forcing angular velocity: {forced_angular:.3f} rad/s "
+                f"(error: {math.degrees(angular_error):.1f}°, direction: {direction_text}, "
+                f"ball position Y: {lateral_error:.3f}m)"
+            )
+            self._cmd_vel_msg.angular.z = forced_angular
+        else:
+            # Use regular angular velocity calculation
+            self._cmd_vel_msg.angular.z = angular_velocity
+            direction_text = 'LEFT' if self._cmd_vel_msg.angular.z > 0 else 'RIGHT' if self._cmd_vel_msg.angular.z < 0 else 'NONE'
+            self.get_logger().info(
+                f"ANGULAR VELOCITY: {self._cmd_vel_msg.angular.z:.3f} rad/s "
+                f"(error: {math.degrees(angular_error):.1f}°, direction: {direction_text}, "
+                f"ball position Y: {lateral_error:.3f}m)"
+            )
+            
+        # ENHANCED LATERAL MOVEMENT LOGGING
+        if abs(linear_y_velocity) > 0.01:
+            self.get_logger().info(
+                f"LATERAL MOVEMENT: {linear_y_velocity:.3f} m/s "
+                f"(error: {lateral_error:.3f}m, direction: {'LEFT' if linear_y_velocity > 0 else 'RIGHT'})"
+            )
+        elif abs(lateral_error) > self.lateral_deadband:
+            self.get_logger().info(
+                f"LATERAL ERROR PRESENT BUT NO MOVEMENT: error={lateral_error:.3f}m, "
+                f"calculated_velocity={lateral_velocity:.3f}m/s, "
+                f"final_velocity={linear_y_velocity:.3f}m/s"
+            )
+            
+        # Log final velocity values for debugging
+        self.get_logger().info(f"FINAL VELOCITY: lin_x={self._cmd_vel_msg.linear.x:.3f}, lin_y={self._cmd_vel_msg.linear.y:.3f}, ang_z={self._cmd_vel_msg.angular.z:.3f}")
+        
+        # Enhanced debugging to trace commands actually being sent
+        if self.enable_debug_velocity_publish:
+            self._log_throttled(
+                self.get_logger().info,
+                f"PUBLISHING VELOCITY: lin_x={self._cmd_vel_msg.linear.x:.3f}m/s, "
+                f"lin_y={self._cmd_vel_msg.linear.y:.3f}m/s, "
+                f"ang_z={self._cmd_vel_msg.angular.z:.3f}rad/s",
+                0.2,  # Every 0.2 seconds max
+                'last_velocity_publish_log_time'
+            )
         
         # Log velocity values less frequently
         if self.debug_level >= 1 and self.cycle_count % 20 == 0:
@@ -915,10 +1089,17 @@ class PIDControllerNode(Node):
         self.last_accel_time = current_time
         
         # Scale acceleration limit by time
-        accel_limit = max_accel * dt * 12.0  # Scale by dt and by 12 to get reasonable units (REDUCED from 15.0)
+        accel_limit = max_accel * dt * 12.0  # Scale by dt and by 12 to get reasonable units
         
         # Calculate difference between current and target velocity
         vel_diff = target_velocity - current_velocity
+        
+        # FIXED: Special case for starting movement from zero
+        # Allow quicker acceleration when starting from zero
+        if abs(current_velocity) < 0.01 and abs(target_velocity) > 0.05:
+            # When starting from stopped position, allow higher initial acceleration
+            accel_limit *= 2.0
+            self.get_logger().info(f"ACCELERATION BOOST: Starting movement with increased limit: {accel_limit:.3f}")
         
         # Limit acceleration if needed
         if abs(vel_diff) > accel_limit:
@@ -939,14 +1120,20 @@ class PIDControllerNode(Node):
         Args:
             distance (float): Current distance to target in meters
         """
-        # Scale factor based on distance (1.0 at max_distance, 0.7 at min_distance) - INCREASED from 0.5 to 0.7
+        # Scale factor based on distance (1.0 at max_distance, 0.7 at min_distance)
         scale = 0.7 + 0.3 * min(1.0, max(0.0, (distance - self.min_distance) / 
                                         (self.max_distance - self.min_distance)))
         
         # Apply scaling to controllers
         # Linear X controller: less aggressive when close
         self.pid_linear_x.kp = self.linear_x_kp * scale
-        self.pid_linear_x.ki = self.linear_x_ki * scale
+        
+        # FIXED: Further reduce integral gain when close to target
+        if distance < self.min_distance + 0.1:
+            # Very close to target, use minimal integral gain to prevent overshoot
+            self.pid_linear_x.ki = self.linear_x_ki * scale * 0.5
+        else:
+            self.pid_linear_x.ki = self.linear_x_ki * scale
         
         # Linear Y controller: less aggressive when close
         self.pid_linear_y.kp = self.linear_y_kp * scale
@@ -955,6 +1142,15 @@ class PIDControllerNode(Node):
         # Angular controller: more precise when close
         precision_scale = 1.5 - 0.5 * scale  # 1.25 when close, 1.0 when far
         self.pid_angular.kp = self.angular_kp * precision_scale
+        
+        # Log the gain adjustments for debugging
+        if self.debug_level >= 1 and self.cycle_count % 20 == 0:
+            self.get_logger().info(
+                f"ADAPTIVE GAINS: distance={distance:.2f}m, "
+                f"lin_x=[P:{self.pid_linear_x.kp:.2f}, I:{self.pid_linear_x.ki:.3f}], "
+                f"lin_y=[P:{self.pid_linear_y.kp:.2f}, I:{self.pid_linear_y.ki:.3f}], "
+                f"ang=[P:{self.pid_angular.kp:.2f}, I:{self.pid_angular.ki:.3f}]"
+            )
             
     def stop_robot(self):
         """Send a command to stop all robot motion immediately."""
@@ -965,6 +1161,10 @@ class PIDControllerNode(Node):
         
         # Publish stop command
         self.cmd_vel_pub.publish(self._cmd_vel_msg)
+        
+        # Debug logging for stop command
+        if self.enable_debug_velocity_publish:
+            self.get_logger().info("STOP COMMAND PUBLISHED: All velocities set to 0.0")
         
         # Reset last command velocity for acceleration limiting
         self.last_cmd_vel = (0.0, 0.0, 0.0)
@@ -1061,6 +1261,17 @@ class PIDControllerNode(Node):
         
         if self.adaptive_gains:
             self.get_logger().info(f"Adaptive gains: linear_x_kp={self.pid_linear_x.kp:.2f}, linear_y_kp={self.pid_linear_y.kp:.2f}, angular_kp={self.pid_angular.kp:.2f}")
+        
+        # Enhanced diagnostics for control logic state
+        angular_error_degrees = math.degrees(abs(self.current_bearing))
+        lateral_error = self.current_lateral - self.target_offset_y
+        using_lateral = self.use_lateral_control and abs(lateral_error) >= self.lateral_deadband
+        
+        self.get_logger().info(f"Control strategy: using_lateral={using_lateral}, always_use_angular={self.always_use_angular_control}")
+        
+        if self.forward_scale_with_angle and angular_error_degrees > self.angular_scale_threshold:
+            forward_scale = max(0.3, 1.0 - ((angular_error_degrees - self.angular_scale_threshold) / (45.0 - self.angular_scale_threshold)))
+            self.get_logger().info(f"Forward scaling: angle={angular_error_degrees:.1f}°, scaling_factor={forward_scale:.2f}")
         
         self.get_logger().info(f"Control cycles: {self.cycle_count}")
         self.get_logger().info("================================")
@@ -1212,7 +1423,7 @@ def main(args=None):
     
     # Welcome message
     print("=================================================")
-    print("Tennis Ball Tracking - Optimized PID Controller Node")
+    print("Tennis Ball Tracking - Improved PID Controller Node")
     print("=================================================")
     print("This node implements three PID controllers:")
     print("1. Linear X velocity (forward/backward movement)")
@@ -1270,6 +1481,7 @@ def main(args=None):
         node.prepare_shutdown()
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
