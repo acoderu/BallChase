@@ -470,22 +470,20 @@ class BasketballLidarDetector(Node):
                     # Schedule a retry for transforms that failed
                     # Only do this for critical transforms
                     if (source == 'ascamera_color_0' and target == 'lidar_frame') or \
-                       (source == 'lidar_frame' and target == 'ascamera_color_0'):
+                    (source == 'lidar_frame' and target == 'ascamera_color_0'):
                         self.get_logger().info(f"Scheduling retry for transform {source} → {target}")
                         
-                        # Define a simpler callback function that properly handles the timer parameter
-                        s, t = source, target  # Capture the current values in local variables
+                        # Capture current source and target values to use in the callback
+                        s, t = source, target
                         
-                        def callback_func(timer):
-                            self.retry_transform_cache(s, t, timer)
-                        
-                        # Create a one-shot timer to retry this specific transform
-                        timer = self.create_timer(
+                        # Create a one-shot timer with proper callback
+                        # Note: Using different variable name for the timer parameter
+                        retry_timer = self.create_timer(
                             2.0,  # Wait 2 seconds before retry
-                            callback_func,
+                            lambda callback_timer, source=s, target=t: self.retry_transform_cache(source, target),
                             callback_group=self.timer_cb_group
                         )
-                        self.node_timers.append(timer)
+                        self.node_timers.append(retry_timer)
                     continue
             
             self.transform_published_successfully = True
@@ -498,30 +496,33 @@ class BasketballLidarDetector(Node):
                 min_interval=30.0,
                 level="error"
             )
-            
             # Schedule a retry for the entire caching process
-            def retry_all_callback(timer):
-                self.retry_all_transform_caches(timer)
-                
-            timer = self.create_timer(
+            # Using a different name for the timer parameter
+            cache_retry_timer = self.create_timer(
                 3.0,  # Wait 3 seconds before retry
-                retry_all_callback,
+                lambda _: self.retry_all_transform_caches(),  # Use underscore to indicate unused parameter
                 callback_group=self.timer_cb_group
             )
-            self.node_timers.append(timer)
-    
+            self.node_timers.append(cache_retry_timer)
+
     def retry_transform_cache(self, source, target, timer=None):
-        """Retry caching a specific transform that failed earlier."""
-        # Find and remove the timer that triggered this
-        timer_index_to_remove = None
-        for i, timer in enumerate(self.node_timers):
-            if hasattr(timer, 'callback') and timer.callback == self.retry_transform_cache:
-                timer_index_to_remove = i
-                break
+        """Retry caching a specific transform that failed earlier.
         
-        if timer_index_to_remove is not None:
-            self.destroy_timer(self.node_timers[timer_index_to_remove])
-            self.node_timers.pop(timer_index_to_remove)
+        Args:
+            source: Source frame
+            target: Target frame
+            timer: The timer that triggered this callback (optional)
+        """
+        # Find and remove any timer with this callback
+        timers_to_remove = []
+        for i, t in enumerate(self.node_timers):
+            if hasattr(t, 'callback') and t.callback.__name__ == '<lambda>' and t.callback.__code__.co_freevars:
+                timers_to_remove.append(i)
+        
+        # Remove timers in reverse order to avoid index issues
+        for i in sorted(timers_to_remove, reverse=True):
+            self.destroy_timer(self.node_timers[i])
+            self.node_timers.pop(i)
                 
         try:
             self.get_logger().info(f"Retrying cache for transform {source} → {target}")
@@ -544,16 +545,24 @@ class BasketballLidarDetector(Node):
         except Exception as e:
             self.get_logger().warn(f"Retry failed for transform {source} → {target}: {str(e)}")
             # Could schedule another retry here if needed
-    
-    def retry_all_transform_caches(self):
-        """Retry the entire transform caching process."""
-        # Find and remove the timer that triggered this
-        for i, timer in enumerate(self.node_timers):
-            if hasattr(timer, 'callback') and timer.callback == self.retry_all_transform_caches:
-                self.destroy_timer(timer)
-                self.node_timers.pop(i)
-                break
-                
+
+    def retry_all_transform_caches(self, timer=None):
+        """Retry the entire transform caching process.
+        
+        Args:
+            timer: The timer that triggered this callback (optional)
+        """
+        # Find and remove any timer with this callback
+        timers_to_remove = []
+        for i, t in enumerate(self.node_timers):
+            if hasattr(t, 'callback') and t.callback.__name__ == '<lambda>':
+                timers_to_remove.append(i)
+        
+        # Remove timers in reverse order to avoid index issues
+        for i in sorted(timers_to_remove, reverse=True):
+            self.destroy_timer(self.node_timers[i])
+            self.node_timers.pop(i)
+                    
         self.get_logger().info("Retrying all transform caches")
         # Just call the main caching function again
         self.cache_transforms()
