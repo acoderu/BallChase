@@ -165,6 +165,11 @@ class PIDController:
         self.integral_decay = 0.7      # Decay rate for integral when error is small
         self.max_integral = (output_max - output_min) / ki if ki > 0 else 1.0  # Prevent excessive integral buildup
         
+        # New: Enhanced transition handling
+        self.sign_change_count = 0     # Count consecutive sign changes for oscillation detection
+        self.prev_sign = 0             # Previous error sign
+        self.zero_crossing_time = None # Time of last zero crossing
+        
     def reset(self):
         """Reset controller state, restarting from scratch."""
         self.prev_error = 0.0
@@ -174,9 +179,12 @@ class PIDController:
         self.last_p_term = 0.0
         self.last_i_term = 0.0
         self.last_d_term = 0.0
+        self.sign_change_count = 0
+        self.prev_sign = 0
+        self.zero_crossing_time = None
         
     def compute(self, error, current_time=None, force_zero=False):
-        """Compute the control output based on the error."""
+        """Compute the control output based on the error with improved zero-crossing handling."""
         try:
             # If forcing zero output, bypass calculations
             if force_zero:
@@ -209,6 +217,29 @@ class PIDController:
             if dt <= 0.001:  # Protect against very small or negative dt
                 dt = 0.01  # Fallback to prevent division by zero (assume 100Hz)
                 
+            # Detect sign changes for improved zero-crossing behavior
+            current_sign = 1 if error > 0 else (-1 if error < 0 else 0)
+            
+            if self.prev_sign != 0 and current_sign != 0 and self.prev_sign != current_sign:
+                # Sign changed - we crossed zero
+                self.zero_crossing_time = current_time
+                self.sign_change_count += 1
+                
+                # More aggressive integral reset on zero crossing for lateral movement
+                if self.name == "Linear Y":
+                    # More aggressive integral reset specifically for lateral PID
+                    self.integral *= 0.2  # More aggressive than the default 0.3
+                else:
+                    # Default behavior for other controllers
+                    self.integral *= 0.3  # Standard reduction
+            else:
+                # No sign change
+                self.sign_change_count = max(0, self.sign_change_count - 1)
+                
+            # Update previous sign
+            if error != 0:
+                self.prev_sign = current_sign
+                
             # Calculate each PID term
             # Proportional term (proportional to error)
             p_term = self.kp * error
@@ -218,17 +249,29 @@ class PIDController:
             predicted_output = p_term + self.last_i_term + self.last_d_term
             is_saturated = (predicted_output >= self.output_max) or (predicted_output <= self.output_min)
             
+            # Enhanced integral behavior
             if self.anti_windup and is_saturated:
                 # Don't accumulate integral when saturated
                 i_term = self.last_i_term
             else:
-                # Only accumulate integral when error is significant
-                if abs(error) > self.integral_deadband:
-                    self.integral += error * dt
-                else:
-                    # More aggressively reduce integral term when close to target
-                    self.integral *= self.integral_decay
+                # Near zero-crossing, be more aggressive with integral changes
+                recently_crossed_zero = (self.zero_crossing_time is not None and 
+                                        (current_time - self.zero_crossing_time) < 0.5)
                 
+                if recently_crossed_zero:
+                    # Near zero crossing, allow faster integral changes
+                    if abs(error) > self.integral_deadband:
+                        self.integral += error * dt * 1.2  # Boost integral after crossing zero
+                    else:
+                        self.integral *= 0.5  # More aggressively reduce integral near zero
+                else:
+                    # Normal integral handling
+                    if abs(error) > self.integral_deadband:
+                        self.integral += error * dt
+                    else:
+                        # More aggressively reduce integral term when close to target
+                        self.integral *= self.integral_decay
+                    
                 # Apply integral limit to prevent excessive buildup
                 self.integral = max(-self.max_integral, min(self.max_integral, self.integral))
                 
@@ -237,7 +280,14 @@ class PIDController:
             # Derivative term with improved noise handling
             # Use filtered error derivative to reduce noise sensitivity
             error_change = error - self.prev_error
-            d_term = self.kd * error_change / max(dt, 0.001)  # Protect against division by zero
+            
+            # Enhanced derivative handling
+            if self.sign_change_count >= 2:
+                # If oscillating (multiple sign changes), amplify derivative term
+                d_term = self.kd * error_change / max(dt, 0.001) * 1.3
+            else:
+                # Normal derivative calculation
+                d_term = self.kd * error_change / max(dt, 0.001)
             
             # Calculate raw output by summing all terms
             output = p_term + i_term + d_term
@@ -255,16 +305,30 @@ class PIDController:
                     i_term = self.ki * self.integral
                     
             # Additional anti-windup when error changes sign
-            if error * self.prev_error < 0 and abs(error) < abs(self.prev_error):
-                # Error crossed zero and is decreasing - reduce integral more aggressively
-                self.integral *= 0.5
+            if error * self.prev_error < 0:
+                # Error crossed zero - reduce integral more aggressively
+                # If error is decreasing (approaching zero), be even more aggressive
+                if abs(error) < abs(self.prev_error):
+                    # More aggressive for lateral controller
+                    if self.name == "Linear Y":
+                        self.integral *= 0.2  # More aggressive for lateral
+                    else:
+                        self.integral *= 0.3  # Standard value for other controllers
+                else:
+                    if self.name == "Linear Y":
+                        self.integral *= 0.4  # Still more aggressive for lateral
+                    else:
+                        self.integral *= 0.5  # Standard value
                 i_term = self.ki * self.integral
                     
             # Apply transition smoothing for rapid control changes
             # This helps reduce jerky movements when control mode changes
-            if abs(output_limited - self.last_output) > (self.output_max - self.output_min) * 0.5:
+            
+            # Enhanced transition smoothing
+            if abs(output_limited - self.last_output) > (self.output_max - self.output_min) * 0.4:
                 # Blend between previous and current output for large changes
-                output_limited = 0.7 * output_limited + 0.3 * self.last_output
+                # More balanced smoothing (was 0.7/0.3)
+                output_limited = 0.6 * output_limited + 0.4 * self.last_output
                 
             # Save individual terms for diagnostics
             self.last_p_term = p_term
@@ -280,8 +344,9 @@ class PIDController:
             return float(output_limited)
             
         except Exception as e:
-            self.get_logger().error(f"Error in PID compute: {str(e)}")
-            return 0.0  # Return a safe default value
+            # Log error and return safe value
+            print(f"Error in PID compute: {str(e)}")
+            return 0.0
         
     def get_components(self):
         """Get the last calculated PID components."""
@@ -318,12 +383,34 @@ class PIDControllerNode(Node):
         # Flag to track if we're shutting down
         self._shutting_down = False
         
-        # Define movement strategies using table-driven approach
-        self._init_strategy_table()
+        # Apply our improvements
+        self.initialize_controller_improvements()
         
+        self._init_strategy_table()
+
         # Log startup info (just once)
         self.get_logger().info("PID Controller initialized with table-driven state logic")
+    
+    def initialize_controller_improvements(self):
+        """Initialize the controller with our recommended improvements."""
+        # Declare parameters if they don't exist
+        if not hasattr(self, 'strategy_min_duration'):
+            self.declare_parameter('strategy_min_duration', 0.3)
+            self.strategy_min_duration = self.get_parameter('strategy_min_duration').value
         
+        # Update PID parameters
+        if hasattr(self, 'pid_angular'):
+            # Update angular controller parameters 
+            # (assuming you've already set angular_kp to 1.8 or 2.0)
+            self.pid_angular.kd = 0.6    # Increased from 0.4 to dampen oscillations
+            self.pid_angular.ki = 0.07   # Reduced from 0.1 to minimize integral buildup
+        
+        # Update error categorization thresholds
+        self.error_large_factor = 6.0    # Increased from 4.0
+        
+        # Log the improvements
+        self.get_logger().info("Controller improvements initialized: Enhanced strategy transitions and zero-crossing handling")
+
     def _declare_parameters(self):
         """Declare and get all node parameters."""
         self.declare_parameters(
@@ -337,16 +424,16 @@ class PIDControllerNode(Node):
                 ('linear_x_max', 0.2),
                 
                 # Linear Y velocity PID parameters
-                ('linear_y_kp', 0.8),
-                ('linear_y_ki', 0.15),
+                ('linear_y_kp', 0.6),
+                ('linear_y_ki', 0.12),
                 ('linear_y_kd', 0.05),
                 ('linear_y_min', -0.2),
                 ('linear_y_max', 0.2),
                 
                 # Angular velocity PID parameters
-                ('angular_kp', 3.0),
+                ('angular_kp', 1.8),
                 ('angular_ki', 0.1),
-                ('angular_kd', 0.4),
+                ('angular_kd', 0.6),
                 ('angular_min', -0.5),
                 ('angular_max', 0.5),
                 
@@ -470,15 +557,19 @@ class PIDControllerNode(Node):
         self.velocity_change_threshold = self.get_parameter('velocity_change_threshold').value
         
     def _init_controllers(self):
-        """Initialize the PID controllers."""
+        """Initialize the PID controllers with improved tuning."""
         self.pid_linear_x = PIDController(
             self.linear_x_kp, self.linear_x_ki, self.linear_x_kd,
             self.linear_x_min, self.linear_x_max,
             name="Linear X"
         )
         
+        # Modified PID parameters for lateral movement
+        # Reduce proportional gain, reduce integral gain, increase derivative gain
         self.pid_linear_y = PIDController(
-            self.linear_y_kp, self.linear_y_ki, self.linear_y_kd,
+            0.6,  # Reduced from 0.8
+            0.08, # Reduced from 0.15
+            0.12, # Increased from 0.05
             self.linear_y_min, self.linear_y_max,
             name="Linear Y"
         )
@@ -547,7 +638,7 @@ class PIDControllerNode(Node):
         
     def _init_strategy_table(self):
         """
-        Initialize the table-driven movement strategy definitions.
+        Initialize the table-driven movement strategy definitions with improved gradations.
         This table defines how the robot should move based on different error states.
         """
         # Define the strategy table
@@ -606,13 +697,53 @@ class PIDControllerNode(Node):
                 0.0, 0.0, 1.0, 
                 "Medium angular error correction: {angular_error:.1f}°"
             ],
+            
+            # NEW: Added more granular angular error categories
+            ("none", "none", "medium_high"): [
+                "ANGULAR_ONLY", False, False, True, 
+                0.0, 0.0, 1.0, 
+                "Medium-high angular error correction: {angular_error:.1f}°"
+            ],
+            ("none", "none", "medium_large"): [
+                "ANGULAR_ONLY", False, False, True, 
+                0.0, 0.0, 1.0, 
+                "Medium-large angular error correction: {angular_error:.1f}°"
+            ],
             ("none", "none", "large"): [
                 "ANGULAR_ONLY", False, False, True, 
                 0.0, 0.0, 1.0, 
                 "Large angular error correction: {angular_error:.1f}°"
             ],
             
-            # Large angular error takes precedence over others
+            # Small angular with other errors - balanced approach
+            ("*", "*", "small"): [
+                "BALANCED", True, True, True, 
+                0.7, 0.7, 0.4, 
+                "Balanced movement with small angular correction: {angular_error:.1f}°"
+            ],
+            
+            # Medium angular takes some precedence but still allows other movements
+            ("*", "*", "medium"): [
+                "ANGULAR_BALANCED", True, True, True, 
+                0.5, 0.4, 0.7,  # Reduced lateral_scale from 0.5 to 0.4
+                "Angular-balanced movement: {angular_error:.1f}°"
+            ],
+            
+            # NEW: Added intermediate step for more gradual transition
+            ("*", "*", "medium_high"): [
+                "ANGULAR_PRIMARY_BALANCED", False, True, True, 
+                0.0, 0.08, 0.7,  # Very limited lateral movement
+                "Primarily angular correction with minimal lateral: {angular_error:.1f}°"
+            ],
+            
+            # Medium-large angular starts to dominate but allows some lateral
+            ("*", "*", "medium_large"): [
+                "ANGULAR_PRIMARY_BALANCED", False, True, True, 
+                0.0, 0.15, 0.8,  # Reduced lateral_scale from 0.3 to 0.15
+                "Primarily angular correction with some lateral: {angular_error:.1f}°"
+            ],
+            
+            # Only truly large angular errors get exclusive focus
             ("*", "*", "large"): [
                 "ANGULAR_PRIMARY", False, False, True, 
                 0.0, 0.0, 1.0, 
@@ -624,16 +755,6 @@ class PIDControllerNode(Node):
                 "COORDINATED", True, True, False, 
                 0.8, 0.8, 0.0, 
                 "Coordinated distance and lateral correction"
-            ],
-            ("small", "none", "small"): [
-                "COORDINATED", True, False, True, 
-                0.8, 0.0, 0.8, 
-                "Coordinated distance and angular correction"
-            ],
-            ("none", "small", "small"): [
-                "COORDINATED", False, True, True, 
-                0.0, 0.8, 0.8, 
-                "Coordinated lateral and angular correction"
             ],
             
             # Medium-to-large lateral with other errors
@@ -660,13 +781,6 @@ class PIDControllerNode(Node):
                 "Forward-primary movement with small corrections"
             ],
             
-            # Medium angular with other errors
-            ("small", "small", "medium"): [
-                "ANGULAR_PRIMARY", True, True, True, 
-                0.3, 0.3, 1.0, 
-                "Angular-focused coordination with small corrections"
-            ],
-            
             # Fallback strategy
             ("*", "*", "*"): [
                 "BALANCED", True, True, True, 
@@ -674,6 +788,7 @@ class PIDControllerNode(Node):
                 "Balanced movement strategy (fallback)"
             ]
         }
+
         
     def _setup_subscriptions(self):
         """Set up all subscriptions for this node."""
@@ -793,14 +908,14 @@ class PIDControllerNode(Node):
             
     def _categorize_error(self, error, error_type="distance"):
         """
-        Categorize an error value into none, small, medium, or large.
+        Categorize an error value into none, small, medium, medium_high, medium_large, or large.
         
         Args:
             error: The error value to categorize
             error_type: The type of error (distance, lateral, angular)
             
         Returns:
-            String: The error category (none, small, medium, large)
+            String: The error category (none, small, medium, medium_high, medium_large, large)
         """
         abs_error = abs(error)
         
@@ -809,16 +924,22 @@ class PIDControllerNode(Node):
             deadband = self.angular_deadband
             small_threshold = deadband * self.error_small_factor
             medium_threshold = deadband * self.error_medium_factor
+            medium_high_threshold = deadband * 3.0  # New intermediate threshold
+            medium_large_threshold = deadband * 4.0  # Between medium and large
             large_threshold = deadband * self.error_large_factor
         elif error_type == "lateral":
             deadband = self.lateral_deadband
             small_threshold = deadband * self.error_small_factor
             medium_threshold = deadband * self.error_medium_factor
+            medium_high_threshold = deadband * 3.0  # New intermediate threshold
+            medium_large_threshold = deadband * 4.0  # Between medium and large
             large_threshold = deadband * self.error_large_factor
         else:  # distance
             deadband = self.distance_deadband
             small_threshold = deadband * self.error_small_factor
             medium_threshold = deadband * self.error_medium_factor
+            medium_high_threshold = deadband * 3.0  # New intermediate threshold
+            medium_large_threshold = deadband * 4.0  # Between medium and large
             large_threshold = deadband * self.error_large_factor
         
         # Handle case where lateral control is disabled
@@ -832,6 +953,10 @@ class PIDControllerNode(Node):
             return "small"
         elif abs_error <= medium_threshold:
             return "medium"
+        elif abs_error <= medium_high_threshold:
+            return "medium_high"  # New category
+        elif abs_error <= medium_large_threshold:
+            return "medium_large"
         else:
             return "large"
     
@@ -974,7 +1099,8 @@ class PIDControllerNode(Node):
         
     def _determine_movement_strategy(self, distance_error, lateral_error, angular_error_degrees):
         """
-        Determine the optimal movement strategy using table-driven approach.
+        Determine the optimal movement strategy using table-driven approach
+        with improved hysteresis to prevent oscillations.
         
         Args:
             distance_error: Error in distance (meters)
@@ -984,9 +1110,11 @@ class PIDControllerNode(Node):
         Returns:
             dict: Strategy information including strategy name, movement flags, and scale factors
         """
-        # FIXED: If we just exited stopped state, use an immediate response strategy
+        current_time = time.time()
+        
+        # If we just exited stopped state, use an immediate response strategy
         if (not self._robot_stopped and 
-            (time.time() - self._stop_time) < 0.5):  # Within 0.5 seconds of exiting stopped state
+            (current_time - self._stop_time) < 0.5):  # Within 0.5 seconds of exiting stopped state
             
             # Use a more responsive strategy when resuming from stop
             urgent_strategy = {
@@ -1004,7 +1132,7 @@ class PIDControllerNode(Node):
         # Reuse pre-allocated strategy dict
         strategy = self._strategy_dict
         
-        # Categorize errors into states: "none", "small", "medium", "large"
+        # Categorize errors into states: "none", "small", "medium", "medium_large", "large"
         # Reuse pre-allocated tuple for key
         self._key_tuple[0] = self._categorize_error(distance_error, "distance")
         self._key_tuple[1] = self._categorize_error(lateral_error, "lateral")
@@ -1018,6 +1146,42 @@ class PIDControllerNode(Node):
         
         # Populate the strategy dict
         self._populate_strategy(strategy, strategy_def, distance_error, lateral_error, angular_error_degrees)
+        
+        # Apply hysteresis to prevent rapid strategy oscillations
+        if hasattr(self, 'strategy_min_duration'):
+            min_duration = self.strategy_min_duration
+        else:
+            min_duration = 0.3  # Default if parameter not defined
+            
+        if strategy["strategy_name"] != self.current_strategy:
+            # Check if minimum time has elapsed since last change
+            strategy_age = current_time - self.strategy_change_time
+            
+            # Apply more stringent requirements for certain transitions
+            if ((self.current_strategy == "ANGULAR_PRIMARY" and
+                strategy["strategy_name"] != "ANGULAR_PRIMARY") or
+                (self.current_strategy != "ANGULAR_PRIMARY" and
+                strategy["strategy_name"] == "ANGULAR_PRIMARY")):
+                # Transitions to/from ANGULAR_PRIMARY need more time
+                required_duration = min_duration * 1.5
+            else:
+                required_duration = min_duration
+            
+            if strategy_age < required_duration:
+                # Not enough time elapsed, keep current strategy
+                # Find current strategy definition
+                for strat_def in self.strategy_table.values():
+                    if strat_def[0] == self.current_strategy:
+                        # Reuse current strategy's parameters
+                        strategy["strategy_name"] = self.current_strategy
+                        strategy["use_forward"] = strat_def[1]
+                        strategy["use_lateral"] = strat_def[2] and self.use_lateral_control
+                        strategy["use_angular"] = strat_def[3]
+                        strategy["forward_scale"] = strat_def[4]
+                        strategy["lateral_scale"] = strat_def[5]
+                        strategy["angular_scale"] = strat_def[6]
+                        # Keep the original reason
+                        break
         
         return strategy
     
@@ -1036,6 +1200,7 @@ class PIDControllerNode(Node):
     def _apply_velocity_limits(self, linear_x, linear_y, angular_z, current_time):
         """
         Apply velocity and acceleration limits for smooth, natural movement.
+        With enhanced handling for combined movements.
         
         Args:
             linear_x: Calculated forward velocity
@@ -1125,7 +1290,25 @@ class PIDControllerNode(Node):
             
         if abs(self._limited_velocities[2]) < self.min_angular_velocity:
             self._limited_velocities[2] = 0.0
-            
+        
+        # NEW: Limit combined lateral and angular movement to prevent overshooting
+        if abs(self._limited_velocities[1]) > 0.15 and abs(self._limited_velocities[2]) > 0.3:
+            # Scale down lateral velocity when combined with significant angular velocity
+            lateral_scale_factor = 0.7
+            self._limited_velocities[1] *= lateral_scale_factor
+            self.get_logger().debug(f"Scaling down lateral velocity due to combined movement: factor={lateral_scale_factor}")
+        
+        # NEW: Additional protection against maximum values in all dimensions
+        if (abs(self._limited_velocities[0]) > 0.18 and 
+            abs(self._limited_velocities[1]) > 0.18 and 
+            abs(self._limited_velocities[2]) > 0.4):
+            # Scale all velocities slightly to prevent robot instability
+            scale_factor = 0.8
+            self._limited_velocities[0] *= scale_factor
+            self._limited_velocities[1] *= scale_factor
+            self._limited_velocities[2] *= scale_factor
+            self.get_logger().debug(f"Scaling all velocities due to high combined movement: factor={scale_factor}")
+        
         # Apply maximum velocity limits
         self._limited_velocities[0] = max(-self.linear_x_max, min(self.linear_x_max, self._limited_velocities[0]))
         self._limited_velocities[1] = max(self.linear_y_min, min(self.linear_y_max, self._limited_velocities[1]))
@@ -1217,7 +1400,7 @@ class PIDControllerNode(Node):
             self._current_errors[1] = lateral - self.target_offset_y    # lateral_error
             self._current_errors[2] = bearing                          # angular_error
             
-            # FIXED: Check if we need to reset stopped state based on errors
+            # Check if we need to reset stopped state based on errors
             state_reset = self._reset_stopped_state_if_needed(
                 self._current_errors[0], 
                 self._current_errors[1], 
@@ -1313,6 +1496,35 @@ class PIDControllerNode(Node):
             forward_scale = strategy["forward_scale"]
             lateral_scale = strategy["lateral_scale"]
             angular_scale = strategy["angular_scale"]
+            
+            # NEW CODE BLOCK: Dynamic lateral scale adjustment for angular strategies
+            if strategy["strategy_name"] in ["ANGULAR_PRIMARY_BALANCED", "ANGULAR_BALANCED"]:
+                # Calculate a scaling factor based on angular error
+                angular_error_abs = abs(angular_degrees)
+                
+                # Determine if angular and lateral errors have opposite signs
+                # (which means the robot needs to turn while moving laterally)
+                same_direction = (angular_degrees * self._current_errors[1]) < 0
+                
+                if same_direction:
+                    # They have opposite signs - progressively reduce lateral movement as robot turns
+                    if angular_error_abs > 15.0:
+                        reduction_factor = 1.0  # Full lateral movement for very large angular errors
+                    elif angular_error_abs > 5.0:
+                        # Linear reduction between 15° and 5°
+                        reduction_factor = (angular_error_abs - 5.0) / 10.0
+                    else:
+                        reduction_factor = 0.0  # No lateral movement when nearly facing the target
+                    
+                    # Apply the dynamic reduction factor
+                    lateral_scale *= reduction_factor
+                    
+                    # Log the adjustment
+                    self.get_logger().debug(
+                        f"Dynamic lateral scale: base={strategy['lateral_scale']:.2f}, "
+                        f"reduction={reduction_factor:.2f}, "
+                        f"final={lateral_scale:.2f}"
+                    )
             
             # Log movement flags and scale factors
             self.get_logger().debug(f"MOVEMENT FLAGS: forward={use_forward}, lateral={use_lateral}, angular={use_angular}")
@@ -1470,6 +1682,7 @@ class PIDControllerNode(Node):
                 self.stop_robot()
             except Exception as stop_error:
                 self.get_logger().error(f"Failed to stop robot after error: {str(stop_error)}")
+
 
     def _evaluate_stop_conditions(self, distance, lateral, angular_degrees, currently_stopped=False):
         """
