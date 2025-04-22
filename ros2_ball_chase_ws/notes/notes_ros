@@ -5,10 +5,36 @@ colcon build --symlink-install
 
 
 ros2 run ball_chase yolo_ball_node
+ros2 run ball_chase pid_controller_node --ros-args -p debug_level:=3
 
 ros2 lifecycle set /optimized_fusion_node configure
-
 ros2 lifecycle set /optimized_fusion_node activate
 
 docker exec -it MentorPi bash
 ....
+~/.stop_ros.sh
+ros2 launch controller controller.launch.py
+
+
+
+ros2 topic pub /controller/cmd_vel geometry_msgs/Twist "linear:
+x: 0.1
+y: 0.0
+z: 0.0
+angular:
+x: 0.0
+y: 0.0
+z: 0.0"
+
+ros2 topic pub /controller/cmd_vel geometry_msgs/Twist "linear:
+x: 0.0
+y: 0.0
+z: 0.0
+angular:
+x: 0.0
+y: 0.0
+z: 0.0"
+
+source /opt/ros/humble/setup.bash
+
+sudo systemctl restart start_node.service

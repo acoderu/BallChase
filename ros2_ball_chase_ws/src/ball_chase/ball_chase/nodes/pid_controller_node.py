@@ -1,15 +1,16 @@
 """
-Basketball Tracking Robot - Enhanced PID Controller Node
+Basketball Tracking Robot - Improved PID Controller Node
 =======================================================
 
 This controller implements efficient movement patterns for a mecanum-wheeled
 basketball tracking robot with several enhancements:
-- Coordinated angular-lateral control for coupled motion
-- Gradual strategy transitions for smooth state changes
-- Adaptive gain system based on tracking conditions
-- Target filtering for smoother tracking
+- Angular-first control strategy for diagonal movements
+- Fast strategy transitions for responsive tracking
+- Enhanced integral term management to prevent windup
+- Coordinated angular-lateral control with balanced parameters
+- Balanced error thresholds and hysteresis for smooth behavior
+- Continuous motion tracking with trajectory prediction
 - Optimized for Raspberry Pi 5 performance with resource monitoring
-- Enhanced transform handling with caching and optimizations
 """
 
 import rclpy
@@ -19,7 +20,6 @@ from geometry_msgs.msg import PointStamped, Twist, Vector3Stamped, Vector3, Tran
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String, Float32MultiArray
 from tf2_ros import TransformListener, Buffer
-import tf2_geometry_msgs
 import math
 import time
 import numpy as np
@@ -27,6 +27,14 @@ import signal
 import sys
 from collections import deque
 import psutil  # For CPU monitoring
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('pid_controller')
 
 # Topic configuration
 TOPICS = {
@@ -39,7 +47,7 @@ TOPICS = {
     "output": {
         "cmd_vel": "/controller/cmd_vel",
         "diagnostics": "/pid/diagnostics",
-        "performance": "/pid/performance"    # New performance metrics topic
+        "performance": "/pid/performance"    # Performance metrics topic
     }
 }
 
@@ -67,24 +75,53 @@ class LightweightBuffer:
     
     def get_all(self):
         """Get all values currently in the buffer in chronological order."""
+        if self.count == 0:
+            return []
+        
+        result = []
+        
         if self.count < self.max_size:
-            return self.data[:self.count]
-        # Reconstruct in chronological order
-        start_idx = self.next_index
-        return self.data[start_idx:] + self.data[:start_idx]
+            # Buffer isn't full yet, return all items from 0 to count
+            for i in range(self.count):
+                result.append(self.data[i])
+        else:
+            # Buffer is full, need to wrap around
+            # Start from oldest item (at next_index) and go around
+            for i in range(self.max_size):
+                idx = (self.next_index + i) % self.max_size
+                result.append(self.data[idx])
+        
+        return result
         
     def get_latest(self, n=1):
         """Get the latest n values (default is just the latest one)."""
         if self.count == 0:
             return []
+        
         n = min(n, self.count)
-        if self.count < self.max_size:
-            return self.data[self.count - n:self.count]
-        # Calculate indices for the latest n elements
-        start_idx = (self.next_index - n) % self.max_size
-        if start_idx < self.next_index:
-            return self.data[start_idx:self.next_index]
-        return self.data[start_idx:] + self.data[:self.next_index]
+        result = []
+        
+        # Calculate positions of the n latest elements
+        for i in range(n):
+            if self.count < self.max_size:
+                # Simple case: buffer isn't full yet
+                idx = self.count - n + i
+            else:
+                # Buffer is full, handle circular indexing
+                idx = (self.next_index - n + i) % self.max_size
+            
+            # Append item at calculated index
+            result.append(self.data[idx])
+        
+        return result
+    
+    def clear(self):
+        """Clear the buffer."""
+        self.next_index = 0
+        self.count = 0
+        # Reset all data to default values
+        for i in range(self.max_size):
+            self.data[i] = (0.0, 0.0, 0.0)
 
 class TTLDict:
     """
@@ -260,16 +297,22 @@ class Matrix4x4:
         
         return (tx, ty, tz)
 
-class TargetFilter:
-    """Filter for target position data to reduce noise and predict movement."""
+class EnhancedTargetFilter:
+    """Enhanced filter for target position data with better motion prediction."""
     
-    def __init__(self, buffer_size=5, prediction_horizon=0.2):
+    def __init__(self, buffer_size=8, prediction_horizon=0.3):
         self.position_buffer = deque(maxlen=buffer_size)
         self.prediction_horizon = prediction_horizon  # seconds
         self.last_update_time = None
         self.current_velocity = (0.0, 0.0, 0.0)  # x, y, angular
         self.filtered_position = None
         self.predicted_position = None
+        self.acceleration = (0.0, 0.0, 0.0)  # x, y, angular acceleration
+        self.is_moving = False
+        self.direction_change_detected = False
+        self.motion_direction = (0.0, 0.0, 0.0)  # normalized direction vector
+        self.trajectory_history = deque(maxlen=10)
+        self.movement_consistency = 0.0  # 0.0-1.0 measure of consistent movement
         
     def update(self, position, timestamp=None):
         """
@@ -278,52 +321,194 @@ class TargetFilter:
         Args:
             position: Tuple of (x, y, angle) for the target position
             timestamp: Time of measurement (defaults to current time)
+        
+        Returns:
+            tuple: Filtered position
         """
         current_time = timestamp if timestamp is not None else time.time()
         
         # Add to buffer with timestamp
         self.position_buffer.append((position[0], position[1], position[2], current_time))
         
-        # Basic filtering - moving average
+        # Add to trajectory history
+        self.trajectory_history.append((position, current_time))
+        
+        # Calculate filtered position (weighted average with recent samples)
         if len(self.position_buffer) >= 3:
-            # Simple weighted average with more weight to recent measurements
+            # Get the three most recent positions manually without slicing
+            buffer_size = len(self.position_buffer)
+            recent = []
+            for i in range(buffer_size - 3, buffer_size):
+                recent.append(self.position_buffer[i])
+            
+            # Assign higher weights to more recent measurements
             weights = [0.2, 0.3, 0.5]  # More weight to recent measurements
-            x_sum = sum(pos[0] * w for pos, w in zip(self.get_recent_positions(3), weights))
-            y_sum = sum(pos[1] * w for pos, w in zip(self.get_recent_positions(3), weights))
-            angle_sum = sum(pos[2] * w for pos, w in zip(self.get_recent_positions(3), weights))
+            
+            # Calculate weighted average for each dimension
+            x_sum = sum(pos[0] * w for pos, w in zip(recent, weights))
+            y_sum = sum(pos[1] * w for pos, w in zip(recent, weights))
+            angle_sum = sum(pos[2] * w for pos, w in zip(recent, weights))
+            
             self.filtered_position = (x_sum, y_sum, angle_sum)
         else:
             self.filtered_position = position
             
-        # Calculate velocity if we have enough data
+        # Calculate velocity and acceleration if we have enough data
         if len(self.position_buffer) >= 2 and self.last_update_time is not None:
             dt = current_time - self.last_update_time
             if dt > 0.001:  # Avoid division by zero
-                # Get two most recent positions
-                prev_pos = self.position_buffer[-2]
-                curr_pos = self.position_buffer[-1]
+                # Calculate velocity
+                # Get the two most recent positions without slicing
+                buffer_size = len(self.position_buffer)
+                prev_pos = self.position_buffer[buffer_size - 2]
+                curr_pos = self.position_buffer[buffer_size - 1]
                 
-                # Calculate velocity components
                 vx = (curr_pos[0] - prev_pos[0]) / dt
                 vy = (curr_pos[1] - prev_pos[1]) / dt
                 v_angle = (curr_pos[2] - prev_pos[2]) / dt
                 
+                # Check for direction changes
+                prev_vel = self.current_velocity
+                new_vel = (vx, vy, v_angle)
+                
+                # Detect significant direction changes
+                self.direction_change_detected = False
+                if prev_vel[0] != 0 and prev_vel[1] != 0:
+                    # Calculate dot product to check direction change
+                    dot_product = prev_vel[0] * new_vel[0] + prev_vel[1] * new_vel[1]
+                    prev_mag = math.sqrt(prev_vel[0]**2 + prev_vel[1]**2)
+                    new_mag = math.sqrt(new_vel[0]**2 + new_vel[1]**2)
+                    
+                    # Avoid division by zero
+                    if prev_mag > 0.01 and new_mag > 0.01:
+                        cos_angle = dot_product / (prev_mag * new_mag)
+                        # Consider significant direction change if angle > 30 degrees
+                        if cos_angle < 0.866:  # cos(30°) ≈ 0.866
+                            self.direction_change_detected = True
+                
+                # Calculate acceleration if we have at least 3 points
+                if len(self.position_buffer) >= 3 and dt > 0.001:
+                    # Simple acceleration calculation 
+                    ax = (vx - self.current_velocity[0]) / dt
+                    ay = (vy - self.current_velocity[1]) / dt
+                    a_angle = (v_angle - self.current_velocity[2]) / dt
+                    
+                    # Low-pass filter for acceleration
+                    alpha_a = 0.3  # Lower value means more smoothing
+                    self.acceleration = (
+                        alpha_a * ax + (1 - alpha_a) * self.acceleration[0],
+                        alpha_a * ay + (1 - alpha_a) * self.acceleration[1],
+                        alpha_a * a_angle + (1 - alpha_a) * self.acceleration[2]
+                    )
+                
                 # Smooth velocity estimate with low-pass filter
-                alpha = 0.7  # Smoothing factor
+                alpha = 0.6  # Decreased from 0.7 to be less reactive to noise
                 self.current_velocity = (
                     alpha * vx + (1 - alpha) * self.current_velocity[0],
                     alpha * vy + (1 - alpha) * self.current_velocity[1],
                     alpha * v_angle + (1 - alpha) * self.current_velocity[2]
                 )
+                
+                # Calculate normalized direction vector
+                vel_magnitude = math.sqrt(self.current_velocity[0]**2 + self.current_velocity[1]**2)
+                if vel_magnitude > 0.01:  # Only update if moving significantly
+                    new_direction = (
+                        self.current_velocity[0] / vel_magnitude,
+                        self.current_velocity[1] / vel_magnitude
+                    )
+                    
+                    # Smooth direction updates
+                    alpha_dir = 0.7
+                    self.motion_direction = (
+                        alpha_dir * new_direction[0] + (1 - alpha_dir) * self.motion_direction[0],
+                        alpha_dir * new_direction[1] + (1 - alpha_dir) * self.motion_direction[1],
+                        self.current_velocity[2]  # Angular component
+                    )
+                
+                # Determine if target is consistently moving
+                vel_threshold = 0.05  # m/s
+                self.is_moving = vel_magnitude > vel_threshold
+                
+                # Calculate movement consistency (higher values = more consistent trajectory)
+                if len(self.trajectory_history) >= 5:
+                    # Get recent positions without slicing
+                    recent_positions = []
+                    traj_size = len(self.trajectory_history)
+                    for i in range(max(0, traj_size - 5), traj_size):
+                        recent_positions.append(self.trajectory_history[i][0])
+                    
+                    # Calculate average displacement direction
+                    dx = recent_positions[-1][0] - recent_positions[0][0]
+                    dy = recent_positions[-1][1] - recent_positions[0][1]
+                    
+                    # Check how well each segment aligns with overall direction
+                    consistency_sum = 0
+                    count = 0
+                    
+                    for i in range(1, len(recent_positions)):
+                        segment_dx = recent_positions[i][0] - recent_positions[i-1][0]
+                        segment_dy = recent_positions[i][1] - recent_positions[i-1][1]
+                        
+                        # Skip tiny movements
+                        segment_len = math.sqrt(segment_dx**2 + segment_dy**2)
+                        if segment_len < 0.01:
+                            continue
+                            
+                        # Normalize
+                        segment_dx /= segment_len
+                        segment_dy /= segment_len
+                        
+                        # Calculate alignment using dot product
+                        overall_len = math.sqrt(dx**2 + dy**2)
+                        if overall_len > 0.01:
+                            overall_dx = dx / overall_len
+                            overall_dy = dy / overall_len
+                            
+                            # Dot product (1.0 = perfect alignment, -1.0 = opposite direction)
+                            alignment = segment_dx * overall_dx + segment_dy * overall_dy
+                            consistency_sum += max(0, alignment)  # Only count positive alignment
+                            count += 1
+                    
+                    # Update consistency metric
+                    if count > 0:
+                        self.movement_consistency = consistency_sum / count
+                    else:
+                        self.movement_consistency = 0.0
         
-        # Make prediction for future position
-        if self.current_velocity != (0.0, 0.0, 0.0) and self.filtered_position is not None:
-            pred_x = self.filtered_position[0] + self.current_velocity[0] * self.prediction_horizon
-            pred_y = self.filtered_position[1] + self.current_velocity[1] * self.prediction_horizon
-            pred_angle = self.filtered_position[2] + self.current_velocity[2] * self.prediction_horizon
-            self.predicted_position = (pred_x, pred_y, pred_angle)
+        # Make better prediction for future position
+        if self.filtered_position is not None:
+            # Base prediction on current velocity and acceleration
+            if self.is_moving and not self.direction_change_detected:
+                # Calculate position using physics formulas with quadratic acceleration term
+                # x = x₀ + v₀t + ½at²
+                t = self.prediction_horizon
+                
+                # More weight to acceleration when consistent movement is detected
+                accel_weight = 0.5 * self.movement_consistency
+                
+                pred_x = (self.filtered_position[0] + 
+                        self.current_velocity[0] * t + 
+                        0.5 * self.acceleration[0] * t**2 * accel_weight)
+                
+                pred_y = (self.filtered_position[1] + 
+                        self.current_velocity[1] * t + 
+                        0.5 * self.acceleration[1] * t**2 * accel_weight)
+                
+                pred_angle = (self.filtered_position[2] + 
+                            self.current_velocity[2] * t)
+                
+                self.predicted_position = (pred_x, pred_y, pred_angle)
+            else:
+                # For non-consistent movement or after direction changes,
+                # use simpler prediction that's less sensitive to noise
+                t = self.prediction_horizon
+                pred_x = self.filtered_position[0] + self.current_velocity[0] * t * 0.7
+                pred_y = self.filtered_position[1] + self.current_velocity[1] * t * 0.7
+                pred_angle = self.filtered_position[2] + self.current_velocity[2] * t * 0.7
+                
+                self.predicted_position = (pred_x, pred_y, pred_angle)
         else:
-            self.predicted_position = self.filtered_position if self.filtered_position else position
+            self.predicted_position = position
             
         self.last_update_time = current_time
         return self.filtered_position
@@ -335,24 +520,56 @@ class TargetFilter:
         )
     
     def get_predicted_position(self):
-        """Get the predicted future position based on velocity."""
+        """Get the predicted future position based on velocity and acceleration."""
         return self.predicted_position
         
     def get_velocity(self):
         """Get the current velocity estimate."""
         return self.current_velocity
     
+    def get_acceleration(self):
+        """Get the current acceleration estimate."""
+        return self.acceleration
+    
     def get_recent_positions(self, n=3):
         """Get the n most recent positions."""
-        return [p[:3] for p in list(self.position_buffer)[-n:]]
+        # Use individual indexing instead of slicing
+        result = []
+        
+        # Get the last n positions manually
+        positions = []
+        count = len(self.position_buffer)
+        for i in range(max(0, count - n), count):
+            positions.append(self.position_buffer[i])
+        
+        # Extract the first 3 elements of each position
+        for p in positions:
+            result.append(p[:3])
+        
+        return result
+    
+    def get_movement_info(self):
+        """Get information about the movement characteristics."""
+        return {
+            'is_moving': self.is_moving,
+            'direction_change': self.direction_change_detected,
+            'consistency': self.movement_consistency,
+            'velocity_magnitude': math.sqrt(self.current_velocity[0]**2 + self.current_velocity[1]**2)
+        }
     
     def reset(self):
         """Reset the filter state."""
         self.position_buffer.clear()
+        self.trajectory_history.clear()
         self.last_update_time = None
         self.current_velocity = (0.0, 0.0, 0.0)
+        self.acceleration = (0.0, 0.0, 0.0)
         self.filtered_position = None
         self.predicted_position = None
+        self.is_moving = False
+        self.direction_change_detected = False
+        self.motion_direction = (0.0, 0.0, 0.0)
+        self.movement_consistency = 0.0
 
 class ErrorTracker:
     """Lightweight error tracker that monitors error values over time."""
@@ -362,51 +579,73 @@ class ErrorTracker:
         self.name = name
         self.current_error = 0.0
         self.previous_error = 0.0
+        self.previous_category = None  # For tracking error category with hysteresis
         # Pre-allocate error history with zeros to avoid frequent allocations
         self.error_history = deque([0.0] * max_history, maxlen=max_history)
-        self.error_history_index = 0
-        self.error_history_count = 0
-        self.error_history_size = max_history
         self.last_correction_time = 0.0
         self.sign_changes = 0  # Count of error sign changes (useful for oscillation detection)
         self.accumulated_error = 0.0
         self.decay_factor = 0.9  # Simplified decay factor
+        self.error_increasing = False
+        self.peak_error = 0.0
+        self.last_sign = 0  # -1, 0, or 1
         
     def update(self, error, dt):
         """Update error tracking with new error value."""
+        # Store previous error and sign
+        self.previous_error = self.current_error
+        prev_sign = 1 if self.current_error > 0 else (-1 if self.current_error < 0 else 0)
+        
+        # Update current error
+        self.current_error = error
+        current_sign = 1 if error > 0 else (-1 if error < 0 else 0)
+        
         # Check for sign change
-        if self.current_error != 0 and error != 0 and (self.current_error * error) < 0:
+        if prev_sign != 0 and current_sign != 0 and prev_sign != current_sign:
             self.sign_changes += 1
             
-        # Update error history using in-place modification
-        self.previous_error = self.current_error
-        self.current_error = error
+        # Update error history
+        self.error_history.append(error)
         
-        # Update error history with in-place modification
-        self.error_history[self.error_history_index] = error
-        self.error_history_index = (self.error_history_index + 1) % self.error_history_size
-        if self.error_history_count < self.error_history_size:
-            self.error_history_count += 1
+        # Track if error is increasing
+        self.error_increasing = abs(error) > abs(self.previous_error) * 1.05  # 5% threshold
         
-        # Update accumulated error with decay
-        self.accumulated_error = (self.accumulated_error + error * dt) * self.decay_factor
+        # Update peak error if current error is larger
+        if abs(error) > abs(self.peak_error):
+            self.peak_error = error
+        
+        # Apply different decay rates based on error direction
+        if current_sign == prev_sign:
+            # Same direction - standard decay
+            decay = self.decay_factor
+        else:
+            # Direction change - faster decay
+            decay = self.decay_factor * 0.5
+            
+        # Update accumulated error with direction-aware decay
+        self.accumulated_error = (self.accumulated_error + error * dt) * decay
+        
+        # Store last sign
+        self.last_sign = current_sign
     
     def reset(self):
         """Reset all tracked errors."""
         self.current_error = 0.0
         self.previous_error = 0.0
-        # Reset history indices rather than allocating new memory
-        self.error_history_index = 0
-        self.error_history_count = 0
-        # Zero out the existing history array instead of clearing and reallocating
-        for i in range(len(self.error_history)):
-            self.error_history[i] = 0.0
+        self.error_history.clear()
+        # Refill with zeros
+        for _ in range(self.error_history.maxlen):
+            self.error_history.append(0.0)
         self.accumulated_error = 0.0
         self.sign_changes = 0
+        self.error_increasing = False
+        self.peak_error = 0.0
+        self.last_sign = 0
+        self.previous_category = None
     
     def is_error_growing(self):
         """Check if error is growing compared to previous value."""
-        return abs(self.current_error) > abs(self.previous_error) * 1.05  # 5% threshold
+        return self.error_increasing
         
     def record_correction(self):
         """Record that a correction was made for this error."""
@@ -416,7 +655,7 @@ class ErrorTracker:
         
     def get_trend(self, n=3):
         """Calculate trend of error (increasing/decreasing)."""
-        if self.error_history_count < n:
+        if len(self.error_history) < n:
             return 0.0  # Not enough data
             
         # Get the last n values
@@ -442,12 +681,17 @@ class ErrorTracker:
             return slope
         except ZeroDivisionError:
             return 0.0
+    
+    def is_oscillating(self):
+        """Determine if the error is oscillating."""
+        # Consider oscillating if there are multiple sign changes recently
+        return self.sign_changes >= 2
 
-class AdaptiveGainPID:
-    """PID controller with adaptive gains based on error magnitude and trend."""
+class ImprovedPID:
+    """PID controller with enhanced integral handling and adaptive gains."""
     
     def __init__(self, base_kp, base_ki, base_kd, output_min, output_max, name="PID"):
-        """Initialize the adaptive PID controller."""
+        """Initialize the improved PID controller."""
         # Base gains
         self.base_kp = base_kp
         self.base_ki = base_ki
@@ -488,6 +732,14 @@ class AdaptiveGainPID:
         # Error tracker for trend analysis
         self.error_tracker = None
         
+        # Performance metrics
+        self.settling_time = 0.0
+        self.overshoot = 0.0
+        self.rise_time = 0.0
+        self.steady_state = False
+        
+        # Logger for controller-specific logs
+        self.logger = logging.getLogger(f'pid_controller.{name}')
         
     def adjust_gains(self, error, trend):
         """
@@ -531,6 +783,13 @@ class AdaptiveGainPID:
             # Less integral for lateral to prevent overshooting
             ki_factor *= 0.8
         
+        # For angular control specifically - reduced integral effect
+        if self.name == "Angular":
+            # Reduced integral gain for angular control
+            ki_factor *= 0.7
+            # Reduced derivative gain to prevent overshoot
+            kd_factor *= 0.6
+        
         # Gradually adjust gains
         self.kp = self.kp * (1.0 - self.gain_adjust_rate) + (self.base_kp * kp_factor) * self.gain_adjust_rate
         self.ki = self.ki * (1.0 - self.gain_adjust_rate) + (self.base_ki * ki_factor) * self.gain_adjust_rate
@@ -558,6 +817,12 @@ class AdaptiveGainPID:
         if self.error_tracker is not None:
             self.error_tracker.reset()
         
+        # Reset performance metrics
+        self.settling_time = 0.0
+        self.overshoot = 0.0
+        self.rise_time = 0.0
+        self.steady_state = False
+        
     def compute(self, error, current_time=None, force_zero=False, error_trend=0.0):
         """
         Compute the control output based on the error with improved zero-crossing handling.
@@ -572,8 +837,14 @@ class AdaptiveGainPID:
             float: Calculated control output
         """
         try:
-
-            print(f"PID {self.name} compute: error={error:.3f}, force_zero={force_zero}")
+            # Throttled logging - only log every few calls for this controller
+            should_log = hasattr(self, 'compute_count') and self.compute_count % 10 == 0
+            if not hasattr(self, 'compute_count'):
+                self.compute_count = 0
+            self.compute_count += 1
+            
+            if should_log:
+                self.logger.info(f"PID {self.name} compute: error={error:.3f}, force_zero={force_zero}")
 
             # If forcing zero output, bypass calculations
             if force_zero:
@@ -611,16 +882,19 @@ class AdaptiveGainPID:
                 self.zero_crossing_time = current_time
                 self.sign_change_count += 1
                 
-                # More aggressive integral reset on zero crossing for lateral movement
-                if self.name == "Linear Y":
-                    # More aggressive integral reset specifically for lateral PID
+                # Much more aggressive integral reset on zero crossing for angular movement
+                if self.name == "Angular":
+                    # More aggressive integral reset
+                    self.integral *= 0.05  # Much more aggressive (was 0.2 or 0.3)
+                elif self.name == "Linear Y":
+                    # More aggressive for lateral controller
                     self.integral *= 0.1  # More aggressive than before (was 0.2)
                 else:
                     # Default behavior for other controllers
-                    self.integral *= 0.2  # More aggressive than before (was 0.3)
+                    self.integral *= 0.2
             else:
-                # No sign change
-                self.sign_change_count = max(0, self.sign_change_count - 1)
+                # No sign change - gradually reduce sign change count for hysteresis
+                self.sign_change_count = max(0, self.sign_change_count - 0.1)
                 
             # Update previous sign
             if error != 0:
@@ -649,19 +923,33 @@ class AdaptiveGainPID:
                 if recently_crossed_zero:
                     # Near zero crossing, allow faster integral changes
                     if abs(error) > self.integral_deadband:
-                        self.integral += error * dt * 1.2  # Boost integral after crossing zero
+                        # For Angular controller, even more cautious integral accumulation
+                        if self.name == "Angular":
+                            self.integral += error * dt * 0.6  # Reduced accumulation rate
+                        else:
+                            self.integral += error * dt * 1.2  # Boost integral after crossing zero
                     else:
                         self.integral *= 0.5  # More aggressively reduce integral near zero
                 else:
                     # Normal integral handling
                     if abs(error) > self.integral_deadband:
-                        self.integral += error * dt
+                        # For Angular controller, reduce integral accumulation rate
+                        if self.name == "Angular":
+                            self.integral += error * dt * 0.7  # 30% slower accumulation
+                        else:
+                            self.integral += error * dt
                     else:
                         # More aggressively reduce integral term when close to target
                         self.integral *= self.integral_decay
                     
                 # Apply integral limit to prevent excessive buildup
-                self.integral = max(-self.max_integral, min(self.max_integral, self.integral))
+                # More restrictive limit for Angular controller
+                if self.name == "Angular":
+                    max_integral = self.max_integral * 0.7  # 30% smaller limit for angular
+                else:
+                    max_integral = self.max_integral
+                    
+                self.integral = max(-max_integral, min(max_integral, self.integral))
                 
                 i_term = self.ki * self.integral
             
@@ -672,7 +960,11 @@ class AdaptiveGainPID:
             # Enhanced derivative handling
             if self.sign_change_count >= 2:
                 # If oscillating (multiple sign changes), amplify derivative term
-                d_term = self.kd * error_change / max(dt, 0.001) * 1.3
+                # But less amplification for Angular controller to prevent overshoot
+                if self.name == "Angular":
+                    d_term = self.kd * error_change / max(dt, 0.001) * 1.0  # No amplification
+                else:
+                    d_term = self.kd * error_change / max(dt, 0.001) * 1.3
             else:
                 # Normal derivative calculation
                 d_term = self.kd * error_change / max(dt, 0.001)
@@ -688,22 +980,27 @@ class AdaptiveGainPID:
                 # Error crossed zero - reduce integral more aggressively
                 # If error is decreasing (approaching zero), be even more aggressive
                 if abs(error) < abs(self.prev_error):
-                    # More aggressive for lateral controller
-                    if self.name == "Linear Y":
-                        self.integral *= 0.1  # More aggressive than before (was 0.2)
+                    if self.name == "Angular":
+                        self.integral *= 0.05  # Much more aggressive for angular
+                    elif self.name == "Linear Y":
+                        self.integral *= 0.1  # More aggressive for lateral
                     else:
-                        self.integral *= 0.2  # More aggressive than before (was 0.3)
+                        self.integral *= 0.2  # Standard value
                 else:
-                    if self.name == "Linear Y":
-                        self.integral *= 0.2  # More aggressive than before (was 0.4)
+                    if self.name == "Angular":
+                        self.integral *= 0.1  # More aggressive than before for angular
+                    elif self.name == "Linear Y":
+                        self.integral *= 0.2
                     else:
-                        self.integral *= 0.3  # More aggressive than before (was 0.5)
+                        self.integral *= 0.3
                 i_term = self.ki * self.integral
                     
             # Apply transition smoothing for rapid control changes
+            # Less smoothing for Angular controller to improve responsiveness
+            smoothing_factor = 0.4 if self.name == "Angular" else 0.6
             if abs(output_limited - self.last_output) > (self.output_max - self.output_min) * 0.4:
                 # Blend between previous and current output for large changes
-                output_limited = 0.6 * output_limited + 0.4 * self.last_output
+                output_limited = smoothing_factor * output_limited + (1 - smoothing_factor) * self.last_output
                 
             # Save individual terms for diagnostics
             self.last_p_term = p_term
@@ -715,14 +1012,15 @@ class AdaptiveGainPID:
             self.prev_error = error
             self.last_time = current_time
             
-            print(f"PID {self.name} terms: P={self.last_p_term:.3f}, I={self.last_i_term:.3f}, D={self.last_d_term:.3f}")
+            if should_log:
+                self.logger.info(f"PID {self.name} terms: P={self.last_p_term:.3f}, I={self.last_i_term:.3f}, D={self.last_d_term:.3f}")
 
             # Ensure we return a proper float value
             return float(output_limited)
             
         except Exception as e:
             # Log error and return safe value
-            print(f"Error in PID compute: {str(e)}")
+            self.logger.error(f"Error in PID compute: {str(e)}")
             return 0.0
         
     def get_components(self):
@@ -748,15 +1046,15 @@ class CoordinatedController:
         self.linear_pid = linear_pid
         self.angular_pid = angular_pid
         
-        # Default configuration
+        # Default configuration with improved values
         self.config = {
-            'coupling_factor': 0.7,  # How strongly movements are coupled
+            'coupling_factor': 0.4,         # Reduced from 0.7 to allow more lateral movement
             'min_angle_for_reduction': 0.1,  # ~5.7 degrees
-            'zero_angle_threshold': 0.03,  # ~1.7 degrees
-            'max_angle_factor': 0.5,  # 30 degrees
-            'same_sign_scale': 0.8,  # Scaling when errors have same sign
-            'opposite_sign_scale': 1.0,  # Scaling when errors have opposite signs
-            'smoothing_factor': 0.6,  # Smoothing factor for velocity changes
+            'zero_angle_threshold': 0.03,    # ~1.7 degrees
+            'max_angle_factor': 0.3,         # Reduced from 0.5 to be less aggressive
+            'same_sign_scale': 0.8,          # Scaling when errors have same sign
+            'opposite_sign_scale': 1.2,      # Increased from 1.0 to prioritize when errors help each other
+            'smoothing_factor': 0.4,         # Reduced from 0.6 for faster response
         }
         
         # Update with provided config
@@ -767,6 +1065,9 @@ class CoordinatedController:
         self.last_lateral_velocity = 0.0
         self.last_angular_velocity = 0.0
         self.last_update_time = None
+        
+        # Logger
+        self.logger = logging.getLogger('pid_controller.coordinated')
     
     def compute(self, lateral_error, angular_error, current_time=None, robot_orientation=0.0):
         """
@@ -796,19 +1097,54 @@ class CoordinatedController:
         lateral_trend = self.linear_pid.error_tracker.get_trend() if hasattr(self.linear_pid, 'error_tracker') else 0.0
         angular_trend = self.angular_pid.error_tracker.get_trend() if hasattr(self.angular_pid, 'error_tracker') else 0.0
         
-        raw_lateral_velocity = self.linear_pid.compute(
-            lateral_error, 
-            current_time, 
-            force_zero=False, 
-            error_trend=lateral_trend
-        )
+        # Control strategy adaptation - prioritize angular control for larger angular errors
+        angular_magnitude = abs(angular_error)
+        large_angle_threshold = 0.1  # ~5.7 degrees
         
-        raw_angular_velocity = self.angular_pid.compute(
-            angular_error, 
-            current_time, 
-            force_zero=False,
-            error_trend=angular_trend
-        )
+        # Angular-first strategy - for larger angular errors, compute angular first
+        # and modulate lateral based on angular progress
+        if angular_magnitude > large_angle_threshold:
+            # Get raw angular velocity first
+            raw_angular_velocity = self.angular_pid.compute(
+                angular_error, 
+                current_time, 
+                force_zero=False,
+                error_trend=angular_trend
+            )
+            
+            # Then compute lateral velocity, potentially with reduced effect
+            angular_progress = 1.0 - min(1.0, angular_magnitude / self.config['max_angle_factor'])
+            
+            # Scale lateral control based on angular progress 
+            lateral_force_zero = angular_magnitude > (large_angle_threshold * 2)
+            
+            raw_lateral_velocity = self.linear_pid.compute(
+                lateral_error, 
+                current_time, 
+                force_zero=lateral_force_zero,
+                error_trend=lateral_trend
+            )
+            
+            # Gradually phase in lateral control as angular error reduces
+            if not lateral_force_zero:
+                # Apply scaling that increases as angular error decreases
+                raw_lateral_velocity *= angular_progress
+                
+        else:
+            # For smaller angular errors, compute both normally
+            raw_lateral_velocity = self.linear_pid.compute(
+                lateral_error, 
+                current_time, 
+                force_zero=False, 
+                error_trend=lateral_trend
+            )
+            
+            raw_angular_velocity = self.angular_pid.compute(
+                angular_error, 
+                current_time, 
+                force_zero=False,
+                error_trend=angular_trend
+            )
         
         # Apply coordination logic
         # 1. Calculate coupling based on angular error magnitude
@@ -819,7 +1155,7 @@ class CoordinatedController:
             # Normalize angular error to 0-1 range up to max_angle_factor
             normalized_angle = min(1.0, angular_magnitude / self.config['max_angle_factor'])
             
-            # Calculate lateral velocity reduction
+            # Calculate lateral velocity reduction - more moderate than before
             lateral_reduction = normalized_angle * self.config['coupling_factor']
             
             # Reduce lateral velocity when angular error is large
@@ -843,16 +1179,31 @@ class CoordinatedController:
                 
         # 3. Apply smoothing to prevent jerky transitions
         if self.last_lateral_velocity is not None and self.last_angular_velocity is not None:
-            lateral_velocity = self.last_lateral_velocity * (1 - self.config['smoothing_factor']) + \
-                              lateral_velocity * self.config['smoothing_factor']
+            # Reduced smoothing factor for more responsive control
+            smoothing = self.config['smoothing_factor']
+            
+            lateral_velocity = self.last_lateral_velocity * (1 - smoothing) + \
+                              lateral_velocity * smoothing
                               
-            angular_velocity = self.last_angular_velocity * (1 - self.config['smoothing_factor']) + \
-                              angular_velocity * self.config['smoothing_factor']
+            angular_velocity = self.last_angular_velocity * (1 - smoothing) + \
+                              angular_velocity * smoothing
         
         # Store values for next iteration
         self.last_lateral_velocity = lateral_velocity
         self.last_angular_velocity = angular_velocity
         self.last_update_time = current_time
+        
+        # Log coordination details occasionally
+        if hasattr(self, 'compute_count') and self.compute_count % 20 == 0:
+            coupling_str = f"{normalized_angle * self.config['coupling_factor']:.2f}" if 'normalized_angle' in locals() else "N/A"
+            self.logger.info(
+                f"Coordinated control: lateral_err={lateral_error:.3f}, angular_err={angular_error:.3f}, "
+                f"lateral_vel={lateral_velocity:.3f}, angular_vel={angular_velocity:.3f}, "
+                f"coupling={coupling_str}")
+            
+        if not hasattr(self, 'compute_count'):
+            self.compute_count = 0
+        self.compute_count += 1
         
         return lateral_velocity, angular_velocity
     
@@ -863,6 +1214,8 @@ class CoordinatedController:
         self.last_lateral_velocity = 0.0
         self.last_angular_velocity = 0.0
         self.last_update_time = None
+        if hasattr(self, 'compute_count'):
+            self.compute_count = 0
 
 class MovementStrategy:
     """Represents a robot movement strategy with blending capabilities."""
@@ -895,13 +1248,18 @@ class MovementStrategy:
 class StrategyBlender:
     """Handles smooth transitions between movement strategies."""
     
-    def __init__(self, blend_duration=0.5):
-        """Initialize the strategy blender."""
+    def __init__(self, blend_duration=0.2):  # Reduced from 0.5 to 0.2 seconds
+        """Initialize the strategy blender with faster transitions."""
         self.current_strategy = None
         self.target_strategy = None
         self.blend_start_time = 0.0
         self.blending_active = False
         self.blend_duration = blend_duration
+        self.direction_change_boost = 2.0  # Speed up transitions when direction changes
+        self.previous_direction = None
+        
+        # Logger
+        self.logger = logging.getLogger('pid_controller.blender')
     
     def update_target(self, target_strategy, current_time):
         """
@@ -917,17 +1275,58 @@ class StrategyBlender:
         # Initialize if this is the first strategy
         if self.current_strategy is None:
             self.current_strategy = target_strategy
+            self.previous_direction = self._get_strategy_direction(target_strategy)
             return False
             
         # Check if target is different from current
         if target_strategy.name != self.current_strategy.name:
+            # Detect direction change for boosting transition speed
+            current_direction = self._get_strategy_direction(target_strategy)
+            direction_change = False
+            
+            if self.previous_direction is not None and current_direction is not None:
+                # Check if direction components are opposite
+                direction_change = (
+                    (self.previous_direction[0] * current_direction[0] < 0) or
+                    (self.previous_direction[1] * current_direction[1] < 0) or
+                    (self.previous_direction[2] * current_direction[2] < 0)
+                )
+            
             # Start new blend
             self.target_strategy = target_strategy
             self.blend_start_time = current_time
             self.blending_active = True
+            
+            # Apply boosting for direction changes
+            if direction_change:
+                # Use shorter blend duration for direction changes
+                self.effective_blend_duration = self.blend_duration / self.direction_change_boost
+                self.logger.info(f"Direction change detected: boosting transition speed")
+            else:
+                self.effective_blend_duration = self.blend_duration
+            
+            # Update previous direction
+            self.previous_direction = current_direction
+            
             return True
             
         return False
+    
+    def _get_strategy_direction(self, strategy):
+        """Extract movement direction from a strategy."""
+        if not (strategy.use_forward or strategy.use_lateral or strategy.use_angular):
+            return None
+            
+        return (
+            1 if strategy.use_forward and strategy.forward_scale > 0 else 
+            (-1 if strategy.use_forward else 0),
+            
+            1 if strategy.use_lateral and strategy.lateral_scale > 0 else 
+            (-1 if strategy.use_lateral else 0),
+            
+            1 if strategy.use_angular and strategy.angular_scale > 0 else 
+            (-1 if strategy.use_angular else 0)
+        )
     
     def _smoothstep(self, x):
         """Apply smoothstep function to create smoother transitions."""
@@ -949,7 +1348,11 @@ class StrategyBlender:
             
         # Calculate blend factor
         elapsed_time = current_time - self.blend_start_time
-        linear_blend = min(1.0, elapsed_time / self.blend_duration)
+        
+        # Use effective blend duration that might be boosted for direction changes
+        blend_duration = getattr(self, 'effective_blend_duration', self.blend_duration)
+        
+        linear_blend = min(1.0, elapsed_time / blend_duration)
         blend_factor = self._smoothstep(linear_blend)
         
         # Check if blending is complete
@@ -960,9 +1363,18 @@ class StrategyBlender:
         
         # Create blended strategy
         name = f"{self.current_strategy.name}→{self.target_strategy.name}"
-        use_forward = self.target_strategy.use_forward  # Boolean flags use target value
-        use_lateral = self.target_strategy.use_lateral
-        use_angular = self.target_strategy.use_angular
+        
+        # Determine boolean flags using OR logic for smoother transitions
+        # e.g., if either strategy uses forward, the blended strategy should use it
+        # This prevents sudden stopping of a movement axis during transitions
+        use_forward = self.target_strategy.use_forward or (
+            self.current_strategy.use_forward and blend_factor < 0.5)
+            
+        use_lateral = self.target_strategy.use_lateral or (
+            self.current_strategy.use_lateral and blend_factor < 0.5)
+            
+        use_angular = self.target_strategy.use_angular or (
+            self.current_strategy.use_angular and blend_factor < 0.5)
         
         # Blend continuous parameters
         forward_scale = self.current_strategy.forward_scale * (1.0 - blend_factor) + \
@@ -990,14 +1402,17 @@ class StrategyBlender:
         if not self.blending_active:
             return 100.0
             
+        # Use effective blend duration for calculating progress
+        blend_duration = getattr(self, 'effective_blend_duration', self.blend_duration)
         elapsed_time = current_time - self.blend_start_time
-        return min(100.0, (elapsed_time / self.blend_duration) * 100.0)
+        return min(100.0, (elapsed_time / blend_duration) * 100.0)
     
     def reset(self):
         """Reset the blender state."""
         self.current_strategy = None
         self.target_strategy = None
         self.blending_active = False
+        self.previous_direction = None
 
 class ResourceMonitor:
     """
@@ -1019,6 +1434,7 @@ class ResourceMonitor:
         self.alert_callbacks = []
         self.cpu_threshold = 85.0  # Default CPU usage threshold (%)
         self.memory_threshold = 85.0  # Default memory usage threshold (%)
+        self.logger = logging.getLogger('pid_controller.resource_monitor')
     
     def update(self):
         """Update resource metrics if interval has elapsed."""
@@ -1063,9 +1479,13 @@ class ResourceMonitor:
     def get_memory_usage(self):
         """Get the last measured memory usage."""
         return self.memory_usage
+        
+    def log_stats(self):
+        """Log current resource statistics."""
+        self.logger.info(f"CPU: {self.cpu_usage:.1f}%, Memory: {self.memory_usage:.1f}%")
 
-class EnhancedPIDControllerNode(Node):
-    """Enhanced PID Controller node with coordinated control and smooth transitions."""
+class ImprovedPIDControllerNode(Node):
+    """Enhanced PID Controller node with improved movement strategy and error handling."""
     
     def __init__(self):
         """Initialize the enhanced PID controller node."""
@@ -1105,13 +1525,13 @@ class EnhancedPIDControllerNode(Node):
         self._init_strategy_table()
         
         # Initialize target filter
-        self.target_filter = TargetFilter(buffer_size=5, prediction_horizon=0.2)
+        self.target_filter = EnhancedTargetFilter(buffer_size=8, prediction_horizon=0.3)
         
-        # Initialize strategy blender
-        self.strategy_blender = StrategyBlender(blend_duration=0.5)
+        # Initialize strategy blender (faster transition time)
+        self.strategy_blender = StrategyBlender(blend_duration=0.2)
         
         # Log startup info
-        self.get_logger().info("Enhanced PID Controller initialized with coordinated control and smooth transitions")
+        self.get_logger().info("Improved PID Controller initialized with angular-first strategy")
     
     def _init_resource_monitoring(self):
         """Initialize the resource monitor for CPU and memory tracking."""
@@ -1127,7 +1547,7 @@ class EnhancedPIDControllerNode(Node):
         # Performance adjustment parameters
         self.base_update_rate = 10.0  # Default 10Hz control rate
         self.adaptive_control_rate = True
-        self.min_update_rate = 5.0  # Don't go below 5Hz
+        self.min_update_rate = 5.0   # Don't go below 5Hz
         self.max_update_rate = 20.0  # Don't go above 20Hz
         
         # Performance metrics tracking
@@ -1136,10 +1556,10 @@ class EnhancedPIDControllerNode(Node):
         self.skip_next_cycle = False
         
     def _declare_parameters(self):
-        """Declare and get all node parameters."""
+        """Declare and get all node parameters with improved defaults."""
         # Most parameter declarations are omitted for brevity but would be here
         
-        # Only showing a few key parameters for example
+        # Declare parameters with improved defaults
         self.declare_parameters(
             namespace='',
             parameters=[
@@ -1150,17 +1570,17 @@ class EnhancedPIDControllerNode(Node):
                 ('linear_x_min', 0.0),
                 ('linear_x_max', 0.2),
                 
-                # Linear Y velocity PID parameters
+                # Linear Y velocity PID parameters - improved lateral damping
                 ('linear_y_kp', 0.6),
-                ('linear_y_ki', 0.08),
-                ('linear_y_kd', 0.12),
+                ('linear_y_ki', 0.06),  # Reduced from 0.08
+                ('linear_y_kd', 0.14),  # Increased from 0.12
                 ('linear_y_min', -0.2),
                 ('linear_y_max', 0.2),
                 
-                # Angular velocity PID parameters
-                ('angular_kp', 1.5),
-                ('angular_ki', 0.05),
-                ('angular_kd', 0.8),
+                # Angular velocity PID parameters - improved to prevent overshoot
+                ('angular_kp', 1.35),  # Reduced from 1.5
+                ('angular_ki', 0.035), # Reduced from 0.05
+                ('angular_kd', 0.5),   # Reduced from 0.8
                 ('angular_min', -0.5),
                 ('angular_max', 0.5),
                 
@@ -1171,9 +1591,14 @@ class EnhancedPIDControllerNode(Node):
                 ('target_offset_y', 0.0),
                 ('target_update_rate', 10.0),
                 ('diagnostics_rate', 0.5),
-                ('debug_level', 0),
+                ('debug_level', 1),
                 ('adaptive_gains', True),
                 ('use_lateral_control', True),
+                
+                # Balanced error thresholds
+                ('distance_threshold', 0.1),
+                ('lateral_threshold', 0.075),  # Increased from 0.05
+                ('angular_threshold', 1.5),    # Decreased from 3.0
                 
                 # Resource monitoring parameters
                 ('adaptive_control_rate', True),
@@ -1184,8 +1609,15 @@ class EnhancedPIDControllerNode(Node):
                 # Performance optimization
                 ('enable_transform_caching', True),
                 ('transform_cache_ttl', 1.0),
-                ('diagnostics_rate', 0.5),
-                ('debug_level', 0),
+                
+                # Strategy configuration
+                ('angular_first_control', True),
+                ('strategy_blend_duration', 0.2),  # Faster blending
+                ('coordinated_movement', True),
+                
+                # Target filter parameters
+                ('filter_buffer_size', 8),
+                ('prediction_horizon', 0.3),
             ]
         )
         
@@ -1208,6 +1640,11 @@ class EnhancedPIDControllerNode(Node):
         self.angular_min = self.get_parameter('angular_min').value
         self.angular_max = self.get_parameter('angular_max').value
         
+        # Get error thresholds
+        self.distance_threshold = self.get_parameter('distance_threshold').value
+        self.lateral_threshold = self.get_parameter('lateral_threshold').value
+        self.angular_threshold = self.get_parameter('angular_threshold').value
+        
         # Get resource monitoring parameters
         self.adaptive_control_rate = self.get_parameter('adaptive_control_rate').value
         self.enable_resource_monitoring = self.get_parameter('enable_resource_monitoring').value
@@ -1218,22 +1655,33 @@ class EnhancedPIDControllerNode(Node):
         self.enable_transform_caching = self.get_parameter('enable_transform_caching').value
         self.transform_cache_ttl = self.get_parameter('transform_cache_ttl').value
         
+        # Get movement strategy parameters
+        self.angular_first_control = self.get_parameter('angular_first_control').value
+        self.strategy_blend_duration = self.get_parameter('strategy_blend_duration').value
+        self.coordinated_movement = self.get_parameter('coordinated_movement').value
+        
+        # Target filter parameters
+        self.filter_buffer_size = self.get_parameter('filter_buffer_size').value
+        self.prediction_horizon = self.get_parameter('prediction_horizon').value
+        
         # Target update rate from parameters
         self.update_rate = self.get_parameter('target_update_rate').value
         
         # All other parameter assignments would be here
         self.diagnostics_rate = self.get_parameter('diagnostics_rate').value
-
         self.debug_level = self.get_parameter('debug_level').value
-
+        
+        # Log important parameters
         self.get_logger().info(
-            f"CONTROLLER PARAMS: linear_x=[{self.linear_x_kp}, {self.linear_x_ki}, {self.linear_x_kd}], "
+            f"Controller parameters: linear_x=[{self.linear_x_kp}, {self.linear_x_ki}, {self.linear_x_kd}], "
             f"linear_y=[{self.linear_y_kp}, {self.linear_y_ki}, {self.linear_y_kd}], "
             f"angular=[{self.angular_kp}, {self.angular_ki}, {self.angular_kd}]"
         )
-
-        self.get_logger().info(f"MODIFIED GAINS: linear_x_kp={self.linear_x_kp}, angular_kp={self.angular_kp}")
-
+        
+        self.get_logger().info(
+            f"Error thresholds: distance={self.distance_threshold}, "
+            f"lateral={self.lateral_threshold}, angular={self.angular_threshold}"
+        )
                
     def _init_controllers(self):
         """Initialize the controllers with improved tuning."""
@@ -1242,22 +1690,22 @@ class EnhancedPIDControllerNode(Node):
         self.lateral_error_tracker = ErrorTracker("lateral", max_history=8)
         self.angular_error_tracker = ErrorTracker("angular", max_history=8)
         
-        # Initialize individual PID controllers with adaptive gains
-        self.pid_linear_x = AdaptiveGainPID(
+        # Initialize individual PID controllers with improved parameters
+        self.pid_linear_x = ImprovedPID(
             self.linear_x_kp, self.linear_x_ki, self.linear_x_kd,
             self.linear_x_min, self.linear_x_max,
             name="Linear X"
         )
         self.pid_linear_x.error_tracker = self.distance_error_tracker
         
-        self.pid_linear_y = AdaptiveGainPID(
+        self.pid_linear_y = ImprovedPID(
             self.linear_y_kp, self.linear_y_ki, self.linear_y_kd,
             self.linear_y_min, self.linear_y_max,
             name="Linear Y"
         )
         self.pid_linear_y.error_tracker = self.lateral_error_tracker
         
-        self.pid_angular = AdaptiveGainPID(
+        self.pid_angular = ImprovedPID(
             self.angular_kp, self.angular_ki, self.angular_kd,
             self.angular_min, self.angular_max,
             name="Angular"
@@ -1265,13 +1713,18 @@ class EnhancedPIDControllerNode(Node):
         
         self.pid_angular.error_tracker = self.angular_error_tracker
         
-        # Initialize coordinated controller
+        # Initialize coordinated controller with improved parameters
         self.coordinated_controller = CoordinatedController(
             self.pid_linear_y, 
             self.pid_angular,
             {
-                'coupling_factor': 0.7,
-                'smoothing_factor': 0.6,
+                'coupling_factor': 0.4,        # Reduced from 0.7
+                'smoothing_factor': 0.4,       # Reduced from 0.6 for faster response
+                'min_angle_for_reduction': 0.1,
+                'zero_angle_threshold': 0.03,
+                'max_angle_factor': 0.3,       # Reduced from 0.5
+                'same_sign_scale': 0.8,
+                'opposite_sign_scale': 1.2,    # Increased from 1.0
             }
         )
         
@@ -1309,7 +1762,8 @@ class EnhancedPIDControllerNode(Node):
             "angular_scale": 0.0,
             "reason": ""
         }
-        self._key_tuple = ["none", "none", "none"]  # Will be modified in-place
+        self._key_tuple = ["none", "none", "none"]  # Use list instead of tuple for mutability
+
         
         # Pre-allocated velocity tuple
         self._velocity_tuple = [0.0, 0.0, 0.0]
@@ -1392,6 +1846,11 @@ class EnhancedPIDControllerNode(Node):
         self.current_bearing = 0.0
         self.current_lateral = 0.0
         
+        # Filtered values
+        self.filtered_distance = 0.0
+        self.filtered_lateral = 0.0
+        self.filtered_bearing = 0.0
+        
         # Motion smoothing
         self.last_cmd_vel = (0.0, 0.0, 0.0)
         self.last_logged_cmd = (0.0, 0.0, 0.0)
@@ -1405,10 +1864,11 @@ class EnhancedPIDControllerNode(Node):
         # Cached values
         self.desired_distance = 1.0  # Will be set properly after parameters are loaded
         
-        # Stopped state tracking
+        # Stopped state tracking with hysteresis
         self._robot_stopped = False
         self._stop_time = 0.0
         self._last_stop_position = (0.0, 0.0, 0.0)
+        self._movement_hysteresis = 0.0  # Used to prevent oscillating between movement/stopped states
         
         # Movement strategy
         self.current_strategy = "IDLE"
@@ -1416,11 +1876,22 @@ class EnhancedPIDControllerNode(Node):
         self.strategy_change_time = time.time()
         self.active_strategy = None  # Holds the current strategy object
         
+        # Error categorization state
+        self.prev_distance_category = "none"
+        self.prev_lateral_category = "none"
+        self.prev_angular_category = "none"
+        
+        # Recovery state tracking
+        self.in_recovery = False
+        self.recovery_start_time = 0.0
+        self.recovery_phase = "none"  # none, stop, orient, approach
+        self.force_target_reacquisition = False
+        
         # Flag to track if we're shutting down
         self._shutting_down = False
 
         self.get_logger().info(
-            f"INIT VALUES: desired_distance={self.desired_distance:.3f}m, "
+            f"Initialized state: desired_distance={self.desired_distance:.3f}m, "
             f"robot_state={self.robot_state}"
         )
     
@@ -1694,6 +2165,7 @@ class EnhancedPIDControllerNode(Node):
     def _is_orientation_fresh(self):
         """Check if orientation data is fresh enough to use."""
         if self.last_orientation_time is None:
+            print ("orientation not received....")
             return False
             
         current_time = time.time()
@@ -1703,7 +2175,7 @@ class EnhancedPIDControllerNode(Node):
         return age < 0.5
     
     def target_callback(self, msg):
-        """Handle target position updates."""
+        """Handle target position updates with enhanced filtering."""
         if self._shutting_down:
             return
         
@@ -1721,11 +2193,14 @@ class EnhancedPIDControllerNode(Node):
         frame_id = msg.header.frame_id if hasattr(msg.header, 'frame_id') else "unknown_frame"
         self.target_frame = frame_id
         
-        self.get_logger().info(
-            f"TARGET DATA: frame={frame_id}, pos=({target.x:.3f}, {target.y:.3f}, {target.z:.3f}), "
-            f"calculated: distance={self.current_distance:.3f}, lateral={self.current_lateral:.3f}, "
-            f"bearing={math.degrees(self.current_bearing):.2f}°"
-        )
+        # Throttled logging for target updates
+        if self.debug_level >= 2:
+            self._log_throttled(
+                self.get_logger().info,
+                f"TARGET DATA: frame={frame_id}, pos=({target.x:.3f}, {target.y:.3f}, {target.z:.3f})",
+                1.0,  # Throttle to once per second
+                'last_target_log_time'
+            )
 
         # Calculate bearing/direction to ball based on frame
         if frame_id == "camera_frame" or frame_id == "camera_optical_frame":
@@ -1737,59 +2212,70 @@ class EnhancedPIDControllerNode(Node):
             self.current_bearing = math.atan2(target.y, target.x)
             self.current_lateral = target.y
         
-        # Apply target filtering if enabled
-        if hasattr(self, 'target_filter'):
-            # Update the filter with the new position
+        # Apply target filtering
+        # Update the filter with the new position
+        filtered_position = self.target_filter.update(
+            (self.current_distance, self.current_lateral, self.current_bearing),
+            self.last_target_time
+        )
+        
+        # Force target reacquisition if requested (e.g. after recovery)
+        if self.force_target_reacquisition:
+            self.target_filter.reset()
             filtered_position = self.target_filter.update(
                 (self.current_distance, self.current_lateral, self.current_bearing),
                 self.last_target_time
             )
+            self.force_target_reacquisition = False
+            self.get_logger().info("Forced target reacquisition - filter reset")
+        
+        # Use filtered/predicted position if available
+        if filtered_position:
+            # Check if we should use prediction or just filtering
+            movement_info = self.target_filter.get_movement_info()
             
-            # Use filtered/predicted position if available
-            if filtered_position:
+            if movement_info['is_moving'] and not movement_info['direction_change']:
+                # For consistent movement, use prediction
                 predicted_position = self.target_filter.get_predicted_position()
                 if predicted_position:
-                    # Use prediction for control, but keep unfiltered values for tracking
-                    # and diagnostics
+                    # Use prediction for control
                     self.filtered_distance = predicted_position[0]
                     self.filtered_lateral = predicted_position[1]
                     self.filtered_bearing = predicted_position[2]
                     
                     if self.debug_level >= 2:
                         self.get_logger().debug(
-                            f"Target filtering: raw=({self.current_distance:.2f}, {self.current_lateral:.2f}, "
+                            f"Target prediction: raw=({self.current_distance:.2f}, {self.current_lateral:.2f}, "
                             f"{math.degrees(self.current_bearing):.1f}°), "
-                            f"filtered=({self.filtered_distance:.2f}, {self.filtered_lateral:.2f}, "
+                            f"predicted=({self.filtered_distance:.2f}, {self.filtered_lateral:.2f}, "
                             f"{math.degrees(self.filtered_bearing):.1f}°)"
                         )
                 else:
-                    # Fall back to raw values if prediction not available
-                    self.filtered_distance = self.current_distance
-                    self.filtered_lateral = self.current_lateral
-                    self.filtered_bearing = self.current_bearing
+                    # Fall back to filtered values
+                    self.filtered_distance = filtered_position[0]
+                    self.filtered_lateral = filtered_position[1]
+                    self.filtered_bearing = filtered_position[2]
             else:
-                # Fall back to raw values if filtering not available
-                self.filtered_distance = self.current_distance
-                self.filtered_lateral = self.current_lateral
-                self.filtered_bearing = self.current_bearing
+                # Just use filtered values for inconsistent movement
+                self.filtered_distance = filtered_position[0]
+                self.filtered_lateral = filtered_position[1]
+                self.filtered_bearing = filtered_position[2]
+        else:
+            # Fall back to raw values if filtering not available
+            self.filtered_distance = self.current_distance
+            self.filtered_lateral = self.current_lateral
+            self.filtered_bearing = self.current_bearing
     
     def state_callback(self, msg):
-        """Handle robot state updates from the state manager."""
+        """Handle robot state updates with improved recovery behavior."""
         new_state = msg.data
         
         # If state changed, handle the transition
         if new_state != self.robot_state:
-
-            self.get_logger().info(
-                f"STATE TRANSITION: {self.robot_state} → {new_state}, "
-                f"last_target_time={self.last_target_time}, "
-                f"current_time={time.time()}"
-            )
-
             # Throttled logging for state changes
             self._log_throttled(
                 self.get_logger().info,
-                f"Robot state changed: {self.robot_state} → {new_state}",
+                f"STATE TRANSITION: {self.robot_state} → {new_state}",
                 LOG_THROTTLE_STATE,
                 'last_state_log_time'
             )
@@ -1797,23 +2283,22 @@ class EnhancedPIDControllerNode(Node):
             self.previous_state = self.robot_state
             self.robot_state = new_state
             
-            # Only reset controllers when switching to/from tracking
+            # Handle recovery state transitions
+            if new_state == "recovery":
+                self.in_recovery = True
+                self.recovery_start_time = time.time()
+                self.recovery_phase = "stop"
+                # Stop robot immediately when entering recovery
+                self.stop_robot()
+                self.get_logger().info("Entering recovery mode - stopping robot")
+            
+            # Complete controller reset when transitioning between tracking and other states
             if new_state == "tracking" or self.previous_state == "tracking":
-                self.pid_linear_x.reset()
-                self.pid_linear_y.reset()
-                self.pid_angular.reset()
-                self.coordinated_controller.reset()
+                self._complete_controller_reset()
                 
-                # Reset error trackers
-                self.distance_error_tracker.reset()
-                self.lateral_error_tracker.reset()
-                self.angular_error_tracker.reset()
-                
-                # Reset target filter
-                self.target_filter.reset()
-                
-                # Reset strategy blender
-                self.strategy_blender.reset()
+                # Force target reacquisition when re-entering tracking mode
+                if new_state == "tracking":
+                    self.force_target_reacquisition = True
                 
             # If we're not in tracking mode, ensure the robot is stopped
             # (unless it's in searching or lost_ball mode, where the state manager controls motion)
@@ -1848,6 +2333,10 @@ class EnhancedPIDControllerNode(Node):
         # Adaptive control rate based on CPU usage
         if self.adaptive_control_rate:
             self._adjust_control_rate()
+            
+        # Log resource stats occasionally
+        if self.cycle_count % 10 == 0:
+            self.resource_monitor.log_stats()
     
     def _handle_resource_alert(self, resource_type, value):
         """Handle resource alerts from the resource monitor."""
@@ -1908,6 +2397,7 @@ class EnhancedPIDControllerNode(Node):
             # Skip this cycle if requested
             if self.skip_next_cycle:
                 self.skip_next_cycle = False
+                self.performance_stats["control_skips"] += 1
                 return
                 
             # Track performance
@@ -1925,6 +2415,11 @@ class EnhancedPIDControllerNode(Node):
             if self.cycle_count % 50 == 0:
                 self._log_periodic_status()
             
+            # Special handling for recovery mode
+            if self.in_recovery:
+                self._handle_recovery_mode(current_time)
+                return
+            
             # Only generate commands in tracking mode with a recent target
             if self.robot_state != "tracking" or self.current_target is None:
                 # When not tracking, ensure robot is stopped (unless controlled by another node)
@@ -1937,30 +2432,26 @@ class EnhancedPIDControllerNode(Node):
                 self.get_logger().warning("Skipping control cycle - orientation data is stale")
                 return
             
-            # Use filtered values if available, otherwise use raw values from target callback
-            if hasattr(self, 'filtered_distance'):
-                distance = self.filtered_distance
-                lateral = self.filtered_lateral
-                bearing = self.filtered_bearing
-            else:
-                distance = self.current_distance
-                lateral = self.current_lateral
-                bearing = self.current_bearing
+            # Use filtered values
+            distance = self.filtered_distance
+            lateral = self.filtered_lateral
+            bearing = self.filtered_bearing
             
             angular_degrees = math.degrees(bearing)
             
-            self.get_logger().info(
-                f"PRE-STOP CHECK: distance={distance:.3f}m (target={self.desired_distance:.3f}m), "
-                f"lateral={lateral:.3f}m, angular={angular_degrees:.2f}°, "
-                f"is_stopped={self._robot_stopped}"
-            )
+            if self.debug_level >= 2:
+                self.get_logger().info(
+                    f"PRE-STOP CHECK: distance={distance:.3f}m (target={self.desired_distance:.3f}m), "
+                    f"lateral={lateral:.3f}m, angular={angular_degrees:.2f}°, "
+                    f"is_stopped={self._robot_stopped}"
+                )
 
             # Calculate errors using pre-allocated array
             self._current_errors[0] = distance - self.desired_distance  # distance_error
-            self._current_errors[1] = lateral - 0.0    # lateral_error (target_offset_y)
-            self._current_errors[2] = bearing          # angular_error
+            self._current_errors[1] = lateral - 0.0                     # lateral_error 
+            self._current_errors[2] = bearing                           # angular_error
             
-            # Check if we need to reset stopped state based on errors
+            # Check if we need to reset stopped state based on errors with enhanced hysteresis
             state_reset = self._reset_stopped_state_if_needed(
                 self._current_errors[0], 
                 self._current_errors[1], 
@@ -1985,9 +2476,14 @@ class EnhancedPIDControllerNode(Node):
             self.lateral_error_tracker.update(self._current_errors[1], dt)
             self.angular_error_tracker.update(self._current_errors[2], dt)
             
-            # Determine the optimal movement strategy
+            # Determine the optimal movement strategy with hysteresis
             strategy = self._determine_movement_strategy(
-                self._current_errors[0], self._current_errors[1], angular_degrees
+                self._current_errors[0], 
+                self._current_errors[1], 
+                angular_degrees,
+                self.prev_distance_category,
+                self.prev_lateral_category,
+                self.prev_angular_category
             )
             
             # Apply strategy to movement decisions
@@ -1999,15 +2495,20 @@ class EnhancedPIDControllerNode(Node):
             lateral_scale = strategy["lateral_scale"]
             angular_scale = strategy["angular_scale"]
             
-            self.get_logger().info(f"Computing PID with: use_forward={use_forward}, use_lateral={use_lateral}, use_angular={use_angular}")
+            if self.debug_level >= 3:
+                self.get_logger().info(
+                    f"Using strategy: {strategy['strategy_name']}, "
+                    f"forward={use_forward}, lateral={use_lateral}, angular={use_angular}"
+                )
 
-            # Compute PID outputs
-            if hasattr(self, 'use_coordinated_control') and self.use_coordinated_control:
+            # Compute velocities
+            if self.coordinated_movement and use_lateral and use_angular:
                 # Use coordinated controller for lateral and angular movements
                 linear_x_velocity = self.pid_linear_x.compute(
                     self._current_errors[0], 
                     current_time, 
-                    not use_forward
+                    not use_forward,
+                    self.distance_error_tracker.get_trend()
                 )
                 
                 # Use coordinated control for lateral and angular velocities
@@ -2028,19 +2529,22 @@ class EnhancedPIDControllerNode(Node):
                 linear_x_velocity = self.pid_linear_x.compute(
                     self._current_errors[0], 
                     current_time, 
-                    not use_forward
+                    not use_forward,
+                    self.distance_error_tracker.get_trend()
                 )
                 
                 lateral_velocity = self.pid_linear_y.compute(
                     self._current_errors[1], 
                     current_time, 
-                    not use_lateral
+                    not use_lateral,
+                    self.lateral_error_tracker.get_trend()
                 )
                 
                 angular_velocity = self.pid_angular.compute(
                     self._current_errors[2], 
                     current_time, 
-                    not use_angular
+                    not use_angular,
+                    self.angular_error_tracker.get_trend()
                 )
             
             # Apply strategy scaling factors
@@ -2048,10 +2552,11 @@ class EnhancedPIDControllerNode(Node):
             lateral_velocity *= lateral_scale
             angular_velocity *= angular_scale
             
-            self.get_logger().info(
-                f"After scaling: linear_x={linear_x_velocity:.3f}, lateral={lateral_velocity:.3f}, "
-                f"angular={angular_velocity:.3f}"
-            )
+            if self.debug_level >= 2:
+                self.get_logger().info(
+                    f"After scaling: linear_x={linear_x_velocity:.3f}, "
+                    f"lateral={lateral_velocity:.3f}, angular={angular_velocity:.3f}"
+                )
 
             # Apply velocity and acceleration limits
             limited_velocities = self._apply_velocity_limits(
@@ -2095,10 +2600,6 @@ class EnhancedPIDControllerNode(Node):
             velocity_tuple = (float(linear_x_velocity), float(lateral_velocity), float(angular_velocity))
             self.velocity_history.add(velocity_tuple)
             
-            self.get_logger().info(f"PUBLISHING: linear_x={cmd_vel_msg.linear.x:.3f}, "
-                          f"lateral={cmd_vel_msg.linear.y:.3f}, "
-                          f"angular={cmd_vel_msg.angular.z:.3f}")
-
             # Publish command
             self.cmd_vel_pub.publish(cmd_vel_msg)
             
@@ -2126,9 +2627,142 @@ class EnhancedPIDControllerNode(Node):
             except Exception as stop_error:
                 self.get_logger().error(f"Failed to stop robot after error: {str(stop_error)}")
     
+    def _handle_recovery_mode(self, current_time):
+        """
+        Handle recovery mode with a three-phase approach:
+        1. Stop - halt all movement
+        2. Orient - align with target
+        3. Approach - move to target
+        """
+        # Check if we should exit recovery mode
+        if self.robot_state != "recovery":
+            self.in_recovery = False
+            self.recovery_phase = "none"
+            return
+        
+        recovery_duration = current_time - self.recovery_start_time
+        
+        # Phase 1: Stop (0-1 seconds)
+        if self.recovery_phase == "stop":
+            # Ensure robot is stopped
+            self.stop_robot()
+            
+            # After 1 second, transition to orient phase
+            if recovery_duration > 1.0:
+                self.recovery_phase = "orient"
+                self.get_logger().info("Recovery: Moving to orientation phase")
+                
+                # Reset angular controller
+                self.pid_angular.reset()
+                self.angular_error_tracker.reset()
+                
+        # Phase 2: Orient (1-3 seconds)
+        elif self.recovery_phase == "orient":
+            # Only orient if we have a target
+            if self.current_target is not None and self._is_orientation_fresh():
+                # Use filtered bearing
+                bearing = self.filtered_bearing
+                angular_degrees = math.degrees(bearing)
+                
+                # Only orient if angular error is significant
+                if abs(angular_degrees) > 2.0:
+                    # Compute angular velocity with PID
+                    angular_velocity = self.pid_angular.compute(
+                        bearing,
+                        current_time,
+                        force_zero=False
+                    )
+                    
+                    # Apply conservative scaling
+                    angular_velocity *= 0.8
+                    
+                    # Create and publish Twist message
+                    cmd_vel_msg = self._cmd_vel_msg
+                    cmd_vel_msg.linear.x = 0.0
+                    cmd_vel_msg.linear.y = 0.0
+                    cmd_vel_msg.angular.z = float(angular_velocity)
+                    
+                    self.cmd_vel_pub.publish(cmd_vel_msg)
+                    
+                    self.get_logger().info(f"Recovery orient: angular_error={angular_degrees:.2f}°, velocity={angular_velocity:.2f}")
+                else:
+                    # If angular error is small, stop rotation
+                    self.stop_robot()
+                    
+                    # Log alignment success
+                    self.get_logger().info(f"Recovery orient: good alignment achieved ({angular_degrees:.2f}°)")
+            
+            # After 2 seconds in orient phase, move to approach
+            if recovery_duration > 3.0:
+                self.recovery_phase = "approach"
+                self.get_logger().info("Recovery: Moving to approach phase")
+                
+                # Reset all controllers for approach
+                self.pid_linear_x.reset()
+                self.pid_linear_y.reset()
+                self.distance_error_tracker.reset()
+                self.lateral_error_tracker.reset()
+                
+        # Phase 3: Approach (3+ seconds)
+        elif self.recovery_phase == "approach":
+            # Only approach if we have a target
+            if self.current_target is not None and self._is_orientation_fresh():
+                # Use filtered values
+                distance = self.filtered_distance
+                lateral = self.filtered_lateral
+                
+                # Calculate errors
+                distance_error = distance - self.desired_distance
+                lateral_error = lateral
+                
+                # Only move if errors are significant
+                if abs(distance_error) > 0.1 or abs(lateral_error) > 0.1:
+                    # Compute velocities
+                    linear_x_velocity = self.pid_linear_x.compute(
+                        distance_error,
+                        current_time,
+                        force_zero=False
+                    ) * 0.7  # Apply conservative scaling
+                    
+                    lateral_velocity = self.pid_linear_y.compute(
+                        lateral_error,
+                        current_time,
+                        force_zero=False
+                    ) * 0.7  # Apply conservative scaling
+                    
+                    # Create and publish Twist message
+                    cmd_vel_msg = self._cmd_vel_msg
+                    cmd_vel_msg.linear.x = float(linear_x_velocity)
+                    cmd_vel_msg.linear.y = float(lateral_velocity)
+                    cmd_vel_msg.angular.z = 0.0
+                    
+                    self.cmd_vel_pub.publish(cmd_vel_msg)
+                    
+                    self.get_logger().info(
+                        f"Recovery approach: distance_error={distance_error:.2f}m, "
+                        f"lateral_error={lateral_error:.2f}m, "
+                        f"velocity=({linear_x_velocity:.2f}, {lateral_velocity:.2f})"
+                    )
+                else:
+                    # If errors are small, stop movement
+                    self.stop_robot()
+                    
+                    # Log approach success
+                    self.get_logger().info(
+                        f"Recovery approach: good position achieved "
+                        f"(distance_error={distance_error:.2f}m, lateral_error={lateral_error:.2f}m)"
+                    )
+            
+            # After 6 seconds in recovery, suggest exiting recovery mode
+            if recovery_duration > 6.0:
+                self.get_logger().info(
+                    "Recovery has been active for 6 seconds. "
+                    "Consider transitioning back to tracking mode if recovery is complete."
+                )
+    
     def _reset_stopped_state_if_needed(self, distance_error, lateral_error, angular_error):
         """
-        Reset stopped state if significant movement is required.
+        Reset stopped state if significant movement is required, with improved hysteresis.
         
         Args:
             distance_error: Current error in distance to target
@@ -2141,10 +2775,17 @@ class EnhancedPIDControllerNode(Node):
         if not self._robot_stopped:
             return False  # Already in movement state
             
-        # If any error exceeds the movement threshold, exit stopped state
-        distance_threshold = 0.2 * 1.5  # Example threshold with hysteresis
-        lateral_threshold = 0.08 * 1.5   # Example threshold with hysteresis
-        angular_threshold = 5.0 * 1.5    # Example threshold with hysteresis
+        # Calculate hysteresis factor based on stop time
+        stop_duration = time.time() - self._stop_time
+        
+        # Hysteresis increases with stop duration to a max of 1.5
+        # This helps prevent oscillating between stopped and moving states
+        hysteresis = min(1.5, 1.0 + stop_duration * 0.2)
+        
+        # If any error exceeds the movement threshold with hysteresis, exit stopped state
+        distance_threshold = self.distance_threshold * hysteresis
+        lateral_threshold = self.lateral_threshold * hysteresis
+        angular_threshold = self.angular_threshold * hysteresis
         
         if (abs(distance_error) > distance_threshold or
             abs(lateral_error) > lateral_threshold or
@@ -2152,13 +2793,17 @@ class EnhancedPIDControllerNode(Node):
             
             self.get_logger().info(
                 f"Exiting stopped state - Movement required: "
-                f"distance_error={distance_error:.3f}m, "
-                f"lateral_error={lateral_error:.3f}m, "
-                f"angular_error={angular_error:.2f}°"
+                f"distance_error={distance_error:.3f}m(threshold={distance_threshold:.3f}), "
+                f"lateral_error={lateral_error:.3f}m(threshold={lateral_threshold:.3f}), "
+                f"angular_error={angular_error:.2f}°(threshold={angular_threshold:.2f})"
             )
             
             # Reset stopped state
             self._robot_stopped = False
+            
+            # Reset movement hysteresis
+            self._movement_hysteresis = 0.0
+            
             return True
         
         return False
@@ -2174,31 +2819,45 @@ class EnhancedPIDControllerNode(Node):
             is_stopped: Whether the robot is currently stopped
             
         Returns:
-            tuple: (should_move, reason) - True if robot should move, False if it should stop
+            tuple: (should_stop, reason) - True if robot should stop, False if it should move
         """
         # Calculate error values
         distance_error = abs(distance - self.desired_distance)
         lateral_error = abs(lateral)
         angular_error = abs(angular_degrees)
         
-        # Define thresholds
-        distance_threshold = 0.1  # meters
-        lateral_threshold = 0.05  # meters
-        angular_threshold = 3.0   # degrees
+        # Start with base thresholds
+        distance_threshold = self.distance_threshold
+        lateral_threshold = self.lateral_threshold
+        angular_threshold = self.angular_threshold
         
         # Apply hysteresis - different thresholds based on current state
         if is_stopped:
             # If already stopped, use higher thresholds to start moving
             # (requires larger errors to start moving)
-            distance_threshold *= 1.5
-            lateral_threshold *= 1.5
-            angular_threshold *= 1.5
+            hysteresis = 1.5 + self._movement_hysteresis  # Additional accumulated hysteresis
+            distance_threshold *= hysteresis
+            lateral_threshold *= hysteresis
+            angular_threshold *= hysteresis
+            
+            # Cap the maximum thresholds
+            distance_threshold = min(distance_threshold, 0.2)
+            lateral_threshold = min(lateral_threshold, 0.15)
+            angular_threshold = min(angular_threshold, 6.0)
+        else:
+            # If already moving, use reduced thresholds to stop
+            # (more precision when already near target)
+            hysteresis = 0.8
+            distance_threshold *= hysteresis
+            lateral_threshold *= hysteresis
+            angular_threshold *= hysteresis
         
-        self.get_logger().info(
-            f"MOVEMENT THRESHOLDS: d_err={distance_error:.3f}/{distance_threshold:.3f}, "
-            f"l_err={lateral_error:.3f}/{lateral_threshold:.3f}, "
-            f"a_err={angular_error:.2f}/{angular_threshold:.2f}"
-        )
+        if self.debug_level >= 2:
+            self.get_logger().info(
+                f"MOVEMENT THRESHOLDS: d_err={distance_error:.3f}/{distance_threshold:.3f}, "
+                f"l_err={lateral_error:.3f}/{lateral_threshold:.3f}, "
+                f"a_err={angular_error:.2f}/{angular_threshold:.2f}"
+            )
         
         # Check if any error exceeds thresholds - robot should move
         if (distance_error > distance_threshold or
@@ -2218,12 +2877,19 @@ class EnhancedPIDControllerNode(Node):
             f"lateral_error={lateral_error:.3f}m, "
             f"angular_error={angular_error:.2f}°"
         )
+        
+        # If we're stopping, accumulate a small amount of hysteresis
+        # This helps prevent oscillating when hovering near thresholds
+        if not is_stopped:
+            self._movement_hysteresis += 0.05
+            self._movement_hysteresis = min(0.3, self._movement_hysteresis)  # Cap at 0.3
+        
         return True, reason  # Return True to indicate robot SHOULD stop
     
     def _apply_velocity_limits(self, linear_x, linear_y, angular_z, current_time):
         """
         Apply velocity and acceleration limits for smooth, natural movement.
-        With enhanced handling for combined movements.
+        With enhanced handling for combined movements and hysteresis.
         
         Args:
             linear_x: Calculated forward velocity
@@ -2234,9 +2900,10 @@ class EnhancedPIDControllerNode(Node):
         Returns:
             tuple: (limited_linear_x, limited_linear_y, limited_angular_z)
         """
-
-        self.get_logger().info(f"Before limits: linear_x={linear_x:.3f}, "
-                          f"linear_y={linear_y:.3f}, angular_z={angular_z:.3f}")
+        if self.debug_level >= 2:  # Lowered from 3 for consistent debug level
+            self.get_logger().info(
+                f"Before limits: linear_x={linear_x:.3f}, linear_y={linear_y:.3f}, angular_z={angular_z:.3f}"
+            )
 
         # Convert inputs to numpy arrays for vectorized operations
         self._target_velocities[0] = linear_x
@@ -2284,25 +2951,32 @@ class EnhancedPIDControllerNode(Node):
             else:
                 self._limited_velocities[i] = self._target_velocities[i]
         
-        # Apply minimum velocity thresholds
-        min_effective_velocity = 0.05
-        min_angular_velocity = 0.1
+        # Apply minimum velocity thresholds with hysteresis
+        min_effective_velocity = 0.025  # Reduced from 0.05
+        min_angular_velocity = 0.05     # Reduced from 0.1
         
-        # Forward velocity
+        # Forward velocity threshold with hysteresis
         if abs(self._limited_velocities[0]) < min_effective_velocity:
-            self._limited_velocities[0] = 0.0
+            # Only zero if previously zero or very small
+            if abs(self._prev_velocities[0]) < min_effective_velocity * 1.2:
+                self._limited_velocities[0] = 0.0
             
-        # Lateral velocity
+        # Lateral velocity threshold with hysteresis
         if abs(self._limited_velocities[1]) < min_effective_velocity:
-            self._limited_velocities[1] = 0.0
+            # Only zero if previously zero or very small
+            if abs(self._prev_velocities[1]) < min_effective_velocity * 1.2:
+                self._limited_velocities[1] = 0.0
             
-        # Angular velocity
+        # Angular velocity threshold with hysteresis
         if abs(self._limited_velocities[2]) < min_angular_velocity:
-            self._limited_velocities[2] = 0.0
+            # Only zero if previously zero or very small
+            if abs(self._prev_velocities[2]) < min_angular_velocity * 1.2:
+                self._limited_velocities[2] = 0.0
         
         # Limit combined lateral and angular movement
         if abs(self._limited_velocities[1]) > 0.15 and abs(self._limited_velocities[2]) > 0.3:
             # Scale down lateral velocity when combined with significant angular velocity
+            # This prevents tipping during combined movements
             self._limited_velocities[1] *= 0.6
         
         # Apply maximum velocity limits
@@ -2314,14 +2988,17 @@ class EnhancedPIDControllerNode(Node):
         self._limited_velocities[1] = max(-linear_y_max, min(linear_y_max, self._limited_velocities[1]))
         self._limited_velocities[2] = max(-angular_max, min(angular_max, self._limited_velocities[2]))
         
-        self.get_logger().info(f"After limits: linear_x={self._limited_velocities[0]:.3f}, "
-                          f"linear_y={self._limited_velocities[1]:.3f}, "
-                          f"angular_z={self._limited_velocities[2]:.3f}")
+        if self.debug_level >= 2:  # Consistent debug level
+            self.get_logger().info(
+                f"After limits: linear_x={self._limited_velocities[0]:.3f}, "
+                f"linear_y={self._limited_velocities[1]:.3f}, "
+                f"angular_z={self._limited_velocities[2]:.3f}"
+            )
 
         return (self._limited_velocities[0], self._limited_velocities[1], self._limited_velocities[2])
     
     def stop_robot(self):
-        """Send a command to stop all robot motion immediately."""
+        """Send a command to stop all robot motion immediately and reset controllers."""
         # Reuse cmd_vel message and set all fields to 0
         self._cmd_vel_msg.linear.x = 0.0
         self._cmd_vel_msg.linear.y = 0.0
@@ -2341,20 +3018,6 @@ class EnhancedPIDControllerNode(Node):
         # Clear velocity history
         self.velocity_history = LightweightBuffer(max_size=6)
         
-        # Reset controllers to clear any lingering integral terms
-        self.pid_linear_x.reset()
-        self.pid_linear_y.reset()
-        self.pid_angular.reset()
-        self.coordinated_controller.reset()
-        
-        # Reset error trackers
-        self.distance_error_tracker.reset()
-        self.lateral_error_tracker.reset()
-        self.angular_error_tracker.reset()
-        
-        # Reset strategy blender
-        self.strategy_blender.reset()
-        
         # Set a "stopped" state flag and timestamp
         self._robot_stopped = True
         self._stop_time = time.time()
@@ -2366,15 +3029,52 @@ class EnhancedPIDControllerNode(Node):
             self.current_bearing
         )
         
-        self.get_logger().info("Robot stopped! All velocities and errors reset.")
+        self.get_logger().info("Robot stopped! All velocities reset.")
+    
+    def _complete_controller_reset(self):
+        """Complete reset of all controllers and error states."""
+        # Reset all PID controllers
+        self.pid_linear_x.reset()
+        self.pid_linear_y.reset()
+        self.pid_angular.reset()
+        
+        # Reset coordinated controller
+        self.coordinated_controller.reset()
+        
+        # Reset all error trackers
+        self.distance_error_tracker.reset()
+        self.lateral_error_tracker.reset()
+        self.angular_error_tracker.reset()
+        
+        # Reset target filter
+        self.target_filter.reset()
+        
+        # Reset strategy blender
+        self.strategy_blender.reset()
+        
+        # Reset error categorization state
+        self.prev_distance_category = "none"
+        self.prev_lateral_category = "none"
+        self.prev_angular_category = "none"
+        
+        # Reset motion state
+        self.last_cmd_vel = (0.0, 0.0, 0.0)
+        self.velocity_history = LightweightBuffer(max_size=6)
+        
+        # Reset last logged command
+        self.last_logged_cmd = (0.0, 0.0, 0.0)
+        
+        # Reset movement hysteresis
+        self._movement_hysteresis = 0.0
+        
+        # Set stopped state
+        self._robot_stopped = True
+        
+        self.get_logger().info("Complete controller reset performed")
     
     def _init_strategy_table(self):
-        """Initialize the table-driven movement strategy definitions."""
-        # Define the strategy table
-        # Format: (distance_state, lateral_state, angular_state): [
-        #    name, use_forward, use_lateral, use_angular, 
-        #    forward_scale, lateral_scale, angular_scale, reason_template
-        # ]
+        """Initialize the table-driven movement strategy definitions with angular-first approach."""
+        # Define the strategy table with improved angular-first strategies
         self.strategy_table = {
             # All errors within deadbands - no movement
             ("none", "none", "none"): [
@@ -2383,17 +3083,69 @@ class EnhancedPIDControllerNode(Node):
                 "All errors within deadbands"
             ],
             
+            # Very small errors - minimal corrections
+            ("very_small", "very_small", "very_small"): [
+                "MINIMAL_CORRECTION", True, True, True, 
+                0.4, 0.4, 0.4, 
+                "Minimal corrections for very small errors"
+            ],
+            
+            # Angular error categories - prioritize angular correction
+            ("*", "*", "very_large"): [
+                "ANGULAR_ONLY", False, False, True, 
+                0.0, 0.0, 1.0, 
+                "Angular error correction only: {angular_error:.1f}°"
+            ],
+            
+            ("*", "*", "large"): [
+                "ANGULAR_PRIMARY", False, False, True, 
+                0.0, 0.0, 1.0, 
+                "Angular correction prioritized: {angular_error:.1f}°"
+            ],
+            
+            ("*", "*", "medium_large"): [
+                "ANGULAR_PRIMARY_BALANCED", False, True, True, 
+                0.0, 0.2, 0.9, 
+                "Primarily angular correction with some lateral: {angular_error:.1f}°"
+            ],
+            
+            ("*", "*", "medium"): [
+                "ANGULAR_BALANCED", False, True, True, 
+                0.0, 0.4, 0.8, 
+                "Angular-balanced movement: {angular_error:.1f}°"
+            ],
+            
+            ("*", "*", "small_medium"): [
+                "ANGULAR_THEN_LATERAL", True, True, True, 
+                0.3, 0.6, 0.7, 
+                "Angular-then-lateral transition: {angular_error:.1f}°"
+            ],
+            
+            ("*", "*", "small"): [
+                "BALANCED", True, True, True, 
+                0.6, 0.7, 0.5, 
+                "Balanced movement with small angular correction: {angular_error:.1f}°"
+            ],
+            
+            ("*", "*", "very_small"): [
+                "COMBINED_MOVEMENT", True, True, True, 
+                0.8, 0.8, 0.3, 
+                "Combined movement with minimal angular error: {angular_error:.1f}°"
+            ],
+            
             # Single dimension errors - focused corrections
             ("small", "none", "none"): [
                 "FORWARD_ONLY", True, False, False, 
                 0.8, 0.0, 0.0, 
                 "Small distance error correction: {distance_error:.2f}m"
             ],
+            
             ("medium", "none", "none"): [
                 "FORWARD_ONLY", True, False, False, 
                 1.0, 0.0, 0.0, 
                 "Medium distance error correction: {distance_error:.2f}m"
             ],
+            
             ("large", "none", "none"): [
                 "FORWARD_ONLY", True, False, False, 
                 1.0, 0.0, 0.0, 
@@ -2405,92 +3157,31 @@ class EnhancedPIDControllerNode(Node):
                 0.0, 0.8, 0.0, 
                 "Small lateral error correction: {lateral_error:.2f}m"
             ],
+            
             ("none", "medium", "none"): [
                 "LATERAL_ONLY", False, True, False, 
                 0.0, 1.0, 0.0, 
                 "Medium lateral error correction: {lateral_error:.2f}m"
             ],
+            
             ("none", "large", "none"): [
                 "LATERAL_ONLY", False, True, False, 
                 0.0, 1.0, 0.0, 
                 "Large lateral error correction: {lateral_error:.2f}m"
             ],
             
-            ("none", "none", "small"): [
-                "ANGULAR_ONLY", False, False, True, 
-                0.0, 0.0, 0.8, 
-                "Small angular error correction: {angular_error:.1f}°"
-            ],
-            ("none", "none", "medium"): [
-                "ANGULAR_ONLY", False, False, True, 
-                0.0, 0.0, 1.0, 
-                "Medium angular error correction: {angular_error:.1f}°"
+            # Combined distance and lateral errors (only when angular error is very small)
+            ("*", "*", "none"): [
+                "POSITION_ONLY", True, True, False,
+                0.9, 0.9, 0.0,
+                "Position correction without rotation"
             ],
             
-            # More granular angular error categories
-            ("none", "none", "medium_high"): [
-                "ANGULAR_ONLY", False, False, True, 
-                0.0, 0.0, 1.0, 
-                "Medium-high angular error correction: {angular_error:.1f}°"
-            ],
-            ("none", "none", "medium_large"): [
-                "ANGULAR_ONLY", False, False, True, 
-                0.0, 0.0, 1.0, 
-                "Medium-large angular error correction: {angular_error:.1f}°"
-            ],
-            ("none", "none", "large"): [
-                "ANGULAR_ONLY", False, False, True, 
-                0.0, 0.0, 1.0, 
-                "Large angular error correction: {angular_error:.1f}°"
-            ],
-            
-            # Small angular with other errors - balanced approach
-            ("*", "*", "small"): [
-                "BALANCED", True, True, True, 
-                0.7, 0.7, 0.4, 
-                "Balanced movement with small angular correction: {angular_error:.1f}°"
-            ],
-            
-            # Medium angular takes precedence but allows other movements
-            ("*", "*", "medium"): [
-                "ANGULAR_BALANCED", True, True, True, 
-                0.5, 0.4, 0.7, 
-                "Angular-balanced movement: {angular_error:.1f}°"
-            ],
-            
-            # Intermediate step for more gradual transition
-            ("*", "*", "medium_high"): [
-                "ANGULAR_PRIMARY_BALANCED", False, True, True, 
-                0.0, 0.08, 0.7, 
-                "Primarily angular correction with minimal lateral: {angular_error:.1f}°"
-            ],
-            
-            # Medium-large angular starts to dominate but allows some lateral
-            ("*", "*", "medium_large"): [
-                "ANGULAR_PRIMARY_BALANCED", False, True, True, 
-                0.0, 0.15, 0.8, 
-                "Primarily angular correction with some lateral: {angular_error:.1f}°"
-            ],
-            
-            # Only truly large angular errors get exclusive focus
-            ("*", "*", "large"): [
-                "ANGULAR_PRIMARY", False, False, True, 
-                0.0, 0.0, 1.0, 
-                "Angular correction prioritized: {angular_error:.1f}°"
-            ],
-            
-            # Combined movement strategies
-            ("small", "small", "none"): [
-                "COORDINATED", True, True, False, 
-                0.8, 0.8, 0.0, 
-                "Coordinated distance and lateral correction"
-            ],
-            
-            # Medium lateral with other errors
-            ("*", "medium", "small"): [
-                "LATERAL_PRIMARY", True, True, True, 
-                0.4, 1.0, 0.3, 
-                "Lateral-focused coordination with small angular correction"
+            # Special case for diagonal movement - gradual transition
+            ("medium", "medium", "small"): [
+                "DIAGONAL_MOVEMENT", True, True, True,
+                0.8, 0.8, 0.4,
+                "Diagonal movement with small angular correction"
             ],
             
             # Fallback strategy
@@ -2501,79 +3192,152 @@ class EnhancedPIDControllerNode(Node):
             ]
         }
     
-    def _categorize_error(self, error, error_type="distance"):
+    def _categorize_error(self, error, error_type="distance", prev_category=None):
         """
-        Categorize an error value into none, small, medium, medium_high, medium_large, or large.
+        Categorize an error value with hysteresis to prevent oscillation.
         
         Args:
             error: The error value to categorize
             error_type: The type of error (distance, lateral, angular)
+            prev_category: Previous category for hysteresis
             
         Returns:
             String: The error category
         """
         abs_error = abs(error)
         
-        # Select appropriate deadband and thresholds based on error type
+        # Select appropriate thresholds based on error type
         if error_type == "angular":
-            deadband = 5.0  # Example angular_deadband in degrees
-            small_threshold = deadband * 1.0
-            medium_threshold = deadband * 2.0
-            medium_high_threshold = deadband * 3.0
-            medium_large_threshold = deadband * 4.0
-            large_threshold = deadband * 6.0
+            deadband = 1.5  # Degrees (reduced from 3.0)
+            very_small_threshold = deadband
+            small_threshold = deadband * 2.0
+            small_medium_threshold = deadband * 3.0
+            medium_threshold = deadband * 4.0
+            medium_large_threshold = deadband * 6.0
+            large_threshold = deadband * 8.0
+            very_large_threshold = deadband * 12.0
         elif error_type == "lateral":
-            deadband = 0.08  # Example lateral_deadband
-            small_threshold = deadband * 1.0
-            medium_threshold = deadband * 2.0
-            medium_high_threshold = deadband * 3.0
-            medium_large_threshold = deadband * 4.0
-            large_threshold = deadband * 6.0
+            deadband = 0.075  # Meters (increased from 0.05)
+            very_small_threshold = deadband
+            small_threshold = deadband * 2.0
+            small_medium_threshold = deadband * 3.0
+            medium_threshold = deadband * 4.0
+            medium_large_threshold = deadband * 6.0
+            large_threshold = deadband * 8.0
+            very_large_threshold = deadband * 10.0
         else:  # distance
-            deadband = 0.08  # Example distance_deadband
-            small_threshold = deadband * 1.0
-            medium_threshold = deadband * 2.0
-            medium_high_threshold = deadband * 3.0
-            medium_large_threshold = deadband * 4.0
-            large_threshold = deadband * 6.0
+            deadband = 0.1  # Meters
+            very_small_threshold = deadband
+            small_threshold = deadband * 2.0
+            small_medium_threshold = deadband * 3.0
+            medium_threshold = deadband * 4.0
+            medium_large_threshold = deadband * 6.0
+            large_threshold = deadband * 8.0
+            very_large_threshold = deadband * 10.0
+        
+        # Apply hysteresis if previous category is provided
+        if prev_category and prev_category != "none":
+            # Apply 20% hysteresis factor
+            hysteresis_down = 0.2  # For moving down a category
+            hysteresis_up = 0.1    # For moving up a category (easier to go up than down)
+            
+            # Going down from a higher category - apply stronger hysteresis
+            if prev_category == "very_large" and abs_error > very_large_threshold * (1.0 - hysteresis_down):
+                return "very_large"
+            elif prev_category == "large":
+                if abs_error > large_threshold * (1.0 - hysteresis_down):
+                    return "large"
+                # Moving up requires less hysteresis
+                if abs_error > very_large_threshold * (1.0 - hysteresis_up):
+                    return "very_large"
+                
+            elif prev_category == "medium_large":
+                if abs_error > medium_large_threshold * (1.0 - hysteresis_down):
+                    return "medium_large"
+                # Moving up requires less hysteresis
+                if abs_error > large_threshold * (1.0 - hysteresis_up):
+                    return "large"
+                
+            elif prev_category == "medium":
+                if abs_error > medium_threshold * (1.0 - hysteresis_down):
+                    return "medium"
+                # Moving up requires less hysteresis
+                if abs_error > medium_large_threshold * (1.0 - hysteresis_up):
+                    return "medium_large"
+                    
+            elif prev_category == "small_medium":
+                if abs_error > small_medium_threshold * (1.0 - hysteresis_down):
+                    return "small_medium"
+                # Moving up requires less hysteresis
+                if abs_error > medium_threshold * (1.0 - hysteresis_up):
+                    return "medium"
+                
+            elif prev_category == "small":
+                if abs_error > small_threshold * (1.0 - hysteresis_down):
+                    return "small"
+                # Moving up requires less hysteresis
+                if abs_error > small_medium_threshold * (1.0 - hysteresis_up):
+                    return "small_medium"
+                
+            elif prev_category == "very_small":
+                if abs_error > very_small_threshold * (1.0 - hysteresis_down):
+                    return "very_small"
+                # Moving up requires less hysteresis
+                if abs_error > small_threshold * (1.0 - hysteresis_up):
+                    return "small"
         
         # Handle lateral control toggle
-        if error_type == "lateral" and not hasattr(self, 'use_lateral_control'):
+        if error_type == "lateral" and not getattr(self, 'use_lateral_control', True):
             return "none"
         
-        # Categorize based on thresholds
+        # Categorize based on absolute error value
         if abs_error <= deadband:
             return "none"
+        elif abs_error <= very_small_threshold:
+            return "very_small"
         elif abs_error <= small_threshold:
             return "small"
+        elif abs_error <= small_medium_threshold:
+            return "small_medium"
         elif abs_error <= medium_threshold:
             return "medium"
-        elif abs_error <= medium_high_threshold:
-            return "medium_high"
         elif abs_error <= medium_large_threshold:
             return "medium_large"
-        else:
+        elif abs_error <= large_threshold:
             return "large"
+        else:
+            return "very_large"
     
-    def _determine_movement_strategy(self, distance_error, lateral_error, angular_error_degrees):
+    def _determine_movement_strategy(self, distance_error, lateral_error, angular_error_degrees,
+                                     prev_distance_category=None, prev_lateral_category=None, 
+                                     prev_angular_category=None):
         """
         Determine the optimal movement strategy using table-driven approach
-        with blending between strategies for smooth transitions.
+        with hysteresis and angular-first prioritization.
         
         Args:
             distance_error: Error in distance (meters)
             lateral_error: Error in lateral position (meters)
             angular_error_degrees: Error in angular position (degrees)
+            prev_*_category: Previous error categories for hysteresis
             
         Returns:
             dict: Strategy information including strategy name, movement flags, and scale factors
         """
         current_time = time.time()
         
-        # Categorize errors into states: "none", "small", "medium", "medium_large", "large"
-        self._key_tuple[0] = self._categorize_error(distance_error, "distance")
-        self._key_tuple[1] = self._categorize_error(lateral_error, "lateral")
-        self._key_tuple[2] = self._categorize_error(angular_error_degrees, "angular")
+        # Categorize errors into states with hysteresis
+        self._key_tuple[0] = self._categorize_error(
+            distance_error, "distance", prev_distance_category)
+        self._key_tuple[1] = self._categorize_error(
+            lateral_error, "lateral", prev_lateral_category)
+        self._key_tuple[2] = self._categorize_error(
+            angular_error_degrees, "angular", prev_angular_category)
+        
+        # Save categories for next iteration's hysteresis
+        self.prev_distance_category = self._key_tuple[0]
+        self.prev_lateral_category = self._key_tuple[1]
+        self.prev_angular_category = self._key_tuple[2]
         
         # Create lookup key
         key = tuple(self._key_tuple)
@@ -2605,10 +3369,22 @@ class EnhancedPIDControllerNode(Node):
         # Keep track of the current strategy name for logging
         self.current_strategy = current_strategy.name
         
-        self.get_logger().info(
-            f"Strategy selected: {current_strategy.name}, params: forward={current_strategy.forward_scale:.1f}, "
-            f"lateral={current_strategy.lateral_scale:.1f}, angular={current_strategy.angular_scale:.1f}"
-        )
+        # Log strategy changes (throttled)
+        if blend_started or self.debug_level >= 2:
+            if self._log_throttled(
+                self.get_logger().info,
+                f"Strategy selected: {current_strategy.name}, params: "
+                f"forward={current_strategy.forward_scale:.1f}, "
+                f"lateral={current_strategy.lateral_scale:.1f}, "
+                f"angular={current_strategy.angular_scale:.1f}",
+                1.0,  # Throttle to once per second
+                'last_strategy_log_time'
+            ):
+                # Log detailed error info with strategy change
+                self.get_logger().info(
+                    f"Error categories: distance={self._key_tuple[0]}, "
+                    f"lateral={self._key_tuple[1]}, angular={self._key_tuple[2]}"
+                )
 
         # Convert to dictionary for compatibility with existing code
         return current_strategy.as_dict()
@@ -2704,18 +3480,66 @@ class EnhancedPIDControllerNode(Node):
         
         # Log detailed information
         if self.debug_level >= 1:
+            # Get PID components
+            p_x, i_x, d_x = self.pid_linear_x.get_components()
+            p_y, i_y, d_y = self.pid_linear_y.get_components()
+            p_a, i_a, d_a = self.pid_angular.get_components()
+            
             diag_msg = (
-                f"DIAG: Avg Vel=[{avg_lin_x_vel:.2f}, {avg_lin_y_vel:.2f}, {avg_ang_vel:.2f}], "
-                f"Strategy={self.current_strategy}, "
-                f"E=[{self.distance_error_tracker.current_error:.2f}m, "
-                f"{self.lateral_error_tracker.current_error:.2f}m, "
-                f"{math.degrees(self.angular_error_tracker.current_error):.1f}°]"
+                f"DIAGNOSTICS: "
+                f"Avg Vel=[{avg_lin_x_vel:.2f}, {avg_lin_y_vel:.2f}, {avg_ang_vel:.2f}], "
+                f"PID X=[{p_x:.2f}, {i_x:.2f}, {d_x:.2f}], "
+                f"PID Y=[{p_y:.2f}, {i_y:.2f}, {d_y:.2f}], "
+                f"PID A=[{p_a:.2f}, {i_a:.2f}, {d_a:.2f}], "
+                f"Strategy={self.current_strategy}"
             )
             
             self.get_logger().info(diag_msg)
         
+        # Publish PID diagnostic data
+        self._publish_pid_diagnostics()
+        
         # Publish performance metrics
         self._publish_performance_metrics()
+    
+    def _publish_pid_diagnostics(self):
+        """Publish detailed PID diagnostics for analysis."""
+        # Get PID components
+        p_x, i_x, d_x = self.pid_linear_x.get_components()
+        p_y, i_y, d_y = self.pid_linear_y.get_components()
+        p_a, i_a, d_a = self.pid_angular.get_components()
+        
+        # Get current gains
+        kp_x, ki_x, kd_x = self.pid_linear_x.get_current_gains()
+        kp_y, ki_y, kd_y = self.pid_linear_y.get_current_gains()
+        kp_a, ki_a, kd_a = self.pid_angular.get_current_gains()
+        
+        # Get current errors
+        e_x = self.distance_error_tracker.current_error
+        e_y = self.lateral_error_tracker.current_error
+        e_a = self.angular_error_tracker.current_error
+        
+        # Pack all data into the array - no unnecessary float() conversions
+        self._diag_data[0] = p_x
+        self._diag_data[1] = i_x
+        self._diag_data[2] = d_x
+        self._diag_data[3] = p_y
+        self._diag_data[4] = i_y
+        self._diag_data[5] = d_y
+        self._diag_data[6] = p_a
+        self._diag_data[7] = i_a
+        self._diag_data[8] = d_a
+        self._diag_data[9] = e_x
+        self._diag_data[10] = e_y
+        self._diag_data[11] = e_a
+        self._diag_data[12] = kp_a  # Track angular P gain
+        self._diag_data[13] = kd_a  # Track angular D gain
+        
+        # Update Float32MultiArray data
+        self._diag_msg.data = self._diag_data.tolist()
+        
+        # Publish diagnostics
+        self.pid_diag_pub.publish(self._diag_msg)
     
     def _publish_performance_metrics(self):
         """Publish performance metrics for monitoring."""
@@ -2753,7 +3577,7 @@ class EnhancedPIDControllerNode(Node):
         # Immediately stop the robot
         try:
             self.stop_robot()
-            self.get_logger().info("Robot motion stopped - velocity and rotation set to 0")
+            self.get_logger().info("Robot motion stopped during shutdown")
         except Exception as e:
             self.get_logger().error(f"Error stopping robot during shutdown: {str(e)}")
 
@@ -2761,19 +3585,18 @@ class EnhancedPIDControllerNode(Node):
 def main(args=None):
     """Main function to initialize and run the PID Controller node."""
     rclpy.init(args=args)
-    node = EnhancedPIDControllerNode()
+    node = ImprovedPIDControllerNode()
     
     # Welcome message
     print("=================================================")
-    print("Enhanced PID Controller for Basketball Tracking Robot")
+    print("Improved PID Controller for Basketball Tracking Robot")
     print("=================================================")
     print("This node implements several enhancements:")
-    print("1. Coordinated angular-lateral control")
-    print("2. Gradual strategy transitions")
-    print("3. Adaptive gain system")
-    print("4. Target filtering")
-    print("5. Optimized transform handling with caching")
-    print("6. Resource monitoring and adaptive control rate")
+    print("1. Angular-first control strategy for diagonal movements")
+    print("2. Enhanced integral term management")
+    print("3. Fast strategy transitions for responsive tracking")
+    print("4. Balanced error thresholds with hysteresis")
+    print("5. Continuous motion tracking with trajectory prediction")
     print("")
     print("Press Ctrl+C to stop the program")
     print("=================================================")
@@ -2793,7 +3616,7 @@ def main(args=None):
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("Enhanced PID Controller shutdown requested via Ctrl+C")
+        node.get_logger().info("Improved PID Controller shutdown requested via Ctrl+C")
     except Exception as e:
         node.get_logger().error(f"Unexpected error: {str(e)}")
     finally:
