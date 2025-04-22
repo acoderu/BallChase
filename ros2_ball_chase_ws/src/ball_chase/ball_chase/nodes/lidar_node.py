@@ -478,9 +478,14 @@ class BasketballLidarDetector(Node):
                         
                         # Create a one-shot timer with proper callback
                         # Note: Using different variable name for the timer parameter
+                        #retry_timer = self.create_timer(
+                        #    2.0,  # Wait 2 seconds before retry
+                        #    lambda callback_timer, source=s, target=t: self.retry_transform_cache(source, target),
+                        #    callback_group=self.timer_cb_group
+                        #)
                         retry_timer = self.create_timer(
                             2.0,  # Wait 2 seconds before retry
-                            lambda callback_timer, source=s, target=t: self.retry_transform_cache(source, target),
+                            lambda callback_timer, source=s, target=t: self.retry_transform_cache(source, target, callback_timer),
                             callback_group=self.timer_cb_group
                         )
                         self.node_timers.append(retry_timer)
