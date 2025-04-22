@@ -1595,10 +1595,13 @@ class ImprovedPIDControllerNode(Node):
                 ('adaptive_gains', True),
                 ('use_lateral_control', True),
                 
-                # Balanced error thresholds
+                # Balanced error thresholds - increased angular threshold
                 ('distance_threshold', 0.1),
                 ('lateral_threshold', 0.075),  # Increased from 0.05
-                ('angular_threshold', 1.5),    # Decreased from 3.0
+                ('angular_threshold', 3.0),    # Increased from 1.5 to 3.0 degrees
+                
+                # New parameter for scaling angular threshold when at target distance
+                ('angular_at_target_factor', 2.5),  # Multiply threshold by this when at target distance
                 
                 # Resource monitoring parameters
                 ('adaptive_control_rate', True),
@@ -1619,7 +1622,7 @@ class ImprovedPIDControllerNode(Node):
                 ('filter_buffer_size', 8),
                 ('prediction_horizon', 0.3),
                 
-                # New approach configuration
+                # Approach configuration
                 ('approach_distance', 0.3),    # Distance at which to start slowing down
                 ('min_approach_factor', 0.4),  # Minimum velocity factor when very close
             ]
@@ -1648,6 +1651,7 @@ class ImprovedPIDControllerNode(Node):
         self.distance_threshold = self.get_parameter('distance_threshold').value
         self.lateral_threshold = self.get_parameter('lateral_threshold').value
         self.angular_threshold = self.get_parameter('angular_threshold').value
+        self.angular_at_target_factor = self.get_parameter('angular_at_target_factor').value
         
         # Get approach parameters
         self.approach_distance = self.get_parameter('approach_distance').value
@@ -1688,7 +1692,8 @@ class ImprovedPIDControllerNode(Node):
         
         self.get_logger().info(
             f"Error thresholds: distance={self.distance_threshold}, "
-            f"lateral={self.lateral_threshold}, angular={self.angular_threshold}"
+            f"lateral={self.lateral_threshold}, angular={self.angular_threshold} "
+            f"(at_target_factor={self.angular_at_target_factor})"
         )
         
         self.get_logger().info(
@@ -2776,6 +2781,7 @@ class ImprovedPIDControllerNode(Node):
     def _reset_stopped_state_if_needed(self, distance_error, lateral_error, angular_error):
         """
         Reset stopped state if significant movement is required, with improved hysteresis.
+        Modified to be more tolerant of angular errors when at target distance.
         
         Args:
             distance_error: Current error in distance to target
@@ -2798,7 +2804,14 @@ class ImprovedPIDControllerNode(Node):
         # If any error exceeds the movement threshold with hysteresis, exit stopped state
         distance_threshold = self.distance_threshold * hysteresis
         lateral_threshold = self.lateral_threshold * hysteresis
-        angular_threshold = self.angular_threshold * hysteresis
+        
+        # Apply increased angular threshold when at target distance
+        if abs(distance_error) < self.distance_threshold * 1.5:
+            # More lenient angular threshold when at target distance
+            angular_threshold = self.angular_threshold * self.angular_at_target_factor * hysteresis
+        else:
+            # Normal angular threshold
+            angular_threshold = self.angular_threshold * hysteresis
         
         if (abs(distance_error) > distance_threshold or
             abs(lateral_error) > lateral_threshold or
@@ -2824,6 +2837,7 @@ class ImprovedPIDControllerNode(Node):
     def _evaluate_stop_conditions(self, distance, lateral, angular_degrees, is_stopped):
         """
         Evaluate if the robot should move based on current conditions.
+        Modified to increase angular threshold when at target distance.
         
         Args:
             distance: Current distance to target
@@ -2844,6 +2858,16 @@ class ImprovedPIDControllerNode(Node):
         lateral_threshold = self.lateral_threshold
         angular_threshold = self.angular_threshold
         
+        # Apply increased angular threshold when at target distance
+        if distance_error < self.distance_threshold * 1.5:
+            # We're close to target distance, be more tolerant of angular errors
+            angular_threshold *= self.angular_at_target_factor
+            
+            if self.debug_level >= 2:
+                self.get_logger().info(
+                    f"At target distance: increasing angular threshold to {angular_threshold:.2f}°"
+                )
+        
         # Apply hysteresis - different thresholds based on current state
         if is_stopped:
             # If already stopped, use higher thresholds to start moving
@@ -2856,7 +2880,7 @@ class ImprovedPIDControllerNode(Node):
             # Cap the maximum thresholds
             distance_threshold = min(distance_threshold, 0.2)
             lateral_threshold = min(lateral_threshold, 0.15)
-            angular_threshold = min(angular_threshold, 6.0)
+            angular_threshold = min(angular_threshold, 15.0)  # Increased from 6.0 to 15.0
         else:
             # If already moving, use reduced thresholds to stop
             # (more precision when already near target)
@@ -3141,46 +3165,46 @@ class ImprovedPIDControllerNode(Node):
                 "Minimal corrections for very small errors"
             ],
             
-            # Angular error categories - prioritize angular correction
+            # Angular error categories - prioritize angular correction, but reduced intensity
             ("*", "*", "very_large"): [
                 "ANGULAR_ONLY", False, False, True, 
-                0.0, 0.0, 1.0, 
+                0.0, 0.0, 0.9,  # Reduced from 1.0 to 0.9
                 "Angular error correction only: {angular_error:.1f}°"
             ],
             
             ("*", "*", "large"): [
                 "ANGULAR_PRIMARY", False, False, True, 
-                0.0, 0.0, 1.0, 
+                0.0, 0.0, 0.8,  # Reduced from 1.0 to 0.8
                 "Angular correction prioritized: {angular_error:.1f}°"
             ],
             
             ("*", "*", "medium_large"): [
                 "ANGULAR_PRIMARY_BALANCED", False, True, True, 
-                0.0, 0.2, 0.9, 
+                0.0, 0.2, 0.7,  # Reduced from 0.9 to 0.7
                 "Primarily angular correction with some lateral: {angular_error:.1f}°"
             ],
             
             ("*", "*", "medium"): [
                 "ANGULAR_BALANCED", False, True, True, 
-                0.0, 0.4, 0.8, 
+                0.0, 0.4, 0.6,  # Reduced from 0.8 to 0.6
                 "Angular-balanced movement: {angular_error:.1f}°"
             ],
             
             ("*", "*", "small_medium"): [
                 "ANGULAR_THEN_LATERAL", True, True, True, 
-                0.4, 0.6, 0.7,  # Reduced forward_scale from 0.5 to 0.4
+                0.4, 0.6, 0.5,  # Reduced angular_scale from 0.7 to 0.5
                 "Angular-then-lateral transition: {angular_error:.1f}°"
             ],
             
             ("*", "*", "small"): [
                 "BALANCED", True, True, True, 
-                0.7, 0.7, 0.5,  # Reduced forward_scale from 0.9 to 0.7
+                0.7, 0.7, 0.4,  # Reduced angular_scale from 0.5 to 0.4
                 "Balanced movement with small angular correction: {angular_error:.1f}°"
             ],
             
             ("*", "*", "very_small"): [
                 "COMBINED_MOVEMENT", True, True, True, 
-                0.8, 0.8, 0.3,  # Reduced forward_scale from 1.0 to 0.8
+                0.8, 0.8, 0.2,  # Reduced angular_scale from 0.3 to 0.2
                 "Combined movement with minimal angular error: {angular_error:.1f}°"
             ],
             
@@ -3221,6 +3245,25 @@ class ImprovedPIDControllerNode(Node):
                 "Large lateral error correction: {lateral_error:.2f}m"
             ],
             
+            # Special case strategies for when at target distance with angular error
+            ("none", "*", "medium"): [
+                "AT_TARGET_ANGULAR", False, False, True, 
+                0.0, 0.0, 0.4,  # Reduced angular scale from 0.8 to 0.4
+                "At target distance - minimal angular correction: {angular_error:.1f}°"
+            ],
+            
+            ("none", "*", "medium_large"): [
+                "AT_TARGET_ANGULAR", False, False, True, 
+                0.0, 0.0, 0.5,  # Reduced angular scale from 0.9 to 0.5
+                "At target distance - reduced angular correction: {angular_error:.1f}°"
+            ],
+            
+            ("none", "*", "large"): [
+                "AT_TARGET_ANGULAR", False, False, True, 
+                0.0, 0.0, 0.6,  # Reduced angular scale from 1.0 to 0.6
+                "At target distance - moderate angular correction: {angular_error:.1f}°"
+            ],
+            
             # Combined distance and lateral errors (only when angular error is very small)
             ("*", "*", "none"): [
                 "POSITION_ONLY", True, True, False,
@@ -3231,40 +3274,41 @@ class ImprovedPIDControllerNode(Node):
             # Special case for diagonal movement - gradual transition
             ("medium", "medium", "small"): [
                 "DIAGONAL_MOVEMENT", True, True, True,
-                0.8, 0.8, 0.4,  # Reduced forward_scale from 1.0 to 0.8
+                0.8, 0.8, 0.3,  # Reduced angular_scale from 0.4 to 0.3
                 "Diagonal movement with small angular correction"
             ],
             
             # New approach strategies for near-target behavior
             ("small", "*", "*"): [
                 "APPROACH", True, True, True, 
-                0.6, 0.7, 0.5,  # Conservative forward scale for approach
+                0.6, 0.7, 0.4,  # Reduced angular_scale from 0.5 to 0.4
                 "Approach mode - nearing target: {distance_error:.2f}m"
             ],
             
             ("very_small", "*", "*"): [
                 "SLOW_APPROACH", True, True, True, 
-                0.4, 0.4, 0.4,  # Very conservative for final approach
+                0.4, 0.4, 0.3,  # Reduced angular_scale from 0.4 to 0.3
                 "Final approach - very close to target: {distance_error:.2f}m"
             ],
             
             # Fallback strategy
             ("*", "*", "*"): [
                 "BALANCED", True, True, True, 
-                0.7, 0.6, 0.6,  # Reduced forward_scale from 0.8 to 0.7
+                0.7, 0.6, 0.5,  # Reduced angular_scale from 0.6 to 0.5
                 "Balanced movement strategy (fallback)"
             ]
         }
     
-    def _categorize_error(self, error, error_type="distance", prev_category=None):
+    def _categorize_error(self, error, error_type="distance", prev_category=None, lenient_factor=1.0):
         """
         Categorize an error value with hysteresis to prevent oscillation.
-        Modified for improved distance categorization during approach.
+        Modified to support lenient categorization for angular errors.
         
         Args:
             error: The error value to categorize
             error_type: The type of error (distance, lateral, angular)
             prev_category: Previous category for hysteresis
+            lenient_factor: Factor to make categories more lenient (higher means more lenient)
             
         Returns:
             String: The error category
@@ -3273,14 +3317,14 @@ class ImprovedPIDControllerNode(Node):
         
         # Select appropriate thresholds based on error type
         if error_type == "angular":
-            deadband = 1.5  # Degrees (reduced from 3.0)
-            very_small_threshold = deadband
-            small_threshold = deadband * 2.0
-            small_medium_threshold = deadband * 3.0
-            medium_threshold = deadband * 4.0
-            medium_large_threshold = deadband * 6.0
-            large_threshold = deadband * 8.0
-            very_large_threshold = deadband * 12.0
+            deadband = 3.0  # Degrees (increased from 1.5)
+            very_small_threshold = deadband * lenient_factor
+            small_threshold = deadband * 2.0 * lenient_factor
+            small_medium_threshold = deadband * 3.0 * lenient_factor
+            medium_threshold = deadband * 4.0 * lenient_factor
+            medium_large_threshold = deadband * 6.0 * lenient_factor
+            large_threshold = deadband * 8.0 * lenient_factor
+            very_large_threshold = deadband * 12.0 * lenient_factor
         elif error_type == "lateral":
             deadband = 0.075  # Meters (increased from 0.05)
             very_small_threshold = deadband
@@ -3375,11 +3419,12 @@ class ImprovedPIDControllerNode(Node):
             return "very_large"
     
     def _determine_movement_strategy(self, distance_error, lateral_error, angular_error_degrees,
-                                     prev_distance_category=None, prev_lateral_category=None, 
-                                     prev_angular_category=None):
+                               prev_distance_category=None, prev_lateral_category=None, 
+                               prev_angular_category=None):
         """
         Determine the optimal movement strategy using table-driven approach
         with hysteresis and angular-first prioritization.
+        Modified to reduce angular corrections when at target distance.
         
         Args:
             distance_error: Error in distance (meters)
@@ -3392,13 +3437,44 @@ class ImprovedPIDControllerNode(Node):
         """
         current_time = time.time()
         
+        # Check if robot is at target distance and reduce angular priority if so
+        at_target_distance = abs(distance_error) < self.distance_threshold * 1.5
+        
         # Categorize errors into states with hysteresis
         self._key_tuple[0] = self._categorize_error(
             distance_error, "distance", prev_distance_category)
         self._key_tuple[1] = self._categorize_error(
             lateral_error, "lateral", prev_lateral_category)
-        self._key_tuple[2] = self._categorize_error(
-            angular_error_degrees, "angular", prev_angular_category)
+        
+        # Modify angular error categorization when at target distance
+        if at_target_distance and self._key_tuple[0] == "none":
+            # At target distance, categorize angular errors more leniently
+            # This effectively makes the robot less concerned with perfect angular alignment
+            angular_category = self._categorize_error(
+                angular_error_degrees, 
+                "angular", 
+                prev_angular_category,
+                lenient_factor=1.5  # Make angular categories 50% more lenient
+            )
+            
+            # Optionally downgrade categories for angular errors when at target distance
+            if angular_category == "medium":
+                angular_category = "small_medium"  # Downgrade medium to small_medium
+            elif angular_category == "small_medium":
+                angular_category = "small"  # Downgrade small_medium to small
+            elif angular_category == "small":
+                angular_category = "very_small"  # Downgrade small to very_small
+                
+            self._key_tuple[2] = angular_category
+            
+            if self.debug_level >= 2:
+                self.get_logger().info(
+                    f"At target distance: using more lenient angular categorization: {angular_category}"
+                )
+        else:
+            # Normal angular categorization
+            self._key_tuple[2] = self._categorize_error(
+                angular_error_degrees, "angular", prev_angular_category)
         
         # Save categories for next iteration's hysteresis
         self.prev_distance_category = self._key_tuple[0]
@@ -3425,6 +3501,17 @@ class ImprovedPIDControllerNode(Node):
             name, use_forward, use_lateral, use_angular,
             forward_scale, lateral_scale, angular_scale, reason
         )
+        
+        # Additional logic for at-target-distance
+        if at_target_distance and (name != "NO_MOVEMENT" and angular_scale > 0.0):
+            # Reduce angular scale further if already at target distance
+            adjusted_angular_scale = angular_scale * 0.8  # Reduce by an additional 20%
+            target_strategy.angular_scale = adjusted_angular_scale
+            
+            if self.debug_level >= 2:
+                self.get_logger().info(
+                    f"At target distance: reducing angular scale from {angular_scale:.2f} to {adjusted_angular_scale:.2f}"
+                )
         
         # Update the strategy blender with the target strategy
         blend_started = self.strategy_blender.update_target(target_strategy, current_time)
