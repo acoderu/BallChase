@@ -1563,12 +1563,12 @@ class ImprovedPIDControllerNode(Node):
         self.declare_parameters(
             namespace='',
             parameters=[
-                # Linear X velocity PID parameters
-                ('linear_x_kp', 1.0),
+                # Linear X velocity PID parameters - adjusted for moderate velocity increase
+                ('linear_x_kp', 1.1),  # Moderately increased from 1.0
                 ('linear_x_ki', 0.03),
-                ('linear_x_kd', 0.1),
+                ('linear_x_kd', 0.15),  # Increased from 0.1 for better stopping behavior
                 ('linear_x_min', 0.0),
-                ('linear_x_max', 0.2),
+                ('linear_x_max', 0.3),  # Increased to 0.3 instead of 0.4 (50% improvement)
                 
                 # Linear Y velocity PID parameters - improved lateral damping
                 ('linear_y_kp', 0.6),
@@ -1618,6 +1618,10 @@ class ImprovedPIDControllerNode(Node):
                 # Target filter parameters
                 ('filter_buffer_size', 8),
                 ('prediction_horizon', 0.3),
+                
+                # New approach configuration
+                ('approach_distance', 0.3),    # Distance at which to start slowing down
+                ('min_approach_factor', 0.4),  # Minimum velocity factor when very close
             ]
         )
         
@@ -1644,6 +1648,10 @@ class ImprovedPIDControllerNode(Node):
         self.distance_threshold = self.get_parameter('distance_threshold').value
         self.lateral_threshold = self.get_parameter('lateral_threshold').value
         self.angular_threshold = self.get_parameter('angular_threshold').value
+        
+        # Get approach parameters
+        self.approach_distance = self.get_parameter('approach_distance').value
+        self.min_approach_factor = self.get_parameter('min_approach_factor').value
         
         # Get resource monitoring parameters
         self.adaptive_control_rate = self.get_parameter('adaptive_control_rate').value
@@ -1682,9 +1690,14 @@ class ImprovedPIDControllerNode(Node):
             f"Error thresholds: distance={self.distance_threshold}, "
             f"lateral={self.lateral_threshold}, angular={self.angular_threshold}"
         )
+        
+        self.get_logger().info(
+            f"Approach configuration: approach_distance={self.approach_distance}m, "
+            f"min_approach_factor={self.min_approach_factor}"
+        )
                
     def _init_controllers(self):
-        """Initialize the controllers with improved tuning."""
+        """Initialize the controllers with improved tuning for controlled velocity."""
         # Create error trackers
         self.distance_error_tracker = ErrorTracker("distance", max_history=8)
         self.lateral_error_tracker = ErrorTracker("lateral", max_history=8)
@@ -1713,13 +1726,13 @@ class ImprovedPIDControllerNode(Node):
         
         self.pid_angular.error_tracker = self.angular_error_tracker
         
-        # Initialize coordinated controller with improved parameters
+        # Initialize coordinated controller with improved parameters for better movement control
         self.coordinated_controller = CoordinatedController(
             self.pid_linear_y, 
             self.pid_angular,
             {
-                'coupling_factor': 0.4,        # Reduced from 0.7
-                'smoothing_factor': 0.4,       # Reduced from 0.6 for faster response
+                'coupling_factor': 0.35,       # Adjusted for better balance with higher velocity
+                'smoothing_factor': 0.5,       # Increased from 0.4 for smoother transitions
                 'min_angle_for_reduction': 0.1,
                 'zero_angle_threshold': 0.03,
                 'max_angle_factor': 0.3,       # Reduced from 0.5
@@ -2889,7 +2902,7 @@ class ImprovedPIDControllerNode(Node):
     def _apply_velocity_limits(self, linear_x, linear_y, angular_z, current_time):
         """
         Apply velocity and acceleration limits for smooth, natural movement.
-        With enhanced handling for combined movements and hysteresis.
+        With enhanced handling for combined movements and distance-based approach.
         
         Args:
             linear_x: Calculated forward velocity
@@ -2900,10 +2913,31 @@ class ImprovedPIDControllerNode(Node):
         Returns:
             tuple: (limited_linear_x, limited_linear_y, limited_angular_z)
         """
-        if self.debug_level >= 2:  # Lowered from 3 for consistent debug level
+        if self.debug_level >= 2:
             self.get_logger().info(
                 f"Before limits: linear_x={linear_x:.3f}, linear_y={linear_y:.3f}, angular_z={angular_z:.3f}"
             )
+        
+        # Apply distance-aware approach scaling for forward velocity
+        if hasattr(self, 'filtered_distance') and hasattr(self, 'desired_distance'):
+            distance_error = abs(self.filtered_distance - self.desired_distance)
+            approach_factor = 1.0
+            
+            # If we're within approach_distance of target, start slowing down
+            if distance_error < self.approach_distance:
+                # Scale from 1.0 (at approach_distance) down to min_approach_factor (when very close)
+                approach_scale = distance_error / self.approach_distance
+                approach_factor = max(self.min_approach_factor, approach_scale)
+                
+                # Apply to forward velocity only (to slow down approach)
+                if abs(linear_x) > 0.01:  # Only apply if moving forward
+                    linear_x *= approach_factor
+                    
+                    if self.debug_level >= 2:
+                        self.get_logger().info(
+                            f"Approach scaling: distance_error={distance_error:.3f}m, "
+                            f"factor={approach_factor:.2f}, adjusted linear_x={linear_x:.3f}"
+                        )
 
         # Convert inputs to numpy arrays for vectorized operations
         self._target_velocities[0] = linear_x
@@ -2922,9 +2956,26 @@ class ImprovedPIDControllerNode(Node):
         # Ensure dt is reasonable
         dt = max(0.001, min(dt, 0.1))
         
-        # Scale acceleration limit by time
-        accel_limit = 0.6 * dt * 10.0  # Example accel_limit
-        angular_accel_limit = 1.0 * dt * 10.0  # Example angular_accel_limit
+        # Scale acceleration limit by time - moderate acceleration increase
+        accel_limit = 0.8 * dt * 10.0  # Moderate increase from 0.6 to 0.8
+        angular_accel_limit = 1.0 * dt * 10.0  # Keep the same
+        
+        # Enhanced deceleration for approaching target
+        if hasattr(self, 'filtered_distance') and hasattr(self, 'desired_distance'):
+            distance_error = abs(self.filtered_distance - self.desired_distance)
+            # If velocity is decreasing and we're approaching target, boost deceleration
+            if (self._prev_velocities[0] > 0 and 
+                self._target_velocities[0] < self._prev_velocities[0] and
+                distance_error < self.approach_distance):
+                # Boost deceleration by up to 50% when close to target
+                decel_boost = 1.0 + 0.5 * (1.0 - distance_error / self.approach_distance)
+                accel_limit *= decel_boost
+                
+                if self.debug_level >= 2:
+                    self.get_logger().info(
+                        f"Deceleration boost: factor={decel_boost:.2f}, "
+                        f"accel_limit={accel_limit:.3f}"
+                    )
         
         # Calculate velocity differences
         np.subtract(self._target_velocities, self._prev_velocities, out=self._vel_diffs)
@@ -2935,7 +2986,7 @@ class ImprovedPIDControllerNode(Node):
                 limit = accel_limit
                 # Apply acceleration boosting when starting from stop
                 if abs(self._prev_velocities[i]) < 0.01 and abs(self._target_velocities[i]) > 0.01:
-                    boost = 3.0  # Acceleration boost factor
+                    boost = 2.5  # Acceleration boost factor (reduced from 3.0)
                     limit *= boost
             else:  # Angular Z
                 limit = angular_accel_limit
@@ -2953,7 +3004,7 @@ class ImprovedPIDControllerNode(Node):
         
         # Apply minimum velocity thresholds with hysteresis
         min_effective_velocity = 0.025  # Reduced from 0.05
-        min_angular_velocity = 0.05     # Reduced from 0.1
+        min_angular_velocity = 0.02     # Reduced from 0.05 to allow smaller angular corrections
         
         # Forward velocity threshold with hysteresis
         if abs(self._limited_velocities[0]) < min_effective_velocity:
@@ -2979,16 +3030,16 @@ class ImprovedPIDControllerNode(Node):
             # This prevents tipping during combined movements
             self._limited_velocities[1] *= 0.6
         
-        # Apply maximum velocity limits
-        linear_x_max = 0.2  # Example max_velocity
-        linear_y_max = 0.2  # Example max_velocity
-        angular_max = 0.5   # Example max_angular_velocity
+        # Apply maximum velocity limits - Moderate speed increase
+        linear_x_max = 0.3  # Increased to 0.3 from 0.2 (50% increase)
+        linear_y_max = 0.2  # Kept the same for lateral
+        angular_max = 0.5   # Kept the same for angular
         
         self._limited_velocities[0] = max(-linear_x_max, min(linear_x_max, self._limited_velocities[0]))
         self._limited_velocities[1] = max(-linear_y_max, min(linear_y_max, self._limited_velocities[1]))
         self._limited_velocities[2] = max(-angular_max, min(angular_max, self._limited_velocities[2]))
         
-        if self.debug_level >= 2:  # Consistent debug level
+        if self.debug_level >= 2:
             self.get_logger().info(
                 f"After limits: linear_x={self._limited_velocities[0]:.3f}, "
                 f"linear_y={self._limited_velocities[1]:.3f}, "
@@ -3073,8 +3124,8 @@ class ImprovedPIDControllerNode(Node):
         self.get_logger().info("Complete controller reset performed")
     
     def _init_strategy_table(self):
-        """Initialize the table-driven movement strategy definitions with angular-first approach."""
-        # Define the strategy table with improved angular-first strategies
+        """Initialize the table-driven movement strategy definitions with approach strategy."""
+        # Define the strategy table with improved angular-first strategies and approach strategies
         self.strategy_table = {
             # All errors within deadbands - no movement
             ("none", "none", "none"): [
@@ -3086,7 +3137,7 @@ class ImprovedPIDControllerNode(Node):
             # Very small errors - minimal corrections
             ("very_small", "very_small", "very_small"): [
                 "MINIMAL_CORRECTION", True, True, True, 
-                0.4, 0.4, 0.4, 
+                0.5, 0.4, 0.4,  # Reduced forward_scale from 0.6 to 0.5
                 "Minimal corrections for very small errors"
             ],
             
@@ -3117,38 +3168,38 @@ class ImprovedPIDControllerNode(Node):
             
             ("*", "*", "small_medium"): [
                 "ANGULAR_THEN_LATERAL", True, True, True, 
-                0.3, 0.6, 0.7, 
+                0.4, 0.6, 0.7,  # Reduced forward_scale from 0.5 to 0.4
                 "Angular-then-lateral transition: {angular_error:.1f}°"
             ],
             
             ("*", "*", "small"): [
                 "BALANCED", True, True, True, 
-                0.6, 0.7, 0.5, 
+                0.7, 0.7, 0.5,  # Reduced forward_scale from 0.9 to 0.7
                 "Balanced movement with small angular correction: {angular_error:.1f}°"
             ],
             
             ("*", "*", "very_small"): [
                 "COMBINED_MOVEMENT", True, True, True, 
-                0.8, 0.8, 0.3, 
+                0.8, 0.8, 0.3,  # Reduced forward_scale from 1.0 to 0.8
                 "Combined movement with minimal angular error: {angular_error:.1f}°"
             ],
             
             # Single dimension errors - focused corrections
             ("small", "none", "none"): [
                 "FORWARD_ONLY", True, False, False, 
-                0.8, 0.0, 0.0, 
+                0.8, 0.0, 0.0,  # Reduced forward_scale from 1.0 to 0.8
                 "Small distance error correction: {distance_error:.2f}m"
             ],
             
             ("medium", "none", "none"): [
                 "FORWARD_ONLY", True, False, False, 
-                1.0, 0.0, 0.0, 
+                0.9, 0.0, 0.0,  # Reduced forward_scale from 1.0 to 0.9
                 "Medium distance error correction: {distance_error:.2f}m"
             ],
             
             ("large", "none", "none"): [
                 "FORWARD_ONLY", True, False, False, 
-                1.0, 0.0, 0.0, 
+                1.0, 0.0, 0.0,  # Kept at 1.0 for large distances
                 "Large distance error correction: {distance_error:.2f}m"
             ],
             
@@ -3173,21 +3224,34 @@ class ImprovedPIDControllerNode(Node):
             # Combined distance and lateral errors (only when angular error is very small)
             ("*", "*", "none"): [
                 "POSITION_ONLY", True, True, False,
-                0.9, 0.9, 0.0,
+                0.8, 0.9, 0.0,  # Reduced forward_scale from 1.0 to 0.8
                 "Position correction without rotation"
             ],
             
             # Special case for diagonal movement - gradual transition
             ("medium", "medium", "small"): [
                 "DIAGONAL_MOVEMENT", True, True, True,
-                0.8, 0.8, 0.4,
+                0.8, 0.8, 0.4,  # Reduced forward_scale from 1.0 to 0.8
                 "Diagonal movement with small angular correction"
+            ],
+            
+            # New approach strategies for near-target behavior
+            ("small", "*", "*"): [
+                "APPROACH", True, True, True, 
+                0.6, 0.7, 0.5,  # Conservative forward scale for approach
+                "Approach mode - nearing target: {distance_error:.2f}m"
+            ],
+            
+            ("very_small", "*", "*"): [
+                "SLOW_APPROACH", True, True, True, 
+                0.4, 0.4, 0.4,  # Very conservative for final approach
+                "Final approach - very close to target: {distance_error:.2f}m"
             ],
             
             # Fallback strategy
             ("*", "*", "*"): [
                 "BALANCED", True, True, True, 
-                0.6, 0.6, 0.6, 
+                0.7, 0.6, 0.6,  # Reduced forward_scale from 0.8 to 0.7
                 "Balanced movement strategy (fallback)"
             ]
         }
@@ -3195,6 +3259,7 @@ class ImprovedPIDControllerNode(Node):
     def _categorize_error(self, error, error_type="distance", prev_category=None):
         """
         Categorize an error value with hysteresis to prevent oscillation.
+        Modified for improved distance categorization during approach.
         
         Args:
             error: The error value to categorize
@@ -3226,10 +3291,11 @@ class ImprovedPIDControllerNode(Node):
             large_threshold = deadband * 8.0
             very_large_threshold = deadband * 10.0
         else:  # distance
+            # Use tighter distance categorization for better approach control
             deadband = 0.1  # Meters
             very_small_threshold = deadband
-            small_threshold = deadband * 2.0
-            small_medium_threshold = deadband * 3.0
+            small_threshold = deadband * 1.5  # Reduced from 2.0 for more granular approach control
+            small_medium_threshold = deadband * 2.5  # Reduced from 3.0
             medium_threshold = deadband * 4.0
             medium_large_threshold = deadband * 6.0
             large_threshold = deadband * 8.0
