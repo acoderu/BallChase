@@ -80,16 +80,15 @@ config_loader = ConfigLoader()
 config = config_loader.load_yaml('yolo_config.yaml')
 
 # Model configuration from config file - keeping as is per requirements
-MODEL_CONFIG = config.get('model', {
+MODEL_CONFIG = {
     "path": "yolo12s_320.mnn",    # Path to our YOLO model file
     "input_width": 320,           # Width our model expects
     "input_height": 320,          # Height our model expects
-    #"precision": "lowBF",        # Lower precision for faster inference
-    "precision": "medium",        # Lower precision for faster inference
+    "precision": "medium",        # Precision for inference
     "backend": "CPU",             # Using CPU for inference
     "thread_count": 1,            # Number of CPU threads to use
     "confidence_threshold": 0.2   # Only keep detections above this confidence
-})
+}
 
 # COCO dataset class ID for "sports ball" - this includes basketballs
 BASKETBALL_CLASS_ID = config.get('model', {}).get('basketball_class_id', 32)

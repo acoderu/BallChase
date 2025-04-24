@@ -402,7 +402,7 @@ class EnhancedTargetFilter:
                     )
                 
                 # Smooth velocity estimate with low-pass filter
-                alpha = 0.6  # Decreased from 0.7 to be less reactive to noise
+                alpha = 0.75  # Decreased from 0.7 to be less reactive to noise
                 self.current_velocity = (
                     alpha * vx + (1 - alpha) * self.current_velocity[0],
                     alpha * vy + (1 - alpha) * self.current_velocity[1],
@@ -1248,14 +1248,14 @@ class MovementStrategy:
 class StrategyBlender:
     """Handles smooth transitions between movement strategies."""
     
-    def __init__(self, blend_duration=0.2):  # Reduced from 0.5 to 0.2 seconds
+    def __init__(self, blend_duration=0.1):  # Reduced from 0.5 to 0.2 seconds
         """Initialize the strategy blender with faster transitions."""
         self.current_strategy = None
         self.target_strategy = None
         self.blend_start_time = 0.0
         self.blending_active = False
         self.blend_duration = blend_duration
-        self.direction_change_boost = 2.0  # Speed up transitions when direction changes
+        self.direction_change_boost = 2.5  # Speed up transitions when direction changes
         self.previous_direction = None
         
         # Logger
@@ -1525,10 +1525,10 @@ class ImprovedPIDControllerNode(Node):
         self._init_strategy_table()
         
         # Initialize target filter
-        self.target_filter = EnhancedTargetFilter(buffer_size=8, prediction_horizon=0.3)
+        self.target_filter = EnhancedTargetFilter(buffer_size=5, prediction_horizon=0.2)
         
         # Initialize strategy blender (faster transition time)
-        self.strategy_blender = StrategyBlender(blend_duration=0.2)
+        self.strategy_blender = StrategyBlender(blend_duration=0.1)
         
         # Log startup info
         self.get_logger().info("Improved PID Controller initialized with angular-first strategy")
@@ -1564,23 +1564,23 @@ class ImprovedPIDControllerNode(Node):
             namespace='',
             parameters=[
                 # Linear X velocity PID parameters - adjusted for moderate velocity increase
-                ('linear_x_kp', 1.1),  # Moderately increased from 1.0
-                ('linear_x_ki', 0.03),
-                ('linear_x_kd', 0.15),  # Increased from 0.1 for better stopping behavior
+                ('linear_x_kp', 0.9),  # controls overshoot
+                ('linear_x_ki', 0.03), # handle steady state errors
+                ('linear_x_kd', 0.35), # controls dampening during approach
                 ('linear_x_min', 0.0),
                 ('linear_x_max', 0.3),  # Increased to 0.3 instead of 0.4 (50% improvement)
                 
                 # Linear Y velocity PID parameters - improved lateral damping
-                ('linear_y_kp', 0.6),
-                ('linear_y_ki', 0.06),  # Reduced from 0.08
-                ('linear_y_kd', 0.14),  # Increased from 0.12
+                ('linear_y_kp', 0.8),
+                ('linear_y_ki', 0.05),  # Reduced from 0.08
+                ('linear_y_kd', 0.4),  # Increased from 0.12
                 ('linear_y_min', -0.2),
                 ('linear_y_max', 0.2),
                 
                 # Angular velocity PID parameters - improved to prevent overshoot
-                ('angular_kp', 1.35),  # Reduced from 1.5
-                ('angular_ki', 0.035), # Reduced from 0.05
-                ('angular_kd', 0.5),   # Reduced from 0.8
+                ('angular_kp', 0.7),  # Reduced from 1.5
+                ('angular_ki', 0.08), # Reduced from 0.05
+                ('angular_kd', 1.2),   # Reduced from 0.8
                 ('angular_min', -0.5),
                 ('angular_max', 0.5),
                 
@@ -1736,11 +1736,11 @@ class ImprovedPIDControllerNode(Node):
             self.pid_linear_y, 
             self.pid_angular,
             {
-                'coupling_factor': 0.35,       # Adjusted for better balance with higher velocity
-                'smoothing_factor': 0.5,       # Increased from 0.4 for smoother transitions
-                'min_angle_for_reduction': 0.1,
-                'zero_angle_threshold': 0.03,
-                'max_angle_factor': 0.3,       # Reduced from 0.5
+                'coupling_factor': 0.4,       # Controls coordination between lateral and angular motion
+                'smoothing_factor': 0.6,       # Controls smoother transitions
+                'min_angle_for_reduction': 0.08,
+                'zero_angle_threshold': 0.02,
+                'max_angle_factor': 0.25,       # Reduced from 0.5
                 'same_sign_scale': 0.8,
                 'opposite_sign_scale': 1.2,    # Increased from 1.0
             }
@@ -2981,8 +2981,8 @@ class ImprovedPIDControllerNode(Node):
         dt = max(0.001, min(dt, 0.1))
         
         # Scale acceleration limit by time - moderate acceleration increase
-        accel_limit = 0.8 * dt * 10.0  # Moderate increase from 0.6 to 0.8
-        angular_accel_limit = 1.0 * dt * 10.0  # Keep the same
+        accel_limit = 1 * dt * 10.0  # Moderate increase from 0.6 to 0.8
+        angular_accel_limit = 1.2 * dt * 10.0  # Keep the same
         
         # Enhanced deceleration for approaching target
         if hasattr(self, 'filtered_distance') and hasattr(self, 'desired_distance'):
@@ -3010,13 +3010,13 @@ class ImprovedPIDControllerNode(Node):
                 limit = accel_limit
                 # Apply acceleration boosting when starting from stop
                 if abs(self._prev_velocities[i]) < 0.01 and abs(self._target_velocities[i]) > 0.01:
-                    boost = 2.5  # Acceleration boost factor (reduced from 3.0)
+                    boost = 3.0  # Acceleration boost factor (reduced from 3.0)
                     limit *= boost
             else:  # Angular Z
                 limit = angular_accel_limit
                 # Apply acceleration boosting for angular motion too
                 if abs(self._prev_velocities[i]) < 0.01 and abs(self._target_velocities[i]) > 0.01:
-                    boost = 2.0  # Angular acceleration boost factor
+                    boost = 3.0  # Angular acceleration boost factor
                     limit *= boost
             
             # If velocity change exceeds limit, scale it
@@ -3161,69 +3161,69 @@ class ImprovedPIDControllerNode(Node):
             # Very small errors - minimal corrections
             ("very_small", "very_small", "very_small"): [
                 "MINIMAL_CORRECTION", True, True, True, 
-                0.5, 0.4, 0.4,  # Reduced forward_scale from 0.6 to 0.5
+                0.5, 0.4, 0.4,
                 "Minimal corrections for very small errors"
             ],
             
-            # Angular error categories - prioritize angular correction, but reduced intensity
+            # Angular error categories - prioritize angular correction but allow forward movement
             ("*", "*", "very_large"): [
-                "ANGULAR_ONLY", False, False, True, 
-                0.0, 0.0, 0.9,  # Reduced from 1.0 to 0.9
-                "Angular error correction only: {angular_error:.1f}°"
+                "ANGULAR_PRIMARY", True, False, True, 
+                0.3, 0.0, 0.9,  # Enable forward movement at 30% with 90% angular
+                "Angular correction with minimal approach: {angular_error:.1f}°"
             ],
             
             ("*", "*", "large"): [
-                "ANGULAR_PRIMARY", False, False, True, 
-                0.0, 0.0, 0.8,  # Reduced from 1.0 to 0.8
-                "Angular correction prioritized: {angular_error:.1f}°"
+                "ANGULAR_PRIMARY", True, False, True, 
+                0.4, 0.0, 0.8,  # 40% forward with 80% angular 
+                "Angular correction with slow approach: {angular_error:.1f}°"
             ],
             
             ("*", "*", "medium_large"): [
-                "ANGULAR_PRIMARY_BALANCED", False, True, True, 
-                0.0, 0.2, 0.7,  # Reduced from 0.9 to 0.7
-                "Primarily angular correction with some lateral: {angular_error:.1f}°"
+                "ANGULAR_BALANCED", True, True, True, 
+                0.5, 0.2, 0.7,  # 50% forward, 20% lateral, 70% angular
+                "Angular correction with steady approach: {angular_error:.1f}°"
             ],
             
             ("*", "*", "medium"): [
-                "ANGULAR_BALANCED", False, True, True, 
-                0.0, 0.4, 0.6,  # Reduced from 0.8 to 0.6
-                "Angular-balanced movement: {angular_error:.1f}°"
+                "BALANCED", True, True, True, 
+                0.6, 0.3, 0.6,  # More even distribution
+                "Balanced movement with angular correction: {angular_error:.1f}°"
             ],
             
             ("*", "*", "small_medium"): [
-                "ANGULAR_THEN_LATERAL", True, True, True, 
-                0.4, 0.6, 0.5,  # Reduced angular_scale from 0.7 to 0.5
-                "Angular-then-lateral transition: {angular_error:.1f}°"
+                "FORWARD_ANGULAR", True, True, True, 
+                0.7, 0.4, 0.5,  # Emphasize forward movement
+                "Forward movement with angular fine-tuning: {angular_error:.1f}°"
             ],
             
             ("*", "*", "small"): [
-                "BALANCED", True, True, True, 
-                0.7, 0.7, 0.4,  # Reduced angular_scale from 0.5 to 0.4
-                "Balanced movement with small angular correction: {angular_error:.1f}°"
+                "FORWARD_PRIMARY", True, True, True, 
+                0.8, 0.5, 0.4,  # Forward priority with some angular correction
+                "Forward-focused movement with minor angular correction: {angular_error:.1f}°"
             ],
             
             ("*", "*", "very_small"): [
                 "COMBINED_MOVEMENT", True, True, True, 
-                0.8, 0.8, 0.2,  # Reduced angular_scale from 0.3 to 0.2
-                "Combined movement with minimal angular error: {angular_error:.1f}°"
+                0.9, 0.6, 0.3,  # Strong forward bias
+                "Forward movement with minimal angular correction: {angular_error:.1f}°"
             ],
             
             # Single dimension errors - focused corrections
             ("small", "none", "none"): [
                 "FORWARD_ONLY", True, False, False, 
-                0.8, 0.0, 0.0,  # Reduced forward_scale from 1.0 to 0.8
+                0.8, 0.0, 0.0,
                 "Small distance error correction: {distance_error:.2f}m"
             ],
             
             ("medium", "none", "none"): [
                 "FORWARD_ONLY", True, False, False, 
-                0.9, 0.0, 0.0,  # Reduced forward_scale from 1.0 to 0.9
+                0.9, 0.0, 0.0,
                 "Medium distance error correction: {distance_error:.2f}m"
             ],
             
             ("large", "none", "none"): [
                 "FORWARD_ONLY", True, False, False, 
-                1.0, 0.0, 0.0,  # Kept at 1.0 for large distances
+                1.0, 0.0, 0.0,
                 "Large distance error correction: {distance_error:.2f}m"
             ],
             
@@ -3235,7 +3235,7 @@ class ImprovedPIDControllerNode(Node):
             
             ("none", "medium", "none"): [
                 "LATERAL_ONLY", False, True, False, 
-                0.0, 1.0, 0.0, 
+                0.0, 0.9, 0.0, 
                 "Medium lateral error correction: {lateral_error:.2f}m"
             ],
             
@@ -3247,54 +3247,54 @@ class ImprovedPIDControllerNode(Node):
             
             # Special case strategies for when at target distance with angular error
             ("none", "*", "medium"): [
-                "AT_TARGET_ANGULAR", False, False, True, 
-                0.0, 0.0, 0.4,  # Reduced angular scale from 0.8 to 0.4
-                "At target distance - minimal angular correction: {angular_error:.1f}°"
+                "AT_TARGET_ANGULAR", True, False, True, 
+                0.2, 0.0, 0.6,  # Some forward movement with angular correction
+                "At target distance - angular correction with slight forward: {angular_error:.1f}°"
             ],
             
             ("none", "*", "medium_large"): [
-                "AT_TARGET_ANGULAR", False, False, True, 
-                0.0, 0.0, 0.5,  # Reduced angular scale from 0.9 to 0.5
-                "At target distance - reduced angular correction: {angular_error:.1f}°"
+                "AT_TARGET_ANGULAR", True, False, True, 
+                0.1, 0.0, 0.7,  # Minimal forward movement with angular focus
+                "At target distance - primarily angular correction: {angular_error:.1f}°"
             ],
             
             ("none", "*", "large"): [
-                "AT_TARGET_ANGULAR", False, False, True, 
-                0.0, 0.0, 0.6,  # Reduced angular scale from 1.0 to 0.6
-                "At target distance - moderate angular correction: {angular_error:.1f}°"
+                "AT_TARGET_ANGULAR", True, False, True, 
+                0.1, 0.0, 0.8,  # Minimal forward with strong angular
+                "At target distance - strong angular correction: {angular_error:.1f}°"
             ],
             
             # Combined distance and lateral errors (only when angular error is very small)
             ("*", "*", "none"): [
                 "POSITION_ONLY", True, True, False,
-                0.8, 0.9, 0.0,  # Reduced forward_scale from 1.0 to 0.8
+                0.9, 0.9, 0.0,  # Increased from 0.8/0.9 to 0.9/0.9
                 "Position correction without rotation"
             ],
             
             # Special case for diagonal movement - gradual transition
             ("medium", "medium", "small"): [
                 "DIAGONAL_MOVEMENT", True, True, True,
-                0.8, 0.8, 0.3,  # Reduced angular_scale from 0.4 to 0.3
+                0.8, 0.8, 0.3,
                 "Diagonal movement with small angular correction"
             ],
             
-            # New approach strategies for near-target behavior
+            # Approach strategies for near-target behavior
             ("small", "*", "*"): [
                 "APPROACH", True, True, True, 
-                0.6, 0.7, 0.4,  # Reduced angular_scale from 0.5 to 0.4
+                0.7, 0.7, 0.4,  # Increased from 0.6/0.7 to 0.7/0.7
                 "Approach mode - nearing target: {distance_error:.2f}m"
             ],
             
             ("very_small", "*", "*"): [
                 "SLOW_APPROACH", True, True, True, 
-                0.4, 0.4, 0.3,  # Reduced angular_scale from 0.4 to 0.3
+                0.5, 0.5, 0.3,  # Increased from 0.4/0.4 to 0.5/0.5
                 "Final approach - very close to target: {distance_error:.2f}m"
             ],
             
             # Fallback strategy
             ("*", "*", "*"): [
                 "BALANCED", True, True, True, 
-                0.7, 0.6, 0.5,  # Reduced angular_scale from 0.6 to 0.5
+                0.7, 0.6, 0.5,
                 "Balanced movement strategy (fallback)"
             ]
         }
