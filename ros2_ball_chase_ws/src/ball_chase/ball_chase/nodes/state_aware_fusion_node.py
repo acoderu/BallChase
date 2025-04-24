@@ -931,12 +931,16 @@ class OptimizedFusionNode(LifecycleNode):
             if bbox_width <= 0 or bbox_height <= 0:
                 return None
             
+
             # Basketball diameter
             basketball_diameter = self.basketball_radius * 2
             
+            # Calculate ball diameter using geometric mean instead of max dimension
+            ball_diameter_pixels = math.sqrt(bbox_width * bbox_height) 
+
             # Calculate distance
             focal_length = self.camera_parameters['focal_length']
-            estimated_distance = (basketball_diameter * focal_length) / bbox_width
+            estimated_distance = (basketball_diameter * focal_length) / ball_diameter_pixels
             
             # Age penalty for older bboxes
             age_factor = min(1.0 + (bbox_age / max_age) * 0.15, 1.15)
