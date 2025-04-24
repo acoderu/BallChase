@@ -402,7 +402,7 @@ class EnhancedTargetFilter:
                     )
                 
                 # Smooth velocity estimate with low-pass filter
-                alpha = 0.75  # Decreased from 0.7 to be less reactive to noise
+                alpha = 0.85  # Increased from 0.75 for less smoothing/faster response
                 self.current_velocity = (
                     alpha * vx + (1 - alpha) * self.current_velocity[0],
                     alpha * vy + (1 - alpha) * self.current_velocity[1],
@@ -1528,7 +1528,7 @@ class ImprovedPIDControllerNode(Node):
         self.target_filter = EnhancedTargetFilter(buffer_size=5, prediction_horizon=0.2)
         
         # Initialize strategy blender (faster transition time)
-        self.strategy_blender = StrategyBlender(blend_duration=0.1)
+        self.strategy_blender = StrategyBlender(blend_duration=0.05)
         
         # Log startup info
         self.get_logger().info("Improved PID Controller initialized with angular-first strategy")
@@ -1545,10 +1545,10 @@ class ImprovedPIDControllerNode(Node):
         }
         
         # Performance adjustment parameters
-        self.base_update_rate = 10.0  # Default 10Hz control rate
+        self.base_update_rate = 20.0  # Default 10Hz control rate
         self.adaptive_control_rate = True
         self.min_update_rate = 5.0   # Don't go below 5Hz
-        self.max_update_rate = 20.0  # Don't go above 20Hz
+        self.max_update_rate = 30.0  # Don't go above 20Hz
         
         # Performance metrics tracking
         self.cycle_start_time = 0.0
@@ -1564,41 +1564,41 @@ class ImprovedPIDControllerNode(Node):
             namespace='',
             parameters=[
                 # Linear X velocity PID parameters - adjusted for moderate velocity increase
-                ('linear_x_kp', 0.9),  # controls overshoot
-                ('linear_x_ki', 0.03), # handle steady state errors
-                ('linear_x_kd', 0.35), # controls dampening during approach
+                ('linear_x_kp', 1.2),  # controls overshoot
+                ('linear_x_ki', 0.05), # handle steady state errors
+                ('linear_x_kd', 0.25), # controls dampening during approach
                 ('linear_x_min', 0.0),
-                ('linear_x_max', 0.3),  # Increased to 0.3 instead of 0.4 (50% improvement)
+                ('linear_x_max', 0.5),  # Increased to 0.3 instead of 0.4 (50% improvement)
                 
                 # Linear Y velocity PID parameters - improved lateral damping
-                ('linear_y_kp', 0.8),
-                ('linear_y_ki', 0.05),  # Reduced from 0.08
-                ('linear_y_kd', 0.4),  # Increased from 0.12
+                ('linear_y_kp', 1),
+                ('linear_y_ki', 0.06),  # Reduced from 0.08
+                ('linear_y_kd', 0.3),  # Increased from 0.12
                 ('linear_y_min', -0.2),
-                ('linear_y_max', 0.2),
+                ('linear_y_max', 0.3),
                 
                 # Angular velocity PID parameters - improved to prevent overshoot
-                ('angular_kp', 0.7),  # Reduced from 1.5
-                ('angular_ki', 0.08), # Reduced from 0.05
-                ('angular_kd', 1.2),   # Reduced from 0.8
+                ('angular_kp', 0.9),  # Reduced from 1.5
+                ('angular_ki', 0.1), # Reduced from 0.05
+                ('angular_kd', 0.8),   # Reduced from 0.8
                 ('angular_min', -0.5),
-                ('angular_max', 0.5),
+                ('angular_max', 0.7),
                 
                 # Control parameters
                 ('min_distance', 0.9),
                 ('max_distance', 2.0),
                 ('target_offset_x', 0.0),
                 ('target_offset_y', 0.0),
-                ('target_update_rate', 10.0),
+                ('target_update_rate', 20.0),
                 ('diagnostics_rate', 0.5),
                 ('debug_level', 1),
                 ('adaptive_gains', True),
                 ('use_lateral_control', True),
                 
                 # Balanced error thresholds - increased angular threshold
-                ('distance_threshold', 0.1),
-                ('lateral_threshold', 0.075),  # Increased from 0.05
-                ('angular_threshold', 3.0),    # Increased from 1.5 to 3.0 degrees
+                ('distance_threshold', 0.08),
+                ('lateral_threshold', 0.06),  # Increased from 0.05
+                ('angular_threshold', 2.5),    # Increased from 1.5 to 3.0 degrees
                 
                 # New parameter for scaling angular threshold when at target distance
                 ('angular_at_target_factor', 2.5),  # Multiply threshold by this when at target distance
@@ -2799,14 +2799,14 @@ class ImprovedPIDControllerNode(Node):
         
         # Hysteresis increases with stop duration to a max of 1.5
         # This helps prevent oscillating between stopped and moving states
-        hysteresis = min(1.5, 1.0 + stop_duration * 0.2)
+        hysteresis = min(1.2, 1.0 + stop_duration * 0.2)
         
         # If any error exceeds the movement threshold with hysteresis, exit stopped state
         distance_threshold = self.distance_threshold * hysteresis
         lateral_threshold = self.lateral_threshold * hysteresis
         
         # Apply increased angular threshold when at target distance
-        if abs(distance_error) < self.distance_threshold * 1.5:
+        if abs(distance_error) < self.distance_threshold * 1.2:
             # More lenient angular threshold when at target distance
             angular_threshold = self.angular_threshold * self.angular_at_target_factor * hysteresis
         else:
@@ -2981,8 +2981,8 @@ class ImprovedPIDControllerNode(Node):
         dt = max(0.001, min(dt, 0.1))
         
         # Scale acceleration limit by time - moderate acceleration increase
-        accel_limit = 1 * dt * 10.0  # Moderate increase from 0.6 to 0.8
-        angular_accel_limit = 1.2 * dt * 10.0  # Keep the same
+        accel_limit = 1.5 * dt * 10.0  # Moderate increase from 0.6 to 0.8
+        angular_accel_limit = 2 * dt * 10.0  # Keep the same
         
         # Enhanced deceleration for approaching target
         if hasattr(self, 'filtered_distance') and hasattr(self, 'desired_distance'):
@@ -3010,7 +3010,7 @@ class ImprovedPIDControllerNode(Node):
                 limit = accel_limit
                 # Apply acceleration boosting when starting from stop
                 if abs(self._prev_velocities[i]) < 0.01 and abs(self._target_velocities[i]) > 0.01:
-                    boost = 3.0  # Acceleration boost factor (reduced from 3.0)
+                    boost = 5.0  # Acceleration boost factor (reduced from 3.0)
                     limit *= boost
             else:  # Angular Z
                 limit = angular_accel_limit
@@ -3027,8 +3027,8 @@ class ImprovedPIDControllerNode(Node):
                 self._limited_velocities[i] = self._target_velocities[i]
         
         # Apply minimum velocity thresholds with hysteresis
-        min_effective_velocity = 0.025  # Reduced from 0.05
-        min_angular_velocity = 0.02     # Reduced from 0.05 to allow smaller angular corrections
+        min_effective_velocity = 0.01  # Reduced from 0.05
+        min_angular_velocity = 0.01     # Reduced from 0.05 to allow smaller angular corrections
         
         # Forward velocity threshold with hysteresis
         if abs(self._limited_velocities[0]) < min_effective_velocity:
