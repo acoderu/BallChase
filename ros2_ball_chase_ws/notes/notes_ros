@@ -10,6 +10,8 @@ ros2 run ball_chase pid_controller_node --ros-args -p debug_level:=3
 ros2 lifecycle set /optimized_fusion_node configure
 ros2 lifecycle set /optimized_fusion_node activate
 
+
+
 docker exec -it MentorPi bash
 ....
 ~/.stop_ros.sh

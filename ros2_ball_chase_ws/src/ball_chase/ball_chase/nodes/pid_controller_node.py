@@ -707,6 +707,9 @@ class ImprovedPID:
         self.output_max = output_max
         self.name = name
         
+        # ADDED: Reference to parent controller
+        self.pid_controller = None
+        
         # PID state
         self.prev_error = 0.0
         self.integral = 0.0
@@ -953,6 +956,34 @@ class ImprovedPID:
                 
                 i_term = self.ki * self.integral
             
+            # ADDED: Reset integral when approaching target to prevent overshoot
+            if self.name == "Linear X" and hasattr(self, 'pid_controller') and \
+               hasattr(self.pid_controller, 'filtered_distance') and \
+               hasattr(self.pid_controller, 'desired_distance') and \
+               hasattr(self.pid_controller, 'approach_distance'):
+                
+                distance_error = abs(self.pid_controller.filtered_distance - self.pid_controller.desired_distance)
+                approach_distance = self.pid_controller.approach_distance
+                
+                # Dynamically scale integral based on distance
+                if distance_error < approach_distance:
+                    # Calculate scaling factor (lower when closer)
+                    proximity_factor = max(0.1, distance_error / approach_distance)
+                    
+                    # Apply stronger reduction to integral when close
+                    self.integral *= proximity_factor
+                    
+                    # Recalculate i_term after adjustment
+                    i_term = self.ki * self.integral
+                    
+                    if abs(error) < 0.1 and abs(self.integral) > 0.1:
+                        # When very close to target, aggressively reset integral
+                        self.integral *= 0.1
+                        i_term = self.ki * self.integral
+                        
+                        if hasattr(self.pid_controller, 'debug_level') and self.pid_controller.debug_level >= 2:
+                            self.logger.info(f"Resetting integral term during approach: distance_error={distance_error:.3f}m")
+            
             # Derivative term with improved noise handling
             # Use filtered error derivative to reduce noise sensitivity
             error_change = error - self.prev_error
@@ -1030,6 +1061,246 @@ class ImprovedPID:
     def get_current_gains(self):
         """Get the current adaptive gains."""
         return (self.kp, self.ki, self.kd)
+
+class StrategyBlender:
+    """Handles smooth transitions between movement strategies."""
+    
+    def __init__(self, blend_duration=0.1):  # Reduced from 0.5 to 0.2 seconds
+        """Initialize the strategy blender with faster transitions."""
+        self.current_strategy = None
+        self.target_strategy = None
+        self.blend_start_time = 0.0
+        self.blending_active = False
+        self.blend_duration = blend_duration
+        self.direction_change_boost = 2.5  # Speed up transitions when direction changes
+        self.previous_direction = None
+        
+        # Logger
+        self.logger = logging.getLogger('pid_controller.blender')
+    
+    def update_target(self, target_strategy, current_time):
+        """
+        Update the target strategy.
+        
+        Args:
+            target_strategy: The target strategy to blend towards
+            current_time: Current time
+            
+        Returns:
+            bool: True if a new blend was started
+        """
+        # Initialize if this is the first strategy
+        if self.current_strategy is None:
+            self.current_strategy = target_strategy
+            self.previous_direction = self._get_strategy_direction(target_strategy)
+            return False
+            
+        # Check if target is different from current
+        if target_strategy.name != self.current_strategy.name:
+            # Detect direction change for boosting transition speed
+            current_direction = self._get_strategy_direction(target_strategy)
+            direction_change = False
+            
+            if self.previous_direction is not None and current_direction is not None:
+                # Check if direction components are opposite
+                direction_change = (
+                    (self.previous_direction[0] * current_direction[0] < 0) or
+                    (self.previous_direction[1] * current_direction[1] < 0) or
+                    (self.previous_direction[2] * current_direction[2] < 0)
+                )
+            
+            # Start new blend
+            self.target_strategy = target_strategy
+            self.blend_start_time = current_time
+            self.blending_active = True
+            
+            # Apply boosting for direction changes
+            if direction_change:
+                # Use shorter blend duration for direction changes
+                self.effective_blend_duration = self.blend_duration / self.direction_change_boost
+                self.logger.info(f"Direction change detected: boosting transition speed")
+            else:
+                self.effective_blend_duration = self.blend_duration
+            
+            # Update previous direction
+            self.previous_direction = current_direction
+            
+            return True
+            
+        return False
+    
+    def _get_strategy_direction(self, strategy):
+        """Extract movement direction from a strategy."""
+        if not (strategy.use_forward or strategy.use_lateral or strategy.use_angular):
+            return None
+            
+        return (
+            1 if strategy.use_forward and strategy.forward_scale > 0 else 
+            (-1 if strategy.use_forward else 0),
+            
+            1 if strategy.use_lateral and strategy.lateral_scale > 0 else 
+            (-1 if strategy.use_lateral else 0),
+            
+            1 if strategy.use_angular and strategy.angular_scale > 0 else 
+            (-1 if strategy.use_angular else 0)
+        )
+    
+    def _smoothstep(self, x):
+        """Improved smoothstep function for smoother transitions."""
+        x = max(0.0, min(1.0, x))
+        # Use a higher-order smoothstep for smoother transitions
+        return x * x * x * (x * (x * 6 - 15) + 10)
+    
+    def get_current_strategy(self, current_time):
+        """
+        Get the current strategy, which might be a blend of two strategies.
+        
+        Args:
+            current_time: Current time
+            
+        Returns:
+            MovementStrategy: Current strategy (possibly blended)
+        """
+        if not self.blending_active:
+            return self.current_strategy
+            
+        # Calculate blend factor
+        elapsed_time = current_time - self.blend_start_time
+        
+        # Use effective blend duration that might be boosted for direction changes
+        blend_duration = getattr(self, 'effective_blend_duration', self.blend_duration)
+        
+        linear_blend = min(1.0, elapsed_time / blend_duration)
+        blend_factor = self._smoothstep(linear_blend)
+        
+        # Check if blending is complete
+        if blend_factor >= 0.999:
+            self.current_strategy = self.target_strategy
+            self.blending_active = False
+            return self.current_strategy
+        
+        # Create blended strategy
+        name = f"{self.current_strategy.name}→{self.target_strategy.name}"
+        
+        # Determine boolean flags using OR logic for smoother transitions
+        # e.g., if either strategy uses forward, the blended strategy should use it
+        # This prevents sudden stopping of a movement axis during transitions
+        use_forward = self.target_strategy.use_forward or (
+            self.current_strategy.use_forward and blend_factor < 0.5)
+            
+        use_lateral = self.target_strategy.use_lateral or (
+            self.current_strategy.use_lateral and blend_factor < 0.5)
+            
+        use_angular = self.target_strategy.use_angular or (
+            self.current_strategy.use_angular and blend_factor < 0.5)
+        
+        # Blend continuous parameters
+        forward_scale = self.current_strategy.forward_scale * (1.0 - blend_factor) + \
+                       self.target_strategy.forward_scale * blend_factor
+                       
+        lateral_scale = self.current_strategy.lateral_scale * (1.0 - blend_factor) + \
+                       self.target_strategy.lateral_scale * blend_factor
+                       
+        angular_scale = self.current_strategy.angular_scale * (1.0 - blend_factor) + \
+                       self.target_strategy.angular_scale * blend_factor
+        
+        reason = f"Blending strategies: {blend_factor*100:.0f}% complete"
+        
+        return MovementStrategy(
+            name, use_forward, use_lateral, use_angular,
+            forward_scale, lateral_scale, angular_scale, reason
+        )
+    
+    def is_blending(self):
+        """Check if a blend is currently in progress."""
+        return self.blending_active
+    
+    def get_blend_progress(self, current_time):
+        """Get the current blend progress as a percentage."""
+        if not self.blending_active:
+            return 100.0
+            
+        # Use effective blend duration for calculating progress
+        blend_duration = getattr(self, 'effective_blend_duration', self.blend_duration)
+        elapsed_time = current_time - self.blend_start_time
+        return min(100.0, (elapsed_time / blend_duration) * 100.0)
+    
+    def reset(self):
+        """Reset the blender state."""
+        self.current_strategy = None
+        self.target_strategy = None
+        self.blending_active = False
+        self.previous_direction = None
+
+class ResourceMonitor:
+    """
+    Lightweight resource monitor for tracking CPU and memory usage.
+    Provides callbacks for resource threshold alerts.
+    """
+    
+    def __init__(self, update_interval=5.0):
+        """
+        Initialize the resource monitor.
+        
+        Args:
+            update_interval: How often to update resource metrics (seconds)
+        """
+        self.update_interval = update_interval
+        self.last_update_time = 0
+        self.cpu_usage = 0.0
+        self.memory_usage = 0.0
+        self.alert_callbacks = []
+        self.cpu_threshold = 85.0  # Default CPU usage threshold (%)
+        self.memory_threshold = 85.0  # Default memory usage threshold (%)
+        self.logger = logging.getLogger('pid_controller.resource_monitor')
+    
+    def update(self):
+        """Update resource metrics if interval has elapsed."""
+        current_time = time.time()
+        
+        # Only update at specified interval
+        if current_time - self.last_update_time >= self.update_interval:
+            self.cpu_usage = psutil.cpu_percent(interval=0.1)
+            memory = psutil.virtual_memory()
+            self.memory_usage = memory.percent
+            
+            # Check thresholds for alerts
+            self._check_thresholds()
+            
+            self.last_update_time = current_time
+    
+    def _check_thresholds(self):
+        """Check if any resource metrics exceed thresholds and trigger callbacks."""
+        # Check CPU
+        if self.cpu_usage > self.cpu_threshold:
+            for callback in self.alert_callbacks:
+                callback('cpu', self.cpu_usage)
+        
+        # Check memory
+        if self.memory_usage > self.memory_threshold:
+            for callback in self.alert_callbacks:
+                callback('memory', self.memory_usage)
+    
+    def add_alert_callback(self, callback):
+        """
+        Add a callback to be called when resource thresholds are exceeded.
+        
+        Args:
+            callback: Function to call with (resource_type, value) parameters
+        """
+        self.alert_callbacks.append(callback)
+    
+    def get_cpu_usage(self):
+        """Get the last measured CPU usage."""
+        return self.cpu_usage
+    
+    def get_memory_usage(self):
+        """Get the last measured memory usage."""
+        return self.memory_usage
+        
+    def log_stats(self):
+        """Log current resource statistics."""
+        self.logger.info(f"CPU: {self.cpu_usage:.1f}%, Memory: {self.memory_usage:.1f}%")
 
 class CoordinatedController:
     """Controller that coordinates lateral and angular movements."""
@@ -1245,245 +1516,6 @@ class MovementStrategy:
             "reason": self.reason
         }
 
-class StrategyBlender:
-    """Handles smooth transitions between movement strategies."""
-    
-    def __init__(self, blend_duration=0.1):  # Reduced from 0.5 to 0.2 seconds
-        """Initialize the strategy blender with faster transitions."""
-        self.current_strategy = None
-        self.target_strategy = None
-        self.blend_start_time = 0.0
-        self.blending_active = False
-        self.blend_duration = blend_duration
-        self.direction_change_boost = 2.5  # Speed up transitions when direction changes
-        self.previous_direction = None
-        
-        # Logger
-        self.logger = logging.getLogger('pid_controller.blender')
-    
-    def update_target(self, target_strategy, current_time):
-        """
-        Update the target strategy.
-        
-        Args:
-            target_strategy: The target strategy to blend towards
-            current_time: Current time
-            
-        Returns:
-            bool: True if a new blend was started
-        """
-        # Initialize if this is the first strategy
-        if self.current_strategy is None:
-            self.current_strategy = target_strategy
-            self.previous_direction = self._get_strategy_direction(target_strategy)
-            return False
-            
-        # Check if target is different from current
-        if target_strategy.name != self.current_strategy.name:
-            # Detect direction change for boosting transition speed
-            current_direction = self._get_strategy_direction(target_strategy)
-            direction_change = False
-            
-            if self.previous_direction is not None and current_direction is not None:
-                # Check if direction components are opposite
-                direction_change = (
-                    (self.previous_direction[0] * current_direction[0] < 0) or
-                    (self.previous_direction[1] * current_direction[1] < 0) or
-                    (self.previous_direction[2] * current_direction[2] < 0)
-                )
-            
-            # Start new blend
-            self.target_strategy = target_strategy
-            self.blend_start_time = current_time
-            self.blending_active = True
-            
-            # Apply boosting for direction changes
-            if direction_change:
-                # Use shorter blend duration for direction changes
-                self.effective_blend_duration = self.blend_duration / self.direction_change_boost
-                self.logger.info(f"Direction change detected: boosting transition speed")
-            else:
-                self.effective_blend_duration = self.blend_duration
-            
-            # Update previous direction
-            self.previous_direction = current_direction
-            
-            return True
-            
-        return False
-    
-    def _get_strategy_direction(self, strategy):
-        """Extract movement direction from a strategy."""
-        if not (strategy.use_forward or strategy.use_lateral or strategy.use_angular):
-            return None
-            
-        return (
-            1 if strategy.use_forward and strategy.forward_scale > 0 else 
-            (-1 if strategy.use_forward else 0),
-            
-            1 if strategy.use_lateral and strategy.lateral_scale > 0 else 
-            (-1 if strategy.use_lateral else 0),
-            
-            1 if strategy.use_angular and strategy.angular_scale > 0 else 
-            (-1 if strategy.use_angular else 0)
-        )
-    
-    def _smoothstep(self, x):
-        """Apply smoothstep function to create smoother transitions."""
-        x = max(0.0, min(1.0, x))  # Clamp input to 0-1
-        return x * x * (3 - 2 * x)  # Smoothstep function
-    
-    def get_current_strategy(self, current_time):
-        """
-        Get the current strategy, which might be a blend of two strategies.
-        
-        Args:
-            current_time: Current time
-            
-        Returns:
-            MovementStrategy: Current strategy (possibly blended)
-        """
-        if not self.blending_active:
-            return self.current_strategy
-            
-        # Calculate blend factor
-        elapsed_time = current_time - self.blend_start_time
-        
-        # Use effective blend duration that might be boosted for direction changes
-        blend_duration = getattr(self, 'effective_blend_duration', self.blend_duration)
-        
-        linear_blend = min(1.0, elapsed_time / blend_duration)
-        blend_factor = self._smoothstep(linear_blend)
-        
-        # Check if blending is complete
-        if blend_factor >= 0.999:
-            self.current_strategy = self.target_strategy
-            self.blending_active = False
-            return self.current_strategy
-        
-        # Create blended strategy
-        name = f"{self.current_strategy.name}→{self.target_strategy.name}"
-        
-        # Determine boolean flags using OR logic for smoother transitions
-        # e.g., if either strategy uses forward, the blended strategy should use it
-        # This prevents sudden stopping of a movement axis during transitions
-        use_forward = self.target_strategy.use_forward or (
-            self.current_strategy.use_forward and blend_factor < 0.5)
-            
-        use_lateral = self.target_strategy.use_lateral or (
-            self.current_strategy.use_lateral and blend_factor < 0.5)
-            
-        use_angular = self.target_strategy.use_angular or (
-            self.current_strategy.use_angular and blend_factor < 0.5)
-        
-        # Blend continuous parameters
-        forward_scale = self.current_strategy.forward_scale * (1.0 - blend_factor) + \
-                       self.target_strategy.forward_scale * blend_factor
-                       
-        lateral_scale = self.current_strategy.lateral_scale * (1.0 - blend_factor) + \
-                       self.target_strategy.lateral_scale * blend_factor
-                       
-        angular_scale = self.current_strategy.angular_scale * (1.0 - blend_factor) + \
-                       self.target_strategy.angular_scale * blend_factor
-        
-        reason = f"Blending strategies: {blend_factor*100:.0f}% complete"
-        
-        return MovementStrategy(
-            name, use_forward, use_lateral, use_angular,
-            forward_scale, lateral_scale, angular_scale, reason
-        )
-    
-    def is_blending(self):
-        """Check if a blend is currently in progress."""
-        return self.blending_active
-    
-    def get_blend_progress(self, current_time):
-        """Get the current blend progress as a percentage."""
-        if not self.blending_active:
-            return 100.0
-            
-        # Use effective blend duration for calculating progress
-        blend_duration = getattr(self, 'effective_blend_duration', self.blend_duration)
-        elapsed_time = current_time - self.blend_start_time
-        return min(100.0, (elapsed_time / blend_duration) * 100.0)
-    
-    def reset(self):
-        """Reset the blender state."""
-        self.current_strategy = None
-        self.target_strategy = None
-        self.blending_active = False
-        self.previous_direction = None
-
-class ResourceMonitor:
-    """
-    Lightweight resource monitor for tracking CPU and memory usage.
-    Provides callbacks for resource threshold alerts.
-    """
-    
-    def __init__(self, update_interval=5.0):
-        """
-        Initialize the resource monitor.
-        
-        Args:
-            update_interval: How often to update resource metrics (seconds)
-        """
-        self.update_interval = update_interval
-        self.last_update_time = 0
-        self.cpu_usage = 0.0
-        self.memory_usage = 0.0
-        self.alert_callbacks = []
-        self.cpu_threshold = 85.0  # Default CPU usage threshold (%)
-        self.memory_threshold = 85.0  # Default memory usage threshold (%)
-        self.logger = logging.getLogger('pid_controller.resource_monitor')
-    
-    def update(self):
-        """Update resource metrics if interval has elapsed."""
-        current_time = time.time()
-        
-        # Only update at specified interval
-        if current_time - self.last_update_time >= self.update_interval:
-            self.cpu_usage = psutil.cpu_percent(interval=0.1)
-            memory = psutil.virtual_memory()
-            self.memory_usage = memory.percent
-            
-            # Check thresholds for alerts
-            self._check_thresholds()
-            
-            self.last_update_time = current_time
-    
-    def _check_thresholds(self):
-        """Check if any resource metrics exceed thresholds and trigger callbacks."""
-        # Check CPU
-        if self.cpu_usage > self.cpu_threshold:
-            for callback in self.alert_callbacks:
-                callback('cpu', self.cpu_usage)
-        
-        # Check memory
-        if self.memory_usage > self.memory_threshold:
-            for callback in self.alert_callbacks:
-                callback('memory', self.memory_usage)
-    
-    def add_alert_callback(self, callback):
-        """
-        Add a callback to be called when resource thresholds are exceeded.
-        
-        Args:
-            callback: Function to call with (resource_type, value) parameters
-        """
-        self.alert_callbacks.append(callback)
-    
-    def get_cpu_usage(self):
-        """Get the last measured CPU usage."""
-        return self.cpu_usage
-    
-    def get_memory_usage(self):
-        """Get the last measured memory usage."""
-        return self.memory_usage
-        
-    def log_stats(self):
-        """Log current resource statistics."""
-        self.logger.info(f"CPU: {self.cpu_usage:.1f}%, Memory: {self.memory_usage:.1f}%")
-
 class ImprovedPIDControllerNode(Node):
     """Enhanced PID Controller node with improved movement strategy and error handling."""
     
@@ -1547,8 +1579,8 @@ class ImprovedPIDControllerNode(Node):
         # Performance adjustment parameters
         self.base_update_rate = 20.0  # Default 10Hz control rate
         self.adaptive_control_rate = True
-        self.min_update_rate = 5.0   # Don't go below 5Hz
-        self.max_update_rate = 30.0  # Don't go above 20Hz
+        self.min_update_rate = 8.0   # Don't go below 8Hz
+        self.max_update_rate = 20.0  # Don't go above 20Hz
         
         # Performance metrics tracking
         self.cycle_start_time = 0.0
@@ -1571,9 +1603,9 @@ class ImprovedPIDControllerNode(Node):
                 ('linear_x_max', 0.5),  # Increased to 0.3 instead of 0.4 (50% improvement)
                 
                 # Linear Y velocity PID parameters - improved lateral damping
-                ('linear_y_kp', 1),
+                ('linear_y_kp', 0.08),
                 ('linear_y_ki', 0.06),  # Reduced from 0.08
-                ('linear_y_kd', 0.3),  # Increased from 0.12
+                ('linear_y_kd', 0.4),  # Increased from 0.12
                 ('linear_y_min', -0.2),
                 ('linear_y_max', 0.3),
                 
@@ -1624,7 +1656,7 @@ class ImprovedPIDControllerNode(Node):
                 
                 # Approach configuration
                 ('approach_distance', 0.3),    # Distance at which to start slowing down
-                ('min_approach_factor', 0.4),  # Minimum velocity factor when very close
+                ('min_approach_factor', 0.2),  # Minimum velocity factor when very close
             ]
         )
         
@@ -1736,13 +1768,13 @@ class ImprovedPIDControllerNode(Node):
             self.pid_linear_y, 
             self.pid_angular,
             {
-                'coupling_factor': 0.4,       # Controls coordination between lateral and angular motion
-                'smoothing_factor': 0.6,       # Controls smoother transitions
-                'min_angle_for_reduction': 0.08,
+                'coupling_factor': 0.3,       # Reduced from 0.4 to reduce lateral overcorrection
+                'smoothing_factor': 0.7,      # Increased from 0.6 for smoother transitions
+                'min_angle_for_reduction': 0.06, # Reduced threshold
                 'zero_angle_threshold': 0.02,
-                'max_angle_factor': 0.25,       # Reduced from 0.5
-                'same_sign_scale': 0.8,
-                'opposite_sign_scale': 1.2,    # Increased from 1.0
+                'max_angle_factor': 0.2,      # Reduced from 0.25
+                'same_sign_scale': 0.7,       # Reduced from 0.8
+                'opposite_sign_scale': 1.1,   # Reduced from 1.2
             }
         )
         
@@ -2357,19 +2389,32 @@ class ImprovedPIDControllerNode(Node):
             self.resource_monitor.log_stats()
     
     def _handle_resource_alert(self, resource_type, value):
-        """Handle resource alerts from the resource monitor."""
+        """Handle resource alerts from the resource monitor with startup grace period."""
         if resource_type == 'cpu':
+            # Add a grace period after startup before throttling
+            if not hasattr(self, '_startup_time'):
+                self._startup_time = time.time()
+                
+            startup_elapsed = time.time() - getattr(self, '_startup_time', 0)
+            
+            # Only throttle aggressively after grace period (5 seconds)
             if value > 90.0:
-                # Severe CPU alert - reduce control rate dramatically
-                self.get_logger().warning(f"Severe CPU usage alert: {value:.1f}% - adjusting control rate")
-                
-                # Trigger skip of next cycle for immediate relief
-                self.skip_next_cycle = True
-                
-                # Reduce control rate
-                if self.update_rate > self.min_update_rate:
-                    new_rate = max(self.min_update_rate, self.update_rate * 0.7)
-                    self._update_control_rate(new_rate)
+                if startup_elapsed < 5.0:
+                    # During grace period, apply gentler throttling
+                    self.get_logger().warning(f"CPU alert during startup grace period: {value:.1f}% - mild adjustment")
+                    
+                    # Less aggressive rate adjustment during startup
+                    if self.update_rate > self.min_update_rate:
+                        new_rate = max(self.min_update_rate, self.update_rate * 0.9)  # Only 10% reduction
+                        self._update_control_rate(new_rate)
+                else:
+                    # Normal throttling after grace period
+                    self.get_logger().warning(f"Severe CPU usage alert: {value:.1f}% - adjusting control rate")
+                    self.skip_next_cycle = True
+                    
+                    if self.update_rate > self.min_update_rate:
+                        new_rate = max(self.min_update_rate, self.update_rate * 0.7)
+                        self._update_control_rate(new_rate)
     
     def _adjust_control_rate(self):
         """Adjust control loop rate based on CPU usage."""
@@ -2409,27 +2454,298 @@ class ImprovedPIDControllerNode(Node):
         self.timer.cancel()
         self.timer = self.create_timer(1.0 / self.update_rate, self.control_loop_callback)
     
+    def _apply_simplified_control(self):
+        """Apply a simplified control update when errors are small to save CPU."""
+        # Reuse previous velocity commands with small damping
+        damping = 0.95  # Slight reduction to avoid oscillation
+        
+        cmd_vel_msg = self._cmd_vel_msg
+        cmd_vel_msg.linear.x = float(self.last_cmd_vel[0] * damping)
+        cmd_vel_msg.linear.y = float(self.last_cmd_vel[1] * damping)
+        cmd_vel_msg.angular.z = float(self.last_cmd_vel[2] * damping)
+        
+        # Publish command
+        self.cmd_vel_pub.publish(cmd_vel_msg)
+        
+        # Update history but skip the expensive diagnostics and filtering
+        self.velocity_history.add((cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z))
+        
+        # Calculate cycle duration for performance monitoring
+        cycle_duration = time.time() - self.cycle_start_time
+        self.performance_stats['control_cycles'].append(cycle_duration)
+        
+        # Update running average
+        if len(self.performance_stats['control_cycles']) > 0:
+            self.cycle_duration_avg = sum(self.performance_stats['control_cycles']) / len(self.performance_stats['control_cycles'])
+
+    def _can_use_simplified_control(self):
+        """Check if simplified control can be used based on tracking error magnitudes."""
+        # Only use simplified control when already in motion and errors are small
+        if self._robot_stopped:
+            return False
+            
+        # Check if errors are small enough to use simplified control
+        small_errors = (
+            abs(self.filtered_distance - self.desired_distance) < self.distance_threshold * 0.5 and
+            abs(self.filtered_lateral) < self.lateral_threshold * 0.5 and
+            abs(self.filtered_bearing) < math.radians(self.angular_threshold * 0.5)
+        )
+        
+        # Don't use simplified control if we just started tracking
+        if self.robot_state == "tracking" and time.time() - self.strategy_change_time < 1.0:
+            return False
+            
+        return small_errors
+
+    def _handle_non_tracking_state(self):
+        """Handle robot behavior when not in tracking mode."""
+        # When not tracking, ensure robot is stopped (unless controlled by another node)
+        if self.robot_state not in ["searching", "lost_ball"]:
+            self.stop_robot()
+        return True  # Indicate that the method handled the situation
+
+    def _update_performance_stats(self):
+        """Update performance statistics for monitoring."""
+        cycle_duration = time.time() - self.cycle_start_time
+        self.performance_stats['control_cycles'].append(cycle_duration)
+        
+        # Update running average
+        if len(self.performance_stats['control_cycles']) > 0:
+            self.cycle_duration_avg = sum(self.performance_stats['control_cycles']) / len(self.performance_stats['control_cycles'])
+
+    def _calculate_errors(self):
+        """Calculate tracking errors using filtered values."""
+        # Use filtered values for error calculation
+        distance = self.filtered_distance
+        lateral = self.filtered_lateral
+        bearing = self.filtered_bearing
+        
+        # Calculate errors using pre-allocated array
+        self._current_errors[0] = distance - self.desired_distance  # distance_error
+        self._current_errors[1] = lateral - 0.0                    # lateral_error 
+        self._current_errors[2] = bearing                          # angular_error
+        
+        # Convert angular error to degrees for logging
+        angular_degrees = math.degrees(bearing)
+        
+        return distance, lateral, bearing, angular_degrees
+
+    def _handle_stop_conditions(self, distance, lateral, angular_degrees, dt):
+        """Check and handle stop conditions if needed."""
+        # Check if we need to reset stopped state based on errors with enhanced hysteresis
+        state_reset = self._reset_stopped_state_if_needed(
+            self._current_errors[0], 
+            self._current_errors[1], 
+            angular_degrees
+        )
+        
+        # If state was reset, skip the normal stop condition check this cycle
+        if not state_reset:
+            # Check stop conditions
+            should_stop, stop_reason = self._evaluate_stop_conditions(
+                distance, lateral, angular_degrees, self._robot_stopped
+            )
+            
+            if should_stop:
+                if not self._robot_stopped:
+                    self.get_logger().info(stop_reason)
+                    self.stop_robot()
+                return True  # Handled by stopping the robot
+        
+        # Update error trackers
+        self.distance_error_tracker.update(self._current_errors[0], dt)
+        self.lateral_error_tracker.update(self._current_errors[1], dt)
+        self.angular_error_tracker.update(self._current_errors[2], dt)
+        
+        return False  # Not handled, continue with normal control
+
+    def _determine_and_apply_strategy(self, dt):
+        """Determine movement strategy and apply it to calculate velocities."""
+        # Determine the optimal movement strategy with hysteresis
+        strategy = self._determine_movement_strategy(
+            self._current_errors[0], 
+            self._current_errors[1], 
+            math.degrees(self._current_errors[2]),
+            self.prev_distance_category,
+            self.prev_lateral_category,
+            self.prev_angular_category
+        )
+        
+        # Apply strategy to movement decisions
+        use_forward = strategy["use_forward"]
+        use_lateral = strategy["use_lateral"]
+        use_angular = strategy["use_angular"]
+        
+        forward_scale = strategy["forward_scale"]
+        lateral_scale = strategy["lateral_scale"]
+        angular_scale = strategy["angular_scale"]
+        
+        if self.debug_level >= 3:
+            self.get_logger().info(
+                f"Using strategy: {strategy['strategy_name']}, "
+                f"forward={use_forward}, lateral={use_lateral}, angular={use_angular}"
+            )
+
+        # Compute velocities based on the selected strategy
+        current_time = time.time()
+        
+        # Compute velocities
+        if self.coordinated_movement and use_lateral and use_angular:
+            # Use coordinated controller for lateral and angular movements
+            linear_x_velocity = self.pid_linear_x.compute(
+                self._current_errors[0], 
+                current_time, 
+                not use_forward,
+                self.distance_error_tracker.get_trend()
+            )
+            
+            # Use coordinated control for lateral and angular velocities
+            lateral_velocity, angular_velocity = self.coordinated_controller.compute(
+                self._current_errors[1],   # lateral error
+                self._current_errors[2],   # angular error
+                current_time,              # current time
+                self.robot_orientation     # current orientation from IMU
+            )
+            
+            # Disable individual components if strategy requires
+            if not use_lateral:
+                lateral_velocity = 0.0
+            if not use_angular:
+                angular_velocity = 0.0
+        else:
+            # Traditional separate PID controllers
+            linear_x_velocity = self.pid_linear_x.compute(
+                self._current_errors[0], 
+                current_time, 
+                not use_forward,
+                self.distance_error_tracker.get_trend()
+            )
+            
+            lateral_velocity = self.pid_linear_y.compute(
+                self._current_errors[1], 
+                current_time, 
+                not use_lateral,
+                self.lateral_error_tracker.get_trend()
+            )
+            
+            angular_velocity = self.pid_angular.compute(
+                self._current_errors[2], 
+                current_time, 
+                not use_angular,
+                self.angular_error_tracker.get_trend()
+            )
+        
+        # Apply strategy scaling factors
+        linear_x_velocity *= forward_scale
+        lateral_velocity *= lateral_scale
+        angular_velocity *= angular_scale
+        
+        if self.debug_level >= 2:
+            self.get_logger().info(
+                f"After scaling: linear_x={linear_x_velocity:.3f}, "
+                f"lateral={lateral_velocity:.3f}, angular={angular_velocity:.3f}"
+            )
+            
+        return linear_x_velocity, lateral_velocity, angular_velocity
+
+    def _apply_and_publish_velocities(self, linear_x_velocity, lateral_velocity, angular_velocity):
+        """Apply velocity limits and publish command velocities."""
+        # Apply velocity and acceleration limits
+        current_time = time.time()
+        limited_velocities = self._apply_velocity_limits(
+            linear_x_velocity, lateral_velocity, angular_velocity, current_time
+        )
+        
+        linear_x_velocity, lateral_velocity, angular_velocity = limited_velocities
+        
+        # Store new velocities in pre-allocated arrays
+        self._velocity_tuple[0] = linear_x_velocity
+        self._velocity_tuple[1] = lateral_velocity
+        self._velocity_tuple[2] = angular_velocity
+        
+        # Calculate if velocity changed significantly for logging
+        for i in range(3):
+            self._velocity_change_check[i] = abs(self._velocity_tuple[i] - self.last_logged_cmd[i]) > 0.05
+        
+        # Log velocity commands (throttled)
+        if self.debug_level >= 1 or any(self._velocity_change_check):
+            self._log_throttled(
+                self.get_logger().info,
+                f"MOTION: x={linear_x_velocity:.2f} y={lateral_velocity:.2f} θ={angular_velocity:.2f}",
+                0.5,  # Throttle to every 0.5 seconds 
+                'last_velocity_log_time'
+            )
+            # Update last logged command
+            self.last_logged_cmd = tuple(self._velocity_tuple)
+        
+        # Store for next cycle
+        self.last_cmd_vel = tuple(self._velocity_tuple)
+        
+        # Get a Twist message from the pool
+        cmd_vel_msg = self._cmd_vel_msg  # Use pre-allocated message
+        
+        # Set velocity values
+        cmd_vel_msg.linear.x = float(linear_x_velocity)
+        cmd_vel_msg.linear.y = float(lateral_velocity)
+        cmd_vel_msg.angular.z = float(angular_velocity)
+        
+        # Save for history
+        velocity_tuple = (float(linear_x_velocity), float(lateral_velocity), float(angular_velocity))
+        self.velocity_history.add(velocity_tuple)
+        
+        # Publish command
+        self.cmd_vel_pub.publish(cmd_vel_msg)
+        
+        # Update error trackers if significant movement is occurring
+        if abs(linear_x_velocity) > 0.05:
+            self.distance_error_tracker.record_correction()
+        if abs(lateral_velocity) > 0.05:
+            self.lateral_error_tracker.record_correction()
+        if abs(angular_velocity) > 0.1:
+            self.angular_error_tracker.record_correction()
+
+    def _optimize_transforms_and_filtering(self):
+        """Execute expensive transform and filtering operations at reduced frequency."""
+        # Only perform expensive operations periodically to save CPU
+        if self.cycle_count % 3 == 0 or self.force_target_reacquisition:
+            # Verify critical transforms
+            if not self.transform_verified and not self.tf_buffer.can_transform(
+                self.reference_frame,
+                self.imu_frame,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.1)
+            ):
+                self.get_logger().warning(f"Transform not yet available between {self.reference_frame} and {self.imu_frame}")
+                
+            # Cache common transforms if needed
+            if self.enable_transform_caching and not self.common_transforms_computed:
+                self._cache_common_transforms()
+                
+            return True
+        
+        return False  # No expensive operations performed
+
     def control_loop_callback(self):
-        """Regular control loop to calculate and publish velocity commands."""
+        """Regular control loop to calculate and publish velocity commands with CPU optimization."""
         try:
-            # Skip this cycle if requested
+            # Skip this cycle if requested for CPU relief
             if self.skip_next_cycle:
                 self.skip_next_cycle = False
                 self.performance_stats["control_skips"] += 1
                 return
-                
+                    
             # Track performance
             self.cycle_start_time = time.time()
             
             if self._shutting_down:
                 return
-                    
+                        
             current_time = time.time()
             dt = current_time - self.last_control_time
             self.last_control_time = current_time
             self.cycle_count += 1
             
-            # Log periodic status updates
+            # Log periodic status updates (once every 50 cycles)
             if self.cycle_count % 50 == 0:
                 self._log_periodic_status()
             
@@ -2440,22 +2756,28 @@ class ImprovedPIDControllerNode(Node):
             
             # Only generate commands in tracking mode with a recent target
             if self.robot_state != "tracking" or self.current_target is None:
-                # When not tracking, ensure robot is stopped (unless controlled by another node)
-                if self.robot_state not in ["searching", "lost_ball"]:
-                    self.stop_robot()
-                return
+                if self._handle_non_tracking_state():
+                    return
             
             # Check if orientation data is fresh (prevents race conditions)
             if not self._is_orientation_fresh():
                 self.get_logger().warning("Skipping control cycle - orientation data is stale")
                 return
             
-            # Use filtered values
-            distance = self.filtered_distance
-            lateral = self.filtered_lateral
-            bearing = self.filtered_bearing
+            # Check if we can use simplified control to save CPU
+            # This is the key CPU optimization - avoid expensive calculations when appropriate
+            if self._can_use_simplified_control() or self.current_cpu_usage > 80.0:
+                # Use simplified control approach when errors are small
+                if self.debug_level >= 2:
+                    self.get_logger().info("Using simplified control to save CPU - errors are small")
+                self._apply_simplified_control()
+                return
+                
+            # Perform expensive transform operations at reduced frequency
+            self._optimize_transforms_and_filtering()
             
-            angular_degrees = math.degrees(bearing)
+            # Calculate current errors
+            distance, lateral, bearing, angular_degrees = self._calculate_errors()
             
             if self.debug_level >= 2:
                 self.get_logger().info(
@@ -2463,179 +2785,19 @@ class ImprovedPIDControllerNode(Node):
                     f"lateral={lateral:.3f}m, angular={angular_degrees:.2f}°, "
                     f"is_stopped={self._robot_stopped}"
                 )
-
-            # Calculate errors using pre-allocated array
-            self._current_errors[0] = distance - self.desired_distance  # distance_error
-            self._current_errors[1] = lateral - 0.0                     # lateral_error 
-            self._current_errors[2] = bearing                           # angular_error
             
-            # Check if we need to reset stopped state based on errors with enhanced hysteresis
-            state_reset = self._reset_stopped_state_if_needed(
-                self._current_errors[0], 
-                self._current_errors[1], 
-                angular_degrees
-            )
+            # Check stop conditions and handle if needed
+            if self._handle_stop_conditions(distance, lateral, angular_degrees, dt):
+                return
             
-            # If state was reset, skip the normal stop condition check this cycle
-            if not state_reset:
-                # Check stop conditions
-                should_stop, stop_reason = self._evaluate_stop_conditions(
-                    distance, lateral, angular_degrees, self._robot_stopped
-                )
-                
-                if should_stop:
-                    if not self._robot_stopped:
-                        self.get_logger().info(stop_reason)
-                        self.stop_robot()
-                    return
+            # Determine strategy and calculate velocities
+            linear_x_velocity, lateral_velocity, angular_velocity = self._determine_and_apply_strategy(dt)
             
-            # Update error trackers
-            self.distance_error_tracker.update(self._current_errors[0], dt)
-            self.lateral_error_tracker.update(self._current_errors[1], dt)
-            self.angular_error_tracker.update(self._current_errors[2], dt)
+            # Apply velocity limits and publish commands
+            self._apply_and_publish_velocities(linear_x_velocity, lateral_velocity, angular_velocity)
             
-            # Determine the optimal movement strategy with hysteresis
-            strategy = self._determine_movement_strategy(
-                self._current_errors[0], 
-                self._current_errors[1], 
-                angular_degrees,
-                self.prev_distance_category,
-                self.prev_lateral_category,
-                self.prev_angular_category
-            )
-            
-            # Apply strategy to movement decisions
-            use_forward = strategy["use_forward"]
-            use_lateral = strategy["use_lateral"]
-            use_angular = strategy["use_angular"]
-            
-            forward_scale = strategy["forward_scale"]
-            lateral_scale = strategy["lateral_scale"]
-            angular_scale = strategy["angular_scale"]
-            
-            if self.debug_level >= 3:
-                self.get_logger().info(
-                    f"Using strategy: {strategy['strategy_name']}, "
-                    f"forward={use_forward}, lateral={use_lateral}, angular={use_angular}"
-                )
-
-            # Compute velocities
-            if self.coordinated_movement and use_lateral and use_angular:
-                # Use coordinated controller for lateral and angular movements
-                linear_x_velocity = self.pid_linear_x.compute(
-                    self._current_errors[0], 
-                    current_time, 
-                    not use_forward,
-                    self.distance_error_tracker.get_trend()
-                )
-                
-                # Use coordinated control for lateral and angular velocities
-                lateral_velocity, angular_velocity = self.coordinated_controller.compute(
-                    self._current_errors[1],   # lateral error
-                    self._current_errors[2],   # angular error
-                    current_time,              # current time
-                    self.robot_orientation     # current orientation from IMU
-                )
-                
-                # Disable individual components if strategy requires
-                if not use_lateral:
-                    lateral_velocity = 0.0
-                if not use_angular:
-                    angular_velocity = 0.0
-            else:
-                # Traditional separate PID controllers
-                linear_x_velocity = self.pid_linear_x.compute(
-                    self._current_errors[0], 
-                    current_time, 
-                    not use_forward,
-                    self.distance_error_tracker.get_trend()
-                )
-                
-                lateral_velocity = self.pid_linear_y.compute(
-                    self._current_errors[1], 
-                    current_time, 
-                    not use_lateral,
-                    self.lateral_error_tracker.get_trend()
-                )
-                
-                angular_velocity = self.pid_angular.compute(
-                    self._current_errors[2], 
-                    current_time, 
-                    not use_angular,
-                    self.angular_error_tracker.get_trend()
-                )
-            
-            # Apply strategy scaling factors
-            linear_x_velocity *= forward_scale
-            lateral_velocity *= lateral_scale
-            angular_velocity *= angular_scale
-            
-            if self.debug_level >= 2:
-                self.get_logger().info(
-                    f"After scaling: linear_x={linear_x_velocity:.3f}, "
-                    f"lateral={lateral_velocity:.3f}, angular={angular_velocity:.3f}"
-                )
-
-            # Apply velocity and acceleration limits
-            limited_velocities = self._apply_velocity_limits(
-                linear_x_velocity, lateral_velocity, angular_velocity, current_time
-            )
-            
-            linear_x_velocity, lateral_velocity, angular_velocity = limited_velocities
-            
-            # Store new velocities in pre-allocated arrays
-            self._velocity_tuple[0] = linear_x_velocity
-            self._velocity_tuple[1] = lateral_velocity
-            self._velocity_tuple[2] = angular_velocity
-            
-            # Calculate if velocity changed significantly for logging
-            for i in range(3):
-                self._velocity_change_check[i] = abs(self._velocity_tuple[i] - self.last_logged_cmd[i]) > 0.05
-            
-            # Log velocity commands (throttled)
-            if self.debug_level >= 1 or any(self._velocity_change_check):
-                self._log_throttled(
-                    self.get_logger().info,
-                    f"MOTION: x={linear_x_velocity:.2f} y={lateral_velocity:.2f} θ={angular_velocity:.2f}",
-                    0.5,  # Throttle to every 0.5 seconds 
-                    'last_velocity_log_time'
-                )
-                # Update last logged command
-                self.last_logged_cmd = tuple(self._velocity_tuple)
-            
-            # Store for next cycle
-            self.last_cmd_vel = tuple(self._velocity_tuple)
-            
-            # Get a Twist message from the pool
-            cmd_vel_msg = self._cmd_vel_msg  # Use pre-allocated message
-            
-            # Set velocity values
-            cmd_vel_msg.linear.x = float(linear_x_velocity)
-            cmd_vel_msg.linear.y = float(lateral_velocity)
-            cmd_vel_msg.angular.z = float(angular_velocity)
-            
-            # Save for history
-            velocity_tuple = (float(linear_x_velocity), float(lateral_velocity), float(angular_velocity))
-            self.velocity_history.add(velocity_tuple)
-            
-            # Publish command
-            self.cmd_vel_pub.publish(cmd_vel_msg)
-            
-            # Update error trackers if significant movement is occurring
-            if abs(linear_x_velocity) > 0.05:
-                self.distance_error_tracker.record_correction()
-            if abs(lateral_velocity) > 0.05:
-                self.lateral_error_tracker.record_correction()
-            if abs(angular_velocity) > 0.1:
-                self.angular_error_tracker.record_correction()
-            
-            # Calculate cycle duration for performance monitoring
-            cycle_duration = time.time() - self.cycle_start_time
-            self.performance_stats['control_cycles'].append(cycle_duration)
-            
-            # Update running average
-            if len(self.performance_stats['control_cycles']) > 0:
-                self.cycle_duration_avg = sum(self.performance_stats['control_cycles']) / len(self.performance_stats['control_cycles'])
+            # Update performance stats
+            self._update_performance_stats()
                 
         except Exception as e:
             self.get_logger().error(f"Unexpected error in control_loop_callback: {str(e)}")
@@ -2781,29 +2943,39 @@ class ImprovedPIDControllerNode(Node):
     def _reset_stopped_state_if_needed(self, distance_error, lateral_error, angular_error):
         """
         Reset stopped state if significant movement is required, with improved hysteresis.
-        Modified to be more tolerant of angular errors when at target distance.
+        Modified to be more tolerant of angular errors when at target distance and
+        to have reduced hysteresis for initial movement.
         
         Args:
-            distance_error: Current error in distance to target
-            lateral_error: Current error in lateral position
-            angular_error: Current error in angular position (degrees)
+            distance_error: Error in distance (meters)
+            lateral_error: Error in lateral position (meters)
+            angular_error: Error in angular position (degrees)
             
         Returns:
             bool: True if stopped state was reset, False otherwise
         """
         if not self._robot_stopped:
             return False  # Already in movement state
-            
+        
+        # NEW: Add initialization flag for initial movement boost
+        if not hasattr(self, '_initial_movement_boost'):
+            self._initial_movement_boost = True
+        
         # Calculate hysteresis factor based on stop time
         stop_duration = time.time() - self._stop_time
         
-        # Hysteresis increases with stop duration to a max of 1.5
-        # This helps prevent oscillating between stopped and moving states
-        hysteresis = min(1.2, 1.0 + stop_duration * 0.2)
+        # Apply reduced hysteresis if this is first movement after startup
+        if self._initial_movement_boost:
+            hysteresis = 0.5  # Much lower hysteresis for first movement
+            self._initial_movement_boost = False  # Clear flag after first use
+        else:
+            # Regular hysteresis calculation (with reduced values)
+            hysteresis = min(1.1, 1.0 + stop_duration * 0.1)
         
-        # If any error exceeds the movement threshold with hysteresis, exit stopped state
-        distance_threshold = self.distance_threshold * hysteresis
-        lateral_threshold = self.lateral_threshold * hysteresis
+        # Modified thresholds for the motion-initiation decision
+        # Use smaller thresholds to exit stopped state - this is the key change
+        distance_threshold = self.distance_threshold * hysteresis * 0.7  # Reduced by 30%
+        lateral_threshold = self.lateral_threshold * hysteresis * 0.7    # Reduced by 30%
         
         # Apply increased angular threshold when at target distance
         if abs(distance_error) < self.distance_threshold * 1.2:
@@ -2942,26 +3114,100 @@ class ImprovedPIDControllerNode(Node):
                 f"Before limits: linear_x={linear_x:.3f}, linear_y={linear_y:.3f}, angular_z={angular_z:.3f}"
             )
         
-        # Apply distance-aware approach scaling for forward velocity
+        # Enhanced distance-aware approach scaling for forward velocity
         if hasattr(self, 'filtered_distance') and hasattr(self, 'desired_distance'):
-            distance_error = abs(self.filtered_distance - self.desired_distance)
+            # ADDED: Handle negative distance errors (robot too close)
+            raw_distance_error = self.filtered_distance - self.desired_distance
+            distance_error = abs(raw_distance_error)
             approach_factor = 1.0
             
-            # If we're within approach_distance of target, start slowing down
-            if distance_error < self.approach_distance:
-                # Scale from 1.0 (at approach_distance) down to min_approach_factor (when very close)
-                approach_scale = distance_error / self.approach_distance
-                approach_factor = max(self.min_approach_factor, approach_scale)
+            # IMPROVED: Special handling for negative distance errors - emergency stop
+            if raw_distance_error < -0.05:  # Robot is already too close
+                emergency_factor = max(0.0, 1.0 + raw_distance_error * 10.0)  # Sharp reduction
+                linear_x *= emergency_factor
                 
-                # Apply to forward velocity only (to slow down approach)
+                if self.debug_level >= 1:
+                    self.get_logger().info(
+                        f"Emergency stop - too close! distance_error={raw_distance_error:.3f}m, "
+                        f"emergency_factor={emergency_factor:.2f}"
+                    )
+            
+            # MODIFIED: Much more aggressive deceleration profile
+            # Start slowing down much earlier and more aggressively
+            if distance_error < self.approach_distance * 3.0:  # Increased from 1.5 to 3.0
+                # Calculate approach scale with stronger exponential curve 
+                normalized_distance = distance_error / self.approach_distance
+                # Use power of 2.5 instead of 3 for more balanced deceleration
+                approach_factor = max(self.min_approach_factor, (normalized_distance)**2.5)
+                
+                # IMPROVED: For very close approaches, apply even stronger deceleration
+                if distance_error < self.approach_distance * 0.5:  # Increased from 0.4
+                    approach_factor *= 0.3  # Stronger reduction (changed from 0.4)
+                    
+                # MODIFIED: Detect forward velocity and closing speed
+                # If we have velocity history, check closing speed
+                if len(self.velocity_history.get_all()) > 0:
+                    avg_velocities = self.velocity_history.get_latest(3)
+                    avg_forward_vel = sum([v[0] for v in avg_velocities]) / len(avg_velocities) if avg_velocities else 0
+                    
+                    # If approaching quickly, apply more aggressive deceleration
+                    if avg_forward_vel > 0.15 and distance_error < self.approach_distance * 1.2:  # More sensitive
+                        # Scale deceleration based on speed - more aggressive curve
+                        speed_reduction = max(0.4, 1.0 - (avg_forward_vel / 0.4) * 0.5)  # Stronger reduction
+                        approach_factor *= speed_reduction
+                        
+                        if self.debug_level >= 1:  # Changed from 2 to 1 to see more logs
+                            self.get_logger().info(
+                                f"Enhanced deceleration: speed={avg_forward_vel:.2f}, "
+                                f"additional factor={speed_reduction:.2f}"
+                            )
+                
+                # Apply to forward velocity (deceleration)
                 if abs(linear_x) > 0.01:  # Only apply if moving forward
                     linear_x *= approach_factor
                     
-                    if self.debug_level >= 2:
+                    if self.debug_level >= 1:  # Changed from 2 to 1 to see more logs
                         self.get_logger().info(
-                            f"Approach scaling: distance_error={distance_error:.3f}m, "
+                            f"Enhanced approach scaling: distance_error={distance_error:.3f}m, "
                             f"factor={approach_factor:.2f}, adjusted linear_x={linear_x:.3f}"
                         )
+        
+        # IMPROVED: Predictive braking based on relative motion
+        if hasattr(self, 'target_filter') and hasattr(self, 'filtered_distance') and hasattr(self, 'desired_distance'):
+            # Get target motion info
+            target_vel = self.target_filter.get_velocity()
+            movement_info = self.target_filter.get_movement_info()
+            distance_error = abs(self.filtered_distance - self.desired_distance)
+            
+            # MODIFIED: Anticipate approach to stationary or moving targets 
+            # Remove condition for target_moving and increase range
+            if distance_error < self.approach_distance * 2.0:  # Increased from 1.2
+                # Extract target velocity components
+                target_vel_x = -target_vel[0]  # Negative because this is in target frame
+                
+                # Check our forward velocity
+                robot_forward_vel = linear_x
+                
+                # MODIFIED: More sensitive detection of closing speed
+                # Always apply predictive braking when approaching targets
+                if robot_forward_vel > 0.05:  # If we're moving forward at all
+                    # Estimate time to collision assuming constant velocities
+                    # Handle both stationary targets and moving targets
+                    closing_speed = robot_forward_vel - min(0, target_vel_x)  # Only subtract if target moving away
+                    if closing_speed > 0:
+                        time_to_target = distance_error / closing_speed
+                        
+                        # IMPROVED: Apply braking much earlier - 1.5 seconds instead of 0.8
+                        if time_to_target < 1.5:
+                            # More aggressive braking curve that starts earlier
+                            braking_factor = max(0.1, (time_to_target / 1.5)**1.5)
+                            linear_x *= braking_factor
+                            
+                            if self.debug_level >= 1:
+                                self.get_logger().info(
+                                    f"Predictive braking: time_to_target={time_to_target:.2f}s, "
+                                    f"braking_factor={braking_factor:.2f}, adjusted x={linear_x:.2f}"
+                                )
 
         # Convert inputs to numpy arrays for vectorized operations
         self._target_velocities[0] = linear_x
@@ -2980,22 +3226,22 @@ class ImprovedPIDControllerNode(Node):
         # Ensure dt is reasonable
         dt = max(0.001, min(dt, 0.1))
         
-        # Scale acceleration limit by time - moderate acceleration increase
-        accel_limit = 1.5 * dt * 10.0  # Moderate increase from 0.6 to 0.8
-        angular_accel_limit = 2 * dt * 10.0  # Keep the same
+        # Scale acceleration limit by time - more aggressive acceleration
+        accel_limit = 2.5 * dt * 10.0  # Significant increase for faster response
+        angular_accel_limit = 3.0 * dt * 10.0  # Increased for faster angular response
         
-        # Enhanced deceleration for approaching target
+        # IMPROVED: Enhanced deceleration for approaching target
         if hasattr(self, 'filtered_distance') and hasattr(self, 'desired_distance'):
             distance_error = abs(self.filtered_distance - self.desired_distance)
             # If velocity is decreasing and we're approaching target, boost deceleration
             if (self._prev_velocities[0] > 0 and 
                 self._target_velocities[0] < self._prev_velocities[0] and
-                distance_error < self.approach_distance):
-                # Boost deceleration by up to 50% when close to target
-                decel_boost = 1.0 + 0.5 * (1.0 - distance_error / self.approach_distance)
+                distance_error < self.approach_distance * 1.5):  # Increased from 1.0
+                # Boost deceleration by up to 85% when close to target (increased from 70%)
+                decel_boost = 1.0 + 0.85 * (1.0 - distance_error / self.approach_distance)
                 accel_limit *= decel_boost
                 
-                if self.debug_level >= 2:
+                if self.debug_level >= 1:  # Changed from 2 to 1
                     self.get_logger().info(
                         f"Deceleration boost: factor={decel_boost:.2f}, "
                         f"accel_limit={accel_limit:.3f}"
@@ -3010,7 +3256,11 @@ class ImprovedPIDControllerNode(Node):
                 limit = accel_limit
                 # Apply acceleration boosting when starting from stop
                 if abs(self._prev_velocities[i]) < 0.01 and abs(self._target_velocities[i]) > 0.01:
-                    boost = 5.0  # Acceleration boost factor (reduced from 3.0)
+                    # Reduce boost for forward motion to prevent aggressive start
+                    if i == 0:  # Linear X
+                        boost = 3.0  # Maintained at 3.0
+                    else:  # Linear Y
+                        boost = 5.0
                     limit *= boost
             else:  # Angular Z
                 limit = angular_accel_limit
@@ -3027,13 +3277,16 @@ class ImprovedPIDControllerNode(Node):
                 self._limited_velocities[i] = self._target_velocities[i]
         
         # Apply minimum velocity thresholds with hysteresis
-        min_effective_velocity = 0.01  # Reduced from 0.05
-        min_angular_velocity = 0.01     # Reduced from 0.05 to allow smaller angular corrections
+        min_effective_velocity = 0.01  # Maintained at 0.01
+        min_angular_velocity = 0.01     # Maintained at 0.01
         
         # Forward velocity threshold with hysteresis
         if abs(self._limited_velocities[0]) < min_effective_velocity:
-            # Only zero if previously zero or very small
-            if abs(self._prev_velocities[0]) < min_effective_velocity * 1.2:
+            # If value is very small but non-zero, apply minimum threshold
+            if abs(self._limited_velocities[0]) > min_effective_velocity * 0.3 and self._limited_velocities[0] != 0.0:
+                self._limited_velocities[0] = min_effective_velocity * math.copysign(1.0, self._limited_velocities[0])
+            # Only zero if previously zero or extremely small
+            elif abs(self._prev_velocities[0]) < min_effective_velocity * 1.2:
                 self._limited_velocities[0] = 0.0
             
         # Lateral velocity threshold with hysteresis
@@ -3050,14 +3303,24 @@ class ImprovedPIDControllerNode(Node):
         
         # Limit combined lateral and angular movement
         if abs(self._limited_velocities[1]) > 0.15 and abs(self._limited_velocities[2]) > 0.3:
-            # Scale down lateral velocity when combined with significant angular velocity
-            # This prevents tipping during combined movements
-            self._limited_velocities[1] *= 0.6
+            # Calculate a dynamic scaling factor based on movement magnitude
+            lateral_magnitude = abs(self._limited_velocities[1])
+            angular_magnitude = abs(self._limited_velocities[2])
+            
+            # Only apply significant reduction for larger combined movements
+            if lateral_magnitude > 0.2 and angular_magnitude > 0.4:
+                # Strong reduction for large combined movements (prevent tipping)
+                self._limited_velocities[1] *= 0.6
+            else:
+                # Milder reduction for smaller movements to maintain responsiveness
+                # Use a progressive scaling that reduces less for smaller movements
+                scale_factor = 0.8 + (0.2 * (1.0 - lateral_magnitude / 0.2))
+                self._limited_velocities[1] *= min(0.9, max(0.7, scale_factor))
         
-        # Apply maximum velocity limits - Moderate speed increase
-        linear_x_max = 0.3  # Increased to 0.3 from 0.2 (50% increase)
-        linear_y_max = 0.2  # Kept the same for lateral
-        angular_max = 0.5   # Kept the same for angular
+        # Apply maximum velocity limits - Enhanced for better tracking
+        linear_x_max = 0.5  # Maintained at 0.5
+        linear_y_max = 0.4  # Maintained at 0.4
+        angular_max = 0.6   # Maintained at 0.6
         
         self._limited_velocities[0] = max(-linear_x_max, min(linear_x_max, self._limited_velocities[0]))
         self._limited_velocities[1] = max(-linear_y_max, min(linear_y_max, self._limited_velocities[1]))
@@ -3148,7 +3411,7 @@ class ImprovedPIDControllerNode(Node):
         self.get_logger().info("Complete controller reset performed")
     
     def _init_strategy_table(self):
-        """Initialize the table-driven movement strategy definitions with approach strategy."""
+        """Initialize the table-driven movement strategy definitions with improved approach and balanced strategies."""
         # Define the strategy table with improved angular-first strategies and approach strategies
         self.strategy_table = {
             # All errors within deadbands - no movement
@@ -3165,137 +3428,238 @@ class ImprovedPIDControllerNode(Node):
                 "Minimal corrections for very small errors"
             ],
             
-            # Angular error categories - prioritize angular correction but allow forward movement
+            # New high-priority strategy for large distance + any lateral/angular error
+            ("large", "*", "*"): [
+                "DISTANCE_PRIORITY_APPROACH", True, True, True,
+                0.9, 0.6, 0.5,  # Strong forward, good lateral, moderate angular
+                "Distance-priority approach: {distance_error:.2f}m"
+            ],
+            
+            # Large distance with large lateral - fast diagonal approach
+            ("large", "large", "*"): [
+                "FAST_DIAGONAL_APPROACH", True, True, True,
+                0.9, 0.9, 0.4,  # Strong forward and lateral, moderate angular
+                "Fast diagonal approach: {distance_error:.2f}m, {lateral_error:.2f}m"
+            ],
+            
+            # Large distance with medium lateral
+            ("large", "medium", "*"): [
+                "FAST_DIAGONAL", True, True, True,
+                1.0, 0.8, 0.5,  # Maximum forward, strong lateral, moderate angular
+                "Fast diagonal approach: {distance_error:.2f}m, {lateral_error:.2f}m"
+            ],
+            
+            # Medium distance with large lateral
+            ("medium", "large", "*"): [
+                "LATERAL_PRIORITY", True, True, True,
+                0.7, 1.0, 0.4,  # Good forward, maximum lateral, moderate angular
+                "Lateral-priority movement: {lateral_error:.2f}m"
+            ],
+            
+            # Pure lateral correction at target distance
+            ("none", "very_small", "none"): [
+                "MICRO_LATERAL", False, True, False,
+                0.0, 0.7, 0.0,
+                "Micro lateral correction at target distance: {lateral_error:.2f}m"
+            ],
+            
+            ("none", "small", "none"): [
+                "LATERAL_CORRECTION", False, True, False,
+                0.0, 0.9, 0.0,
+                "Lateral correction at target distance: {lateral_error:.2f}m"
+            ],
+            
+            ("none", "medium", "none"): [
+                "STRONG_LATERAL", False, True, False, 
+                0.0, 1.0, 0.0, 
+                "Strong lateral correction at target distance: {lateral_error:.2f}m"
+            ],
+            
+            ("none", "large", "none"): [
+                "MAX_LATERAL", False, True, False, 
+                0.0, 1.0, 0.0, 
+                "Maximum lateral correction at target distance: {lateral_error:.2f}m"
+            ],
+            
+            # Pure distance corrections (no lateral, no angular)
+            ("very_small", "none", "none"): [
+                "MICRO_APPROACH", True, False, False, 
+                0.7, 0.0, 0.0,
+                "Micro distance adjustment: {distance_error:.2f}m"
+            ],
+            
+            ("small", "none", "none"): [
+                "FORWARD_ADJUSTMENT", True, False, False, 
+                0.8, 0.0, 0.0,
+                "Small distance adjustment: {distance_error:.2f}m"
+            ],
+            
+            ("medium", "none", "none"): [
+                "FORWARD_APPROACH", True, False, False, 
+                1.0, 0.0, 0.0,  # Increased from 0.9 to 1.0 for faster approach
+                "Medium distance approach: {distance_error:.2f}m"
+            ],
+            
+            ("large", "none", "none"): [
+                "FULL_APPROACH", True, False, False, 
+                1.0, 0.0, 0.0,
+                "Full distance approach: {distance_error:.2f}m"
+            ],
+            
+            # Angular-first strategies by magnitude - IMPROVED
             ("*", "*", "very_large"): [
-                "ANGULAR_PRIMARY", True, False, True, 
-                0.3, 0.0, 0.9,  # Enable forward movement at 30% with 90% angular
-                "Angular correction with minimal approach: {angular_error:.1f}°"
+                "ANGULAR_PRIMARY", True, True, True,  # Enabled lateral movement
+                0.4, 0.3, 0.9,  # Increased forward from 0.3 to 0.4, added lateral 0.3
+                "Angular correction with approach: {angular_error:.1f}°"
             ],
             
             ("*", "*", "large"): [
-                "ANGULAR_PRIMARY", True, False, True, 
-                0.4, 0.0, 0.8,  # 40% forward with 80% angular 
-                "Angular correction with slow approach: {angular_error:.1f}°"
+                "ANGULAR_PRIORITY", True, True, True,  # Enabled lateral
+                0.5, 0.4, 0.8,  # Increased forward from 0.4, added lateral 0.4
+                "Angular correction with steady approach: {angular_error:.1f}°"
             ],
             
             ("*", "*", "medium_large"): [
-                "ANGULAR_BALANCED", True, True, True, 
-                0.5, 0.2, 0.7,  # 50% forward, 20% lateral, 70% angular
-                "Angular correction with steady approach: {angular_error:.1f}°"
+                "ANGULAR_BALANCED", True, True, True,
+                0.6, 0.5, 0.7,  # Increased forward from 0.5 to 0.6, lateral from 0.2 to 0.5
+                "Balanced approach with angular correction: {angular_error:.1f}°"
             ],
             
             ("*", "*", "medium"): [
                 "BALANCED", True, True, True, 
-                0.6, 0.3, 0.6,  # More even distribution
+                0.7, 0.5, 0.6,  # Increased forward from 0.6 to 0.7, lateral from 0.3 to 0.5
                 "Balanced movement with angular correction: {angular_error:.1f}°"
             ],
             
             ("*", "*", "small_medium"): [
                 "FORWARD_ANGULAR", True, True, True, 
-                0.7, 0.4, 0.5,  # Emphasize forward movement
+                0.8, 0.6, 0.5,  # Increased forward from 0.7 to 0.8, lateral from 0.4 to 0.6
                 "Forward movement with angular fine-tuning: {angular_error:.1f}°"
             ],
             
             ("*", "*", "small"): [
                 "FORWARD_PRIMARY", True, True, True, 
-                0.8, 0.5, 0.4,  # Forward priority with some angular correction
+                0.9, 0.7, 0.4,  # Increased forward from 0.8 to 0.9, lateral from 0.5 to 0.7
                 "Forward-focused movement with minor angular correction: {angular_error:.1f}°"
             ],
             
             ("*", "*", "very_small"): [
-                "COMBINED_MOVEMENT", True, True, True, 
-                0.9, 0.6, 0.3,  # Strong forward bias
-                "Forward movement with minimal angular correction: {angular_error:.1f}°"
+                "POSITION_WITH_ALIGNMENT", True, True, True, 
+                1.0, 0.8, 0.3,  # Increased forward from 0.9 to 1.0, lateral from 0.6 to 0.8
+                "Position-focused movement with subtle alignment: {angular_error:.1f}°"
             ],
             
-            # Single dimension errors - focused corrections
-            ("small", "none", "none"): [
-                "FORWARD_ONLY", True, False, False, 
-                0.8, 0.0, 0.0,
-                "Small distance error correction: {distance_error:.2f}m"
-            ],
-            
-            ("medium", "none", "none"): [
-                "FORWARD_ONLY", True, False, False, 
-                0.9, 0.0, 0.0,
-                "Medium distance error correction: {distance_error:.2f}m"
-            ],
-            
-            ("large", "none", "none"): [
-                "FORWARD_ONLY", True, False, False, 
-                1.0, 0.0, 0.0,
-                "Large distance error correction: {distance_error:.2f}m"
-            ],
-            
-            ("none", "small", "none"): [
-                "LATERAL_ONLY", False, True, False, 
-                0.0, 0.8, 0.0, 
-                "Small lateral error correction: {lateral_error:.2f}m"
-            ],
-            
-            ("none", "medium", "none"): [
-                "LATERAL_ONLY", False, True, False, 
-                0.0, 0.9, 0.0, 
-                "Medium lateral error correction: {lateral_error:.2f}m"
-            ],
-            
-            ("none", "large", "none"): [
-                "LATERAL_ONLY", False, True, False, 
-                0.0, 1.0, 0.0, 
-                "Large lateral error correction: {lateral_error:.2f}m"
-            ],
-            
-            # Special case strategies for when at target distance with angular error
+            # Special case strategies for when at target distance with angular error - IMPROVED
             ("none", "*", "medium"): [
-                "AT_TARGET_ANGULAR", True, False, True, 
-                0.2, 0.0, 0.6,  # Some forward movement with angular correction
-                "At target distance - angular correction with slight forward: {angular_error:.1f}°"
+                "AT_TARGET_ANGULAR", True, True, True,  # Enabled lateral movement
+                0.4, 0.3, 0.6,  # Increased forward from 0.2 to 0.4, added lateral 0.3
+                "At target distance - angular correction with movement: {angular_error:.1f}°"
             ],
             
             ("none", "*", "medium_large"): [
-                "AT_TARGET_ANGULAR", True, False, True, 
-                0.1, 0.0, 0.7,  # Minimal forward movement with angular focus
-                "At target distance - primarily angular correction: {angular_error:.1f}°"
+                "AT_TARGET_ANGULAR_STRONG", True, True, True,  # Enabled lateral movement
+                0.3, 0.3, 0.7,  # Increased forward from 0.1 to 0.3, added lateral 0.3
+                "At target distance - angular correction with movement: {angular_error:.1f}°"
             ],
             
             ("none", "*", "large"): [
-                "AT_TARGET_ANGULAR", True, False, True, 
-                0.1, 0.0, 0.8,  # Minimal forward with strong angular
-                "At target distance - strong angular correction: {angular_error:.1f}°"
+                "AT_TARGET_ANGULAR_MAX", True, True, True,  # Enabled forward and lateral
+                0.2, 0.3, 0.8,  # Added forward 0.2, lateral 0.3
+                "At target distance - angular correction with movement: {angular_error:.1f}°"
             ],
             
-            # Combined distance and lateral errors (only when angular error is very small)
-            ("*", "*", "none"): [
-                "POSITION_ONLY", True, True, False,
-                0.9, 0.9, 0.0,  # Increased from 0.8/0.9 to 0.9/0.9
-                "Position correction without rotation"
+            # Combined distance + lateral but no angular - IMPROVED
+            ("very_small", "very_small", "none"): [
+                "FINE_POSITION_ADJUSTMENT", True, True, False,
+                0.5, 0.7, 0.0,  # Increased forward from 0.4 to 0.5, lateral from 0.6 to 0.7
+                "Fine position adjustment with lateral emphasis"
             ],
             
-            # Special case for diagonal movement - gradual transition
+            ("small", "small", "none"): [
+                "POSITION_ADJUSTMENT", True, True, False,
+                0.7, 0.8, 0.0,  # Increased forward from 0.6 to 0.7
+                "Small position adjustment with lateral priority"
+            ],
+            
+            ("medium", "small", "none"): [
+                "APPROACH_WITH_LATERAL", True, True, False,
+                0.9, 0.7, 0.0,  # Increased forward from 0.8 to 0.9, lateral from 0.6 to 0.7
+                "Approach with lateral correction"
+            ],
+            
+            ("small", "medium", "none"): [
+                "LATERAL_WITH_APPROACH", True, True, False,
+                0.7, 0.9, 0.0,  # Increased forward from 0.6 to 0.7, lateral from 0.8 to 0.9
+                "Lateral correction with approach component"
+            ],
+            
+            # Combined distance + angular without lateral - IMPROVED
+            ("small", "none", "small"): [
+                "APPROACH_WITH_ALIGNMENT", True, True, True,  # Enabled lateral for minor corrections
+                0.8, 0.2, 0.5,  # Increased forward from 0.7 to 0.8, added lateral 0.2
+                "Approach with alignment correction"
+            ],
+            
+            ("medium", "none", "small"): [
+                "APPROACH_WITH_MINOR_ALIGNMENT", True, True, True,  # Enabled lateral
+                0.9, 0.2, 0.4,  # Increased forward from 0.8 to 0.9, added lateral 0.2
+                "Focused approach with minor alignment"
+            ],
+            
+            # Angular-first based on distance - IMPROVED
+            ("large", "*", "medium"): [
+                "ANGULAR_THEN_APPROACH", True, True, True,  # Enabled lateral
+                0.7, 0.4, 0.6,  # Increased forward from 0.5 to 0.7, added lateral 0.4
+                "Angular correction with approach from distance"
+            ],
+            
+            # Diagonal movement - IMPROVED
             ("medium", "medium", "small"): [
                 "DIAGONAL_MOVEMENT", True, True, True,
-                0.8, 0.8, 0.3,
+                0.8, 0.8, 0.4,  # Increased angular from 0.3 to 0.4
                 "Diagonal movement with small angular correction"
             ],
             
-            # Approach strategies for near-target behavior
+            ("medium", "medium", "none"): [
+                "PURE_DIAGONAL", True, True, False,
+                0.9, 0.9, 0.0,
+                "Pure diagonal movement without rotation"
+            ],
+            
+            # Approach strategies for near-target behavior - IMPROVED
             ("small", "*", "*"): [
                 "APPROACH", True, True, True, 
-                0.7, 0.7, 0.4,  # Increased from 0.6/0.7 to 0.7/0.7
+                0.8, 0.8, 0.4,  # Increased forward from 0.7 to 0.8, lateral from 0.7 to 0.8
                 "Approach mode - nearing target: {distance_error:.2f}m"
             ],
+                       
             
-            ("very_small", "*", "*"): [
-                "SLOW_APPROACH", True, True, True, 
-                0.5, 0.5, 0.3,  # Increased from 0.4/0.4 to 0.5/0.5
-                "Final approach - very close to target: {distance_error:.2f}m"
+            # Position correction without rotation - IMPROVED
+            ("*", "*", "none"): [
+                "POSITION_ONLY", True, True, False,
+                0.9, 0.9, 0.0,  # Increased from 0.8 to 0.9
+                "Position correction without rotation"
             ],
             
-            # Fallback strategy
+            # Fallback strategy - IMPROVED
             ("*", "*", "*"): [
                 "BALANCED", True, True, True, 
-                0.7, 0.6, 0.5,
+                0.8, 0.7, 0.5,  # Increased forward from 0.7 to 0.8, lateral from 0.6 to 0.7
                 "Balanced movement strategy (fallback)"
+            ],
+
+            # ADDED: Deceleration strategy for controlled approach at close range
+            ("very_small", "*", "*"): [
+                "DECELERATION_APPROACH", True, True, True, 
+                0.4, 0.6, 0.3,  # Reduced forward from 0.6 to 0.4 for controlled approach
+                "Deceleration approach - very close to target: {distance_error:.2f}m"
+            ],
+
+            # Add a new strategy for close approaches
+            ("very_small", "*", "*"): [
+                "FINAL_APPROACH", True, True, True, 
+                0.4, 0.6, 0.3,  # Reduced forward from 0.6 to 0.4
+                "Final careful approach - very close to target: {distance_error:.2f}m"
             ]
         }
     
@@ -3317,29 +3681,31 @@ class ImprovedPIDControllerNode(Node):
         
         # Select appropriate thresholds based on error type
         if error_type == "angular":
-            deadband = 3.0  # Degrees (increased from 1.5)
+            # MODIFIED: Significantly increased angular thresholds
+            deadband = 5.0  # Increased from 3.0 degrees
             very_small_threshold = deadband * lenient_factor
             small_threshold = deadband * 2.0 * lenient_factor
             small_medium_threshold = deadband * 3.0 * lenient_factor
-            medium_threshold = deadband * 4.0 * lenient_factor
-            medium_large_threshold = deadband * 6.0 * lenient_factor
-            large_threshold = deadband * 8.0 * lenient_factor
-            very_large_threshold = deadband * 12.0 * lenient_factor
+            medium_threshold = deadband * 5.0 * lenient_factor  # Increased
+            medium_large_threshold = deadband * 8.0 * lenient_factor  # Increased
+            large_threshold = deadband * 12.0 * lenient_factor  # Increased
+            very_large_threshold = deadband * 16.0 * lenient_factor  # Increased
         elif error_type == "lateral":
-            deadband = 0.075  # Meters (increased from 0.05)
+            # MODIFIED: Increased lateral thresholds
+            deadband = 0.08  
             very_small_threshold = deadband
-            small_threshold = deadband * 2.0
+            small_threshold = deadband * 1.8
             small_medium_threshold = deadband * 3.0
             medium_threshold = deadband * 4.0
             medium_large_threshold = deadband * 6.0
             large_threshold = deadband * 8.0
             very_large_threshold = deadband * 10.0
         else:  # distance
-            # Use tighter distance categorization for better approach control
-            deadband = 0.1  # Meters
+            # MODIFIED: Increased distance thresholds
+            deadband = 0.15  # Increased from 0.1 meters
             very_small_threshold = deadband
-            small_threshold = deadband * 1.5  # Reduced from 2.0 for more granular approach control
-            small_medium_threshold = deadband * 2.5  # Reduced from 3.0
+            small_threshold = deadband * 2.0  # Increased from 1.5
+            small_medium_threshold = deadband * 3.0  # Increased from 2.5
             medium_threshold = deadband * 4.0
             medium_large_threshold = deadband * 6.0
             large_threshold = deadband * 8.0
@@ -3418,13 +3784,15 @@ class ImprovedPIDControllerNode(Node):
         else:
             return "very_large"
     
+    
     def _determine_movement_strategy(self, distance_error, lateral_error, angular_error_degrees,
-                               prev_distance_category=None, prev_lateral_category=None, 
-                               prev_angular_category=None):
+                           prev_distance_category=None, prev_lateral_category=None, 
+                           prev_angular_category=None):
         """
         Determine the optimal movement strategy using table-driven approach
         with hysteresis and angular-first prioritization.
-        Modified to reduce angular corrections when at target distance.
+        Modified to reduce angular corrections when at target distance and
+        prioritize forward movement during startup.
         
         Args:
             distance_error: Error in distance (meters)
@@ -3436,6 +3804,38 @@ class ImprovedPIDControllerNode(Node):
             dict: Strategy information including strategy name, movement flags, and scale factors
         """
         current_time = time.time()
+        
+        # Add startup movement counter if it doesn't exist
+        if not hasattr(self, '_startup_movement_cycles'):
+            self._startup_movement_cycles = 0
+        
+        # For first few cycles after movement starts, prioritize forward movement
+        if self._robot_stopped == False and self._startup_movement_cycles < 5:
+            self._startup_movement_cycles += 1
+            
+            # If significant distance error exists, prioritize forward movement
+            if abs(distance_error) > 0.2:  # Significant distance error
+                # Override strategy to prioritize forward movement
+                name = "STARTUP_FORWARD_PRIORITY"
+                use_forward = True
+                use_lateral = True
+                use_angular = True
+                forward_scale = 0.7  # Start with moderate forward scale
+                lateral_scale = 0.3  # Reduced lateral scale during startup
+                angular_scale = 0.3  # Reduced angular scale during startup
+                reason = "Startup forward priority - quick response mode"
+                
+                # Create and return startup strategy
+                return {
+                    "strategy_name": name,
+                    "use_forward": use_forward,
+                    "use_lateral": use_lateral,
+                    "use_angular": use_angular,
+                    "forward_scale": forward_scale,
+                    "lateral_scale": lateral_scale,
+                    "angular_scale": angular_scale,
+                    "reason": reason
+                }
         
         # Check if robot is at target distance and reduce angular priority if so
         at_target_distance = abs(distance_error) < self.distance_threshold * 1.5
@@ -3541,7 +3941,7 @@ class ImprovedPIDControllerNode(Node):
 
         # Convert to dictionary for compatibility with existing code
         return current_strategy.as_dict()
-    
+        
     def _match_strategy(self, key, strategies):
         """
         Match a key against the strategy table with wildcard support.
