@@ -38,7 +38,7 @@ _dummy_logging_manager = None  # Will be initialized below
 class LoggingManager:
     """Centralized manager for all logging in the PID controller."""
     
-    def __init__(self, node, debug_level=1):
+    def __init__(self, node, debug_level=1, log_verbosity=1):
         """
         Initialize logging system with proper hierarchy.
         
@@ -48,6 +48,7 @@ class LoggingManager:
         """
         self.node = node
         self.debug_level = debug_level
+        self.log_verbosity = log_verbosity
         self.throttle_timestamps = {}  # For tracking throttled logs
         
         # Create base logger
@@ -85,6 +86,10 @@ class LoggingManager:
         self.log_structured('logging_manager', 'INIT', 
                          f"Logging system initialized with debug level {debug_level}")
     
+    def should_log(self, verbosity_level):
+        """Check if logging is enabled for the given verbosity level."""
+        return self.log_verbosity >= verbosity_level
+
     def _setup_component_loggers(self):
         """Set up loggers for all components with correct propagation settings."""
         # List of all components
@@ -234,25 +239,32 @@ class DummyLoggingManager:
 # Initialize the dummy manager
 _dummy_logging_manager = DummyLoggingManager()
 
-def init_logging_system(node, debug_level=1):
+def init_logging_system(node, debug_level=1, log_verbosity=1):
     """Initialize the global logging system."""
     global _logging_manager
-    _logging_manager = LoggingManager(node, debug_level)
+    _logging_manager = LoggingManager(node, debug_level, log_verbosity)
     return _logging_manager
 
 # Global function interfaces that use the logging manager
 
+# Modify the global log_structured function
 def log_structured(component, event_type, message, params=None, level=logging.INFO, 
-                throttle_key=None, throttle_seconds=None):
-    """Global shortcut for log_structured."""
+                throttle_key=None, throttle_seconds=None, verbosity_level=1):
+    """Global shortcut for log_structured with verbosity level check."""
     global _logging_manager, _dummy_logging_manager
-    # Use the global logging manager
-    if _logging_manager is None:
+    
+    # Check if we should log based on verbosity level
+    if _logging_manager is not None:
+        if _logging_manager.log_verbosity < verbosity_level:
+            return False  # Skip logging due to verbosity setting
+        
+        # Use the global logging manager
+        return _logging_manager.log_structured(component, event_type, message, 
+                                            params, level, throttle_key, throttle_seconds)
+    else:
         # Use dummy manager if not initialized yet
         return _dummy_logging_manager.log_structured(component, event_type, message, 
                                                    params, level, throttle_key, throttle_seconds)
-    return _logging_manager.log_structured(component, event_type, message, 
-                                         params, level, throttle_key, throttle_seconds)
 
 def get_logger(component):
     """Global shortcut for get_logger."""
@@ -306,7 +318,7 @@ def log_pid_state(controller_name, error, output, p_term, i_term, d_term, curren
                   f"{controller_name} update", 
                   params,
                   throttle_key=controller_name,
-                  throttle_seconds=1.0)  # Once per second
+                  throttle_seconds=2.0)  # Once per second
 
 def log_strategy_selection(key, selected_strategy, candidate_strategies=None, reason=None):
     """
@@ -329,7 +341,7 @@ def log_strategy_selection(key, selected_strategy, candidate_strategies=None, re
                   msg, 
                   params,
                   throttle_key=selected_strategy['strategy_name'],
-                  throttle_seconds=0.5)  # Max twice per second
+                  throttle_seconds=1)  # Max once per second
 
 def log_strategy_blending(start_strategy, target_strategy, blend_factor, blend_duration):
     """
@@ -343,10 +355,9 @@ def log_strategy_blending(start_strategy, target_strategy, blend_factor, blend_d
         'effective_duration': getattr(start_strategy, 'effective_blend_duration', blend_duration)
     }
     
-    # Only log at 0%, 50%, and 100% blend progress to reduce noise
+    # Only log at start and end of blend to reduce noise (removed middle log point)
     should_log = (
-        abs(blend_factor) < 0.05 or      # Start of blend
-        abs(blend_factor - 0.5) < 0.05 or # Middle of blend
+        abs(blend_factor) < 0.05 or      # Start of blend        
         abs(blend_factor - 1.0) < 0.05    # End of blend
     )
     
@@ -355,7 +366,7 @@ def log_strategy_blending(start_strategy, target_strategy, blend_factor, blend_d
                       f"Blending {blend_factor*100:.1f}% complete", 
                       params,
                       throttle_key=f"{start_strategy.name}_to_{target_strategy.name}",
-                      throttle_seconds=0.2)  # Allow reasonable updates during blend
+                      throttle_seconds=0.6)  # Allow reasonable updates during blend
 
 def log_error_categorization(error_type, raw_error, category, threshold, prev_category=None):
     """
@@ -472,7 +483,7 @@ def log_velocity_limiting(raw_velocities, limited_velocities, reason=None):
     for i in range(3):
         if abs(raw_velocities[i]) > 0.01:  # Avoid division by zero
             limit_pct[i] = abs(limited_velocities[i] - raw_velocities[i]) / abs(raw_velocities[i]) * 100
-            if limit_pct[i] > 15:  # Only consider significant if >15% change
+            if limit_pct[i] > 25:  # Only consider significant if >15% change
                 significant_limiting = True
     
     # Skip logging if velocity wasn't limited significantly
@@ -497,7 +508,7 @@ def log_velocity_limiting(raw_velocities, limited_velocities, reason=None):
                   msg, 
                   params,
                   throttle_key="velocity_limit",
-                  throttle_seconds=0.5)  # Max twice per second
+                  throttle_seconds=1.5)  
 
 def log_resource_usage(cpu_usage, memory_usage, cycle_time=None, rate_adjustment=None):
     """
@@ -525,13 +536,13 @@ def log_resource_usage(cpu_usage, memory_usage, cycle_time=None, rate_adjustment
         last_cpu = log_resource_usage.last_cpu
         last_mem = log_resource_usage.last_mem
         
-        if abs(cpu_usage - last_cpu) > 20 or abs(memory_usage - last_mem) > 10:
+        if abs(cpu_usage - last_cpu) > 25 or abs(memory_usage - last_mem) > 15:
             # Log immediately for significant changes
             log_structured('resource_monitor', 'RESOURCE_USAGE', 
                          f"CPU: {cpu_usage:.1f}%, Memory: {memory_usage:.1f}%", 
                          params,
                          throttle_key=significant_change_key,
-                         throttle_seconds=2.0)  # Allow significant changes every 2s
+                         throttle_seconds=4.0)  # Allow significant changes every 2s
     
     # Regular periodic logging with longer throttle time
     log_structured('resource_monitor', 'RESOURCE_USAGE', 
@@ -677,9 +688,9 @@ TOPICS = {
 }
 
 # Log throttling parameters
-LOG_THROTTLE_CONTROL = 2.0     # Seconds between control loop status logs
-LOG_THROTTLE_STATE = 0.5       # Seconds between state change logs
-LOG_THROTTLE_DIAG = 1.0        # Seconds between diagnostic logs
+LOG_THROTTLE_CONTROL = 4.0     # Seconds between control loop status logs
+LOG_THROTTLE_STATE = 1       # Seconds between state change logs
+LOG_THROTTLE_DIAG = 2.5        # Seconds between diagnostic logs
 
 
 # Memory optimization classes
@@ -3419,7 +3430,7 @@ class ImprovedPID:
                 output_change_rate = (last['output'] - prev['output']) / dt
                 
                 # Log problematic conditions
-                if abs(integral_change_rate) > 0.5 or abs(last['integral']) > self.max_integral * 0.8:
+                if abs(integral_change_rate) > 1 or abs(last['integral']) > self.max_integral * 0.9:
                     self.logger.warning(
                         f"PID {self.name} integral warning: value={self.integral:.3f}, "
                         f"change_rate={integral_change_rate:.3f}, error={self.prev_error:.3f}"
@@ -5738,7 +5749,7 @@ class ImprovedPIDControllerNode(Node):
             elapsed = time.time() - start_time
 
             # Initialize the global logging system FIRST
-            init_logging_system(self, self.debug_level)
+            init_logging_system(self, self.debug_level, self.log_verbosity)
 
             # Now set up logging with debug_level available
             start_time = time.time()
@@ -6205,6 +6216,7 @@ class ImprovedPIDControllerNode(Node):
                 # Approach configuration
                 ('approach_distance', 0.7),    # Distance at which to start slowing down
                 ('min_approach_factor', 0.1),  # Minimum velocity factor when very close
+                ('log_verbosity', 1),  # 0=minimal, 1=normal, 2=verbose
             ]
         )
         
@@ -6262,6 +6274,8 @@ class ImprovedPIDControllerNode(Node):
         # All other parameter assignments would be here
         self.diagnostics_rate = self.get_parameter('diagnostics_rate').value
         self.debug_level = self.get_parameter('debug_level').value
+
+        self.log_verbosity = self.get_parameter('log_verbosity').value
         
         # Log important parameters
         self.get_logger().info(
@@ -7502,9 +7516,9 @@ class ImprovedPIDControllerNode(Node):
             self.prev_angular_category = new_angular_category
         
         # Log significant error changes regardless of category
-        if distance_change > self.distance_threshold or \
-        lateral_change > self.lateral_threshold or \
-        angular_change > self.angular_threshold:
+        if distance_change > self.distance_threshold * 1.5 or \
+        lateral_change > self.lateral_threshold * 1.5 or \
+        angular_change > self.angular_threshold * 1.5:
             
             log_structured('error_tracking', 'ERROR_CHANGE', 
                         f"Significant change in tracking errors", 
@@ -7537,7 +7551,7 @@ class ImprovedPIDControllerNode(Node):
         self._prev_all_errors_small = all_errors_small
         
         # Log periodic error summaries (every 50 cycles) for monitoring
-        if hasattr(self, 'cycle_count') and self.cycle_count % 50 == 0:
+        if hasattr(self, 'cycle_count') and self.cycle_count % 100 == 0:
             log_structured('error_tracking', 'ERROR_SUMMARY', 
                         f"Tracking error summary", 
                         {'distance_error': self._current_errors[0],
@@ -8001,13 +8015,13 @@ class ImprovedPIDControllerNode(Node):
         else:
             self.pid_log_counter = 0
             
-        # Log PID outputs every 20 cycles or when error changes significantly
+        # Log PID outputs every 50 cycles (increased from 20) or when error changes significantly
         significant_error_change = False
         if hasattr(self, 'last_logged_errors'):
             error_change = sum([abs(self._current_errors[i] - self.last_logged_errors[i]) for i in range(3)])
-            significant_error_change = error_change > 0.1
-        
-        if self.pid_log_counter % 20 == 0 or significant_error_change:
+            significant_error_change = error_change > 0.2  # Increased threshold from 0.1 to 0.2
+
+        if self.pid_log_counter % 50 == 0 or significant_error_change:
             # Log PID state
             for controller, data in pid_results.items():
                 log_pid_state(
@@ -8176,7 +8190,7 @@ class ImprovedPIDControllerNode(Node):
                 ang_change = abs(angular_velocity - self.last_angular_vel)
                 
                 # Log on significant changes (>10%)
-                if (lat_change > 0.05 or ang_change > 0.05) and self.debug_level >= 1:
+                if (lat_change > 0.10 or ang_change > 0.1) and self.debug_level >= 1:
                     log_structured('coordinated_control', 'COORDINATION_OUTPUT', 
                                 f"Coordinated control output changed", 
                                 {'lateral_error': self._current_errors[1],
@@ -8466,7 +8480,7 @@ class ImprovedPIDControllerNode(Node):
         change_components = []
         
         for i, component in enumerate(['forward', 'lateral', 'angular']):
-            if abs(self._velocity_tuple[i] - prev_cmd[i]) > 0.05:  # >0.05 m/s or rad/s change
+            if abs(self._velocity_tuple[i] - prev_cmd[i]) > 0.1:  
                 significant_change = True
                 change_components.append(component)
         
@@ -8475,7 +8489,7 @@ class ImprovedPIDControllerNode(Node):
         reversing_components = []
         
         for i, component in enumerate(['forward', 'lateral', 'angular']):
-            if (prev_cmd[i] * self._velocity_tuple[i] < 0) and abs(self._velocity_tuple[i]) > 0.05:
+            if (prev_cmd[i] * self._velocity_tuple[i] < 0) and abs(self._velocity_tuple[i]) > 0.10:
                 direction_change = True
                 reversing_components.append(component)
         
@@ -8509,7 +8523,7 @@ class ImprovedPIDControllerNode(Node):
             self._vel_log_count += 1
             
             # Log periodically (every 15 cycles) or on significant changes
-            should_log_velocity = (self._vel_log_count % 15 == 0) or significant_change
+            should_log_velocity = (self._vel_log_count % 30 == 0) or significant_change
         else:
             self._vel_log_count = 0
             should_log_velocity = True  # Always log the first velocity
@@ -8588,7 +8602,7 @@ class ImprovedPIDControllerNode(Node):
             self._perf_log_count += 1
             
             # Log every 50 cycles
-            if self._perf_log_count % 50 == 0:
+            if self._perf_log_count % 100 == 0:
                 log_structured('motion_commander', 'PERFORMANCE_METRICS', 
                             f"Motion command performance metrics", 
                             {'velocity_limit_time_ms': velocity_limit_time * 1000,
