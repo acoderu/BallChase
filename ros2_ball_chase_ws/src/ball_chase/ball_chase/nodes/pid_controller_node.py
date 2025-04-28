@@ -631,55 +631,207 @@ def log_pid_state(controller_name, error, output, p_term, i_term, d_term, curren
 
 def log_strategy_selection(key, selected_strategy, candidate_strategies=None, reason=None):
     """
-    Log strategy selection with improved throttling.
+    Log strategy selection with improved throttling and significance detection.
     Consolidates strategy selection logs with appropriate throttling.
+    
+    Args:
+        key: Selection key or context
+        selected_strategy: The strategy that was selected
+        candidate_strategies: Optional dictionary of candidate strategies
+        reason: Optional reason for the selection
     """
-    strategy_name = selected_strategy['strategy_name']
+    # Initialize static tracking dictionary if it doesn't exist
+    if not hasattr(log_strategy_selection, "_tracking"):
+        log_strategy_selection._tracking = {
+            "last_log_time": {},  # Keyed by strategy name
+            "consecutive_count": {},  # Count consecutive selections of same strategy
+            "last_strategy": None,  # Last logged strategy
+            "strategy_durations": {},  # Track how long each strategy is used
+            "significant_strategies": {  # Strategies that are always significant to log
+                "ANGULAR_FIRST_APPROACH", 
+                "ANGULAR_PRIMARY",
+                "EMERGENCY_BRAKE",
+                "APPROACH"
+            },
+            "min_log_interval": 2.0,  # Minimum seconds between logs for same strategy
+            "escalating_interval": True,  # Whether to increase interval for repetitive logs
+        }
     
-    params = {
-        'key': key,
-        'strategy_name': strategy_name,
-        'forward_scale': selected_strategy['forward_scale'],
-        'lateral_scale': selected_strategy['lateral_scale'],
-        'angular_scale': selected_strategy['angular_scale']
-    }
+    tracking = log_strategy_selection._tracking
+    current_time = time.time()
     
-    msg = f"Selected strategy: {strategy_name}"
-    if reason:
-        msg += f" - {reason}"
+    # Extract strategy name - handle both dict and object formats
+    strategy_name = selected_strategy
+    if isinstance(selected_strategy, dict) and "strategy_name" in selected_strategy:
+        strategy_name = selected_strategy["strategy_name"]
+    elif hasattr(selected_strategy, "name"):
+        strategy_name = selected_strategy.name
     
-    # Throttle by strategy name with increased throttle time
-    log_structured('strategy_selector', 'STRATEGY_SELECTION', 
-                  msg, 
-                  params,
-                  throttle_key=strategy_name,
-                  throttle_seconds=1.0,  # Keep at 1.0 for important strategy changes
-                  verbosity_level=1)     # Normal verbosity for important state changes
+    # Check if this is a significant strategy change
+    is_significant = False
+    
+    # Case 1: Strategy changed from previous
+    prev_strategy = tracking["last_strategy"]
+    strategy_changed = prev_strategy is not None and prev_strategy != strategy_name
+    
+    if strategy_changed:
+        is_significant = True
+        # Reset consecutive count for new strategy
+        tracking["consecutive_count"][strategy_name] = 0
+        
+        # Record duration of previous strategy
+        if prev_strategy in tracking["strategy_durations"]:
+            start_time = tracking["strategy_durations"][prev_strategy]
+            duration = current_time - start_time
+            # Only log significant durations (> 0.5 seconds)
+            if duration > 0.5:
+                log_structured('strategy_selector', 'STRATEGY_DURATION', 
+                            f"Strategy {prev_strategy} was active for {duration:.1f}s", 
+                            {'duration': duration,
+                             'strategy': prev_strategy},
+                             throttle_key=f"duration_{prev_strategy}",
+                             throttle_seconds=5.0)
+        
+        # Record start time for new strategy
+        tracking["strategy_durations"][strategy_name] = current_time
+    
+    # Case 2: Always log significant strategies
+    elif strategy_name in tracking["significant_strategies"]:
+        is_significant = True
+        
+    # Case 3: First time seeing this strategy
+    elif strategy_name not in tracking["last_log_time"]:
+        is_significant = True
+        tracking["consecutive_count"][strategy_name] = 0
+        tracking["strategy_durations"][strategy_name] = current_time
+    
+    # Update consecutive count for this strategy
+    if strategy_name in tracking["consecutive_count"]:
+        tracking["consecutive_count"][strategy_name] += 1
+    else:
+        tracking["consecutive_count"][strategy_name] = 1
+    
+    # Determine if we should log based on time and significance
+    should_log = is_significant
+    
+    if not should_log:
+        # Get last log time for this strategy, defaulting to 0
+        last_log_time = tracking["last_log_time"].get(strategy_name, 0)
+        consecutive_count = tracking["consecutive_count"].get(strategy_name, 0)
+        
+        # Calculate required interval based on repetition
+        if tracking["escalating_interval"] and consecutive_count > 3:
+            # Escalate interval for highly repetitive selections
+            # After 3 consecutive logs, double the interval each time up to 20 seconds
+            log_interval = min(20.0, tracking["min_log_interval"] * (2 ** (consecutive_count - 3)))
+        else:
+            log_interval = tracking["min_log_interval"]
+        
+        # Log if enough time has passed
+        time_since_log = current_time - last_log_time
+        if time_since_log >= log_interval:
+            should_log = True
+    
+    if should_log:
+        # Format parameters for logging
+        params = {
+            'key': key,
+            'strategy_name': strategy_name,
+        }
+        
+        # Add selected strategy details
+        if isinstance(selected_strategy, dict):
+            for k, v in selected_strategy.items():
+                if k != "strategy_name":  # Already included
+                    params[k] = v
+        
+        # Include consecutive count if relevant
+        consecutive_msg = ""
+        if tracking["consecutive_count"].get(strategy_name, 0) > 1:
+            consecutive_count = tracking["consecutive_count"][strategy_name]
+            consecutive_msg = f" (selected {consecutive_count} times consecutively)"
+            params['consecutive_count'] = consecutive_count
+        
+        # Create log message
+        msg = f"Selected strategy: {strategy_name}{consecutive_msg}"
+        if reason:
+            msg += f" - {reason}"
+        
+        # Log with appropriate throttling
+        log_structured('strategy_selector', 'STRATEGY_SELECTION', 
+                     msg, 
+                     params,
+                     throttle_key=strategy_name,
+                     throttle_seconds=1.0)  # Keep at 1.0 for important strategy changes
+                     
+        # Update tracking
+        tracking["last_log_time"][strategy_name] = current_time
+        tracking["last_strategy"] = strategy_name
 
 def log_strategy_blending(start_strategy, target_strategy, blend_factor, blend_duration):
     """
-    Log strategy blending progress with reduced frequency.
+    Log strategy blending progress with reduced frequency and improved significance detection.
     """
+    # Initialize static tracking dictionary if it doesn't exist
+    if not hasattr(log_strategy_blending, "_tracking"):
+        log_strategy_blending._tracking = {
+            "last_log_time": {},  # Keyed by blend transition
+            "last_factor": {},    # Last logged factor for this transition
+            "significant_points": [0.0, 0.5, 1.0],  # Log at these specific blend points
+            "min_factor_change": 0.25,  # Minimum change in blend factor to log
+        }
+    
+    tracking = log_strategy_blending._tracking
+    current_time = time.time()
+    
+    # Get strategy names consistently
+    start_name = start_strategy.name if hasattr(start_strategy, "name") else str(start_strategy)
+    target_name = target_strategy.name if hasattr(target_strategy, "name") else str(target_strategy)
+    
+    # Create a key for this specific blend transition
+    blend_key = f"{start_name}_to_{target_name}"
+    
     params = {
-        'start': start_strategy.name,
-        'target': target_strategy.name,
+        'start': start_name,
+        'target': target_name,
         'blend_factor': blend_factor,
         'blend_duration': blend_duration,
         'effective_duration': getattr(start_strategy, 'effective_blend_duration', blend_duration)
     }
     
-    # Only log at start and end of blend to reduce noise (removed middle log point)
-    should_log = (
-        abs(blend_factor) < 0.05 or      # Start of blend        
-        abs(blend_factor - 1.0) < 0.05    # End of blend
-    )
+    # Determine if this is a significant point to log
+    is_significant = False
     
-    if should_log:
+    # Case 1: First time seeing this blend transition
+    if blend_key not in tracking["last_log_time"]:
+        is_significant = True
+    
+    # Case 2: At a significant blend point (start, middle, end)
+    for point in tracking["significant_points"]:
+        if abs(blend_factor - point) < 0.05:  # Within 5% of a significant point
+            is_significant = True
+            break
+    
+    # Case 3: Significant change from last logged factor
+    last_factor = tracking["last_factor"].get(blend_key, -1)
+    if last_factor >= 0 and abs(blend_factor - last_factor) >= tracking["min_factor_change"]:
+        is_significant = True
+    
+    # Only log if significant and enough time has passed
+    min_log_interval = 0.3  # Minimum seconds between logs for same blend
+    last_log_time = tracking["last_log_time"].get(blend_key, 0)
+    time_since_log = current_time - last_log_time
+    
+    if is_significant and time_since_log >= min_log_interval:
         log_structured('strategy_blender', 'STRATEGY_BLEND', 
                       f"Blending {blend_factor*100:.1f}% complete", 
                       params,
-                      throttle_key=f"{start_strategy.name}_to_{target_strategy.name}",
-                      throttle_seconds=0.6)  # Allow reasonable updates during blend
+                      throttle_key=blend_key,
+                      throttle_seconds=0.3)  # Allow reasonable updates during blend
+        
+        # Update tracking
+        tracking["last_log_time"][blend_key] = current_time
+        tracking["last_factor"][blend_key] = blend_factor
 
 def log_error_categorization(error_type, raw_error, category, threshold, prev_category=None):
     """
@@ -751,6 +903,22 @@ def log_target_filter_update(raw_position, filtered_position, predicted_position
     """
     Log target filter updates and predictions with reduced frequency.
     """
+    # Initialize static tracking dictionary for throttling
+    if not hasattr(log_target_filter_update, "_tracking"):
+        log_target_filter_update._tracking = {
+            "last_log_time": {},  # Keyed by type of update
+            "consecutive_similar": {},  # Count of consecutive similar updates
+            "last_positions": {},  # Last logged positions for comparison
+            "min_log_interval": {
+                "filter": 2.0,  # Every 2 seconds for regular updates
+                "prediction": 1.0  # Every 1 second for predictions
+            },
+            "significant_change_threshold": 0.05  # 5% position change is significant
+        }
+    
+    tracking = log_target_filter_update._tracking
+    current_time = time.time()
+    
     params = {
         'raw_dist': raw_position[0],
         'raw_lateral': raw_position[1],
@@ -760,29 +928,103 @@ def log_target_filter_update(raw_position, filtered_position, predicted_position
         'filtered_angle': filtered_position[2]
     }
     
-    msg = "Target filter update"
-    
+    # Determine log type and setup tracking key
     if predicted_position:
+        log_type = "prediction"
+        tracking_key = "prediction"
         params['pred_dist'] = predicted_position[0]
         params['pred_lateral'] = predicted_position[1]
         params['pred_angle'] = predicted_position[2]
         if confidence:
             params['confidence'] = confidence
         msg = "Target prediction"
-        
-        # Throttle prediction logs (these happen frequently)
-        throttle_key = "prediction"
-        throttle_seconds = 1.0  # Once per second max
     else:
-        # Throttle regular updates even more aggressively
-        throttle_key = "filter_update"
-        throttle_seconds = 2.0  # Once per 2 seconds max
+        log_type = "filter_update"
+        tracking_key = "filter"
+        msg = "Target filter update"
     
-    log_structured('target_filter', 'FILTER_UPDATE', 
-                  msg, 
-                  params,
-                  throttle_key=throttle_key,
-                  throttle_seconds=throttle_seconds)
+    # Check if this update is similar to the previous one
+    is_similar = False
+    if tracking_key in tracking["last_positions"]:
+        if log_type == "prediction":
+            # For predictions, compare prediction values
+            prev_vals = tracking["last_positions"][tracking_key]
+            curr_vals = [predicted_position[0], predicted_position[1], predicted_position[2]]
+            
+            # Calculate difference percentage
+            diffs = [
+                abs(curr_vals[0] - prev_vals[0]) / (abs(prev_vals[0]) + 0.001),
+                abs(curr_vals[1] - prev_vals[1]) / (abs(prev_vals[1]) + 0.001),
+                abs(curr_vals[2] - prev_vals[2]) / (abs(prev_vals[2]) + 0.001)
+            ]
+            avg_diff = sum(diffs) / 3
+            
+            is_similar = avg_diff < tracking["significant_change_threshold"]
+        else:
+            # For filter updates, compare filtered position
+            prev_vals = tracking["last_positions"][tracking_key]
+            curr_vals = [filtered_position[0], filtered_position[1], filtered_position[2]]
+            
+            # Calculate difference percentage
+            diffs = [
+                abs(curr_vals[0] - prev_vals[0]) / (abs(prev_vals[0]) + 0.001),
+                abs(curr_vals[1] - prev_vals[1]) / (abs(prev_vals[1]) + 0.001),
+                abs(curr_vals[2] - prev_vals[2]) / (abs(prev_vals[2]) + 0.001)
+            ]
+            avg_diff = sum(diffs) / 3
+            
+            is_similar = avg_diff < tracking["significant_change_threshold"]
+    
+    # Update consecutive similar counter
+    if is_similar:
+        if tracking_key in tracking["consecutive_similar"]:
+            tracking["consecutive_similar"][tracking_key] += 1
+        else:
+            tracking["consecutive_similar"][tracking_key] = 1
+    else:
+        tracking["consecutive_similar"][tracking_key] = 0
+    
+    # Determine if we should log based on similarity and time
+    last_log_time = tracking["last_log_time"].get(tracking_key, 0)
+    time_since_log = current_time - last_log_time
+    consecutive_count = tracking["consecutive_similar"].get(tracking_key, 0)
+    
+    # Apply time-based throttling with consecutive message consideration
+    min_interval = tracking["min_log_interval"][tracking_key]
+    
+    # For consecutive similar updates, increase throttle interval
+    if consecutive_count > 3:
+        # Exponential increase in throttle interval
+        adjusted_interval = min_interval * (1.5 ** min(consecutive_count - 3, 5))
+        should_log = time_since_log >= adjusted_interval
+    else:
+        # Regular time-based throttling
+        should_log = time_since_log >= min_interval
+    
+    # Add repetition info to message if needed
+    if consecutive_count > 0 and should_log:
+        msg += f" (similar updates: {consecutive_count+1}x)"
+    
+    # Log if we should
+    if should_log:
+        log_structured('target_filter', log_type.upper(), 
+                    msg, 
+                    params,
+                    throttle_key=tracking_key,
+                    throttle_seconds=min_interval)
+        
+        # Update tracking info
+        tracking["last_log_time"][tracking_key] = current_time
+        if log_type == "prediction":
+            # Store prediction values
+            tracking["last_positions"][tracking_key] = [
+                predicted_position[0], predicted_position[1], predicted_position[2]
+            ]
+        else:
+            # Store filtered values
+            tracking["last_positions"][tracking_key] = [
+                filtered_position[0], filtered_position[1], filtered_position[2]
+            ]
 
 def log_velocity_limiting(raw_velocities, limited_velocities, reason=None, components=None):
     """
@@ -2288,7 +2530,7 @@ class EnhancedTargetFilter:
             filtered_position: Position after filtering
         """
         # Initialize tracking variables if they don't exist
-        if not hasattr(self, '_filter_log_data'):
+        if not hasattr(self, "_filter_log_data"):
             self._filter_log_data = {
                 'last_log_time': 0,
                 'last_logged_position': None,
@@ -2739,6 +2981,18 @@ class EnhancedTargetFilter:
         Args:
             current_time: Current time
         """
+        # Initialize tracking for prediction logging if needed
+        if not hasattr(self, "_prediction_log_tracking"):
+            self._prediction_log_tracking = {
+                "last_log_time": 0.0,
+                "consecutive_similar": 0,
+                "last_prediction": None,
+                "min_log_interval": 1.0,  # Minimum seconds between prediction logs
+                "significant_change_threshold": 0.05  # 5% position change is significant
+            }
+        
+        tracking = self._prediction_log_tracking
+        
         # Calculate base prediction confidence
         vel_magnitude = math.sqrt(
             self.current_velocity[0]**2 + 
@@ -2795,6 +3049,13 @@ class EnhancedTargetFilter:
                     
                     # Reset recovery counter on successful prediction
                     self.recovery_counter = 0
+                    
+                    # Log prediction with improved throttling
+                    self._log_prediction_update(
+                        self.filtered_position, 
+                        pred_position, 
+                        self.prediction_confidence
+                    )
                 else:
                     # Low confidence prediction - fall back to filtered position
                     self.predicted_position = self.filtered_position
@@ -2817,6 +3078,90 @@ class EnhancedTargetFilter:
             self.predicted_position = self.filtered_position
             self.prediction_confidence = 0.0
             self.using_prediction = False
+
+    def _log_prediction_update(self, filtered_position, predicted_position, confidence):
+        """
+        Log prediction updates with improved throttling and significance detection.
+        
+        Args:
+            filtered_position: Current filtered position
+            predicted_position: Calculated prediction
+            confidence: Prediction confidence score
+        """
+        # Ensure tracking structure exists
+        if not hasattr(self, "_prediction_log_tracking"):
+            self._prediction_log_tracking = {
+                "last_log_time": 0.0,
+                "consecutive_similar": 0,
+                "last_prediction": None,
+                "min_log_interval": 1.0,  # Minimum seconds between prediction logs
+                "significant_change_threshold": 0.05  # 5% position change is significant
+            }
+        
+        tracking = self._prediction_log_tracking
+        current_time = time.time()
+        
+        # Check if prediction is similar to the last logged prediction
+        is_similar = False
+        if tracking["last_prediction"] is not None:
+            # Calculate position difference percentages
+            diffs = [
+                abs(predicted_position[0] - tracking["last_prediction"][0]) / (abs(tracking["last_prediction"][0]) + 0.001),
+                abs(predicted_position[1] - tracking["last_prediction"][1]) / (abs(tracking["last_prediction"][1]) + 0.001),
+                abs(predicted_position[2] - tracking["last_prediction"][2]) / (abs(tracking["last_prediction"][2]) + 0.001)
+            ]
+            avg_diff = sum(diffs) / 3
+            
+            is_similar = avg_diff < tracking["significant_change_threshold"]
+        
+        # Update consecutive counter
+        if is_similar:
+            tracking["consecutive_similar"] += 1
+        else:
+            tracking["consecutive_similar"] = 0
+        
+        # Determine if we should log based on time and similarity
+        time_since_log = current_time - tracking["last_log_time"]
+        
+        # Adjust log interval based on consecutive similar predictions
+        if tracking["consecutive_similar"] > 3:
+            # Exponential increase in throttle interval for similar predictions
+            adjusted_interval = tracking["min_log_interval"] * (1.5 ** min(tracking["consecutive_similar"] - 3, 5))
+            should_log = time_since_log >= adjusted_interval
+        else:
+            # Regular time-based throttling
+            should_log = time_since_log >= tracking["min_log_interval"]
+        
+        # Log prediction only when significant or after enough time
+        if should_log:
+            # Add repetition info if needed
+            repetition_info = ""
+            if tracking["consecutive_similar"] > 0:
+                repetition_info = f" (similar predictions: {tracking['consecutive_similar']+1}x)"
+            
+            # Enhanced prediction message 
+            prediction_diff = (
+                predicted_position[0] - filtered_position[0],
+                predicted_position[1] - filtered_position[1]
+            )
+            
+            # Calculate look-ahead time
+            lookdir_txt = ""
+            if abs(prediction_diff[0]) > 0.01:
+                look_dir = "ahead" if prediction_diff[0] > 0 else "behind"
+                lookdir_txt = f", looking {look_dir}"
+            
+            # Log using target filter update to leverage its throttling
+            log_target_filter_update(
+                filtered_position,  # Use filtered as "raw" since we're interested in prediction offset
+                filtered_position, 
+                predicted_position,
+                confidence
+            )
+            
+            # Update tracking info
+            tracking["last_log_time"] = current_time
+            tracking["last_prediction"] = predicted_position
     
     def _calculate_prediction_confidence(self, velocity_magnitude, consistency, filtered_position, predicted_position):
         """
@@ -4227,15 +4572,27 @@ class StrategyBlender:
    
     def update_target(self, target_strategy, current_time):
         """
-        Update the target strategy with enhanced handling for angular strategies.
+        Update the target strategy with enhanced handling for angular strategies
+        and improved logging of transitions.
         
         Args:
             target_strategy: The target strategy to blend towards
             current_time: Current time
-                
+                    
         Returns:
             bool: True if a new blend was started
         """
+        # Initialize tracking for blend logs if needed
+        if not hasattr(self, "_blend_tracking"):
+            self._blend_tracking = {
+                "last_log_time": 0.0,
+                "blend_count": 0,  # Count of blend transitions
+                "min_log_interval": 0.5,  # Minimum seconds between consecutive blend logs
+                "significant_transitions": set(),  # Track significant strategy pairs
+            }
+        
+        tracking = self._blend_tracking
+        
         # Gather parameters for potential logging
         blend_params = {
             'target_strategy': target_strategy.name,
@@ -4250,7 +4607,7 @@ class StrategyBlender:
             self.previous_direction = self._get_strategy_direction(target_strategy)
             self.last_strategy_switch_time = current_time
             
-            # Log initial strategy with detailed parameters
+            # Log initial strategy with reduced details for cleaner logs
             log_strategy_selection(
                 "initial", 
                 target_strategy.as_dict(),
@@ -4266,11 +4623,14 @@ class StrategyBlender:
             
             # Check if we're already blending to this strategy
             if self.blending_active and self.target_strategy.name == target_strategy.name:
-                # Log continued blend attempt
+                # Only log continued blend attempts at high debug level
                 if self.debug_level >= 2:
                     log_structured('strategy_blender', 'BLEND_CONTINUE', 
                                 f"Continued blend request to {target_strategy.name} - already in progress",
-                                blend_params)
+                                blend_params,
+                                throttle_key="blend_continue",
+                                throttle_seconds=1.0,
+                                verbosity_level=2)  # Higher verbosity level
                 return False  # Already blending to this strategy
                     
             # MODIFIED: Special handling for angular strategies
@@ -4288,10 +4648,14 @@ class StrategyBlender:
                     # Still apply a minimal hold time to prevent oscillation
                     blend_params['reason'] = f"Minimal hold time not met ({time_in_current_strategy:.2f}s < {angular_min_hold:.2f}s)"
                     
-                    # Log deferred blend with reason
-                    log_structured('strategy_blender', 'BLEND_DEFERRED', 
-                                f"Strategy switch to {target_strategy.name} deferred - minimal hold time not met", 
-                                blend_params)
+                    # Only log at higher debug level to reduce verbosity
+                    if self.debug_level >= 2:
+                        log_structured('strategy_blender', 'BLEND_DEFERRED', 
+                                    f"Strategy switch to {target_strategy.name} deferred - minimal hold time not met", 
+                                    blend_params,
+                                    throttle_key="angular_hold",
+                                    throttle_seconds=0.5,
+                                    verbosity_level=2)  # Higher verbosity level
                     return False
             else:
                 # Standard hold time check for non-angular strategies
@@ -4299,10 +4663,14 @@ class StrategyBlender:
                     # Haven't held current strategy long enough, don't switch yet
                     blend_params['reason'] = f"Minimum hold time not met ({time_in_current_strategy:.2f}s < {self.min_hold_time:.2f}s)"
                     
-                    # Log deferred blend with reason
-                    log_structured('strategy_blender', 'BLEND_DEFERRED', 
-                                f"Strategy switch to {target_strategy.name} deferred - minimum hold time not met", 
-                                blend_params)
+                    # Only log at higher debug level to reduce verbosity
+                    if self.debug_level >= 2:
+                        log_structured('strategy_blender', 'BLEND_DEFERRED', 
+                                    f"Strategy switch to {target_strategy.name} deferred - minimum hold time not met", 
+                                    blend_params,
+                                    throttle_key="standard_hold",
+                                    throttle_seconds=1.0,
+                                    verbosity_level=2)  # Higher verbosity level
                     return False
             
             # MODIFIED: Stricter similarity check to prevent unnecessary transitions
@@ -4316,10 +4684,14 @@ class StrategyBlender:
                     # Strategies are too similar, don't switch
                     blend_params['reason'] = "Strategies too similar for angular transition"
                     
-                    # Log similarity-based deferral
-                    log_structured('strategy_blender', 'BLEND_SIMILARITY_SKIP', 
-                                f"Strategy switch to {target_strategy.name} skipped - too similar to current strategy", 
-                                blend_params)
+                    # Only log at higher debug level to reduce verbosity
+                    if self.debug_level >= 2:
+                        log_structured('strategy_blender', 'BLEND_SIMILARITY_SKIP', 
+                                    f"Strategy switch to {target_strategy.name} skipped - too similar to current strategy", 
+                                    blend_params,
+                                    throttle_key="angular_similarity",
+                                    throttle_seconds=1.0,
+                                    verbosity_level=2)  # Higher verbosity level
                     return False
             else:
                 if strategies_similar:
@@ -4331,10 +4703,14 @@ class StrategyBlender:
                         'angular_diff': abs(self.current_strategy.angular_scale - target_strategy.angular_scale)
                     }
                     
-                    # Log similarity-based deferral
-                    log_structured('strategy_blender', 'BLEND_SIMILARITY_SKIP', 
-                                f"Strategy switch to {target_strategy.name} skipped - too similar to current strategy", 
-                                blend_params)
+                    # Only log at higher debug level to reduce verbosity
+                    if self.debug_level >= 2:
+                        log_structured('strategy_blender', 'BLEND_SIMILARITY_SKIP', 
+                                    f"Strategy switch to {target_strategy.name} skipped - too similar to current strategy", 
+                                    blend_params,
+                                    throttle_key="standard_similarity",
+                                    throttle_seconds=1.0,
+                                    verbosity_level=2)  # Higher verbosity level
                     return False
             
             # MODIFIED: Improved oscillation checking for all strategies
@@ -4346,10 +4722,12 @@ class StrategyBlender:
                 blend_params['reason'] = "Oscillation detected"
                 blend_params['history'] = [s[0] for s in self.strategy_history[-3:]]
                 
-                # Log oscillation detection
-                log_structured('strategy_blender', 'BLEND_OSCILLATION_DETECTED', 
-                            f"Strategy switch to {target_strategy.name} deferred - oscillation pattern detected", 
-                            blend_params)
+                # Only log oscillation if significant time has passed
+                if current_time - tracking["last_log_time"] >= tracking["min_log_interval"]:
+                    log_structured('strategy_blender', 'BLEND_OSCILLATION_DETECTED', 
+                                f"Strategy switch to {target_strategy.name} deferred - oscillation pattern detected", 
+                                blend_params)
+                    tracking["last_log_time"] = current_time
                 return False
             
             # Detect direction change for boosting transition speed
@@ -4396,10 +4774,37 @@ class StrategyBlender:
             # Update previous direction
             self.previous_direction = current_direction
             
-            # Log strategy transition with detailed parameters
+            # Determine if this transition is significant for logging
+            is_significant_transition = False
+            
+            # Case 1: Direction change transitions are significant
+            if direction_change:
+                is_significant_transition = True
+                
+            # Case 2: Any transition involving angular strategies is significant
+            if is_angular_strategy or self.current_strategy.name.startswith("ANGULAR_"):
+                is_significant_transition = True
+                
+            # Case 3: Any strategy with a substantial scale change is significant
+            forward_change = abs(target_strategy.forward_scale - self.current_strategy.forward_scale)
+            lateral_change = abs(target_strategy.lateral_scale - self.current_strategy.lateral_scale)
+            angular_change = abs(target_strategy.angular_scale - self.current_strategy.angular_scale)
+            
+            if forward_change > 0.3 or lateral_change > 0.3 or angular_change > 0.3:
+                is_significant_transition = True
+                
+            # Case 4: First few blends are significant
+            if tracking["blend_count"] < 5:
+                is_significant_transition = True
+                
+            # Increment blend count
+            tracking["blend_count"] += 1
+            
+            # Log strategy transition with detailed parameters if significant
             transition_reason = self._determine_transition_reason(
                 self.current_strategy, target_strategy)
             
+            # Always log initial blend event
             log_strategy_blending(
                 self.current_strategy, 
                 target_strategy, 
@@ -4407,13 +4812,15 @@ class StrategyBlender:
                 self.effective_blend_duration
             )
             
-            # Add detailed selection log
-            log_strategy_selection(
-                "transition", 
-                target_strategy.as_dict(),
-                candidate_strategies={self.current_strategy.name: self.current_strategy.as_dict()},
-                reason=transition_reason
-            )
+            # Log selection with reason if significant or enough time has passed
+            if is_significant_transition or (current_time - tracking["last_log_time"] >= tracking["min_log_interval"]):
+                log_strategy_selection(
+                    "transition", 
+                    target_strategy.as_dict(),
+                    candidate_strategies={self.current_strategy.name: self.current_strategy.as_dict()},
+                    reason=transition_reason
+                )
+                tracking["last_log_time"] = current_time
             
             return True
                 
@@ -5779,7 +6186,7 @@ class MovementDecisionManager:
 
 
 class VelocityLimitingStrategy:
-    """Base class for velocity limiting strategies."""
+    """Base class for velocity limiting strategies with improved logging."""
     
     def __init__(self, name, priority=5):
         """
@@ -5791,10 +6198,110 @@ class VelocityLimitingStrategy:
         """
         self.name = name
         self.priority = priority
+        self.logger = logging.getLogger('pid_controller.velocity_limiter')
         
+        # Add logging tracking for this strategy
+        self._log_tracking = {
+            'last_log_time': 0.0,
+            'last_components': None,
+            'consecutive_similar_count': 0,
+            'min_log_interval': 2.0  # Minimum seconds between similar logs
+        }
+    
+    def _is_change_significant(self, original_values, limited_values, components=None):
+        """
+        Determine if velocity changes are significant enough to log.
+        
+        Args:
+            original_values: Original velocity values [x, y, angular]
+            limited_values: Limited velocity values [x, y, angular]
+            components: Optional list to store components that changed significantly
+            
+        Returns:
+            tuple: (is_significant, total_magnitude, affected_components)
+        """
+        # Track which components were significantly limited
+        affected_components = [] if components is None else components
+        
+        # Increased threshold from 25% to 40% for significance
+        significance_threshold = 40.0
+        total_magnitude = 0.0
+        
+        component_names = ['x', 'y', 'a']
+        for i, name in enumerate(component_names):
+            # Skip insignificant original values
+            if abs(original_values[i]) <= 0.01:
+                continue
+                
+            # Calculate percentage change
+            pct_change = abs(limited_values[i] - original_values[i]) / abs(original_values[i]) * 100
+            total_magnitude += pct_change
+            
+            if pct_change > significance_threshold:
+                affected_components.append(f"{name}:{pct_change:.0f}%")
+        
+        # Determine overall significance:
+        # - Either total magnitude exceeds 50% across all components
+        # - Or any single component exceeds 70% (critical limiting)
+        is_significant = total_magnitude > 50.0 or any(float(comp.split(':')[1][:-1]) > 70.0 
+                                                     for comp in affected_components)
+        
+        return is_significant, total_magnitude, affected_components
+    
+    def _should_log_change(self, affected_components, reason):
+        """
+        Determine if this change should be logged based on frequency and similarity.
+        
+        Args:
+            affected_components: List of components affected by limiting
+            reason: Reason for limiting
+            
+        Returns:
+            bool: True if should log, False otherwise
+        """
+        current_time = time.time()
+        
+        # Sort components to ensure consistent comparison
+        affected_components = sorted(affected_components) if affected_components else []
+        
+        # Check if this is similar to the last logged change
+        is_similar = (self._log_tracking['last_components'] == affected_components)
+        
+        if is_similar:
+            # Increment similarity counter
+            self._log_tracking['consecutive_similar_count'] += 1
+            
+            # Only log every Nth similar change 
+            # For strategies that typically repeat, use higher thresholds
+            if self.name in ['LookAheadLimiter', 'ApproachScalingLimiter']:
+                # These tend to repeat frequently - require more repetitions
+                should_log = self._log_tracking['consecutive_similar_count'] % 5 == 0
+            else:
+                # Standard strategies - log every 3rd occurrence
+                should_log = self._log_tracking['consecutive_similar_count'] % 3 == 0
+        else:
+            # New component pattern - reset counter
+            self._log_tracking['consecutive_similar_count'] = 0
+            should_log = True
+        
+        # Always respect minimum time between logs
+        if (current_time - self._log_tracking['last_log_time']) < self._log_tracking['min_log_interval']:
+            should_log = False
+            
+        # If we're going to log, update tracking
+        if should_log:
+            self._log_tracking['last_log_time'] = current_time
+            self._log_tracking['last_components'] = affected_components
+            
+            # Add repetition info to reason if relevant
+            if self._log_tracking['consecutive_similar_count'] > 0:
+                return f"{reason} (repeated {self._log_tracking['consecutive_similar_count']} times)"
+        
+        return should_log and reason
+    
     def apply_limits(self, velocities, prev_velocities, robot_state, dt):
         """
-        Apply velocity limits according to this strategy.
+        Base implementation of apply_limits - should be overridden by subclasses.
         
         Args:
             velocities: Current commanded velocities [linear_x, linear_y, angular]
@@ -5820,7 +6327,7 @@ class AccelerationLimiter(VelocityLimitingStrategy):
         
         # ADDED: Separate limits for deceleration to allow faster stopping
         self.decel_limit = accel_limit * 1.5  # 50% higher limit for deceleration
-        self.angular_decel_limit = angular_accel_limit * 1.8  
+        self.angular_decel_limit = angular_accel_limit * 1.8
         
     def apply_limits(self, velocities, prev_velocities, robot_state, dt):
         """
@@ -5857,26 +6364,33 @@ class AccelerationLimiter(VelocityLimitingStrategy):
                 is_approaching
             )
             
-            # Check if limiting was applied
-            any_limited = False
-            components = []
+            # Check if limiting was significant
+            affected_components = []
+            is_significant, total_magnitude, affected_components = self._is_change_significant(
+                current_velocities, limited_velocities, affected_components
+            )
             
-            for i, (original, limited) in enumerate(zip(current_velocities, limited_velocities)):
-                if abs(original - limited) > 0.01:
-                    any_limited = True
-                    component_name = ['x', 'y', 'a'][i]
-                    components.append(component_name)
+            if is_significant:
+                reason = self._should_log_change(
+                    affected_components,
+                    f"Acceleration limited for {', '.join(affected_components)}"
+                )
+                
+                if reason:
+                    return limited_velocities, reason, True
+                else:
+                    # Change was significant but logging is throttled
+                    return limited_velocities, None, True
             
-            if any_limited:
-                reason = f"Acceleration limited for {', '.join(components)}"
-                return limited_velocities, reason, True
+            # Still return limited velocities even if not significant enough to log
+            if not np.array_equal(current_velocities, limited_velocities):
+                return limited_velocities, None, True
                 
             return current_velocities, None, False
             
         except Exception as e:
             # Fall back to simplified limiting
-            logger = logging.getLogger('pid_controller.velocity_limiter')
-            logger.warning(f"JIT acceleration limiting failed: {str(e)}. Using fallback.")
+            self.logger.warning(f"JIT acceleration limiting failed: {str(e)}. Using fallback.")
             
             # Simple fallback implementation
             limited_velocities = np.copy(current_velocities)
@@ -5887,7 +6401,7 @@ class AccelerationLimiter(VelocityLimitingStrategy):
             
             # Apply limits to each component
             any_limited = False
-            components = []
+            affected_components = []
             
             for i in range(3):
                 # Determine appropriate limit based on component
@@ -5900,11 +6414,27 @@ class AccelerationLimiter(VelocityLimitingStrategy):
                     # Apply limit while preserving sign
                     limited_velocities[i] = previous_velocities[i] + (limit if diff > 0 else -limit)
                     any_limited = True
-                    components.append(['x', 'y', 'a'][i])
+                    
+                    # Calculate percentage change for significance
+                    if abs(current_velocities[i]) > 0.01:
+                        pct_change = abs(limited_velocities[i] - current_velocities[i]) / abs(current_velocities[i]) * 100
+                        if pct_change > 40:  # Only record if >40% change
+                            affected_components.append(f"{['x', 'y', 'a'][i]}:{pct_change:.0f}%")
+            
+            if any_limited and affected_components:
+                reason = self._should_log_change(
+                    affected_components,
+                    f"Acceleration limited for {', '.join(affected_components)} (fallback mode)"
+                )
+                
+                if reason:
+                    return limited_velocities, reason, True
+                else:
+                    # Change was significant but logging is throttled
+                    return limited_velocities, None, True
             
             if any_limited:
-                reason = f"Acceleration limited for {', '.join(components)} (fallback mode)"
-                return limited_velocities, reason, True
+                return limited_velocities, None, True
             
             return current_velocities, None, False
 
@@ -5929,16 +6459,24 @@ class EmergencyBrakingLimiter(VelocityLimitingStrategy):
         # Emergency case 1: Already overshot target
         if distance_error < 0 and limited_velocities[0] > 0.01:
             # Hard limit on forward velocity
+            original_velocity = limited_velocities[0]
             limited_velocities[0] = 0.0
             reason = f"EMERGENCY BRAKE: Overshot target by {abs(distance_error):.3f}m"
             limiting_applied = True
             
+            # Emergency is always logged (no throttling for safety reasons)
+            return limited_velocities, reason, limiting_applied
+            
         # Emergency case 2: Too fast near target
         elif abs(distance_error) < 0.1 and limited_velocities[0] > 0.15:
             # Severe reduction in forward velocity
+            original_velocity = limited_velocities[0]
             limited_velocities[0] *= 0.3
-            reason = f"EMERGENCY BRAKE: Too fast near target ({limited_velocities[0]:.2f}m/s)"
+            reason = f"EMERGENCY BRAKE: Too fast near target ({original_velocity:.2f}m/s)"
             limiting_applied = True
+            
+            # Emergency is always logged (no throttling for safety reasons)
+            return limited_velocities, reason, limiting_applied
             
         return limited_velocities, reason, limiting_applied
 
@@ -5983,13 +6521,27 @@ class LookAheadLimiter(VelocityLimitingStrategy):
             
             # Copy velocities for modification
             limited_velocities = velocities.copy()
+            original_velocity = limited_velocities[0]
             limited_velocities[0] = safe_velocity
             
-            # Check if we made a significant change
-            if velocities[0] - safe_velocity > 0.05:  # 5 cm/s change
-                reason = (f"Look-ahead braking: distance={abs(distance_error):.2f}m, "
-                         f"stopping_distance={stopping_distance:.2f}m")
-                return limited_velocities, reason, True
+            # Calculate percentage reduction
+            if original_velocity > 0.01:
+                reduction_pct = abs(safe_velocity - original_velocity) / original_velocity * 100
+                
+                # Only consider significant if reduction is large
+                if reduction_pct > 40:  # Increased from 25% to 40%
+                    # Check if we should log based on frequency and similarity
+                    components = [f"x:{reduction_pct:.0f}%"]
+                    
+                    reason = self._should_log_change(
+                        components,
+                        f"Look-ahead braking: distance={abs(distance_error):.2f}m, stopping_distance={stopping_distance:.2f}m"
+                    )
+                    
+                    return limited_velocities, reason, True
+                    
+                # Still limit velocity even if not logging
+                return limited_velocities, None, True
                 
         return velocities, None, False
 
@@ -6026,6 +6578,7 @@ class ApproachScalingLimiter(VelocityLimitingStrategy):
         if abs(distance_error) < approach_zone:
             # Copy velocities for modification
             limited_velocities = velocities.copy()
+            original_velocities = velocities.copy()
             
             # Calculate approach factor (1.0 at edge of zone, min_factor at target)
             # This creates a linear scaling from full speed to minimum
@@ -6042,11 +6595,26 @@ class ApproachScalingLimiter(VelocityLimitingStrategy):
             angular_scale = min(1.0, scale_factor * 1.8)  # Even less reduction
             limited_velocities[2] = limited_velocities[2] * angular_scale
             
-            # Check if we made a significant change
-            if abs(1.0 - scale_factor) > 0.1:  # 10% change
-                reason = (f"Approach scaling: distance={abs(distance_error):.2f}m, "
-                         f"scale={scale_factor:.2f}, zone={approach_zone:.2f}m")
-                return limited_velocities, reason, True
+            # Check if change is significant
+            affected_components = []
+            is_significant, total_magnitude, affected_components = self._is_change_significant(
+                original_velocities, limited_velocities, affected_components
+            )
+            
+            if is_significant:
+                reason = self._should_log_change(
+                    affected_components,
+                    f"Approach scaling: distance={abs(distance_error):.2f}m, scale={scale_factor:.2f}, zone={approach_zone:.2f}m"
+                )
+                
+                if reason:
+                    return limited_velocities, reason, True
+                else:
+                    # Still apply limiting even if not logging
+                    return limited_velocities, None, True
+                    
+            # Always apply the scaling even if not significant enough to log
+            return limited_velocities, None, True
                 
         return velocities, None, False
 
@@ -6085,16 +6653,21 @@ class AsymmetricDecelerationLimiter(VelocityLimitingStrategy):
         is_decelerating_angular = (velocities[2] * prev_velocities[2] > 0 and 
                                   abs(velocities[2]) < abs(prev_velocities[2]))
         
+        # If neither component is decelerating, do nothing
+        if not is_decelerating_x and not is_decelerating_angular:
+            return velocities, None, False
+        
         # Get error values from robot state
         distance_error = robot_state.get('distance_error', 0.0)
         angular_error = robot_state.get('angular_error', 0.0)
         
         # Flag for whether limiting was applied
         limiting_applied = False
-        reason = None
         
         # Create a copy of velocities for modification
         limited_velocities = velocities.copy()
+        original_velocities = velocities.copy()
+        affected_components = []
         
         # Handle forward deceleration
         if is_decelerating_x:
@@ -6121,11 +6694,13 @@ class AsymmetricDecelerationLimiter(VelocityLimitingStrategy):
                 if decel > accel_limit:
                     # Apply the enhanced limit
                     limited_velocities[0] = prev_velocities[0] - accel_limit
-                    
-                    reason = (f"Enhanced deceleration near target: "
-                             f"boost={decel_boost:.2f}x, distance={abs(distance_error):.2f}m, "
-                             f"angular={math.degrees(abs(angular_error)):.2f}°")
                     limiting_applied = True
+                    
+                    # Calculate percentage reduction for logging
+                    if abs(velocities[0]) > 0.01:
+                        reduction_pct = abs(limited_velocities[0] - velocities[0]) / abs(velocities[0]) * 100
+                        if reduction_pct > 40:  # Only log significant changes
+                            affected_components.append(f"x:{reduction_pct:.0f}%")
         
         # Handle angular deceleration
         if is_decelerating_angular:
@@ -6147,23 +6722,42 @@ class AsymmetricDecelerationLimiter(VelocityLimitingStrategy):
                     # Apply the enhanced limit (preserve direction)
                     sign = 1.0 if velocities[2] >= 0 else -1.0
                     limited_velocities[2] = prev_velocities[2] - sign * angular_accel_limit
-                    
-                    # Update or append to reason
-                    angular_reason = (f"Enhanced angular deceleration: "
-                                    f"boost={angular_boost:.2f}x, angular={math.degrees(abs(angular_error)):.2f}°")
-                    
-                    if reason:
-                        reason = reason + "; " + angular_reason
-                    else:
-                        reason = angular_reason
-                        
                     limiting_applied = True
+                    
+                    # Calculate percentage reduction for logging
+                    if abs(velocities[2]) > 0.01:
+                        reduction_pct = abs(limited_velocities[2] - velocities[2]) / abs(velocities[2]) * 100
+                        if reduction_pct > 40:  # Only log significant changes
+                            affected_components.append(f"a:{reduction_pct:.0f}%")
         
-        # Return results
-        if limiting_applied:
-            return limited_velocities, reason, True
+        # Check if limiting should be logged
+        if limiting_applied and affected_components:
+            # Check if this should be logged based on throttling
+            is_significant, total_magnitude, _ = self._is_change_significant(
+                original_velocities, limited_velocities
+            )
             
-        return velocities, None, False
+            if is_significant:
+                reason = self._should_log_change(
+                    affected_components,
+                    f"Enhanced deceleration applied to {', '.join(affected_components)}"
+                )
+                
+                # Return with reason if should log
+                if reason:
+                    return limited_velocities, reason, True
+                
+                # Otherwise just return limited values without a reason
+                return limited_velocities, None, True
+            
+            # Still apply limiting even if not significant enough to log
+            return limited_velocities, None, True
+                
+        # Return original velocities if no limiting was applied
+        if not limiting_applied:
+            return velocities, None, False
+        
+        return limited_velocities, None, True
 
 
 class VelocityHysteresisLimiter(VelocityLimitingStrategy):
@@ -6184,25 +6778,50 @@ class VelocityHysteresisLimiter(VelocityLimitingStrategy):
         """Apply velocity hysteresis."""
         # Check if velocity changes are above hysteresis band
         significant_changes = [False, False, False]
+        
+        any_limited = False
+        limited_velocities = velocities.copy()
+        affected_components = []
+        
         for i in range(3):
             significant_changes[i] = abs(velocities[i] - prev_velocities[i]) > self.hysteresis_band
             
-        # If any component has insignificant change, apply hysteresis
-        if not all(significant_changes):
-            # Copy velocities for modification
-            limited_velocities = velocities.copy()
-            
-            # Apply hysteresis to each component
-            filtered_dirs = []
-            for i in range(3):
-                if not significant_changes[i]:
+            # If change is below hysteresis band, apply hysteresis
+            if not significant_changes[i]:
+                # Only apply if current velocity is non-zero (avoid preventing stopping)
+                if abs(velocities[i]) > 0.01:
                     # Change is below hysteresis band - keep previous velocity
+                    original = limited_velocities[i]
                     limited_velocities[i] = prev_velocities[i]
-                    filtered_dirs.append(f"{['x', 'y', 'a'][i]}")
+                    any_limited = True
                     
-            if filtered_dirs:
-                reason = f"Velocity hysteresis applied to {', '.join(filtered_dirs)}"
-                return limited_velocities, reason, True
+                    # Calculate percentage change for logging
+                    if abs(original) > 0.01:
+                        change_pct = abs(limited_velocities[i] - original) / abs(original) * 100
+                        if change_pct > 40:  # Only log significant changes
+                            affected_components.append(f"{['x', 'y', 'a'][i]}:{change_pct:.0f}%")
+        
+        # Only log significant hysteresis applications
+        if any_limited and affected_components:
+            is_significant, total_magnitude, _ = self._is_change_significant(
+                velocities, limited_velocities
+            )
+            
+            if is_significant:
+                reason = self._should_log_change(
+                    affected_components,
+                    f"Velocity hysteresis applied to {', '.join(affected_components)}"
+                )
+                
+                if reason:
+                    return limited_velocities, reason, True
+                
+                # Still apply limiting even if not logging
+                return limited_velocities, None, True
+        
+        # Always apply hysteresis if needed, even if not significant enough to log
+        if any_limited:
+            return limited_velocities, None, True
                 
         return velocities, None, False
 
@@ -6227,28 +6846,25 @@ class MinVelocityLimiter(VelocityLimitingStrategy):
         """Apply minimum velocity thresholds."""
         # Check if any velocity is below minimum threshold but not zero
         below_min = [False, False, False]
+        limited_velocities = velocities.copy()
+        any_limited = False
+        affected_components = []
         
         # Check each component
-        below_min[0] = 0 < abs(velocities[0]) < self.min_linear
-        below_min[1] = 0 < abs(velocities[1]) < self.min_linear
-        below_min[2] = 0 < abs(velocities[2]) < self.min_angular
-        
-        # If any component is below minimum, apply limits
-        if any(below_min):
-            # Copy velocities for modification
-            limited_velocities = velocities.copy()
+        for i in range(3):
+            min_threshold = self.min_angular if i == 2 else self.min_linear
+            below_min[i] = 0 < abs(velocities[i]) < min_threshold
             
-            # Apply minimum thresholds
-            zeroed_dirs = []
-            for i in range(3):
-                if below_min[i]:
-                    # Too small to be effective - zero it out
-                    limited_velocities[i] = 0.0
-                    zeroed_dirs.append(f"{['x', 'y', 'a'][i]}")
-                    
-            if zeroed_dirs:
-                reason = f"Min velocity threshold applied to {', '.join(zeroed_dirs)}"
-                return limited_velocities, reason, True
+            if below_min[i]:
+                # Too small to be effective - zero it out
+                original = limited_velocities[i]
+                limited_velocities[i] = 0.0
+                any_limited = True
+                affected_components.append(f"{['x', 'y', 'a'][i]}")
+        
+        if any_limited:
+            # This isn't significant enough to log in most cases - just apply it
+            return limited_velocities, None, True
                 
         return velocities, None, False
 
@@ -6273,40 +6889,68 @@ class MaxVelocityLimiter(VelocityLimitingStrategy):
         """Apply maximum velocity limits."""
         # Check if any velocity exceeds maximum
         exceeds_max = [False, False, False]
+        limited_velocities = velocities.copy()
+        any_limited = False
+        affected_components = []
         
         # Check each component
         for i in range(3):
             exceeds_max[i] = abs(velocities[i]) > self.max_velocities[i]
             
-        # If any component exceeds maximum, apply limits
-        if any(exceeds_max):
-            # Copy velocities for modification
-            limited_velocities = velocities.copy()
+            if exceeds_max[i]:
+                # Apply limit with original sign
+                original = limited_velocities[i]
+                sign = 1 if velocities[i] >= 0 else -1
+                limited_velocities[i] = sign * self.max_velocities[i]
+                any_limited = True
+                
+                # Calculate percentage change for logging
+                if abs(original) > 0.01:
+                    change_pct = abs(limited_velocities[i] - original) / abs(original) * 100
+                    if change_pct > 40:  # Only log significant changes
+                        affected_components.append(f"{['x', 'y', 'a'][i]}:{change_pct:.0f}%")
+        
+        # Check if limiting is significant enough to log
+        if any_limited and affected_components:
+            is_significant, total_magnitude, _ = self._is_change_significant(
+                velocities, limited_velocities
+            )
             
-            # Apply maximum limits
-            limited_dirs = []
-            for i in range(3):
-                if exceeds_max[i]:
-                    # Apply limit with original sign
-                    sign = 1 if velocities[i] >= 0 else -1
-                    limited_velocities[i] = sign * self.max_velocities[i]
-                    limited_dirs.append(f"{['x', 'y', 'a'][i]}")
+            if is_significant:
+                reason = self._should_log_change(
+                    affected_components,
+                    f"Max velocity limit applied to {', '.join(affected_components)}"
+                )
+                
+                if reason:
+                    return limited_velocities, reason, True
                     
-            if limited_dirs:
-                reason = f"Max velocity limit applied to {', '.join(limited_dirs)}"
-                return limited_velocities, reason, True
+                # Still apply limiting even if not logging
+                return limited_velocities, None, True
+        
+        # Always apply max velocity limits even if not significant enough to log
+        if any_limited:
+            return limited_velocities, None, True
                 
         return velocities, None, False
 
 
 class VelocityLimiterPipeline:
-    """Pipeline for applying multiple velocity limiting strategies."""
+    """Pipeline for applying multiple velocity limiting strategies with improved logging."""
     
     def __init__(self, debug_level=0):
         """Initialize the pipeline with debugging level."""
         self.strategies = []
         self.debug_level = debug_level
         self.logger = logging.getLogger('pid_controller.velocity_limiter')
+        
+        # Add tracking for consolidated logging
+        self._pipeline_log_tracking = {
+            'last_log_time': 0.0,
+            'last_components': None,
+            'consecutive_similar_count': 0,
+            'min_log_interval': 3.0  # Minimum seconds between pipeline logs
+        }
         
     def add_strategy(self, strategy):
         """
@@ -6322,7 +6966,7 @@ class VelocityLimiterPipeline:
         
     def apply_limits(self, velocities, prev_velocities, robot_state, dt):
         """
-        Apply all strategies in priority order with improved logging and deduplication.
+        Apply all strategies in priority order with improved logging.
         
         Args:
             velocities: Current commanded velocities [linear_x, linear_y, angular]
@@ -6335,6 +6979,7 @@ class VelocityLimiterPipeline:
         """
         # Convert to numpy array for efficient operations
         current_velocities = np.array(velocities, dtype=np.float32)
+        original_velocities = current_velocities.copy()
         
         # Create consolidated tracking data structure
         limiting_data = {
@@ -6374,15 +7019,15 @@ class VelocityLimiterPipeline:
                             if abs(pre_strategy_velocities[i]) > 0.01:
                                 # Calculate limitation percentage
                                 pct_change = abs(limited_velocities[i] - pre_strategy_velocities[i]) / abs(pre_strategy_velocities[i]) * 100
-                                if pct_change > 10:  # Only track significant changes (>10%)
+                                limiting_magnitude += pct_change
+                                if pct_change > 20:  # Track any change over 20%
                                     component_changes[comp] = pct_change
                                     limiting_data['limited_components'][comp] = True
-                                    limiting_magnitude += pct_change  # Sum up total limitation magnitude
                     
                     limiting_data['limiting_magnitude'] += limiting_magnitude
                     
                     # Only record significant limiting actions
-                    if component_changes:
+                    if component_changes and reason:  # Only record if there's a reason (means strategy decided it was significant)
                         # Store limit information with components affected
                         limiting_data['applied_limits'].append({
                             'strategy': strategy.name,
@@ -6427,7 +7072,7 @@ class VelocityLimiterPipeline:
                 strategy_groups['hysteresis'].append(limit_info)
             
             # Collect affected components for logging
-            if limit_info['components']:
+            if 'components' in limit_info:
                 for comp, pct in limit_info['components'].items():
                     limited_components.append(f"{comp}:{pct:.0f}%")
         
@@ -6453,7 +7098,8 @@ class VelocityLimiterPipeline:
         if strategy_groups['acceleration'] and reasons_collected < 2:
             accel_components = []
             for limit_info in strategy_groups['acceleration']:
-                accel_components.extend(limit_info['components'].keys())
+                if 'components' in limit_info:
+                    accel_components.extend(limit_info['components'].keys())
             
             if accel_components:
                 accel_components = list(set(accel_components))  # Remove duplicates
@@ -6461,311 +7107,137 @@ class VelocityLimiterPipeline:
                 reasons_collected += 1
         
         # Log only if significant limiting occurred - increased threshold
-        if limiting_data['applied_limits'] and limiting_data['limiting_magnitude'] > 50.0:  # Increased from any limiting to >50% total magnitude
+        if limiting_data['applied_limits'] and limiting_data['limiting_magnitude'] > 60.0:  # Increased from 50% to 60%
             # Count how many components were limited
             limited_count = sum(limiting_data['limited_components'].values())
             
-            # Only log if multiple components were limited or limitation was very significant
-            very_significant = limiting_data['limiting_magnitude'] > 100.0  # Very significant limiting
+            # Calculate overall percentage change
+            percentage_change = 0.0
+            for i in range(3):
+                if abs(original_velocities[i]) > 0.01:
+                    pct = abs(current_velocities[i] - original_velocities[i]) / abs(original_velocities[i]) * 100
+                    percentage_change += pct
             
-            if limited_count > 1 or very_significant:
+            # Only log if multiple components were limited or limitation was very significant
+            very_significant = limiting_data['limiting_magnitude'] > 120.0  # Very significant limiting
+            multi_component = limited_count > 1
+            
+            # Determine if this should be logged based on throttling
+            current_time = time.time()
+            should_log = False
+            
+            # Sort components to ensure consistent comparison
+            sorted_components = sorted(limited_components) if limited_components else []
+            
+            # Check if this is similar to the last logged change
+            is_similar = (self._pipeline_log_tracking['last_components'] == sorted_components)
+            
+            if is_similar:
+                # Increment similarity counter
+                self._pipeline_log_tracking['consecutive_similar_count'] += 1
+                
+                # Only log every 5th similar change
+                should_log = self._pipeline_log_tracking['consecutive_similar_count'] % 5 == 0
+            else:
+                # New component pattern - reset counter
+                self._pipeline_log_tracking['consecutive_similar_count'] = 0
+                should_log = True
+            
+            # Time-based throttling - minimum time between similar logs
+            if (current_time - self._pipeline_log_tracking['last_log_time']) < self._pipeline_log_tracking['min_log_interval']:
+                should_log = False
+            
+            # Additional conditions for logging
+            meets_significance = very_significant or multi_component
+            
+            if should_log and meets_significance:
+                # Update tracking
+                self._pipeline_log_tracking['last_log_time'] = current_time
+                self._pipeline_log_tracking['last_components'] = sorted_components
+                
+                # Add repetition info if relevant
+                repetition_info = ""
+                if self._pipeline_log_tracking['consecutive_similar_count'] > 0:
+                    repetition_info = f" (repeated {self._pipeline_log_tracking['consecutive_similar_count']} times)"
+                
                 # Create consolidated log message with main reasons (limited to 2)
-                log_msg = "Velocity limiting: " + "; ".join(reasons[:2])
+                log_msg = "Velocity limiting: " + "; ".join(reasons[:2]) + repetition_info
                 
                 # Log with improved throttling
                 log_velocity_limiting(
                     limiting_data['original_velocities'], 
                     current_velocities.tolist(), 
                     log_msg, 
-                    limited_components
+                    limited_components[:3]  # Limit to top 3 components for brevity
                 )
         
         return current_velocities.tolist(), reasons
 
-class VelocityLimiterPipeline:
-    """Pipeline for applying multiple velocity limiting strategies."""
-    
-    def __init__(self, debug_level=0):
-        """Initialize the pipeline with debugging level."""
-        self.strategies = []
-        self.debug_level = debug_level
-        self.logger = logging.getLogger('pid_controller.velocity_limiter')
-        
-    def add_strategy(self, strategy):
-        """
-        Add a velocity limiting strategy to the pipeline.
-        
-        Args:
-            strategy: VelocityLimitingStrategy instance
-        """
-        self.strategies.append(strategy)
-        
-        # Sort strategies by priority (highest first)
-        self.strategies.sort(key=lambda s: s.priority, reverse=True)
-        
-    def apply_limits(self, velocities, prev_velocities, robot_state, dt):
-        """
-        Apply all strategies in priority order with improved logging.
-        
-        Args:
-            velocities: Current commanded velocities [linear_x, linear_y, angular]
-            prev_velocities: Previous velocities [linear_x, linear_y, angular]
-            robot_state: Dict with robot state info
-            dt: Time delta since last update
-            
-        Returns:
-            tuple: (limited_velocities, reasons)
-        """
-        # Convert to numpy array for efficient operations
-        current_velocities = np.array(velocities, dtype=np.float32)
-        
-        # Create consolidated tracking data structure
-        limiting_data = {
-            'original_velocities': velocities.copy(),
-            'limited_velocities': None,  # Will be set at end
-            'applied_limits': [],        # Track all limits applied
-            'limited_components': {      # Track which components were limited
-                'x': False,
-                'y': False,
-                'a': False
-            }
-        }
-        
-        # Apply each strategy in priority order
-        for strategy in self.strategies:
-            # Store velocities before this strategy
-            pre_strategy_velocities = current_velocities.copy()
-            
-            # Apply this strategy
-            try:
-                limited_velocities, reason, limiting_applied = strategy.apply_limits(
-                    current_velocities, prev_velocities, robot_state, dt
-                )
-                
-                # Update current velocities for next strategy
-                if limiting_applied:
-                    # Calculate which components were limited and by how much
-                    component_changes = {}
-                    component_names = ['x', 'y', 'a']
-                    
-                    for i, comp in enumerate(component_names):
-                        # Check if this component changed significantly
-                        if abs(limited_velocities[i] - pre_strategy_velocities[i]) > 0.01:
-                            # Calculate percentage change
-                            if abs(pre_strategy_velocities[i]) > 0.01:
-                                # Calculate limitation percentage
-                                pct_change = abs(limited_velocities[i] - pre_strategy_velocities[i]) / abs(pre_strategy_velocities[i]) * 100
-                                if pct_change > 5:  # Only track significant changes (>5%)
-                                    component_changes[comp] = pct_change
-                                    limiting_data['limited_components'][comp] = True
-                    
-                    # Store limit information with components affected
-                    limiting_data['applied_limits'].append({
-                        'strategy': strategy.name,
-                        'reason': reason,
-                        'components': component_changes,
-                        'before': pre_strategy_velocities.copy(),
-                        'after': limited_velocities.copy()
-                    })
-                    
-                    # Update current velocities for next strategy
-                    current_velocities = limited_velocities
-            except Exception as e:
-                self.logger.error(f"Error in strategy {strategy.name}: {str(e)}")
-                # Continue with next strategy
-        
-        # Update final velocities
-        limiting_data['limited_velocities'] = current_velocities.copy()
-        
-        # Create consolidated reasons list and extract limited components
-        reasons = []
-        limited_components = []
-        
-        # Organize limiting info into logical groups
-        strategy_groups = {
-            'emergency': [],
-            'approach': [],
-            'acceleration': [],
-            'hysteresis': []
-        }
-        
-        # Group strategies by type
-        for limit_info in limiting_data['applied_limits']:
-            strategy_name = limit_info['strategy']
-            # Categorize based on strategy name
-            if 'Emergency' in strategy_name:
-                strategy_groups['emergency'].append(limit_info)
-            elif 'Approach' in strategy_name:
-                strategy_groups['approach'].append(limit_info)
-            elif 'Acceleration' in strategy_name or 'Deceleration' in strategy_name:
-                strategy_groups['acceleration'].append(limit_info)
-            elif 'Hysteresis' in strategy_name:
-                strategy_groups['hysteresis'].append(limit_info)
-            
-            # Collect affected components for logging
-            if limit_info['components']:
-                for comp, pct in limit_info['components'].items():
-                    limited_components.append(f"{comp}:{pct:.0f}%")
-        
-        # Build consolidated reason message
-        if strategy_groups['emergency']:
-            # Emergency strategies take precedence in messaging
-            for limit_info in strategy_groups['emergency']:
-                reasons.append(limit_info['reason'])
-        
-        # Add approach scaling if applicable
-        if strategy_groups['approach']:
-            approach_info = strategy_groups['approach'][0]  # Take the first one
-            if 'reason' in approach_info and approach_info['reason']:
-                reasons.append(approach_info['reason'])
-        
-        # Add acceleration limiting if applicable
-        accel_components = []
-        for limit_info in strategy_groups['acceleration']:
-            accel_components.extend(limit_info['components'].keys())
-        
-        if accel_components:
-            accel_components = list(set(accel_components))  # Remove duplicates
-            reasons.append(f"Acceleration limited in {', '.join(accel_components)}")
-        
-        # Add hysteresis limiting if applicable
-        if strategy_groups['hysteresis']:
-            hysteresis_components = []
-            for limit_info in strategy_groups['hysteresis']:
-                hysteresis_components.extend(limit_info['components'].keys())
-            
-            if hysteresis_components:
-                hysteresis_components = list(set(hysteresis_components))  # Remove duplicates
-                reasons.append(f"Velocity hysteresis applied to {', '.join(hysteresis_components)}")
-        
-        # Log only if significant limiting occurred
-        if limiting_data['applied_limits']:
-            # Count how many components were limited
-            limited_count = sum(limiting_data['limited_components'].values())
-            
-            # Calculate overall limitation magnitude
-            limitation_magnitude = sum([
-                abs(limiting_data['original_velocities'][i] - current_velocities[i])
-                for i in range(3)
-            ])
-            
-            # Only log if limitation was significant
-            if limited_count > 0 and limitation_magnitude > 0.05:
-                # Create consolidated log message
-                log_msg = "Velocity limiting: " + "; ".join(reasons[:2])  # Limit to top 2 reasons
-                
-                # Log with improved throttling
-                self.logger.info(log_msg)
-        
-        return current_velocities.tolist(), reasons
 
-
-class VelocityLimiterManager:
-    """Manager for all velocity limiting functionality."""
+def create_velocity_limiter_pipeline(robot_params, debug_level=0):
+    """
+    Create a complete velocity limiter pipeline with all strategies.
     
-    def __init__(self, robot_params, debug_level=0):
-        """
-        Initialize the velocity limiter manager.
+    Args:
+        robot_params: Dictionary with robot parameters
+        debug_level: Debug level for logging
         
-        Args:
-            robot_params: Dictionary with robot parameters
-            debug_level: Debug level for logging
-        """
-        self.pipeline = VelocityLimiterPipeline(debug_level)
-        self.debug_level = debug_level
-        self.logger = logging.getLogger('pid_controller.velocity_limiter')
-        
-        # Extract parameters
-        self.approach_distance = robot_params.get('approach_distance', 0.7)
-        self.min_approach_factor = robot_params.get('min_approach_factor', 0.1)
-        self.linear_x_max = robot_params.get('linear_x_max', 0.3)
-        self.linear_y_max = robot_params.get('linear_y_max', 0.3)
-        self.angular_max = robot_params.get('angular_max', 0.7)
-        self.accel_limit = robot_params.get('accel_limit', 1.5)
-        self.angular_accel_limit = robot_params.get('angular_accel_limit', 0.8)
-        
-        # Initialize strategies
-        self._init_strategies()
-        
-    def _init_strategies(self):
-        """Initialize all velocity limiting strategies."""
-        # Create instances of all strategy classes
-        # No imports - assuming all classes are defined in the same file
-        
-        # 1. Maximum velocity limits (highest priority)
-        max_vel_limiter = MaxVelocityLimiter(
-            self.linear_x_max, self.linear_y_max, self.angular_max
-        )
-        self.pipeline.add_strategy(max_vel_limiter)
-        
-        # 2. Emergency braking
-        emergency_limiter = EmergencyBrakingLimiter()
-        self.pipeline.add_strategy(emergency_limiter)
-        
-        # 3. Look-ahead limiting
-        lookahead_limiter = LookAheadLimiter()
-        self.pipeline.add_strategy(lookahead_limiter)
-        
-        # 4. Approach scaling
-        approach_limiter = ApproachScalingLimiter(
-            self.approach_distance, self.min_approach_factor
-        )
-        self.pipeline.add_strategy(approach_limiter)
-        
-        # 5. Asymmetric deceleration
-        asymmetric_limiter = AsymmetricDecelerationLimiter()
-        self.pipeline.add_strategy(asymmetric_limiter)
-        
-        # 6. Standard acceleration limiting
-        accel_limiter = AccelerationLimiter(
-            self.accel_limit, self.angular_accel_limit
-        )
-        self.pipeline.add_strategy(accel_limiter)
-        
-        # 7. Velocity hysteresis
-        hysteresis_limiter = VelocityHysteresisLimiter()
-        self.pipeline.add_strategy(hysteresis_limiter)
-        
-        # 8. Minimum velocity threshold
-        min_vel_limiter = MinVelocityLimiter()
-        self.pipeline.add_strategy(min_vel_limiter)
+    Returns:
+        VelocityLimiterPipeline: Configured pipeline
+    """
+    # Extract parameters
+    approach_distance = robot_params.get('approach_distance', 0.7)
+    min_approach_factor = robot_params.get('min_approach_factor', 0.1)
+    linear_x_max = robot_params.get('linear_x_max', 0.3)
+    linear_y_max = robot_params.get('linear_y_max', 0.3)
+    angular_max = robot_params.get('angular_max', 0.7)
+    accel_limit = robot_params.get('accel_limit', 1.5)
+    angular_accel_limit = robot_params.get('angular_accel_limit', 0.8)
     
-    def apply_velocity_limits(self, target_velocities, prev_velocities, distance_error, 
-                             is_approaching=False, dt=0.1):
-        """
-        Apply velocity limits to target velocities.
-        
-        Args:
-            target_velocities: Target velocities [linear_x, linear_y, angular]
-            prev_velocities: Previous velocities [linear_x, linear_y, angular]
-            distance_error: Error in distance to target
-            is_approaching: Whether robot is approaching target
-            dt: Time delta since last update
-            
-        Returns:
-            tuple: (limited_velocities, limited_components)
-        """
-        # Prepare robot state dictionary
-        robot_state = {
-            'distance_error': distance_error,
-            'is_approaching': is_approaching,
-            'accel_limit': self.accel_limit,
-            'approach_distance': self.approach_distance
-        }
-        
-        # Apply all limiting strategies
-        limited_velocities, reasons = self.pipeline.apply_limits(
-            target_velocities, prev_velocities, robot_state, dt
-        )
-        
-        # Determine which components were limited
-        limited_components = []
-        for i, (target, limited) in enumerate(zip(target_velocities, limited_velocities)):
-            if abs(target - limited) > 0.01:
-                pct = abs(target - limited) / max(0.01, abs(target)) * 100
-                limited_components.append(f"{['x', 'y', 'a'][i]}:{pct:.0f}%")
-        
-        return limited_velocities, limited_components
+    # Create pipeline
+    pipeline = VelocityLimiterPipeline(debug_level)
+    
+    # Create and add all strategies in priority order
+    
+    # 1. Maximum velocity limits (highest priority)
+    max_vel_limiter = MaxVelocityLimiter(
+        linear_x_max, linear_y_max, angular_max
+    )
+    pipeline.add_strategy(max_vel_limiter)
+    
+    # 2. Emergency braking
+    emergency_limiter = EmergencyBrakingLimiter()
+    pipeline.add_strategy(emergency_limiter)
+    
+    # 3. Look-ahead limiting
+    lookahead_limiter = LookAheadLimiter()
+    pipeline.add_strategy(lookahead_limiter)
+    
+    # 4. Approach scaling
+    approach_limiter = ApproachScalingLimiter(
+        approach_distance, min_approach_factor
+    )
+    pipeline.add_strategy(approach_limiter)
+    
+    # 5. Asymmetric deceleration
+    asymmetric_limiter = AsymmetricDecelerationLimiter()
+    pipeline.add_strategy(asymmetric_limiter)
+    
+    # 6. Standard acceleration limiting
+    accel_limiter = AccelerationLimiter(
+        accel_limit, angular_accel_limit
+    )
+    pipeline.add_strategy(accel_limiter)
+    
+    # 7. Velocity hysteresis
+    hysteresis_limiter = VelocityHysteresisLimiter()
+    pipeline.add_strategy(hysteresis_limiter)
+    
+    # 8. Minimum velocity threshold
+    min_vel_limiter = MinVelocityLimiter()
+    pipeline.add_strategy(min_vel_limiter)
+    
+    return pipeline
 
 class ImprovedPIDControllerNode(Node):
     """Enhanced PID Controller node with improved movement strategy and error handling."""
@@ -7647,6 +8119,33 @@ class ImprovedPIDControllerNode(Node):
             
             # Setup pre-allocation for error calculation
             self._current_errors = [0.0, 0.0, 0.0]  # distance, lateral, angular
+            
+            # ====================================================================
+            # IMPROVED: Set up velocity limiter pipeline instead of manager
+            # ====================================================================
+            
+            # Collect robot parameters for velocity limiter
+            robot_params = {
+                'approach_distance': self.approach_distance,
+                'min_approach_factor': self.min_approach_factor,
+                'linear_x_max': self.linear_x_max,
+                'linear_y_max': self.linear_y_max,
+                'angular_max': self.angular_max,
+                'accel_limit': 1.5,  # Base acceleration limit
+                'angular_accel_limit': 1.0  # Base angular acceleration limit
+            }
+            
+            # Create the velocity limiter pipeline
+            start_time = time.time()
+            self._velocity_limiter_pipeline = create_velocity_limiter_pipeline(
+                robot_params, self.debug_level
+            )
+            elapsed = time.time() - start_time
+            log_initialization_step("velocity_limiter", "pipeline_setup", "completed", elapsed)
+            
+            # ====================================================================
+            # End of improved velocity limiter setup
+            # ====================================================================
             
             # Log successful initialization
             log_initialization_step("state_variables", "all_variables", "initialized", None)
@@ -8807,7 +9306,7 @@ class ImprovedPIDControllerNode(Node):
             
     def _select_strategy(self):
         """
-        Select the optimal movement strategy based on current errors and conditions.
+        Select the optimal movement strategy based on current errors and conditions with improved logging.
         
         Returns:
             dict: The selected strategy
@@ -8815,13 +9314,30 @@ class ImprovedPIDControllerNode(Node):
         # Determine the optimal movement strategy with hysteresis
         prev_strategy_name = self.current_strategy
         
-        # Log error values before strategy determination for context
-        if self.debug_level >= 2:
+        # Initialize selection tracking if it doesn't exist
+        if not hasattr(self, "_strategy_selection_tracking"):
+            self._strategy_selection_tracking = {
+                "last_log_time": 0.0,
+                "min_log_interval": 2.0,  # Minimum seconds between selection logs
+                "last_selection_key": None,  # Last error category combination used
+                "selection_counts": {},  # Count selections for each key combination
+            }
+        
+        tracking = self._strategy_selection_tracking
+        current_time = time.time()
+        
+        # Log error values before strategy determination only if:
+        # 1. Debug level is high enough AND
+        # 2. Enough time has passed since last log
+        if self.debug_level >= 2 and (current_time - tracking["last_log_time"]) >= tracking["min_log_interval"]:
             log_structured('strategy_selector', 'PRE_STRATEGY_ERRORS', 
                         f"Errors before strategy selection", 
                         {'distance_error': self._current_errors[0], 
                         'lateral_error': self._current_errors[1], 
-                        'angular_error_deg': math.degrees(self._current_errors[2])})
+                        'angular_error_deg': math.degrees(self._current_errors[2])},
+                        verbosity_level=2)  # Higher verbosity level
+            
+            tracking["last_log_time"] = current_time
         
         # Get error trends from trackers for dynamic adjustments
         distance_trend = self.distance_error_tracker.get_trend() if hasattr(self.distance_error_tracker, 'get_trend') else 0.0
@@ -8850,13 +9366,17 @@ class ImprovedPIDControllerNode(Node):
             if time_in_strategy < adaptive_hold_time:
                 strategy_stability_needed = True
                 
-                # Log the strategy stability constraint
+                # Only log stability constraints at high debug level
                 if self.debug_level >= 2:
+                    # Use throttled logging to reduce verbosity
                     log_structured('strategy_selector', 'STRATEGY_STABILITY', 
                                 f"Maintaining current strategy for stability", 
                                 {'current_strategy': self.current_strategy,
                                 'time_in_strategy': time_in_strategy,
-                                'required_hold_time': adaptive_hold_time})
+                                'required_hold_time': adaptive_hold_time},
+                                throttle_key="stability",
+                                throttle_seconds=1.0,
+                                verbosity_level=2)  # Higher verbosity level
                 
                 # If we need strategy stability and have an active strategy, use it
                 if hasattr(self, 'active_strategy'):
@@ -8868,28 +9388,63 @@ class ImprovedPIDControllerNode(Node):
         # Apply strategy modifiers based on approach phase
         strategy = self._apply_strategy_modifiers(strategy, distance_error, distance_trend, lateral_trend, angular_trend)
         
-        # Log strategy change if it occurred
-        self._log_strategy_change(strategy, prev_strategy_name)
+        # Track selection key for logging
+        current_key = (self.prev_distance_category, self.prev_lateral_category, self.prev_angular_category)
+        if current_key != tracking["last_selection_key"]:
+            # Reset count for new key combination
+            tracking["selection_counts"][current_key] = 1
+            tracking["last_selection_key"] = current_key
+        else:
+            # Increment count for this key
+            tracking["selection_counts"][current_key] = tracking["selection_counts"].get(current_key, 0) + 1
+        
+        # Log strategy selection with improved context
+        sel_count = tracking["selection_counts"].get(current_key, 1)
+        context = f"Error categories: distance={self.prev_distance_category}, lateral={self.prev_lateral_category}, angular={self.prev_angular_category}"
+        
+        # Add trend information for significant trends only
+        if abs(distance_trend) > 0.1 or abs(lateral_trend) > 0.1 or abs(angular_trend) > 0.1:
+            context += f", trends=[{distance_trend:.2f}, {lateral_trend:.2f}, {angular_trend:.2f}]"
+        
+        # Only log periodically based on selection count for the same key
+        if sel_count <= 3 or sel_count % 10 == 0:  # Log first 3 and then every 10th
+            log_strategy_selection(
+                current_key, 
+                strategy,
+                reason=context
+            )
         
         return strategy
 
     def _check_special_case_strategies(self, distance_error, lateral_error, angular_error_degrees):
         """
         Check for special case strategies based on error conditions with enhanced
-        angular prioritization.
+        angular prioritization and reduced logging.
         
         Args:
             distance_error: Current distance error
             lateral_error: Current lateral error
             angular_error_degrees: Current angular error in degrees
-                
+                    
         Returns:
             dict: Selected strategy
         """
+        # Initialize tracking for special case logging if needed
+        if not hasattr(self, "_special_case_tracking"):
+            self._special_case_tracking = {
+                "last_log_time": {},  # Keyed by special case type
+                "consecutive_count": {},  # Count consecutive selections
+                "min_log_interval": 1.0,  # Minimum seconds between logs
+            }
+        
+        tracking = self._special_case_tracking
+        current_time = time.time()
+        
         # IMPROVED: Lowering angular threshold for special case handling from 10.0 to 7.0 degrees
         # This ensures earlier intervention for moderate angular errors
         if abs(angular_error_degrees) > 7.0:
             # Angular-first strategy for significant angular errors
+            special_case = "ANGULAR_FIRST"
             name = "ANGULAR_FIRST_APPROACH"
             use_forward = True
             use_lateral = True
@@ -8903,7 +9458,7 @@ class ImprovedPIDControllerNode(Node):
             
             reason = f"Angular-first approach - correcting angular error: {angular_error_degrees:.1f}°"
             
-            # Create and log special strategy
+            # Create special strategy
             special_strategy = {
                 "strategy_name": name,
                 "use_forward": use_forward,
@@ -8914,11 +9469,35 @@ class ImprovedPIDControllerNode(Node):
                 "angular_scale": angular_scale,
                 "reason": reason
             }
-            log_strategy_selection(
-                "angular_override", 
-                special_strategy,
-                reason=f"Angular error ({angular_error_degrees:.1f}°) exceeds threshold"
-            )
+            
+            # Log with reduced frequency depending on consecutive selections
+            if special_case in tracking["consecutive_count"]:
+                tracking["consecutive_count"][special_case] += 1
+            else:
+                tracking["consecutive_count"][special_case] = 1
+            
+            # Get last log time, defaulting to 0
+            last_log_time = tracking["last_log_time"].get(special_case, 0)
+            consecutive_count = tracking["consecutive_count"][special_case]
+            
+            # Calculate appropriate log interval based on repetition
+            if consecutive_count > 5:
+                # After 5 consecutive logs, gradually increase interval
+                log_interval = min(5.0, tracking["min_log_interval"] * (consecutive_count / 5))
+            else:
+                log_interval = tracking["min_log_interval"]
+            
+            # Log if enough time has passed or if angular error changed significantly
+            time_since_log = current_time - last_log_time
+            
+            # Only log periodically with higher-level reason
+            if time_since_log >= log_interval:
+                log_strategy_selection(
+                    "angular_override", 
+                    special_strategy,
+                    reason=f"Angular error ({angular_error_degrees:.1f}°) exceeds threshold"
+                )
+                tracking["last_log_time"][special_case] = current_time
             
             # Store as active strategy
             self.active_strategy = MovementStrategy(
@@ -8929,9 +9508,9 @@ class ImprovedPIDControllerNode(Node):
             return special_strategy
             
         # IMPROVED: Add additional special case for medium angular errors (3-7 degrees)
-        # This creates a more gradual transition for angular corrections
         elif abs(angular_error_degrees) > 3.0:
             # Balanced approach with moderate angular priority
+            special_case = "BALANCED_ANGULAR"
             name = "BALANCED_ANGULAR_CORRECTION"
             use_forward = True
             use_lateral = True
@@ -8944,7 +9523,7 @@ class ImprovedPIDControllerNode(Node):
             
             reason = f"Balanced approach with angular priority: {angular_error_degrees:.1f}°"
             
-            # Create and log special strategy
+            # Create special strategy
             special_strategy = {
                 "strategy_name": name,
                 "use_forward": use_forward,
@@ -8955,11 +9534,29 @@ class ImprovedPIDControllerNode(Node):
                 "angular_scale": angular_scale,
                 "reason": reason
             }
-            log_strategy_selection(
-                "medium_angular_override", 
-                special_strategy,
-                reason=f"Medium angular error ({angular_error_degrees:.1f}°) requires attention"
-            )
+            
+            # Increment consecutive count
+            if special_case in tracking["consecutive_count"]:
+                tracking["consecutive_count"][special_case] += 1
+            else:
+                tracking["consecutive_count"][special_case] = 1
+            
+            # Get last log time and consecutive count
+            last_log_time = tracking["last_log_time"].get(special_case, 0)
+            consecutive_count = tracking["consecutive_count"][special_case]
+            
+            # For medium angular corrections, log less frequently
+            log_interval = min(8.0, tracking["min_log_interval"] * (1 + consecutive_count / 3))
+            time_since_log = current_time - last_log_time
+            
+            # Only log periodically to reduce verbosity
+            if consecutive_count <= 2 or time_since_log >= log_interval:
+                log_strategy_selection(
+                    "medium_angular_override", 
+                    special_strategy,
+                    reason=f"Medium angular error ({angular_error_degrees:.1f}°) requires attention"
+                )
+                tracking["last_log_time"][special_case] = current_time
             
             # Store as active strategy
             self.active_strategy = MovementStrategy(
@@ -8970,9 +9567,9 @@ class ImprovedPIDControllerNode(Node):
             return special_strategy
             
         # Check for combined lateral and distance error - implement coordinated diagonal approach
-        # This part remains similar to the original implementation
         elif abs(lateral_error) > 0.15 and abs(distance_error) > 0.3:
             # Calculate approach angle to determine optimal path
+            special_case = "DIAGONAL"
             approach_angle = math.degrees(math.atan2(lateral_error, distance_error))
             
             # For significant diagonal approaches, create a coordinated strategy
@@ -9003,11 +9600,24 @@ class ImprovedPIDControllerNode(Node):
                     "reason": reason
                 }
                 
-                log_strategy_selection(
-                    "diagonal_override", 
-                    special_strategy,
-                    reason=f"Significant diagonal approach at {approach_angle:.1f}° angle"
-                )
+                # Reduced logging for diagonal approaches
+                if special_case in tracking["consecutive_count"]:
+                    tracking["consecutive_count"][special_case] += 1
+                else:
+                    tracking["consecutive_count"][special_case] = 1
+                    
+                consecutive_count = tracking["consecutive_count"][special_case]
+                last_log_time = tracking["last_log_time"].get(special_case, 0)
+                time_since_log = current_time - last_log_time
+                
+                # Log only for first few and then periodically
+                if consecutive_count <= 2 or (consecutive_count % 5 == 0 and time_since_log >= 2.0):
+                    log_strategy_selection(
+                        "diagonal_override", 
+                        special_strategy,
+                        reason=f"Significant diagonal approach at {approach_angle:.1f}° angle"
+                    )
+                    tracking["last_log_time"][special_case] = current_time
                 
                 # Store as active strategy
                 self.active_strategy = MovementStrategy(
@@ -9099,7 +9709,7 @@ class ImprovedPIDControllerNode(Node):
 
     def _log_strategy_change(self, strategy, prev_strategy_name):
         """
-        Log strategy changes and update strategy tracking.
+        Log strategy changes and update strategy tracking with improved significance detection.
         
         Args:
             strategy: Current strategy
@@ -9113,24 +9723,105 @@ class ImprovedPIDControllerNode(Node):
         
         # Check if strategy changed
         if strategy_name != prev_strategy_name:
-            # Strategy has changed - log the transition
-            log_structured('strategy_selector', 'STRATEGY_CHANGED', 
-                        f"Strategy changed: {prev_strategy_name} → {strategy_name}", 
-                        {'reason': strategy.get("reason", "N/A") if isinstance(strategy, dict) else "N/A",
-                        'distance_cat': self.prev_distance_category,
-                        'lateral_cat': self.prev_lateral_category, 
-                        'angular_cat': self.prev_angular_category,
-                        'forward_scale': strategy.get("forward_scale", 0.0) if isinstance(strategy, dict) else 0.0,
-                        'lateral_scale': strategy.get("lateral_scale", 0.0) if isinstance(strategy, dict) else 0.0,
-                        'angular_scale': strategy.get("angular_scale", 0.0) if isinstance(strategy, dict) else 0.0})
+            # Initialize strategy change tracking if it doesn't exist
+            if not hasattr(self, "_strategy_change_tracking"):
+                self._strategy_change_tracking = {
+                    "last_log_time": 0.0,
+                    "oscillating_strategies": {},  # Count oscillations between pairs
+                    "significant_changes": set(),  # Track significant state transitions
+                }
             
-            # Update the strategy change time for oscillation detection
+            tracking = self._strategy_change_tracking
+            current_time = time.time()
+            
+            # Check for oscillation (switching back and forth between strategies)
+            pair_key = f"{prev_strategy_name}_{strategy_name}"
+            reverse_key = f"{strategy_name}_{prev_strategy_name}"
+            
+            if reverse_key in tracking["oscillating_strategies"]:
+                # This is a switch back to a recent strategy - increment oscillation count
+                tracking["oscillating_strategies"][reverse_key] = tracking["oscillating_strategies"].get(reverse_key, 0) + 1
+                
+                # Only log oscillations periodically to avoid spam
+                oscillation_count = tracking["oscillating_strategies"][reverse_key]
+                if oscillation_count <= 3 or oscillation_count % 5 == 0:  # Log first 3, then every 5th
+                    log_structured('strategy_selector', 'STRATEGY_OSCILLATION', 
+                                f"Strategy oscillation detected: {prev_strategy_name} ↔ {strategy_name} ({oscillation_count}x)", 
+                                {'count': oscillation_count,
+                                'from_strategy': prev_strategy_name,
+                                'to_strategy': strategy_name})
+            else:
+                # Record this transition for future oscillation detection
+                tracking["oscillating_strategies"][pair_key] = 1
+                
+                # Clean up old oscillation records periodically
+                if len(tracking["oscillating_strategies"]) > 10:
+                    # Keep only the most recent and most frequent oscillations
+                    sorted_pairs = sorted(tracking["oscillating_strategies"].items(), 
+                                        key=lambda x: x[1], reverse=True)
+                    tracking["oscillating_strategies"] = dict(sorted_pairs[:5])  # Keep top 5
+            
+            # Determine if this is a significant strategy change worth logging
+            is_significant = False
+            
+            # Case 1: First strategy after initialization
+            if prev_strategy_name is None or prev_strategy_name == "IDLE":
+                is_significant = True
+                
+            # Case 2: Entering or exiting an "ANGULAR" strategy
+            if ("ANGULAR" in strategy_name and "ANGULAR" not in prev_strategy_name) or \
+            ("ANGULAR" in prev_strategy_name and "ANGULAR" not in strategy_name):
+                is_significant = True
+                
+            # Case 3: Any transition to emergency, stop, or approach strategies
+            important_strategies = ["EMERGENCY", "STOP", "APPROACH", "DIAGONAL"]
+            if any(s in strategy_name for s in important_strategies):
+                is_significant = True
+                
+            # Case 4: Major change in motion components or direction
+            if isinstance(strategy, dict) and isinstance(prev_strategy_name, str):
+                # Try to find previous strategy in strategy table
+                for strat_def in self.strategy_table.values():
+                    if len(strat_def) >= 8 and strat_def[0] == prev_strategy_name:
+                        # Compare motion components
+                        prev_forward = strat_def[1]  # use_forward
+                        prev_lateral = strat_def[2]  # use_lateral
+                        prev_angular = strat_def[3]  # use_angular
+                        
+                        curr_forward = strategy.get("use_forward", False)
+                        curr_lateral = strategy.get("use_lateral", False)
+                        curr_angular = strategy.get("use_angular", False)
+                        
+                        # If motion components changed, it's significant
+                        if prev_forward != curr_forward or prev_lateral != curr_lateral or prev_angular != curr_angular:
+                            is_significant = True
+                        break
+            
+            # Only log significant strategy changes or periodically forced logs
+            if is_significant or (current_time - tracking["last_log_time"]) > 5.0:  # Force log every 5 seconds
+                # Strategy has changed - log the transition
+                log_structured('strategy_selector', 'STRATEGY_CHANGED', 
+                            f"Strategy changed: {prev_strategy_name} → {strategy_name}", 
+                            {'reason': strategy.get("reason", "N/A") if isinstance(strategy, dict) else "N/A",
+                            'distance_cat': self.prev_distance_category,
+                            'lateral_cat': self.prev_lateral_category, 
+                            'angular_cat': self.prev_angular_category,
+                            'forward_scale': strategy.get("forward_scale", 0.0) if isinstance(strategy, dict) else 0.0,
+                            'lateral_scale': strategy.get("lateral_scale", 0.0) if isinstance(strategy, dict) else 0.0,
+                            'angular_scale': strategy.get("angular_scale", 0.0) if isinstance(strategy, dict) else 0.0})
+                
+                # Update log time
+                tracking["last_log_time"] = current_time
+                
+            # Always update the strategy change time regardless of logging
             self.strategy_change_time = time.time()
+            
         elif self.debug_level >= 3:
-            # Only log if at high debug level
+            # Only log continued strategy at highest debug level
             log_structured('strategy_selector', 'STRATEGY_MAINTAINED', 
                         f"Maintaining strategy: {strategy_name}", 
-                        {'duration': time.time() - self.strategy_change_time})
+                        {'duration': time.time() - self.strategy_change_time},
+                        verbosity_level=3)  # Increase verbosity level to reduce logging
 
     def _compute_velocities_from_strategy(self, strategy):
         """
@@ -10431,38 +11122,20 @@ class ImprovedPIDControllerNode(Node):
     
     def _apply_velocity_limits(self, linear_x, linear_y, angular_z, current_time):
         """
-        Apply velocity and acceleration limits with enhanced approach behavior.
+        Apply velocity and acceleration limits with enhanced approach behavior and improved logging.
         
         Args:
             linear_x: Calculated forward velocity
             linear_y: Calculated lateral velocity
             angular_z: Calculated angular velocity
             current_time: Current time for acceleration limiting
-                
+                    
         Returns:
             tuple: (limited_linear_x, limited_linear_y, limited_angular_z)
         """
         # Store original velocities for comparison and logging
         original_velocities = [linear_x, linear_y, angular_z]
         
-        # Initialize velocity limiter if needed
-        if not hasattr(self, '_velocity_limiter_manager'):
-            # Collect robot parameters for limiter
-            robot_params = {
-                'approach_distance': self.approach_distance,
-                'min_approach_factor': self.min_approach_factor,
-                'linear_x_max': self.linear_x_max,
-                'linear_y_max': self.linear_y_max,
-                'angular_max': self.angular_max,
-                'accel_limit': 1.5,  # Base acceleration limit
-                'angular_accel_limit': 1.0  # Base angular acceleration limit
-            }
-            
-            # Create the velocity limiter manager
-            self._velocity_limiter_manager = VelocityLimiterManager(
-                robot_params, self.debug_level
-            )
-            
         # Calculate time since last control step
         dt = current_time - getattr(self, "last_accel_time", current_time - 0.1)
         self.last_accel_time = current_time
@@ -10478,20 +11151,46 @@ class ImprovedPIDControllerNode(Node):
             if abs(distance_error) < self.approach_distance * 1.5:
                 is_approaching = True
         
-        # Apply velocity limits
-        limited_velocities, limited_components = self._velocity_limiter_manager.apply_velocity_limits(
-            [linear_x, linear_y, angular_z],
-            self.last_cmd_vel,
-            distance_error,
-            is_approaching,
-            dt
-        )
+        # ====================================================================
+        # IMPROVED: Use velocity limiter pipeline instead of manager
+        # ====================================================================
         
-        # Log if significant limiting occurred
-        if limited_components and self.debug_level >= 1:
-            self.get_logger().info(f"Velocity limited: {', '.join(limited_components)}")
+        # Prepare robot state dictionary for velocity limiting
+        robot_state = {
+            'distance_error': distance_error,
+            'is_approaching': is_approaching,
+            'approach_distance': self.approach_distance,
+            'accel_limit': 1.5,  # Base acceleration limit
+            'angular_accel_limit': 1.0  # Base angular acceleration limit
+        }
         
-        return tuple(limited_velocities)    
+        try:
+            # Apply all velocity limiting strategies through the pipeline
+            limited_velocities, reasons = self._velocity_limiter_pipeline.apply_limits(
+                [linear_x, linear_y, angular_z],  # Current velocities
+                self.last_cmd_vel,                # Previous velocities
+                robot_state,                      # State information
+                dt                                # Time delta
+            )
+            
+            # Only log if there are reasons (significant limiting occurred)
+            if reasons and self.debug_level >= 1:
+                # The pipeline's internal logging is already improved and throttled,
+                # so no need for additional logging here
+                pass
+                
+        except Exception as e:
+            # Handle errors gracefully - log and return original velocities
+            self.get_logger().error(f"Error in velocity limiter pipeline: {str(e)}")
+            limited_velocities = [linear_x, linear_y, angular_z]
+        
+        # ====================================================================
+        # End of improved velocity limiter usage
+        # ====================================================================
+        
+        return tuple(limited_velocities)
+
+
     def stop_robot(self):
         """Send a command to stop all robot motion immediately and reset controllers with improved logging."""
         # Store previous motion state for transition logging
@@ -11192,7 +11891,7 @@ class ImprovedPIDControllerNode(Node):
 
     def _match_strategy(self, key, strategies):
         """
-        Match a key against the strategy table with wildcard support.
+        Match a key against the strategy table with wildcard support and reduced logging.
         
         Args:
             key: Tuple of (distance_state, lateral_state, angular_state)
@@ -11224,8 +11923,8 @@ class ImprovedPIDControllerNode(Node):
         
         for pattern in patterns_to_try:
             if pattern in strategies:
-                # Only log at debug level to reduce verbosity
-                if self.debug_level >= 2:
+                # Only log at highest debug level (3) to minimize verbosity
+                if self.debug_level >= 3:
                     self.get_logger().debug(
                         f"Strategy wildcard match: {key} → {pattern}, " 
                         f"strategy={strategies[pattern][0]}"
