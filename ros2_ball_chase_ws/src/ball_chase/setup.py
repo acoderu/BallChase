@@ -23,6 +23,10 @@ setup(
     license='TODO: License declaration',
     tests_require=['pytest'],
 
+    package_data={
+        'ball_chase': ['nodes/*.py'],
+    },
+
     entry_points={
         'console_scripts': [
             'lidar_node = ball_chase.nodes.lidar_node:main',
