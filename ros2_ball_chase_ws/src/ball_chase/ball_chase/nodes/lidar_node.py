@@ -1797,7 +1797,7 @@ class BasketballLidarDetector(Node):
                 # Early stopping if we have a good enough result
                 if (i >= self.ransac_min_iterations_before_early_stop and 
                     quality > self.ransac_early_stop_quality and
-                    inlier_count >= len(points) * 0.7):
+                    inlier_count >= len(nearby_points) * 0.7):
                     break
             
         # Return result if found

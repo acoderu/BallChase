@@ -908,20 +908,7 @@ class PIDControllers:
             self.lateral_scale = lateral_scale
             self.angular_scale = angular_scale
             self.reason = reason
-        
-        # def as_dict(self):
-        #     """Convert to dictionary for compatibility with existing code."""
-        #     return {
-        #         "strategy_name": self.name,
-        #         "use_forward": self.use_forward,
-        #         "use_lateral": self.use_lateral,
-        #         "use_angular": self.use_angular,
-        #         "forward_scale": self.forward_scale,
-        #         "lateral_scale": self.lateral_scale,
-        #         "angular_scale": self.angular_scale,
-        #         "reason": self.reason
-        #     }
-
+    
     class StrategyBlender:
         """Handles smooth transitions between movement strategies."""
         

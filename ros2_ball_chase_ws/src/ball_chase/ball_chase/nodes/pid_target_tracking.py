@@ -374,48 +374,29 @@ class TargetTrackingModule:
 #############################################
 
 class MovementStrategyModule:
-    """Module that handles movement strategy selection and blending."""
+    """Module that handles movement strategy selection and blending by delegating to StrategyManager."""
     
     def __init__(self, logger, debug_level=0):
         """Initialize the movement strategy module."""
         self.logger = logger
         self.debug_level = debug_level
-        
-        # Direct initialization - no fallbacks
+        # Use centralized StrategyManager from PIDControllers
         self.strategy_manager = PIDControllers.StrategyManager(self.logger)
-        self.strategy_blender = PIDControllers.StrategyBlender(self.logger)
-        self.strategy_manager.strategy_blender = self.strategy_blender
-        self.strategy_table = self.strategy_manager._init_strategy_table()
+        self.strategy_manager.set_debug_level(self.debug_level)
+        self.strategy_blender = self.strategy_manager.strategy_blender
         self.initialized = True
-        
-        # Strategy handling
         self.current_strategy = "IDLE"
         self.previous_strategy = None
         self.strategy_change_time = time.time()
-        
-        # Error categorization state
         self.prev_error_categories = ["none", "none", "none"]  # [distance, lateral, angular]
-                
-        # Startup movement tracking
         self._startup_movement_cycles = 0
-        
-        # Default fallback strategy (for error cases)
-        self._fallback_strategy = None  # No fallback strategy
-        
-        # Pre-compute common string templates for logging
-        self._log_strategy_template = (
-            "Strategy selected: {}, params: forward={:.1f}, lateral={:.1f}, angular={:.1f}"
-        )
-        self._log_error_categories_template = (
-            "Error categories: distance={}, lateral={}, angular={}"
-        )
+        self._fallback_strategy = self.strategy_manager._fallback_strategy
 
     def determine_strategy(self, distance_error, lateral_error, angular_error_degrees, is_robot_stopped=False):
         """
         Determine the optimal movement strategy based on current errors.
-        Uses the instance's strategy_manager and logger.
+        Delegates to the centralized StrategyManager.
         """
-        # No fallback - direct usage of the strategy_manager
         strategy = self.strategy_manager.determine_strategy(
             distance_error, 
             lateral_error, 
@@ -424,95 +405,10 @@ class MovementStrategyModule:
         )
         if self.debug_level >= 2:
             self.logger.info(
-                self._log_strategy_template.format(
-                    strategy.strategy_name, strategy.forward_scale, strategy.lateral_scale, strategy.angular_scale
-                ),
+                f"Strategy selected: {strategy.strategy_name}, params: forward={strategy.forward_scale:.1f}, lateral={strategy.lateral_scale:.1f}, angular={strategy.angular_scale:.1f}",
                 throttle_duration_sec=1.0
             )
         return strategy
-
-    def _categorize_errors(self, errors, at_target_distance):
-        """
-        Optimized method to categorize all errors at once.
-        Updates self.prev_error_categories in place.
-        
-        Args:
-            errors: List of errors [distance_error, lateral_error, angular_error_degrees]
-            at_target_distance: Whether the robot is at target distance
-        """
-        try:
-            # Validate input errors
-            if len(errors) < 3:
-                raise ValueError("Insufficient error values for categorization.")
-            # Check for NaN or infinite values
-            for i, err in enumerate(errors):
-                if not isinstance(err, (int, float)) or math.isnan(err) or math.isinf(err):
-                    raise ValueError(f"Invalid error value at index {i}: {err}")
-            # Distance error category
-            self.prev_error_categories[0] = self._categorize_error(
-                errors[0], "distance", self.prev_error_categories[0])
-            # Lateral error category
-            self.prev_error_categories[1] = self._categorize_error(
-                errors[1], "lateral", self.prev_error_categories[1])
-            # Angular error category - with special handling when at target distance
-            if at_target_distance and self.prev_error_categories[0] == "none":
-                self.prev_error_categories[2] = self._categorize_error(
-                    errors[2], "angular", self.prev_error_categories[2], lenient_factor=1.5)
-            else:
-                self.prev_error_categories[2] = self._categorize_error(
-                    errors[2], "angular", self.prev_error_categories[2])
-        except Exception as e:
-            self.logger.error(f"Error categorizing errors: {str(e)}")
-            # Keep previous categories on error
-
-    def _categorize_error(self, error, error_type="distance", prev_category=None, lenient_factor=1.0):
-        """Categorize error values using the PIDControllers static method."""
-        try:
-            return PIDControllers.categorize_error(error, error_type, prev_category, lenient_factor)
-        except Exception as e:
-            self.logger.error(f"Error categorizing error value: {str(e)}")
-            raise
-
-    def match_strategy(self, key, strategies=None):
-        """
-        Match a key against the strategy table with wildcard support.
-        Args:
-            key: Tuple of (distance_state, lateral_state, angular_state)
-            strategies: Optional strategy table to use (defaults to self.strategy_table or gets it from strategy_manager)
-        Returns:
-            List: The matched strategy definition
-        """
-        try:
-            if strategies is not None:
-                table = strategies
-            elif hasattr(self, 'strategy_table') and self.strategy_table is not None:
-                table = self.strategy_table
-            elif hasattr(self, 'strategy_manager') and self.strategy_manager is not None:
-                table = self.strategy_manager.strategy_table
-            else:
-                raise RuntimeError("No strategy table available for matching.")
-            if key in table:
-                return table[key]
-            # Support wildcards
-            d_state, l_state, a_state = key
-            patterns_to_try = [
-                (d_state, l_state, "*"),
-                (d_state, "*", a_state),
-                ("*", l_state, a_state),
-                (d_state, "*", "*"),
-                ("*", l_state, "*"),
-                ("*", "*", a_state),
-            ]
-            for pattern in patterns_to_try:
-                if pattern in table:
-                    return table[pattern]
-            # Always return a MovementStrategy object for fallback
-            return PIDControllers.MovementStrategy(
-                "EMERGENCY_FALLBACK", True, False, False, 0.3, 0.0, 0.0, "Emergency fallback strategy due to missing table"
-            )
-        except Exception as e:
-            self.logger.error(f"Strategy matching error: {str(e)}")
-            raise
 
     def reset(self):
         """Reset the movement strategy module state."""
@@ -526,10 +422,7 @@ class MovementStrategyModule:
         if hasattr(self, 'strategy_manager') and self.strategy_manager is not None:
             self.strategy_manager.current_strategy = "IDLE"
             self.strategy_manager._startup_movement_cycles = 0
-        # Optionally reset fallback strategy
-        self._fallback_strategy = PIDControllers.MovementStrategy(
-            "SAFE_FALLBACK", True, False, False, 0.3, 0.0, 0.0, "Fallback strategy due to selection error"
-        )
+        self._fallback_strategy = self.strategy_manager._fallback_strategy
 
 #############################################
 # Velocity Control Module
@@ -633,7 +526,7 @@ class VelocityControlModule:
             desired_distance = float(desired_distance) if desired_distance is not None else 1.0
             
             # If data is stale, apply conservative velocity scaling
-            if freshness_level == 'stale':
+            if (freshness_level == 'stale'):
                 # Reduce all velocities to handle stale data
                 velocity_scale = 0.5  # 50% of normal velocity
                 self._target_velocities *= velocity_scale
