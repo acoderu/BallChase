@@ -30,6 +30,7 @@ class PIDControllers:
             controller_type, kp, ki, kd, output_min, output_max
         )
         controller.error_tracker = error_tracker
+        controller.logger = logger  
         if not hasattr(controller, 'error_tracker') or controller.error_tracker is None:
             raise RuntimeError(f"Failed to initialize error tracker for {controller_type.name} controller")
         return controller, error_tracker
