@@ -23,9 +23,9 @@ class PIDControllers:
     """Namespace for PID controller classes and related functionality."""
     
     @staticmethod
-    def create_controller_with_tracker(controller_type, kp, ki, kd, output_min, output_max, tracker_name, max_history=8):
+    def create_controller_with_tracker(controller_type, kp, ki, kd, output_min, output_max, tracker_name, logger, max_history=8):
         """Factory method to create a controller with its error tracker properly initialized."""
-        error_tracker = ErrorTracker(tracker_name, max_history=max_history)
+        error_tracker = ErrorTracker(tracker_name, logger, max_history=max_history)
         controller = PIDControllers.create_controller(
             controller_type, kp, ki, kd, output_min, output_max
         )
@@ -43,15 +43,15 @@ class PIDControllers:
         the appropriate movement strategy based on current error conditions.
         """
         
-        def __init__(self, logger=None):
+        def __init__(self, logger):
             """
             Initialize the strategy manager.
             
             Args:
-                logger: Optional logger instance for diagnostic output
+                logger: Logger instance for diagnostic output
             """
             # Setup logging
-            self.logger = logger or logging.getLogger('strategy_manager')
+            self.logger = logger
             
             # Initialize strategy table
             self.strategy_table = self._init_strategy_table()
@@ -714,17 +714,19 @@ class PIDControllers:
     class CoordinatedController:
         """Controller that coordinates lateral and angular movements."""
         
-        def __init__(self, linear_pid, angular_pid, config=None):
+        def __init__(self, linear_pid, angular_pid, logger, config=None):
             """
             Initialize the coordinated controller.
             
             Args:
                 linear_pid: PID controller for lateral movement
                 angular_pid: PID controller for angular movement
+                logger: Logger instance for diagnostic output
                 config: Configuration dictionary
             """
             self.linear_pid = linear_pid
             self.angular_pid = angular_pid
+            self.logger = logger
             
             # Default configuration with improved values - extract to instance variables
             self.coupling_factor = 0.4         # Reduced from 0.7 to allow more lateral movement
@@ -746,9 +748,6 @@ class PIDControllers:
             self.last_lateral_velocity = 0.0
             self.last_angular_velocity = 0.0
             self.last_update_time = None
-            
-            # Logger
-            self.logger = logging.getLogger('pid_controller.coordinated')
         
         def compute(self, lateral_error, angular_error, current_time=None, robot_orientation=0.0):
             """
@@ -926,7 +925,7 @@ class PIDControllers:
     class StrategyBlender:
         """Handles smooth transitions between movement strategies."""
         
-        def __init__(self, blend_duration=0.1):  # Reduced from 0.5 to 0.2 seconds
+        def __init__(self, logger, blend_duration=0.1):  # Reduced from 0.5 to 0.2 seconds
             """Initialize the strategy blender with faster transitions."""
             self.current_strategy = None
             self.target_strategy = None
@@ -940,7 +939,7 @@ class PIDControllers:
             self._blended_strategy = None
             
             # Logger
-            self.logger = logging.getLogger('pid_controller.blender')
+            self.logger = logger
         
         def update_target(self, target_strategy, current_time):
             """
@@ -1131,7 +1130,7 @@ class PIDControllers:
         """PID controller with enhanced integral handling and adaptive gains."""
         # NOTE: Initialization errors should be raised explicitly and not masked, for consistency with the node's error handling policy.
         
-        def __init__(self, base_kp, base_ki, base_kd, output_min, output_max, name="PID"):
+        def __init__(self, base_kp, base_ki, base_kd, output_min, output_max, name="PID", logger=None):
             """Initialize the improved PID controller."""
             # Base gains
             self.base_kp = base_kp
@@ -1190,7 +1189,7 @@ class PIDControllers:
             self.steady_state = False
             
             # Logger for controller-specific logs at lower frequency
-            self.logger = logging.getLogger(f'pid_controller.{name}')
+            self.logger = logger
         
         def validate_initialization(self):
             """Validate that the controller is properly initialized."""
@@ -1225,8 +1224,16 @@ class PIDControllers:
                 self.compute_count += 1
                 
                 should_log = self.compute_count % 50 == 0  # Reduced logging frequency
-                if should_log:
+                # Log large output jumps or output saturation at debug_level >= 1
+                large_jump = abs(self.last_output - self.prev_error) > self.output_range * 0.4
+                debug_level = getattr(self, 'debug_level', 0)
+                if debug_level >= 2 or should_log:
                     self.logger.info(f"PID {self.name} compute: error={error:.3f}, force_zero={force_zero}")
+                if debug_level >= 1 and large_jump:
+                    self.logger.info(
+                        f"PID {self.name} large output change: prev={self.prev_error:.3f} -> output={self.last_output:.3f}",
+                        throttle_duration_sec=1.0
+                    )
                 
                 # Special case: forced zero output
                 if force_zero:
@@ -1445,8 +1452,22 @@ class PIDControllers:
                 self.last_time = current_time
                 
                 # Log PID terms if needed (reduced frequency)
-                if should_log:
+                if debug_level >= 2 and should_log:
                     self.logger.info(f"PID {self.name} terms: P={p_term:.3f}, I={i_term:.3f}, D={d_term:.3f}")
+                
+                # After output limits
+                if debug_level >= 1 and output != output_limited:
+                    self.logger.info(
+                        f"PID {self.name} output saturated: {output:.3f} limited to {output_limited:.3f}",
+                        throttle_duration_sec=1.0
+                    )
+                
+                # Log direction change (sign flip) at debug_level >= 1
+                if debug_level >= 1 and error * self.prev_error < 0:
+                    self.logger.info(
+                        f"PID {self.name} direction change: error sign flip {self.prev_error:.3f} -> {error:.3f}",
+                        throttle_duration_sec=1.0
+                    )
                 
                 return float(output_limited)
             

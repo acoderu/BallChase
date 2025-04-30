@@ -4,13 +4,12 @@ import numpy as np
 from collections import deque
 import logging
 
-# Configure logger
-logger = logging.getLogger("target_filter")
-
 class EnhancedTargetFilter:
     """Enhanced filter for target position data with better motion prediction."""
     
-    def __init__(self, buffer_size=8, prediction_horizon=0.3):
+    def __init__(self, logger, buffer_size=8, prediction_horizon=0.3, debug_level=0):
+        self.logger = logger
+        self.debug_level = debug_level
         # Pre-allocate buffers to reduce memory allocations
         self.position_buffer = deque([(0.0, 0.0, 0.0, 0.0)] * buffer_size, maxlen=buffer_size)
         self.trajectory_history = deque([(((0.0, 0.0, 0.0), 0.0))] * 10, maxlen=10)
@@ -42,6 +41,12 @@ class EnhancedTargetFilter:
         # Add to trajectory history
         self.trajectory_history.append((position, current_time))
         
+        if self.debug_level >= 3:
+            if not hasattr(self, '_last_logged_position') or \
+               np.linalg.norm(np.array(position) - np.array(getattr(self, '_last_logged_position', (0,0,0)))) > 0.02:
+                self.logger.info(f"Buffer updated with position: {position} at {current_time:.3f}", throttle_duration_sec=2.0)
+                self._last_logged_position = position
+        
     def _calculate_filtered_position(self):
         """Calculate filtered position from recent measurements."""
         if len(self.position_buffer) >= 3:
@@ -58,6 +63,12 @@ class EnhancedTargetFilter:
             # Not enough data, use the latest position
             latest = self.position_buffer[-1]
             self.filtered_position = (latest[0], latest[1], latest[2])
+        
+        if self.debug_level >= 3:
+            if not hasattr(self, '_last_logged_filtered') or \
+               np.linalg.norm(np.array(self.filtered_position) - np.array(getattr(self, '_last_logged_filtered', (0,0,0)))) > 0.02:
+                self.logger.info(f"Filtered position: {self.filtered_position}", throttle_duration_sec=2.0)
+                self._last_logged_filtered = self.filtered_position
     
     def _update_velocity(self, current_time):
         """Update velocity and acceleration estimates."""
@@ -97,8 +108,11 @@ class EnhancedTargetFilter:
             # Consider significant direction change if angle > 30 degrees
             if cos_angle < self.DIRECTION_CHANGE_THRESHOLD:
                 self.direction_change_detected = True
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"Direction change detected: {cos_angle:.3f}")
+                if hasattr(self, 'debug_level') and self.debug_level >= 3:
+                    self.logger.debug(f"Direction change detected: {cos_angle:.3f}")
+        
+        if self.direction_change_detected and self.debug_level >= 2:
+            self.logger.info(f"Direction change detected in velocity at {current_time:.3f}", throttle_duration_sec=2.0)
         
         # Calculate acceleration if we have enough data
         if len(self.position_buffer) >= 3 and dt > 0.001:
@@ -112,6 +126,12 @@ class EnhancedTargetFilter:
         # Smooth velocity with low-pass filter (adaptive alpha based on consistency)
         alpha = 0.7 + 0.15 * self.movement_consistency  # 0.7-0.85 range
         self.current_velocity = alpha * raw_velocity + (1 - alpha) * self.current_velocity
+        
+        if self.is_moving and self.debug_level >= 3:
+            if not hasattr(self, '_last_logged_velocity') or \
+               np.linalg.norm(self.current_velocity - getattr(self, '_last_logged_velocity', np.zeros(3))) > 0.02:
+                self.logger.debug(f"Current velocity: {self.current_velocity}", throttle_duration_sec=2.0)
+                self._last_logged_velocity = self.current_velocity.copy()
         
         # Update movement status and direction
         self._update_movement_characteristics()
@@ -142,6 +162,12 @@ class EnhancedTargetFilter:
         
         # Calculate movement consistency from trajectory history
         self._calculate_movement_consistency()
+        
+        if self.debug_level >= 3:
+            if not hasattr(self, '_last_logged_consistency') or \
+               abs(self.movement_consistency - getattr(self, '_last_logged_consistency', 0.0)) > 0.05:
+                self.logger.info(f"Movement consistency: {self.movement_consistency:.2f}", throttle_duration_sec=4.0)
+                self._last_logged_consistency = self.movement_consistency
     
     def _calculate_movement_consistency(self):
         """Calculate how consistently the target is moving in one direction."""
@@ -217,6 +243,12 @@ class EnhancedTargetFilter:
             damping = 0.7  # Reduce prediction confidence
             pred_pos = np.array(self.filtered_position) + self.current_velocity * t * damping
             self.predicted_position = tuple(pred_pos)
+        
+        if self.debug_level >= 3:
+            if not hasattr(self, '_last_logged_predicted') or \
+               np.linalg.norm(np.array(self.predicted_position) - np.array(getattr(self, '_last_logged_predicted', (0,0,0)))) > 0.02:
+                self.logger.info(f"Predicted position: {self.predicted_position}", throttle_duration_sec=2.0)
+                self._last_logged_predicted = self.predicted_position
     
     def update(self, position, timestamp=None):
         """
@@ -238,6 +270,12 @@ class EnhancedTargetFilter:
             self.predicted_position = position
             self.last_update_time = current_time
             return position
+        
+        if self.debug_level >= 2:
+            if not hasattr(self, '_last_logged_update') or \
+               np.linalg.norm(np.array(position) - np.array(getattr(self, '_last_logged_update', (0,0,0)))) > 0.02:
+                self.logger.info(f"Update called with position: {position} at {current_time:.3f}", throttle_duration_sec=2.0)
+                self._last_logged_update = position
         
         # Update buffers with new measurement
         self._update_buffers(position, current_time)
@@ -318,13 +356,17 @@ class EnhancedTargetFilter:
         self.direction_change_detected = False
         self.motion_direction = np.zeros(3)
         self.movement_consistency = 0.0
+        
+        if hasattr(self, 'debug_level') and self.debug_level >= 2:
+            self.logger.info("Target filter state reset", throttle_duration_sec=2.0)
 
 
 class ErrorTracker:
     """Lightweight error tracker that monitors error values over time."""
     
-    def __init__(self, name, max_history=8):
-        """Initialize error tracker with efficient storage."""
+    def __init__(self, name, logger, max_history=8, debug_level=0):
+        self.logger = logger
+        self.debug_level = debug_level
         self.name = name
         self.current_error = 0.0
         self.previous_error = 0.0
@@ -378,6 +420,17 @@ class ErrorTracker:
         
         # Store last sign
         self.last_sign = current_sign
+        
+        if self.debug_level >= 3:
+            if not hasattr(self, '_last_logged_error') or \
+               abs(error - getattr(self, '_last_logged_error', 0.0)) > 0.02:
+                self.logger.info(f"Error updated: {error:.3f}, dt={dt:.3f}", throttle_duration_sec=2.0)
+                self._last_logged_error = error
+        if self.sign_changes > 0 and self.debug_level >= 3:
+            if not hasattr(self, '_last_logged_sign_changes') or \
+               self.sign_changes != getattr(self, '_last_logged_sign_changes', -1):
+                self.logger.info(f"Error sign changes: {self.sign_changes}", throttle_duration_sec=4.0)
+                self._last_logged_sign_changes = self.sign_changes
     
     def reset(self):
         """Reset all tracked errors."""
@@ -396,6 +449,9 @@ class ErrorTracker:
         self.error_history.clear()
         for _ in range(max_len):
             self.error_history.append(0.0)
+        
+        if hasattr(self, 'debug_level') and self.debug_level >= 2:
+            self.logger.info("Error tracker state reset", throttle_duration_sec=2.0)
     
     def is_error_growing(self):
         """Check if error is growing compared to previous value."""
@@ -406,6 +462,9 @@ class ErrorTracker:
         self.last_correction_time = time.time()
         # Reduce accumulated error when correction is made
         self.accumulated_error *= 0.5
+        
+        if hasattr(self, 'debug_level') and self.debug_level >= 2:
+            self.logger.info("Correction recorded for error tracker", throttle_duration_sec=2.0)
         
     def get_trend(self, n=3):
         """Calculate trend of error (increasing/decreasing)."""

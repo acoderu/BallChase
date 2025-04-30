@@ -37,9 +37,10 @@ from pid_computation import PIDControllers
 class TargetTrackingModule:
     """Module that handles target tracking, filtering, and prediction with fusion rate detection."""
     
-    def __init__(self, logger, filter_buffer_size=5, prediction_horizon=0.2):
+    def __init__(self, logger, filter_buffer_size=5, prediction_horizon=0.2, debug_level=0):
         """Initialize the target tracking module."""
         self.logger = logger
+        self.debug_level = debug_level
         self.current_target = None
         self.last_target_time = None
         self.target_frame = "unknown_frame"
@@ -53,8 +54,10 @@ class TargetTrackingModule:
         # Initialize target filter
         try:
             self.target_filter = EnhancedTargetFilter(
+                self.logger,
                 buffer_size=filter_buffer_size,
-                prediction_horizon=prediction_horizon
+                prediction_horizon=prediction_horizon,
+                debug_level=self.debug_level
             )
             self.filter_initialized = True
         except Exception as e:
@@ -70,13 +73,15 @@ class TargetTrackingModule:
         self.fusion_rate_updated = False
         self.last_rate_calculation = 0.0
     
-    def update_target(self, target_msg, debug_level=0):
+    def update_target(self, target_msg, debug_level=None):
         """
         Process a new target message and update position data.
         
         Returns:
             bool: True if data was updated, False otherwise
         """
+        if debug_level is None:
+            debug_level = self.debug_level
         if target_msg is None:
             return False
             
@@ -112,15 +117,22 @@ class TargetTrackingModule:
             
             # Log target update if debugging enabled
             if debug_level >= 2:
-                self._log_target_update(target_msg)
+                now = time.time()
+                if not hasattr(self, '_last_logged_target_update_info') or now - self._last_logged_target_update_info > 1.0:
+                    self.logger.info(
+                        f"Target update: frame={self.target_frame}, pos=({self.current_metrics[0]:.3f}, {self.current_metrics[1]:.3f}, {self.current_metrics[2]:.3f})"
+                    )
+                    self._last_logged_target_update_info = now
                 
             return True
         except Exception as e:
             self.logger.error(f"Error updating target: {str(e)}")
             return False
     
-    def _calculate_fusion_rate(self, debug_level=0):
+    def _calculate_fusion_rate(self, debug_level=None):
         """Calculate the actual fusion data rate based on timestamps."""
+        if debug_level is None:
+            debug_level = self.debug_level
         try:
             # Safety check - need at least 2 timestamps
             if len(self.update_timestamps) < 2:
@@ -148,7 +160,7 @@ class TargetTrackingModule:
                 self.last_fusion_rate = new_rate
                 self.fusion_rate_updated = True
                 if debug_level >= 1:
-                    self.logger.info(f"Detected fusion data rate: {new_rate:.2f} Hz")
+                    self.logger.info(f"Detected fusion data rate: {new_rate:.2f} Hz", throttle_duration_sec=2.0)
         except Exception as e:
             self.logger.error(f"Error calculating fusion rate: {str(e)}")
     
@@ -193,6 +205,13 @@ class TargetTrackingModule:
             
             # Use filtered/predicted position values
             self._select_position_values(filtered_position)
+            
+            if self.filter_initialized and self.debug_level >= 2:
+                now = time.time()
+                if not hasattr(self, '_last_logged_applied_filter') or now - self._last_logged_applied_filter > 1.0:
+                    self.logger.info(f"Applied target filtering: filtered={self.filtered_metrics}")
+                    self._last_logged_applied_filter = now
+                
         except Exception as e:
             self.logger.error(f"Error applying target filtering: {str(e)}")
             # Fall back to raw values on error
@@ -206,7 +225,7 @@ class TargetTrackingModule:
             current_position = (self.current_metrics[0], self.current_metrics[1], self.current_metrics[2])
             filtered_position = self.target_filter.update(current_position, self.last_target_time)
             self.force_target_reacquisition = False
-            self.logger.info("Forced target reacquisition - filter reset")
+            self.logger.info("Forced target reacquisition - filter reset", throttle_duration_sec=2.0)
             
             # Use filtered values (not prediction during reacquisition)
             if filtered_position:
@@ -255,6 +274,13 @@ class TargetTrackingModule:
                 self.filtered_metrics[0] = filtered_position[0]
                 self.filtered_metrics[1] = filtered_position[1]
                 self.filtered_metrics[2] = filtered_position[2]
+                
+            if self.debug_level >= 2:
+                now = time.time()
+                if not hasattr(self, '_last_logged_selected_position') or now - self._last_logged_selected_position > 1.0:
+                    self.logger.info(f"Selected position values: {self.filtered_metrics}")
+                    self._last_logged_selected_position = now
+                
         except Exception as e:
             self.logger.error(f"Error selecting position values: {str(e)}")
             # Fall back to filtered values on error
@@ -271,9 +297,13 @@ class TargetTrackingModule:
         frame_id = self.target_frame
         
         # Only format the log message if it will actually be logged
-        self.logger.info(
-            f"TARGET DATA: frame={frame_id}, pos=({target.x:.3f}, {target.y:.3f}, {target.z:.3f})"
-        )
+        if self.debug_level >= 2:
+            now = time.time()
+            if not hasattr(self, '_last_logged_target_update') or now - self._last_logged_target_update > 1.0:
+                self.logger.info(
+                    f"TARGET DATA: frame={frame_id}, pos=({target.x:.3f}, {target.y:.3f}, {target.z:.3f})"
+                )
+                self._last_logged_target_update = now
         
     def get_position_data(self):
         """Get the current filtered position data."""
@@ -353,6 +383,7 @@ class MovementStrategyModule:
         
         # Direct initialization - no fallbacks
         self.strategy_manager = PIDControllers.StrategyManager(self.logger)
+        self.strategy_blender = PIDControllers.StrategyBlender(self.logger)
         self.strategy_table = self.strategy_manager._init_strategy_table()
         self.initialized = True
         
@@ -365,7 +396,7 @@ class MovementStrategyModule:
         self.prev_error_categories = ["none", "none", "none"]  # [distance, lateral, angular]
         
         # Initialize blender for smooth transitions - use existing class from PIDControllers
-        self.strategy_blender = PIDControllers.StrategyBlender()
+        self.strategy_blender = PIDControllers.StrategyBlender(self.logger)
         self.strategy_manager.strategy_blender = self.strategy_blender
         
         # Startup movement tracking
@@ -388,12 +419,20 @@ class MovementStrategyModule:
         Uses the instance's strategy_manager and logger.
         """
         # No fallback - direct usage of the strategy_manager
-        return self.strategy_manager.determine_strategy(
+        strategy = self.strategy_manager.determine_strategy(
             distance_error, 
             lateral_error, 
             angular_error_degrees,
             is_robot_stopped
         )
+        if self.debug_level >= 2:
+            self.logger.info(
+                self._log_strategy_template.format(
+                    strategy.name, strategy.forward_scale, strategy.lateral_scale, strategy.angular_scale
+                ),
+                throttle_duration_sec=1.0
+            )
+        return strategy
 
     def _categorize_errors(self, errors, at_target_distance):
         """
@@ -470,9 +509,10 @@ class MovementStrategyModule:
             for pattern in patterns_to_try:
                 if pattern in table:
                     return table[pattern]
-            return table.get(("*", "*", "*"), [
+            # Always return a MovementStrategy object for fallback
+            return PIDControllers.MovementStrategy(
                 "EMERGENCY_FALLBACK", True, False, False, 0.3, 0.0, 0.0, "Emergency fallback strategy due to missing table"
-            ])
+            )
         except Exception as e:
             self.logger.error(f"Strategy matching error: {str(e)}")
             raise
@@ -606,9 +646,9 @@ class VelocityControlModule:
             
             # Log incoming velocities at debug level
             if self.debug_level >= 2:
-                self.logger.debug(
-                    f"Pre-limit velocities: x={self._target_velocities[0]:.3f}, "
-                    f"y={self._target_velocities[1]:.3f}, θ={self._target_velocities[2]:.3f}"
+                self.logger.info(
+                    f"Pre-limit velocities: x={self._target_velocities[0]:.3f}, y={self._target_velocities[1]:.3f}, θ={self._target_velocities[2]:.3f}",
+                    throttle_duration_sec=1.0
                 )
             
             # Apply distance-aware approach scaling for forward velocity
@@ -641,9 +681,9 @@ class VelocityControlModule:
             
             # Log limited velocities at debug level
             if self.debug_level >= 2:
-                self.logger.debug(
-                    f"Post-limit velocities: x={self._limited_velocities[0]:.3f}, "
-                    f"y={self._limited_velocities[1]:.3f}, θ={self._limited_velocities[2]:.3f}"
+                self.logger.info(
+                    f"Post-limit velocities: x={self._limited_velocities[0]:.3f}, y={self._limited_velocities[1]:.3f}, θ={self._limited_velocities[2]:.3f}",
+                    throttle_duration_sec=1.0
                 )
             
             # Update last command for next cycle
@@ -658,7 +698,8 @@ class VelocityControlModule:
             # Log velocity commands if changed significantly
             if self.debug_level >= 1 or np.any(self._velocity_change_check):
                 self.logger.info(
-                    f"MOTION: x={self.last_cmd_vel[0]:.2f} y={self.last_cmd_vel[1]:.2f} θ={self.last_cmd_vel[2]:.2f}"
+                    f"MOTION: x={self.last_cmd_vel[0]:.2f} y={self.last_cmd_vel[1]:.2f} θ={self.last_cmd_vel[2]:.2f}",
+                    throttle_duration_sec=0.5
                 )
                 # Update last logged command
                 np.copyto(self.last_logged_cmd, self.last_cmd_vel)
@@ -945,7 +986,7 @@ class ResourceMonitoringModule:
         
         # Initialize resource monitor from imported module
         try:
-            self.resource_monitor = ResourceMonitor(update_interval=5.0)
+            self.resource_monitor = ResourceMonitor(logger=logger, update_interval=5.0)
             self.monitor_initialized = True
         except Exception as e:
             self.logger.error(f"Failed to initialize resource monitor: {str(e)}")
@@ -1276,8 +1317,7 @@ class TransformSystem:
         self.transform_dependencies.append({
             'source': source_frame,
             'target': target_frame,
-            'required': required,
-            'available': False
+            'required': required
         })
         self.logger.debug(f"Added transform dependency: {source_frame} -> {target_frame}")
         return self
@@ -1883,3 +1923,4 @@ class RecoveryBehaviorModule:
         self.recovery_phase = "none"
         self._exit_suggested = False
         self._stale_data_stop_active = False
+        self._last_staleness_log_time = 0.0

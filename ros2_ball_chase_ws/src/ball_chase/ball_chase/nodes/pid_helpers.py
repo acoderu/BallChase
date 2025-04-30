@@ -286,13 +286,15 @@ class ResourceMonitor:
     Non-blocking implementation using background thread for resource monitoring.
     """
     
-    def __init__(self, update_interval=5.0):
+    def __init__(self, logger, update_interval=5.0):
         """
         Initialize the resource monitor.
         
         Args:
+            logger: Logger instance to use for logging
             update_interval: How often to update resource metrics (seconds)
         """
+        self.logger = logger
         self.update_interval = update_interval
         self.last_update_time = 0
         self.cpu_usage = 0.0
@@ -300,7 +302,6 @@ class ResourceMonitor:
         self.alert_callback = None  # Single callback function for efficiency
         self.cpu_threshold = 85.0  # Default CPU usage threshold (%)
         self.memory_threshold = 85.0  # Default memory usage threshold (%)
-        self.logger = logging.getLogger('pid_controller.resource_monitor')
         self.running = False
         self._monitor_thread = None
     
@@ -399,5 +400,6 @@ class ResourceMonitor:
         
     def log_stats(self):
         """Log current resource statistics efficiently."""
-        if self.logger.isEnabledFor(logging.INFO):
-            self.logger.info(f"CPU: {self.cpu_usage:.1f}%, Memory: {self.memory_usage:.1f}%")
+        # Use debug_level gating instead of isEnabledFor
+        if hasattr(self, 'debug_level') and self.debug_level >= 2:
+            self.logger.info(f"CPU: {self.cpu_usage:.1f}%, Memory: {self.memory_usage:.1f}%", throttle_duration_sec=2.0)

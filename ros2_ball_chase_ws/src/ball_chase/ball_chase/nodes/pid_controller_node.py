@@ -219,9 +219,16 @@ class OptimizedPIDControllerNode(Node):
     def __init__(self):
         """Initialize the enhanced PID controller node with phased, dependency-driven initialization."""
         super().__init__('pid_controller')
+        # Set ROS2 logger level based on debug_level
+        
+        
         try:
             # Phase 1: Parameter initialization (must come first)
             self._initialize_parameters()
+            if self.debug_level >= 2:
+                self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
+            else:
+                self.get_logger().set_level(rclpy.logging.LoggingSeverity.INFO)
             # Phase 2: Core initialization
             self._initialize_core_components()
             # Phase 3: Basic utility components
@@ -251,8 +258,8 @@ class OptimizedPIDControllerNode(Node):
 
     def _initialize_utility_components(self):
         """Initialize utility components that depend only on parameters."""
-        self.resource_monitor = ResourceMonitoringModule(logger)
-        # Set up resource monitor with appropriate parameters (moved from _declare_parameters)
+        # Pass self.get_logger() to all helper modules for consistent logging
+        self.resource_monitor = ResourceMonitoringModule(self.get_logger())
         if hasattr(self.resource_monitor, 'set_rate_limits'):
             self.resource_monitor.set_rate_limits(
                 min_rate=self.min_control_rate,
@@ -276,19 +283,20 @@ class OptimizedPIDControllerNode(Node):
         """Initialize components that depend on utility components."""
         self._init_controllers()
         self.target_tracker = TargetTrackingModule(
-            logger,
+            self.get_logger(),
             filter_buffer_size=self.filter_buffer_size,
-            prediction_horizon=self.prediction_horizon
+            prediction_horizon=self.prediction_horizon,
+            debug_level=self.debug_level
         )
         if not hasattr(self.target_tracker, 'target_filter') or self.target_tracker.target_filter is None:
             raise RuntimeError("Target tracking filter was not properly initialized")
-        self.strategy_module = MovementStrategyModule(logger, self.debug_level)
-        self.velocity_control = VelocityControlModule(logger)
+        self.strategy_module = MovementStrategyModule(self.get_logger(), self.debug_level)
+        self.velocity_control = VelocityControlModule(self.get_logger())
         self.velocity_control.set_approach_parameters(
             self.approach_distance, 
             self.min_approach_factor
         )
-        self.recovery_module = RecoveryBehaviorModule(logger)
+        self.recovery_module = RecoveryBehaviorModule(self.get_logger())
 
     def _initialize_final_components(self):
         """Initialize communication and timer components."""
@@ -551,19 +559,19 @@ class OptimizedPIDControllerNode(Node):
                 PIDControllers.ControllerType.LINEAR_X,
                 self.linear_x_kp, self.linear_x_ki, self.linear_x_kd,
                 self.linear_x_min, self.linear_x_max,
-                "distance", max_history=8
+                "distance", self.get_logger(), max_history=8
             )
             self.pid_linear_y, self.lateral_error_tracker = PIDControllers.create_controller_with_tracker(
                 PIDControllers.ControllerType.LINEAR_Y,
                 self.linear_y_kp, self.linear_y_ki, self.linear_y_kd,
                 self.linear_y_min, self.linear_y_max,
-                "lateral", max_history=8
+                "lateral", self.get_logger(), max_history=8
             )
             self.pid_angular, self.angular_error_tracker = PIDControllers.create_controller_with_tracker(
                 PIDControllers.ControllerType.ANGULAR,
                 self.angular_kp, self.angular_ki, self.angular_kd,
                 self.angular_min, self.angular_max,
-                "angular", max_history=8
+                "angular", self.get_logger(), max_history=8
             )
             self.pid_linear_x.validate_initialization()
             self.pid_linear_y.validate_initialization()
@@ -2412,6 +2420,7 @@ class OptimizedPIDControllerNode(Node):
             # Publish the stop command to actually halt the robot
             self.cmd_vel_pub.publish(stop_cmd)
             self.get_logger().info("Robot motion stopped during shutdown")
+            time.sleep(1)
         except Exception as e:
             self.get_logger().error(f"Error stopping robot during shutdown: {str(e)}")
 
