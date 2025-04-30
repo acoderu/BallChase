@@ -240,128 +240,114 @@ class Matrix4x4:
 
 
 class ResourceMonitor:
-    """
-    Lightweight resource monitor for tracking CPU and memory usage.
-    Non-blocking implementation using background thread for resource monitoring.
-    """
-    
-    def __init__(self, logger, update_interval=5.0):
-        """
-        Initialize the resource monitor.
-        
-        Args:
-            logger: Logger instance to use for logging
-            update_interval: How often to update resource metrics (seconds)
-        """
+    """Unified resource monitor for tracking CPU and memory usage with alerting and stats."""
+    def __init__(self, logger, update_interval=5.0, debug_level=0):
         self.logger = logger
         self.update_interval = update_interval
+        self.debug_level = debug_level
         self.last_update_time = 0
         self.cpu_usage = 0.0
         self.memory_usage = 0.0
-        self.alert_callback = None  # Single callback function for efficiency
-        self.cpu_threshold = 85.0  # Default CPU usage threshold (%)
-        self.memory_threshold = 85.0  # Default memory usage threshold (%)
+        self.current_cpu_usage = 0.0
+        self.current_memory_usage = 0.0
+        self.alert_callback = None
+        self.cpu_threshold = 85.0
+        self.memory_threshold = 85.0
         self.running = False
         self._monitor_thread = None
-    
+        self._cycle_stats = []
+        self._max_cycle_stats = 100
+        self._performance_stats = {
+            'cpu_avg': 0.0,
+            'cycle_time_ms': 0.0,
+            'update_rate': 0.0,
+            'skips': 0
+        }
+
     def start(self):
-        """Start background monitoring thread."""
         if not self.running:
             self.running = True
             self._monitor_thread = threading.Thread(target=self._background_monitor, daemon=True)
             self._monitor_thread.start()
-    
+
     def stop(self):
-        """Stop background monitoring thread."""
         self.running = False
         if self._monitor_thread:
             self._monitor_thread.join(timeout=1.0)
-    
+            self._monitor_thread = None
+
     def _background_monitor(self):
-        """Background thread for non-blocking resource monitoring."""
         while self.running:
-            # Update resource metrics
-            self.cpu_usage = psutil.cpu_percent(interval=None)  # Non-blocking
-            memory = psutil.virtual_memory()
-            self.memory_usage = memory.percent
-            
-            # Check thresholds for alerts
-            self._check_thresholds()
-            
-            # Sleep for update interval
+            self.update_cpu_stats()
             time.sleep(self.update_interval)
-    
-    def update(self):
-        """
-        Legacy update method for compatibility.
-        Not needed if using background thread mode.
-        """
-        # If not using background thread, force an update
-        if not self.running:
-            current_time = time.time()
-            if current_time - self.last_update_time >= self.update_interval:
-                self.cpu_usage = psutil.cpu_percent(interval=None)
-                memory = psutil.virtual_memory()
-                self.memory_usage = memory.percent
-                self._check_thresholds()
-                self.last_update_time = current_time
-    
+
+    def update_cpu_stats(self):
+        self.cpu_usage = psutil.cpu_percent(interval=None)
+        self.memory_usage = psutil.virtual_memory().percent
+        self.current_cpu_usage = self.cpu_usage
+        self.current_memory_usage = self.memory_usage
+        self._check_thresholds()
+        if self.debug_level >= 2:
+            self.logger.info(
+                f"CPU: {self.cpu_usage:.1f}%, Memory: {self.memory_usage:.1f}%",
+                throttle_duration_sec=5.0,  
+                log_id="resource_monitor_stats"  # <--- static log_id ensures throttling works!
+            )
+
     def _check_thresholds(self):
-        """Check if any resource metrics exceed thresholds and trigger callback."""
         if not self.alert_callback:
             return
-            
         alerts = {}
-        
-        # Check CPU
         if self.cpu_usage > self.cpu_threshold:
             alerts['cpu'] = self.cpu_usage
-        
-        # Check memory
         if self.memory_usage > self.memory_threshold:
             alerts['memory'] = self.memory_usage
-        
-        # Call callback once with all alerts
         if alerts:
             self.alert_callback(alerts)
-    
+
     def set_alert_callback(self, callback):
-        """
-        Set a callback to be called when resource thresholds are exceeded.
-        
-        Args:
-            callback: Function to call with alerts dictionary {resource_type: value}
-        """
         self.alert_callback = callback
-    
+
     def add_alert_callback(self, callback):
-        """
-        Legacy method for compatibility.
-        Wraps individual resource callbacks to work with new system.
-        
-        Args:
-            callback: Function to call with (resource_type, value) parameters
-        """
-        # Create a wrapper that converts new format to old format
         def wrapper(alerts):
             for resource_type, value in alerts.items():
                 callback(resource_type, value)
-        
         self.alert_callback = wrapper
-    
+
+    def set_cpu_thresholds(self, low_threshold, high_threshold):
+        self.cpu_threshold = high_threshold
+        # Optionally store low_threshold for future use
+
+    def set_rate_limits(self, min_rate, max_rate, base_rate):
+        self._performance_stats['update_rate'] = base_rate
+
+    def set_fusion_rate(self, fusion_rate):
+        self._performance_stats['update_rate'] = fusion_rate
+
+    def should_skip_cycle(self):
+        return self.cpu_usage > self.cpu_threshold
+
     def get_cpu_usage(self):
-        """Get the last measured CPU usage."""
         return self.cpu_usage
-    
+
     def get_memory_usage(self):
-        """Get the last measured memory usage."""
         return self.memory_usage
-        
+
+    def _update_cycle_stats(self, cycle_duration):
+        self._cycle_stats.append(cycle_duration)
+        if len(self._cycle_stats) > self._max_cycle_stats:
+            self._cycle_stats.pop(0)
+        avg_cycle = sum(self._cycle_stats) / len(self._cycle_stats) * 1000.0 if self._cycle_stats else 0.0
+        self._performance_stats['cycle_time_ms'] = avg_cycle
+
+    def get_performance_stats(self):
+        # Optionally update CPU avg
+        self._performance_stats['cpu_avg'] = self.cpu_usage
+        return self._performance_stats
+
     def log_stats(self):
-        """Log current resource statistics efficiently."""
-        # Use debug_level gating instead of isEnabledFor
-        if hasattr(self, 'debug_level') and self.debug_level >= 2:
-            self.logger.info(f"CPU: {self.cpu_usage:.1f}%, Memory: {self.memory_usage:.1f}%", throttle_duration_sec=2.0)
+        if self.debug_level >= 2:
+            self.logger.info(f"CPU: {self.cpu_usage:.1f}%, Memory: {self.memory_usage:.1f}%", throttle_duration_sec=5.0)
 
 class ThrottledLogger:
     """Logger wrapper that supports throttled logging to avoid log spam."""

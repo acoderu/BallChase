@@ -34,11 +34,11 @@ import logging
 import traceback  
 
 # Import modules from refactored files
-from pid_helpers import LightweightBuffer, CircularBuffer, ThrottledLogger, FastTrigonometry
+from pid_helpers import LightweightBuffer, CircularBuffer, ThrottledLogger, FastTrigonometry, ResourceMonitor
 from pid_target_filter import EnhancedTargetFilter, ErrorTracker
 from pid_computation import PIDControllers
 from pid_target_tracking import TargetTrackingModule, MovementStrategyModule, VelocityControlModule, TransformSystem
-from pid_target_tracking import ResourceMonitoringModule, RecoveryBehaviorModule, TransformStatus
+from pid_target_tracking import RecoveryBehaviorModule, TransformStatus
 
 # Configure logging
 logging.basicConfig(
@@ -204,7 +204,7 @@ class OptimizedPIDControllerNode(Node):
     def _initialize_utility_components(self):
         """Initialize utility components that depend only on parameters."""
         # Pass self.get_logger() to all helper modules for consistent logging
-        self.resource_monitor = ResourceMonitoringModule(throttled_logger)
+        self.resource_monitor = ResourceMonitor(throttled_logger, debug_level=self.debug_level)
         if hasattr(self.resource_monitor, 'set_rate_limits'):
             self.resource_monitor.set_rate_limits(
                 min_rate=self.min_control_rate,
@@ -216,6 +216,7 @@ class OptimizedPIDControllerNode(Node):
                 low_threshold=self.cpu_low_threshold,
                 high_threshold=self.cpu_high_threshold
             )
+        self.resource_monitor.start()
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         from pid_target_tracking import TransformSystem
