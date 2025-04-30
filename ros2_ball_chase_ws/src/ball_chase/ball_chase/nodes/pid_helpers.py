@@ -362,3 +362,35 @@ class ResourceMonitor:
         # Use debug_level gating instead of isEnabledFor
         if hasattr(self, 'debug_level') and self.debug_level >= 2:
             self.logger.info(f"CPU: {self.cpu_usage:.1f}%, Memory: {self.memory_usage:.1f}%", throttle_duration_sec=2.0)
+
+class ThrottledLogger:
+    """Logger wrapper that supports throttled logging to avoid log spam."""
+    def __init__(self, logger):
+        self.logger = logger
+        self._last_log_times = {}
+        self._lock = threading.Lock()
+
+    def info(self, msg, throttle_duration_sec=None, log_id=None):
+        self._log('info', msg, throttle_duration_sec, log_id)
+
+    def warning(self, msg, throttle_duration_sec=None, log_id=None):
+        self._log('warning', msg, throttle_duration_sec, log_id)
+
+    def debug(self, msg, throttle_duration_sec=None, log_id=None):
+        self._log('debug', msg, throttle_duration_sec, log_id)
+
+    def error(self, msg, throttle_duration_sec=None, log_id=None):
+        self._log('error', msg, throttle_duration_sec, log_id)
+
+    def _log(self, level, msg, throttle_duration_sec, log_id):
+        if throttle_duration_sec is None:
+            getattr(self.logger, level)(msg)
+            return
+        # Use log_id or msg as the key
+        key = log_id if log_id is not None else msg
+        now = time.time()
+        with self._lock:
+            last_time = self._last_log_times.get(key, 0)
+            if now - last_time >= throttle_duration_sec:
+                getattr(self.logger, level)(msg)
+                self._last_log_times[key] = now

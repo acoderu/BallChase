@@ -7,8 +7,8 @@ import logging
 class EnhancedTargetFilter:
     """Enhanced filter for target position data with better motion prediction."""
     
-    def __init__(self, logger, buffer_size=8, prediction_horizon=0.3, debug_level=0):
-        self.logger = logger
+    def __init__(self, throttled_logger, buffer_size=8, prediction_horizon=0.3, debug_level=0):
+        self.logger = throttled_logger
         self.debug_level = debug_level
         # Use CircularBuffer for position and trajectory history
         self.position_buffer = CircularBuffer(buffer_size, default=(0.0, 0.0, 0.0, 0.0))
@@ -361,9 +361,9 @@ class EnhancedTargetFilter:
 class ErrorTracker:
     """Lightweight error tracker that monitors error values over time."""
     
-    def __init__(self, name, logger, max_history=8, debug_level=0):
+    def __init__(self, name, throttled_logger, max_history=8, debug_level=0):
         self.name = name
-        self.logger = logger
+        self.logger = throttled_logger
         self.max_history = max_history
         self.debug_level = debug_level
         self.error_history = CircularBuffer(max_history, default=0.0)
@@ -420,12 +420,12 @@ class ErrorTracker:
         if self.debug_level >= 3:
             if not hasattr(self, '_last_logged_error') or \
                abs(error - getattr(self, '_last_logged_error', 0.0)) > 0.02:
-                self.logger.info(f"Error updated: {error:.3f}, dt={dt:.3f}", throttle_duration_sec=2.0)
+                self.logger.info(f"Error updated: {error:.3f}, dt={dt:.3f}", throttle_duration_sec=2.0, log_id=f'{self.name}_error')
                 self._last_logged_error = error
         if self.sign_changes > 0 and self.debug_level >= 3:
             if not hasattr(self, '_last_logged_sign_changes') or \
                self.sign_changes != getattr(self, '_last_logged_sign_changes', -1):
-                self.logger.info(f"Error sign changes: {self.sign_changes}", throttle_duration_sec=4.0)
+                self.logger.info(f"Error sign changes: {self.sign_changes}", throttle_duration_sec=4.0, log_id=f'{self.name}_sign_changes')
                 self._last_logged_sign_changes = self.sign_changes
     
     def reset(self):
@@ -443,7 +443,7 @@ class ErrorTracker:
         self.previous_category = None
         
         if hasattr(self, 'debug_level') and self.debug_level >= 2:
-            self.logger.info("Error tracker state reset", throttle_duration_sec=2.0)
+            self.logger.info("Error tracker state reset", throttle_duration_sec=2.0, log_id=f'{self.name}_reset')
     
     def is_error_growing(self):
         """Check if error is growing compared to previous value."""

@@ -34,7 +34,7 @@ import logging
 import traceback  
 
 # Import modules from refactored files
-from pid_helpers import LightweightBuffer, CircularBuffer
+from pid_helpers import LightweightBuffer, CircularBuffer, ThrottledLogger
 from pid_target_filter import EnhancedTargetFilter, ErrorTracker
 from pid_computation import PIDControllers
 from pid_target_tracking import TargetTrackingModule, MovementStrategyModule, VelocityControlModule, TransformSystem
@@ -46,6 +46,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('pid_controller')
+throttled_logger = ThrottledLogger(logger)
 
 # Topic configuration
 TOPICS = {
@@ -260,7 +261,7 @@ class OptimizedPIDControllerNode(Node):
     def _initialize_utility_components(self):
         """Initialize utility components that depend only on parameters."""
         # Pass self.get_logger() to all helper modules for consistent logging
-        self.resource_monitor = ResourceMonitoringModule(self.get_logger())
+        self.resource_monitor = ResourceMonitoringModule(throttled_logger)
         if hasattr(self.resource_monitor, 'set_rate_limits'):
             self.resource_monitor.set_rate_limits(
                 min_rate=self.min_control_rate,
@@ -275,7 +276,7 @@ class OptimizedPIDControllerNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         from pid_target_tracking import TransformSystem
-        self.transform_system = TransformSystem(self, self.get_logger(), self.tf_buffer)
+        self.transform_system = TransformSystem(self, throttled_logger, self.tf_buffer)
         self.transform_system.add_transform_dependency("base_link", "imu_link", required=True)
         if not self.transform_system.start_initialization():
             raise RuntimeError("Failed to start transform system initialization")
@@ -284,20 +285,20 @@ class OptimizedPIDControllerNode(Node):
         """Initialize components that depend on utility components."""
         self._init_controllers()
         self.target_tracker = TargetTrackingModule(
-            self.get_logger(),
+            throttled_logger,
             filter_buffer_size=self.filter_buffer_size,
             prediction_horizon=self.prediction_horizon,
             debug_level=self.debug_level
         )
         if not hasattr(self.target_tracker, 'target_filter') or self.target_tracker.target_filter is None:
             raise RuntimeError("Target tracking filter was not properly initialized")
-        self.strategy_module = MovementStrategyModule(self.get_logger(), self.debug_level)
-        self.velocity_control = VelocityControlModule(self.get_logger())
+        self.strategy_module = MovementStrategyModule(throttled_logger, self.debug_level)
+        self.velocity_control = VelocityControlModule(throttled_logger)
         self.velocity_control.set_approach_parameters(
             self.approach_distance, 
             self.min_approach_factor
         )
-        self.recovery_module = RecoveryBehaviorModule(self.get_logger())
+        self.recovery_module = RecoveryBehaviorModule(throttled_logger)
 
     def _initialize_final_components(self):
         """Initialize communication and timer components."""
@@ -535,19 +536,19 @@ class OptimizedPIDControllerNode(Node):
                 PIDControllers.ControllerType.LINEAR_X,
                 self.linear_x_kp, self.linear_x_ki, self.linear_x_kd,
                 self.linear_x_min, self.linear_x_max,
-                "distance", self.get_logger(), max_history=8
+                "distance", throttled_logger, max_history=8
             )
             self.pid_linear_y, self.lateral_error_tracker = PIDControllers.create_controller_with_tracker(
                 PIDControllers.ControllerType.LINEAR_Y,
                 self.linear_y_kp, self.linear_y_ki, self.linear_y_kd,
                 self.linear_y_min, self.linear_y_max,
-                "lateral", self.get_logger(), max_history=8
+                "lateral", throttled_logger, max_history=8
             )
             self.pid_angular, self.angular_error_tracker = PIDControllers.create_controller_with_tracker(
                 PIDControllers.ControllerType.ANGULAR,
                 self.angular_kp, self.angular_ki, self.angular_kd,
                 self.angular_min, self.angular_max,
-                "angular", self.get_logger(), max_history=8
+                "angular", throttled_logger, max_history=8
             )
             self.pid_linear_x.validate_initialization()
             self.pid_linear_y.validate_initialization()
@@ -555,7 +556,7 @@ class OptimizedPIDControllerNode(Node):
             self.coordinated_controller = PIDControllers.CoordinatedController(
                 self.pid_linear_y, 
                 self.pid_angular,
-                self.get_logger(),
+                throttled_logger,
                 {
                     'coupling_factor': 0.3,
                     'smoothing_factor': 0.7,
@@ -1059,7 +1060,7 @@ class OptimizedPIDControllerNode(Node):
                 f"Using strategy: {strategy.strategy_name}, "
                 f"forward={use_forward}, lateral={use_lateral}, angular={use_angular}"
             )
-            self.get_logger().info(strategy_log, throttle_duration_sec=0.5)
+            throttled_logger.info(strategy_log, throttle_duration_sec=0.5, log_id='strategy')
 
         # Compute velocities based on the selected strategy
         current_time = time.time()
@@ -1139,7 +1140,7 @@ class OptimizedPIDControllerNode(Node):
                 f"After scaling: linear_x={linear_x_velocity:.3f}, "
                 f"lateral={lateral_velocity:.3f}, angular={angular_velocity:.3f}"
             )
-            self.get_logger().info(velocity_log, throttle_duration_sec=1.0)
+            throttled_logger.info(velocity_log, throttle_duration_sec=1.0, log_id='velocity')
             
         return linear_x_velocity, lateral_velocity, angular_velocity
 
@@ -1183,10 +1184,9 @@ class OptimizedPIDControllerNode(Node):
         
         # Log velocity commands with built-in throttling
         if self.debug_level >= 1 or velocity_change:
-            self.get_logger().info(
+            throttled_logger.info(
                 f"MOTION: x={linear_x_velocity:.2f} y={lateral_velocity:.2f} θ={angular_velocity:.2f}",
-                throttle_duration_sec=0.5
-            )
+                throttle_duration_sec=0.5, log_id='motion')
             
             # For keeping track of last logged command (manages outside of throttling)
             current_time = time.time()
@@ -2000,14 +2000,9 @@ class OptimizedPIDControllerNode(Node):
     
     def _log_periodic_status(self):
         """Log periodic status updates."""
-        # Only log if debug level supports it
         if self.debug_level < 1:
             return
-            
-        # Get current CPU usage and performance stats
         perf_stats = self.resource_monitor.get_performance_stats()
-        
-        # Check if performance stats are available
         if not perf_stats or not all(k in perf_stats for k in ['cpu_avg', 'cycle_time_ms', 'update_rate']):
             perf_stats = {
                 'cpu_avg': 0.0,
@@ -2015,17 +2010,9 @@ class OptimizedPIDControllerNode(Node):
                 'update_rate': getattr(self, 'update_rate', 3.0),
                 'skips': 0
             }
-        
-        # Get current strategy name safely
-        strategy_name = "unknown"
-        if hasattr(self.strategy_module, 'current_strategy'):
-            strategy_name = self.strategy_module.current_strategy
-        
-        # Calculate event-based execution ratio
+        strategy_name = getattr(self.strategy_module, 'current_strategy', 'unknown')
         total_cycles = max(1, self._event_control_count + self._timer_control_count)
         event_ratio = self._event_control_count / total_cycles * 100.0
-        
-        # Log status with optimization info
         status_msg = (
             f"Status: Robot state={self.robot_state}, "
             f"Strategy={strategy_name}, "
@@ -2037,7 +2024,7 @@ class OptimizedPIDControllerNode(Node):
             f"Event-driven={event_ratio:.1f}%, "
             f"Skips={self._skipped_cycle_count}"
         )
-        self.get_logger().info(status_msg)
+        throttled_logger.info(status_msg, throttle_duration_sec=LOG_THROTTLE_CONTROL, log_id='periodic_status')
     
     def calculate_adaptive_rate(self, base_rate, cpu_usage):
         """
@@ -2251,8 +2238,7 @@ class OptimizedPIDControllerNode(Node):
                     f"Simp={simplified_pct:.1f}%, "
                     f"Freshness={self._data_freshness_level}"
                 )
-                
-                self.get_logger().info(diag_msg, throttle_duration_sec=LOG_THROTTLE_DIAG)
+                throttled_logger.info(diag_msg, throttle_duration_sec=LOG_THROTTLE_DIAG, log_id='diagnostics')
             
             # Publish PID diagnostic data
             self._publish_pid_diagnostics()

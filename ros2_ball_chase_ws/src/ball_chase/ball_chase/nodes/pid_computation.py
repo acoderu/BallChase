@@ -23,14 +23,14 @@ class PIDControllers:
     """Namespace for PID controller classes and related functionality."""
     
     @staticmethod
-    def create_controller_with_tracker(controller_type, kp, ki, kd, output_min, output_max, tracker_name, logger, max_history=8):
+    def create_controller_with_tracker(controller_type, kp, ki, kd, output_min, output_max, tracker_name, throttled_logger, max_history=8):
         """Factory method to create a controller with its error tracker properly initialized."""
-        error_tracker = ErrorTracker(tracker_name, logger, max_history=max_history)
+        error_tracker = ErrorTracker(tracker_name, throttled_logger, max_history=max_history)
         controller = PIDControllers.create_controller(
             controller_type, kp, ki, kd, output_min, output_max
         )
         controller.error_tracker = error_tracker
-        controller.logger = logger  
+        controller.logger = throttled_logger  
         if not hasattr(controller, 'error_tracker') or controller.error_tracker is None:
             raise RuntimeError(f"Failed to initialize error tracker for {controller_type.name} controller")
         return controller, error_tracker
@@ -44,7 +44,7 @@ class PIDControllers:
         the appropriate movement strategy based on current error conditions.
         """
         
-        def __init__(self, logger):
+        def __init__(self, throttled_logger):
             """
             Initialize the strategy manager.
             
@@ -52,7 +52,7 @@ class PIDControllers:
                 logger: Logger instance for diagnostic output
             """
             # Setup logging
-            self.logger = logger
+            self.logger = throttled_logger
             
             # Initialize strategy table
             self.strategy_table = self._init_strategy_table()
@@ -714,7 +714,7 @@ class PIDControllers:
     class CoordinatedController:
         """Controller that coordinates lateral and angular movements."""
         
-        def __init__(self, linear_pid, angular_pid, logger, config=None):
+        def __init__(self, linear_pid, angular_pid, throttled_logger, config=None):
             """
             Initialize the coordinated controller.
             
@@ -726,7 +726,7 @@ class PIDControllers:
             """
             self.linear_pid = linear_pid
             self.angular_pid = angular_pid
-            self.logger = logger
+            self.logger = throttled_logger
             
             # Default configuration with improved values - extract to instance variables
             self.coupling_factor = 0.4         # Reduced from 0.7 to allow more lateral movement

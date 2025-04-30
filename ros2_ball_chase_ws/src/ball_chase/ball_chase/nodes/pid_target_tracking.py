@@ -37,9 +37,9 @@ from pid_computation import PIDControllers
 class TargetTrackingModule:
     """Module that handles target tracking, filtering, and prediction with fusion rate detection."""
     
-    def __init__(self, logger, filter_buffer_size=5, prediction_horizon=0.2, debug_level=0):
+    def __init__(self, throttled_logger, filter_buffer_size=5, prediction_horizon=0.2, debug_level=0):
         """Initialize the target tracking module."""
-        self.logger = logger
+        self.logger = throttled_logger
         self.debug_level = debug_level
         self.current_target = None
         self.last_target_time = None
@@ -376,12 +376,12 @@ class TargetTrackingModule:
 class MovementStrategyModule:
     """Module that handles movement strategy selection and blending by delegating to StrategyManager."""
     
-    def __init__(self, logger, debug_level=0):
+    def __init__(self, throttled_logger, debug_level=0):
         """Initialize the movement strategy module."""
-        self.logger = logger
+        self.logger = throttled_logger
         self.debug_level = debug_level
         # Use centralized StrategyManager from PIDControllers
-        self.strategy_manager = PIDControllers.StrategyManager(self.logger)
+        self.strategy_manager = PIDControllers.StrategyManager(throttled_logger)
         self.strategy_manager.set_debug_level(self.debug_level)
         self.strategy_blender = self.strategy_manager.strategy_blender
         self.initialized = True
@@ -431,9 +431,9 @@ class MovementStrategyModule:
 class VelocityControlModule:
     """Module to handle velocity generation, limiting, and coordination."""
     
-    def __init__(self, logger):
+    def __init__(self, throttled_logger):
         """Initialize velocity processor with logger."""
-        self.logger = logger
+        self.logger = throttled_logger
         
         # Velocity parameters
         self.approach_distance = 0.3
@@ -870,13 +870,13 @@ class VelocityControlModule:
 class ResourceMonitoringModule:
     """Module for monitoring system resources and adapting behavior for Raspberry Pi 5."""
     
-    def __init__(self, logger):
+    def __init__(self, throttled_logger):
         """Initialize the resource monitoring module."""
-        self.logger = logger
+        self.logger = throttled_logger
         
         # Initialize resource monitor from imported module
         try:
-            self.resource_monitor = ResourceMonitor(logger=logger, update_interval=5.0)
+            self.resource_monitor = ResourceMonitor(logger=throttled_logger, update_interval=5.0)
             self.monitor_initialized = True
         except Exception as e:
             self.logger.error(f"Failed to initialize resource monitor: {str(e)}")
@@ -1493,9 +1493,9 @@ class TransformSystem:
 class RecoveryBehaviorModule:
     """Module for handling recovery behaviors."""
     
-    def __init__(self, logger):
+    def __init__(self, throttled_logger):
         """Initialize recovery module with logger."""
-        self.logger = logger
+        self.logger = throttled_logger
         
         # Recovery state tracking
         self.in_recovery = False
