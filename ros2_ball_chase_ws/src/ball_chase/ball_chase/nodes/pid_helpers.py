@@ -394,3 +394,60 @@ class ThrottledLogger:
             if now - last_time >= throttle_duration_sec:
                 getattr(self.logger, level)(msg)
                 self._last_log_times[key] = now
+
+# Trigonometric optimization - pre-computed values for common angles
+# Using 1-degree increments for reasonable accuracy/memory tradeoff
+class FastTrigonometry:
+    """Optimized trigonometric functions using look-up tables and approximations."""
+    
+    def __init__(self):
+        """Initialize lookup tables for common angles."""
+        # Create lookup tables with 1-degree increments from -180 to 180 degrees
+        self.angles_rad = np.radians(np.arange(-180, 181, 1))
+        self.sin_table = np.sin(self.angles_rad)
+        self.cos_table = np.cos(self.angles_rad)
+        
+        # Small angle threshold in radians (approximately 5 degrees)
+        self.small_angle_threshold = 0.087  # ~5 degrees
+        
+    def sin(self, angle_rad):
+        """Fast sine calculation using lookup table and small angle approximation."""
+        # Small angle approximation for very small angles
+        if abs(angle_rad) < self.small_angle_threshold:
+            return angle_rad  # sin(x) ≈ x for small x
+        
+        # Normalize angle to -π to π range
+        angle_rad = (angle_rad + math.pi) % (2 * math.pi) - math.pi
+        
+        # Convert to degrees and find nearest index
+        angle_deg = round(math.degrees(angle_rad))
+        # Ensure index is within bounds
+        index = max(-180, min(180, angle_deg)) + 180
+        
+        return self.sin_table[index]
+    
+    def cos(self, angle_rad):
+        """Fast cosine calculation using lookup table and small angle approximation."""
+        # Small angle approximation for very small angles
+        if abs(angle_rad) < self.small_angle_threshold:
+            return 1.0 - (angle_rad * angle_rad) / 2.0  # cos(x) ≈ 1 - x²/2 for small x
+        
+        # Normalize angle to -π to π range
+        angle_rad = (angle_rad + math.pi) % (2 * math.pi) - math.pi
+        
+        # Convert to degrees and find nearest index
+        angle_deg = round(math.degrees(angle_rad))
+        # Ensure index is within bounds
+        index = max(-180, min(180, angle_deg)) + 180
+        
+        return self.cos_table[index]
+    
+    def atan2(self, y, x):
+        """Fast implementation of atan2 using lookup tables for common cases."""
+        # Handle special cases
+        if abs(x) < 1e-10:  # x is close to zero
+            return math.pi/2 if y > 0 else -math.pi/2 if y < 0 else 0.0
+        
+        # Use standard atan2 for non-common cases
+        # This could be further optimized with a 2D lookup table if needed
+        return math.atan2(y, x)
