@@ -325,32 +325,7 @@ class OptimizedPIDControllerNode(Node):
         for component in required_components:
             if not hasattr(self, component) or getattr(self, component) is None:
                 raise RuntimeError(f"Required component '{component}' is not initialized")
-    
-    # def _on_transform_status_change(self, status, message):
-    #     """Handle transform system status changes."""
-    #     # Log status change
-    #     self.get_logger().info(f"Transform system status: {status.name} - {message}")
-        
-    #     # Take action based on status
-    #     if status == TransformStatus.READY:
-    #         # Transform system fully initialized
-    #         self.get_logger().info("Transform system fully initialized - normal operation enabled")
-            
-    #         # Cache common transforms now that they're available
-    #         self.transform_utils.cache_common_transforms()
-        
-    #     elif status == TransformStatus.PARTIALLY_AVAILABLE:
-    #         # Core transforms available, but some optional ones missing
-    #         self.get_logger().warning(
-    #             "Proceeding with partial transform availability - some features may be limited"
-    #         )
-        
-    #     elif status == TransformStatus.ERROR:
-    #         # Transform initialization failed
-    #         self.get_logger().error(
-    #             "Transform system initialization failed - operating with limited functionality"
-    #         )
-
+       
     def _declare_parameters(self):
         """Declare and get all node parameters with improved defaults for Raspberry Pi 5."""
         # Declare parameters with improved defaults
@@ -766,30 +741,6 @@ class OptimizedPIDControllerNode(Node):
         # Resource monitoring timer
         self.resource_timer = self.create_timer(self.cpu_throttle_interval, self._update_resource_monitoring)
         
-        # Transform verification timer - runs periodically to check transform status
-        # This is separate from the TransformManager's internal verification timer
-        # to provide ongoing verification even after initialization
-        #self.transform_check_timer = self.create_timer(2.0, self._check_transform_status)
-    
-    # def _check_transform_status(self):
-    #     """Periodic check of transform system status."""
-    #     # This runs on a timer to verify transforms periodically even after initialization
-    #     if hasattr(self, 'transform_system') and hasattr(self, 'transform_utils'):
-    #         if not self.transform_system.is_transform_system_ready():
-    #             # If not initialized, try to restart initialization
-    #             if self.cycle_count % 5 == 0:  # Only log occasionally
-    #                 status = self.transform_system.get_status()
-    #                 self.get_logger().warning(
-    #                     f"Transform system not initialized: {status['message']} - retrying"
-    #                 )
-    #                 self.transform_system.start_initialization()
-    #             else:
-    #                 # If initialized but hasn't cached transforms, do so
-    #                 if not hasattr(self, '_transforms_cached') or not self._transforms_cached:
-    #                     if self.transform_utils.cache_common_transforms():
-    #                         self._transforms_cached = True
-    #                         self.get_logger().info("Common transforms cached successfully")
-
     def orientation_callback(self, msg):
         """Handle orientation updates from the IMU with improved transform handling."""
         # Extract yaw (z component) from the Vector3Stamped message
@@ -1275,32 +1226,7 @@ class OptimizedPIDControllerNode(Node):
             motion_occurred = True
             
         return motion_occurred
-
-    # def _optimize_transforms_and_filtering(self):
-    #     """Execute expensive transform and filtering operations at reduced frequency."""
-    #     # Only perform expensive operations periodically to save CPU
-    #     if self.cycle_count % 3 == 0 or self.force_target_reacquisition:
-    #         # Check transform status and trigger verification if needed
-    #         if (hasattr(self, 'transform_system') and not self.transform_system.is_transform_system_ready()):
-                
-    #             # Only log occasionally to avoid spam
-    #             if self.cycle_count % 15 == 0:
-    #                 self.get_logger().debug("Transform system not initialized during control cycle")
-                    
-    #             # Try to restart initialization if not already in progress
-    #             if not self.transform_system._initialization_started:
-    #                 self.transform_system.start_initialization()
-                    
-    #         # Cache common transforms if needed and system is ready
-    #         elif hasattr(self, 'transform_utils') and self.transform_utils.is_transform_system_ready():
-    #             if not hasattr(self, '_transforms_cached') or not self._transforms_cached:
-    #                 if self.transform_utils.cache_common_transforms():
-    #                     self._transforms_cached = True
-                    
-    #         return True
-        
-    #     return False  # No expensive operations performed
-
+    
     def _check_data_freshness(self):
         """
         Check the freshness of target data and update system state accordingly.

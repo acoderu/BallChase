@@ -26,7 +26,7 @@ from collections import deque
 from enum import Enum, auto
 
 # Import modules from refactored files
-from pid_helpers import ResourceMonitor, Matrix4x4, TTLDict, LightweightBuffer
+from pid_helpers import Matrix4x4, TTLDict, LightweightBuffer, ResourceMonitor
 from pid_target_filter import EnhancedTargetFilter, ErrorTracker
 from pid_computation import PIDControllers
 
