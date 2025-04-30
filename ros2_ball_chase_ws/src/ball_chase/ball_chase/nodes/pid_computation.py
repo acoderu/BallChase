@@ -522,7 +522,7 @@ class PIDControllers:
                 is_robot_stopped: Whether the robot is currently stopped
                 
             Returns:
-                dict: Strategy information including strategy name, movement flags, and scale factors
+                MovementStrategy: Strategy object including strategy name, movement flags, and scale factors
             """
             current_time = time.time()
             
@@ -547,8 +547,7 @@ class PIDControllers:
                             0.7, 0.3, 0.3,
                             "Startup forward priority - quick response mode"
                         )
-                        
-                        return startup_strategy.as_dict()
+                        return startup_strategy
                 
                 # Check if robot is at target distance and reduce angular priority if so
                 at_target_distance = abs(distance_error) < self.distance_threshold * 1.5
@@ -637,12 +636,12 @@ class PIDControllers:
                     current_strategy = self.strategy_blender.get_current_strategy(current_time)
                     
                     # Keep track of the current strategy name for logging
-                    self.current_strategy = current_strategy.name
+                    self.current_strategy = current_strategy.strategy_name
                     
                     # Log strategy changes (throttled)
                     if blend_started or self.debug_level >= 2:
                         self.logger.info(
-                            f"Strategy selected: {current_strategy.name}, params: "
+                            f"Strategy selected: {current_strategy.strategy_name}, params: "
                             f"forward={current_strategy.forward_scale:.1f}, "
                             f"lateral={current_strategy.lateral_scale:.1f}, "
                             f"angular={current_strategy.angular_scale:.1f}"
@@ -653,16 +652,16 @@ class PIDControllers:
                             f"lateral={self._key_tuple[1]}, angular={self._key_tuple[2]}"
                         )
                     
-                    # Return strategy as dict
-                    return current_strategy.as_dict()
+                    # Return strategy object
+                    return current_strategy
                 else:
                     # If no blender, return target strategy directly
-                    self.current_strategy = target_strategy.name
-                    return target_strategy.as_dict()
+                    self.current_strategy = target_strategy.strategy_name
+                    return target_strategy
             except Exception as e:
                 self.logger.error(f"Strategy determination error: {str(e)}")
                 # Return fallback strategy on error
-                return self._fallback_strategy.as_dict()
+                return self._fallback_strategy
 
         @staticmethod
         def create_strategy_from_definition(strategy_def, distance_error=0.0, lateral_error=0.0, angular_error=0.0):
@@ -900,7 +899,7 @@ class PIDControllers:
         def __init__(self, name, use_forward, use_lateral, use_angular, 
                     forward_scale, lateral_scale, angular_scale, reason):
             """Initialize a movement strategy."""
-            self.name = name
+            self.strategy_name = name
             self.use_forward = use_forward
             self.use_lateral = use_lateral
             self.use_angular = use_angular
@@ -909,18 +908,18 @@ class PIDControllers:
             self.angular_scale = angular_scale
             self.reason = reason
         
-        def as_dict(self):
-            """Convert to dictionary for compatibility with existing code."""
-            return {
-                "strategy_name": self.name,
-                "use_forward": self.use_forward,
-                "use_lateral": self.use_lateral,
-                "use_angular": self.use_angular,
-                "forward_scale": self.forward_scale,
-                "lateral_scale": self.lateral_scale,
-                "angular_scale": self.angular_scale,
-                "reason": self.reason
-            }
+        # def as_dict(self):
+        #     """Convert to dictionary for compatibility with existing code."""
+        #     return {
+        #         "strategy_name": self.name,
+        #         "use_forward": self.use_forward,
+        #         "use_lateral": self.use_lateral,
+        #         "use_angular": self.use_angular,
+        #         "forward_scale": self.forward_scale,
+        #         "lateral_scale": self.lateral_scale,
+        #         "angular_scale": self.angular_scale,
+        #         "reason": self.reason
+        #     }
 
     class StrategyBlender:
         """Handles smooth transitions between movement strategies."""
@@ -959,7 +958,7 @@ class PIDControllers:
                 return False
                 
             # Check if target is different from current
-            if target_strategy.name != self.current_strategy.name:
+            if target_strategy.strategy_name != self.current_strategy.strategy_name:
                 # Detect direction change for boosting transition speed
                 current_direction = self._get_strategy_direction(target_strategy)
                 direction_change = False
@@ -1049,8 +1048,7 @@ class PIDControllers:
                     "blended", False, False, False, 0, 0, 0, "")
             
             # Update the reusable blended strategy object
-            # Use a simple constant name for the blended strategy to avoid string operations
-            self._blended_strategy.name = "blended"
+            self._blended_strategy.strategy_name = "blended"
             
             # Determine boolean flags using OR logic for smoother transitions
             self._blended_strategy.use_forward = self.target_strategy.use_forward or (

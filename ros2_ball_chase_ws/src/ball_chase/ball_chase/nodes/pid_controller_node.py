@@ -31,6 +31,7 @@ import signal
 import sys
 from collections import deque
 import logging
+import traceback  
 
 # Import modules from refactored files
 from pid_helpers import LightweightBuffer
@@ -325,30 +326,30 @@ class OptimizedPIDControllerNode(Node):
             if not hasattr(self, component) or getattr(self, component) is None:
                 raise RuntimeError(f"Required component '{component}' is not initialized")
     
-    def _on_transform_status_change(self, status, message):
-        """Handle transform system status changes."""
-        # Log status change
-        self.get_logger().info(f"Transform system status: {status.name} - {message}")
+    # def _on_transform_status_change(self, status, message):
+    #     """Handle transform system status changes."""
+    #     # Log status change
+    #     self.get_logger().info(f"Transform system status: {status.name} - {message}")
         
-        # Take action based on status
-        if status == TransformStatus.READY:
-            # Transform system fully initialized
-            self.get_logger().info("Transform system fully initialized - normal operation enabled")
+    #     # Take action based on status
+    #     if status == TransformStatus.READY:
+    #         # Transform system fully initialized
+    #         self.get_logger().info("Transform system fully initialized - normal operation enabled")
             
-            # Cache common transforms now that they're available
-            self.transform_utils.cache_common_transforms()
+    #         # Cache common transforms now that they're available
+    #         self.transform_utils.cache_common_transforms()
         
-        elif status == TransformStatus.PARTIALLY_AVAILABLE:
-            # Core transforms available, but some optional ones missing
-            self.get_logger().warning(
-                "Proceeding with partial transform availability - some features may be limited"
-            )
+    #     elif status == TransformStatus.PARTIALLY_AVAILABLE:
+    #         # Core transforms available, but some optional ones missing
+    #         self.get_logger().warning(
+    #             "Proceeding with partial transform availability - some features may be limited"
+    #         )
         
-        elif status == TransformStatus.ERROR:
-            # Transform initialization failed
-            self.get_logger().error(
-                "Transform system initialization failed - operating with limited functionality"
-            )
+    #     elif status == TransformStatus.ERROR:
+    #         # Transform initialization failed
+    #         self.get_logger().error(
+    #             "Transform system initialization failed - operating with limited functionality"
+    #         )
 
     def _declare_parameters(self):
         """Declare and get all node parameters with improved defaults for Raspberry Pi 5."""
@@ -579,6 +580,7 @@ class OptimizedPIDControllerNode(Node):
             self.coordinated_controller = PIDControllers.CoordinatedController(
                 self.pid_linear_y, 
                 self.pid_angular,
+                self.get_logger(),
                 {
                     'coupling_factor': 0.3,
                     'smoothing_factor': 0.7,
@@ -614,16 +616,6 @@ class OptimizedPIDControllerNode(Node):
         self._diag_data = np.zeros(14, dtype=np.float32)
         
         # Pre-allocated objects for frequent operations
-        self._strategy_dict = {
-            "strategy_name": "",
-            "use_forward": False,
-            "use_lateral": False,
-            "use_angular": False,
-            "forward_scale": 0.0,
-            "lateral_scale": 0.0,
-            "angular_scale": 0.0,
-            "reason": ""
-        }
         self._key_tuple = ["none", "none", "none"]  # Use list instead of tuple for mutability
         
         # Pre-allocated velocity tuple
@@ -777,26 +769,26 @@ class OptimizedPIDControllerNode(Node):
         # Transform verification timer - runs periodically to check transform status
         # This is separate from the TransformManager's internal verification timer
         # to provide ongoing verification even after initialization
-        self.transform_check_timer = self.create_timer(2.0, self._check_transform_status)
+        #self.transform_check_timer = self.create_timer(2.0, self._check_transform_status)
     
-    def _check_transform_status(self):
-        """Periodic check of transform system status."""
-        # This runs on a timer to verify transforms periodically even after initialization
-        if hasattr(self, 'transform_manager') and hasattr(self, 'transform_utils'):
-            if not self.transform_manager.is_initialized(required_only=True):
-                # If not initialized, try to restart initialization
-                if self.cycle_count % 5 == 0:  # Only log occasionally
-                    status = self.transform_manager.get_status()
-                    self.get_logger().warning(
-                        f"Transform system not initialized: {status['message']} - retrying"
-                    )
-                    self.transform_manager.start_initialization()
-            else:
-                # If initialized but hasn't cached transforms, do so
-                if not hasattr(self, '_transforms_cached') or not self._transforms_cached:
-                    if self.transform_utils.cache_common_transforms():
-                        self._transforms_cached = True
-                        self.get_logger().info("Common transforms cached successfully")
+    # def _check_transform_status(self):
+    #     """Periodic check of transform system status."""
+    #     # This runs on a timer to verify transforms periodically even after initialization
+    #     if hasattr(self, 'transform_system') and hasattr(self, 'transform_utils'):
+    #         if not self.transform_system.is_transform_system_ready():
+    #             # If not initialized, try to restart initialization
+    #             if self.cycle_count % 5 == 0:  # Only log occasionally
+    #                 status = self.transform_system.get_status()
+    #                 self.get_logger().warning(
+    #                     f"Transform system not initialized: {status['message']} - retrying"
+    #                 )
+    #                 self.transform_system.start_initialization()
+    #             else:
+    #                 # If initialized but hasn't cached transforms, do so
+    #                 if not hasattr(self, '_transforms_cached') or not self._transforms_cached:
+    #                     if self.transform_utils.cache_common_transforms():
+    #                         self._transforms_cached = True
+    #                         self.get_logger().info("Common transforms cached successfully")
 
     def orientation_callback(self, msg):
         """Handle orientation updates from the IMU with improved transform handling."""
@@ -1079,7 +1071,10 @@ class OptimizedPIDControllerNode(Node):
                     self.get_logger().info(stop_reason)
                     self._robot_stopped = True
                     self._stop_time = time.time()
-                    self.recovery_module.stop_robot()
+                    # Generate stop command
+                    stop_cmd = self.recovery_module.stop_robot()
+                    # Publish stop command to actually stop the robot
+                    self.cmd_vel_pub.publish(stop_cmd)  # Add this line to actually send the 
                 return True  # Handled by stopping the robot
         
         # Update error trackers
@@ -1099,18 +1094,18 @@ class OptimizedPIDControllerNode(Node):
             self._robot_stopped
         )
         
-        # Apply strategy to movement decisions
-        use_forward = strategy["use_forward"]
-        use_lateral = strategy["use_lateral"]
-        use_angular = strategy["use_angular"]
+        # Apply strategy to movement decisions (use object attributes)
+        use_forward = strategy.use_forward
+        use_lateral = strategy.use_lateral
+        use_angular = strategy.use_angular
         
-        forward_scale = strategy["forward_scale"]
-        lateral_scale = strategy["lateral_scale"]
-        angular_scale = strategy["angular_scale"]
+        forward_scale = strategy.forward_scale
+        lateral_scale = strategy.lateral_scale
+        angular_scale = strategy.angular_scale
         
         if self.debug_level >= 3:
             strategy_log = (
-                f"Using strategy: {strategy['strategy_name']}, "
+                f"Using strategy: {strategy.strategy_name}, "
                 f"forward={use_forward}, lateral={use_lateral}, angular={use_angular}"
             )
             self.get_logger().info(strategy_log, throttle_duration_sec=0.5)
@@ -1281,31 +1276,30 @@ class OptimizedPIDControllerNode(Node):
             
         return motion_occurred
 
-    def _optimize_transforms_and_filtering(self):
-        """Execute expensive transform and filtering operations at reduced frequency."""
-        # Only perform expensive operations periodically to save CPU
-        if self.cycle_count % 3 == 0 or self.force_target_reacquisition:
-            # Check transform status and trigger verification if needed
-            if (hasattr(self, 'transform_manager') and 
-                not self.transform_manager.is_initialized(required_only=True)):
+    # def _optimize_transforms_and_filtering(self):
+    #     """Execute expensive transform and filtering operations at reduced frequency."""
+    #     # Only perform expensive operations periodically to save CPU
+    #     if self.cycle_count % 3 == 0 or self.force_target_reacquisition:
+    #         # Check transform status and trigger verification if needed
+    #         if (hasattr(self, 'transform_system') and not self.transform_system.is_transform_system_ready()):
                 
-                # Only log occasionally to avoid spam
-                if self.cycle_count % 15 == 0:
-                    self.get_logger().debug("Transform system not initialized during control cycle")
+    #             # Only log occasionally to avoid spam
+    #             if self.cycle_count % 15 == 0:
+    #                 self.get_logger().debug("Transform system not initialized during control cycle")
                     
-                # Try to restart initialization if not already in progress
-                if not self.transform_manager.is_initializing:
-                    self.transform_manager.start_initialization()
+    #             # Try to restart initialization if not already in progress
+    #             if not self.transform_system._initialization_started:
+    #                 self.transform_system.start_initialization()
                     
-            # Cache common transforms if needed and system is ready
-            elif hasattr(self, 'transform_utils') and self.transform_utils.is_transform_system_ready():
-                if not hasattr(self, '_transforms_cached') or not self._transforms_cached:
-                    if self.transform_utils.cache_common_transforms():
-                        self._transforms_cached = True
+    #         # Cache common transforms if needed and system is ready
+    #         elif hasattr(self, 'transform_utils') and self.transform_utils.is_transform_system_ready():
+    #             if not hasattr(self, '_transforms_cached') or not self._transforms_cached:
+    #                 if self.transform_utils.cache_common_transforms():
+    #                     self._transforms_cached = True
                     
-            return True
+    #         return True
         
-        return False  # No expensive operations performed
+    #     return False  # No expensive operations performed
 
     def _check_data_freshness(self):
         """
@@ -1319,6 +1313,7 @@ class OptimizedPIDControllerNode(Node):
             is_fresh, freshness_level, data_age = self.target_tracker.is_target_fresh(
                 max_age=self.fresh_data_timeout
             )
+            
             # Validate returned data (guard against unexpected return values)
             if not isinstance(freshness_level, str):
                 self.get_logger().warning(f"Invalid freshness level type: {type(freshness_level)}")
@@ -1326,6 +1321,7 @@ class OptimizedPIDControllerNode(Node):
             if not isinstance(data_age, (int, float)):
                 self.get_logger().warning(f"Invalid data age type: {type(data_age)}")
                 data_age = 999.0  # Default to high age for safety
+            
             # Check if the freshness level has changed
             if freshness_level != self._data_freshness_level:
                 # Log the transition
@@ -1338,15 +1334,9 @@ class OptimizedPIDControllerNode(Node):
                 self._freshness_state_change_time = time.time()
                 # Update the freshness level
                 self._data_freshness_level = freshness_level
-            # Handle critical freshness - safety stop
-            if freshness_level == "critical" and not self._robot_stopped:
-                self.get_logger().warning(
-                    f"CRITICAL DATA AGE: {data_age:.3f}s - Safety stop triggered"
-                )
-                self.recovery_module.stop_robot()
-                self._robot_stopped = True
-                self._stop_time = time.time()
-            return is_fresh, freshness_level, data_age
+            
+            #caller handles the stop when data is not fresh
+            return is_fresh, freshness_level, data_age            
         except Exception as e:
             self.get_logger().error(f"Error checking data freshness: {str(e)}")
             # Default to critical for safety in case of errors
@@ -1476,15 +1466,15 @@ class OptimizedPIDControllerNode(Node):
             return max(base_rate, self.min_control_rate)
 
     def execute_control_cycle(self, event_triggered=False):
-        """Execute one complete control cycle with improved error handling."""
+        """Execute one complete control cycle with improved error handling and state management."""
         try:
             # Skip if shutting down
             if hasattr(self, '_shutting_down') and self._shutting_down:
                 return
             
             # Skip if transform system is not initialized and required for this operation
-            if (hasattr(self, 'transform_manager') and 
-                not self.transform_manager.is_initialized(required_only=True)):
+            if (hasattr(self, 'transform_system') and 
+                not self.transform_system.is_transform_system_ready()):
                 return
             
             # Track execution time source for metrics
@@ -1522,7 +1512,17 @@ class OptimizedPIDControllerNode(Node):
             if self.cycle_count % 50 == 0:
                 self._log_periodic_status()
             
-            # Special handling for recovery mode
+            # Handle critical data freshness (prioritized over other state handling)
+            if freshness_level == "critical":
+                if not self._robot_stopped:
+                    self.get_logger().warning(f"CRITICAL DATA AGE: {data_age:.3f}s - Safety stop triggered")
+                    stop_cmd = self.recovery_module.stop_robot()
+                    self.cmd_vel_pub.publish(stop_cmd)  # Ensure command is published
+                    self._robot_stopped = True
+                    self._stop_time = time.time()
+                return  # Exit early when data is critically stale
+                
+            # Special handling for recovery mode (higher priority than other states)
             if self.in_recovery:
                 # Get position data for recovery
                 position_data = self.target_tracker.get_position_data()
@@ -1533,7 +1533,7 @@ class OptimizedPIDControllerNode(Node):
                     current_time, position_data, orientation_data
                 )
                 
-                # Publish the recovery command
+                # Always publish the command if in recovery mode
                 self.cmd_vel_pub.publish(cmd_vel)
                 
                 # If recovery is complete, transition back to normal mode
@@ -1541,18 +1541,18 @@ class OptimizedPIDControllerNode(Node):
                     self.in_recovery = False
                     self.get_logger().info("Recovery sequence completed")
                 
-                return
+                return  # Exit after handling recovery
             
-            # Only generate commands in tracking mode with a fresh enough target
-            if self.robot_state != "tracking" or freshness_level == "critical":
+            # Handle non-tracking states (searching/lost_ball have their own handling)
+            if self.robot_state != "tracking":
                 if self._handle_non_tracking_state():
-                    return
+                    return  # Exit after handling non-tracking state
             
             # Check if orientation data is fresh (prevents race conditions)
             if not self._is_orientation_fresh():
                 if self.debug_level >= 2:
                     self.get_logger().warning("Skipping control cycle - orientation data is stale", 
-                                              throttle_duration_sec=1.0)
+                                            throttle_duration_sec=1.0)
                 return
             
             # Determine computation level needed
@@ -1571,7 +1571,7 @@ class OptimizedPIDControllerNode(Node):
                 self._using_simplified_control = False
                 
             # Perform expensive transform operations at reduced frequency
-            self._optimize_transforms_and_filtering()
+            #self._optimize_transforms_and_filtering()
             
             # Calculate current errors
             distance, lateral, bearing, angular_degrees = self._calculate_errors()
@@ -1586,10 +1586,27 @@ class OptimizedPIDControllerNode(Node):
             
             # Check stop conditions and handle if needed
             if self._handle_stop_conditions(distance, lateral, angular_degrees, dt):
-                return
+                return  # Exit if stop conditions were met
+            
+            # Apply stale data handling - reduce velocity if data is stale
+            velocity_scale = 1.0
+            if freshness_level == "stale":
+                # Apply significant reduction for stale data
+                velocity_scale = 0.5  # 50% reduction
+                if self.debug_level >= 1:
+                    self.get_logger().warning(
+                        f"Using stale sensor data ({data_age:.3f}s old) - scaling velocities to {velocity_scale*100:.0f}%",
+                        throttle_duration_sec=2.0
+                    )
             
             # Determine strategy and calculate velocities
             linear_x_velocity, lateral_velocity, angular_velocity = self._determine_and_apply_strategy(dt)
+            
+            # Apply stale data velocity scaling
+            if velocity_scale < 1.0:
+                linear_x_velocity *= velocity_scale
+                lateral_velocity *= velocity_scale
+                angular_velocity *= velocity_scale
             
             # Guard against NaN values which can cause silent failures
             if (math.isnan(linear_x_velocity) or math.isnan(lateral_velocity) or 
@@ -1607,10 +1624,16 @@ class OptimizedPIDControllerNode(Node):
             self.update_performance_stats(cycle_duration)
                 
         except Exception as e:
+            stack_trace = traceback.format_exc()
+        
+            # Log the error with stack trace
+            self.get_logger().error(f"Unexpected error in execute_control_cycle: {str(e)}\nStack trace:\n{stack_trace}")
+
             self.get_logger().error(f"Unexpected error in control cycle: {str(e)}")
             # Try to safely stop the robot
             try:
-                self.recovery_module.stop_robot()
+                stop_cmd = self.recovery_module.stop_robot()
+                self.cmd_vel_pub.publish(stop_cmd)  # Ensure the stop command is published
             except Exception as stop_error:
                 self.get_logger().error(f"Failed to stop robot after error: {str(stop_error)}")
 
@@ -1785,12 +1808,12 @@ class OptimizedPIDControllerNode(Node):
                 return
             
             # Skip if transform system is not initialized and required
-            if (hasattr(self, 'transform_manager') and 
-                not self.transform_manager.is_initialized(required_only=True)):
+            if (hasattr(self, 'transform_system') and 
+                not self.transform_system.is_transform_system_ready()):
                 
                 # Log at most once per 20 cycles to avoid spamming
                 if self.cycle_count % 20 == 0:
-                    status = self.transform_manager.get_status()
+                    status = self.transform_system.get_status()
                     self.get_logger().warn(
                         f"Control loop waiting for transform initialization: {status['message']}"
                     )
@@ -1798,7 +1821,7 @@ class OptimizedPIDControllerNode(Node):
                     # Try to restart initialization if it's in error state
                     if status['status'] == TransformStatus.ERROR:
                         self.get_logger().warn("Attempting to restart transform initialization")
-                        self.transform_manager.start_initialization()
+                        self.transform_system.start_initialization()
                 
                 # Still increment cycle count
                 self.cycle_count += 1
@@ -1835,12 +1858,19 @@ class OptimizedPIDControllerNode(Node):
                 self.execute_control_cycle(event_triggered=False)
                     
         except Exception as e:
+            
+            stack_trace = traceback.format_exc()
+        
+            # Log the error with stack trace
+            self.get_logger().error(f"Unexpected error in control_loop_callback: {str(e)}\nStack trace:\n{stack_trace}")
+
             self.get_logger().error(f"Unexpected error in control_loop_callback: {str(e)}")
             # Try to safely stop the robot
             try:
                 self.recovery_module.stop_robot()
             except Exception as stop_error:
                 self.get_logger().error(f"Failed to stop robot after error: {str(stop_error)}")
+
     
     def _evaluate_stop_conditions(self, distance, lateral, angular_degrees, is_stopped):
         """
@@ -2126,7 +2156,7 @@ class OptimizedPIDControllerNode(Node):
                 fusion_rate = self._detected_fusion_rate
                 
                 # Ensure fusion rate is positive and reasonable
-                if fusion_rate > 0 and fusion_rate < 100:  # Sanity check
+                if (fusion_rate > 0 and fusion_rate < 100):  # Sanity check
                     # Cap to reasonable limits
                     adjusted_base_rate = min(max(fusion_rate * 1.2, self.min_control_rate), self.max_control_rate)
                     
@@ -2413,22 +2443,45 @@ class OptimizedPIDControllerNode(Node):
     
     def prepare_shutdown(self):
         """Prepare for node shutdown."""
-        self.get_logger().info("Preparing for shutdown")
+        if hasattr(self, '_shutting_down') and self._shutting_down:
+            return  # Already shutting down
+            
+        print("Preparing for shutdown")  # Use print instead of ROS logger
         self._shutting_down = True
+        
+        # Cancel all timers to prevent them from continuing to fire
+        for timer in [self.timer, self.diagnostic_timer, self.resource_timer, self.transform_check_timer]:
+            if hasattr(self, timer.__name__) and timer.__name__ is not None:
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+                    
         try:
-            stop_cmd = self.recovery_module.stop_robot()
-            # Publish the stop command to actually halt the robot
-            self.cmd_vel_pub.publish(stop_cmd)
-            self.get_logger().info("Robot motion stopped during shutdown")
-            time.sleep(1)
+            # Create a stop command directly
+            stop_cmd = Twist()  # All values default to 0.0
+            
+            # Try to publish but don't rely on logging
+            try:
+                self.cmd_vel_pub.publish(stop_cmd)
+                print("Robot motion stopped during shutdown")
+            except Exception:
+                print("Failed to publish stop command - context may be invalid")
+                
+            # Quick sleep to allow message to be sent if context still valid
+            time.sleep(0.1)
         except Exception as e:
-            self.get_logger().error(f"Error stopping robot during shutdown: {str(e)}")
-
+            print(f"Error stopping robot during shutdown: {str(e)}")
 
 # Main function
 def main(args=None):
     """Main function to initialize and run the PID Controller node."""
     rclpy.init(args=args)
+    node = None
+    
+    # Flag to track shutdown state
+    shutdown_initiated = False
+    
     try:
         print("=================================================")
         print("Optimized PID Controller for Basketball Tracking Robot")
@@ -2439,23 +2492,62 @@ def main(args=None):
             print(f"\nINITIALIZATION ERROR: {str(e)}")
             print("\nThe system cannot start due to critical initialization errors.")
             sys.exit(1)
+            
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            nonlocal shutdown_initiated
+            
+            if shutdown_initiated:
+                print("\nForce quitting (received multiple shutdown signals)")
+                sys.exit(1)
+                
+            shutdown_initiated = True
+            print("\nShutdown requested by user (Ctrl+C)")
+            print("Stopping robot and shutting down...")
+            
+            # Stop the robot first, before rclpy.shutdown() invalidates the context
+            if node is not None:
+                # Use direct method to stop robot without logging
+                stop_cmd = Twist()  # All values default to 0.0
+                try:
+                    node.cmd_vel_pub.publish(stop_cmd)
+                    # Small delay to allow message to be sent
+                    time.sleep(0.1)
+                except Exception as e:
+                    print(f"Error during emergency stop: {str(e)}")
+                node._shutting_down = True
+                
+            # Important: Raise KeyboardInterrupt to break out of rclpy.spin()
+            raise KeyboardInterrupt
+            
+        # Register the signal handler
+        original_sigint_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal_handler)
+        
         try:
             rclpy.spin(node)
         except KeyboardInterrupt:
-            print("\nShutdown requested by user (Ctrl+C)")
+            # This will be raised by our signal handler
+            print("Exiting main loop...")
         except Exception as e:
             print(f"\nRUNTIME ERROR: {str(e)}")
             import traceback
             traceback.print_exc()
     finally:
         try:
-            if 'node' in locals() and node is not None:
-                node.prepare_shutdown()
+            # Restore original signal handler before cleanup
+            signal.signal(signal.SIGINT, original_sigint_handler)
+            
+            if node is not None:
+                # No need to call prepare_shutdown() since signal handler does it
                 node.destroy_node()
+                print("Node destroyed successfully")
         except Exception as e:
             print(f"Error during shutdown: {str(e)}")
+        
+        print("Calling rclpy.shutdown()...")
         rclpy.shutdown()
-
+        print("Shutdown complete")
 
 if __name__ == '__main__':
     main()

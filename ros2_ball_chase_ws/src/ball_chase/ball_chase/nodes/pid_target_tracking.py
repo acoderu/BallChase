@@ -384,6 +384,7 @@ class MovementStrategyModule:
         # Direct initialization - no fallbacks
         self.strategy_manager = PIDControllers.StrategyManager(self.logger)
         self.strategy_blender = PIDControllers.StrategyBlender(self.logger)
+        self.strategy_manager.strategy_blender = self.strategy_blender
         self.strategy_table = self.strategy_manager._init_strategy_table()
         self.initialized = True
         
@@ -394,11 +395,7 @@ class MovementStrategyModule:
         
         # Error categorization state
         self.prev_error_categories = ["none", "none", "none"]  # [distance, lateral, angular]
-        
-        # Initialize blender for smooth transitions - use existing class from PIDControllers
-        self.strategy_blender = PIDControllers.StrategyBlender(self.logger)
-        self.strategy_manager.strategy_blender = self.strategy_blender
-        
+                
         # Startup movement tracking
         self._startup_movement_cycles = 0
         
@@ -428,7 +425,7 @@ class MovementStrategyModule:
         if self.debug_level >= 2:
             self.logger.info(
                 self._log_strategy_template.format(
-                    strategy.name, strategy.forward_scale, strategy.lateral_scale, strategy.angular_scale
+                    strategy.strategy_name, strategy.forward_scale, strategy.lateral_scale, strategy.angular_scale
                 ),
                 throttle_duration_sec=1.0
             )
@@ -1640,56 +1637,7 @@ class RecoveryBehaviorModule:
         self._exit_suggested = False
         self.logger.info("Entering recovery mode - stopping robot")
         return self.get_stop_command()
-    
-    def handle_data_staleness(self, target_freshness):
-        """
-        Handle robot behavior based on target data freshness.
         
-        Args:
-            target_freshness: Tuple of (is_fresh, freshness_level, age) from is_target_fresh()
-            
-        Returns:
-            tuple: (cmd_vel, handled) - Command velocity and whether staleness was handled
-        """
-        is_fresh, freshness_level, age = target_freshness
-        current_time = time.time()
-        
-        # Return immediately if data is fresh
-        if freshness_level == 'fresh':
-            # Reset stale data stop if it was active
-            if self._stale_data_stop_active:
-                self._stale_data_stop_active = False
-                self.logger.info("Resumed normal operation - sensor data is fresh again")
-            return None, False
-        
-        # Handle stale data
-        if freshness_level == 'stale':
-            # Log warning about stale data (throttled)
-            if current_time - self._last_staleness_log_time > 2.0:
-                self.logger.warning(f"Using stale sensor data ({age:.2f}s old) - reducing speed")
-                self._last_staleness_log_time = current_time
-            
-            # Continue with reduced speed, but don't take control
-            return None, False
-            
-        # Handle critical or invalid data
-        if freshness_level in ['critical', 'invalid']:
-            # Activate stale data stop if not already active
-            if not self._stale_data_stop_active:
-                self._stale_data_stop_active = True
-                self.logger.warning(f"STOPPING ROBOT - sensor data too old ({age:.2f}s)")
-                
-            # Log status periodically
-            elif current_time - self._last_staleness_log_time > 5.0:
-                self.logger.warning(f"Robot stopped due to stale data ({age:.2f}s old)")
-                self._last_staleness_log_time = current_time
-                
-            # Stop the robot and indicate that staleness was handled
-            return self.get_stop_command(), True
-        
-        # Default case - shouldn't get here
-        return None, False
-    
     def handle_recovery(self, current_time, target_data=None, orientation_data=None):
         """
         Handle recovery mode with a three-phase approach.
