@@ -431,9 +431,12 @@ class MovementStrategyModule:
 class VelocityControlModule:
     """Module to handle velocity generation, limiting, and coordination."""
     
-    def __init__(self, throttled_logger):
+    def __init__(self, throttled_logger, history_size=10):
         """Initialize velocity processor with logger."""
         self.logger = throttled_logger
+        self.history_size = history_size
+        self.velocity_history = []  # Always use a list
+        self.last_cmd_vel = np.zeros(3, dtype=np.float32)
         
         # Velocity parameters
         self.approach_distance = 0.3
@@ -483,14 +486,14 @@ class VelocityControlModule:
     def reset(self):
         """Reset processor state."""
         # Zero velocity commands
-        self.last_cmd_vel.fill(0.0)
-        self.last_logged_cmd.fill(0.0)
+        self.last_cmd_vel = np.zeros(3, dtype=np.float32)
+        self.last_logged_cmd = np.zeros(3, dtype=np.float32)
         
         # Reset timing
         self.last_accel_time = time.time()
         
         # Reset velocity history
-        self.velocity_history.fill(0.0)
+        self.velocity_history = np.zeros((self.buffer_size, 3), dtype=np.float32)
         self.history_index = 0
         self.history_count = 0
         
@@ -501,6 +504,7 @@ class VelocityControlModule:
         
         # Reset velocity change check 
         self._velocity_change_check.fill(False)
+        
     
     def process_velocities(self, linear_x, linear_y, angular_z, filtered_distance, desired_distance, freshness_level='fresh'):
         """
@@ -595,7 +599,7 @@ class VelocityControlModule:
                 np.copyto(self.last_logged_cmd, self.last_cmd_vel)
             
             # Return as tuple for compatibility
-            return (self.last_cmd_vel[0], self.last_cmd_vel[1], self.last_cmd_vel[2])
+            return tuple(self.last_cmd_vel)
             
         except Exception as e:
             self.logger.error(f"Error processing velocities: {str(e)}")
@@ -862,6 +866,19 @@ class VelocityControlModule:
         except Exception as e:
             self.logger.error(f"Error calculating average velocity: {str(e)}")
             return (0.0, 0.0, 0.0)  # Return zero velocity on error
+
+    def _add_to_history(self, vel_tuple):
+        # Accepts tuple or array, always stores as numpy array
+        if not isinstance(vel_tuple, np.ndarray):
+            vel_tuple = np.array(vel_tuple, dtype=np.float32)
+        if not hasattr(self, 'velocity_history') or not isinstance(self.velocity_history, list):
+            self.velocity_history = []
+        self.velocity_history.append(tuple(vel_tuple))
+        if len(self.velocity_history) > self.history_size:
+            self.velocity_history.pop(0)
+
+    def get_velocity_history(self):
+        return list(self.velocity_history)
 
 #############################################
 # Resource Monitoring Module

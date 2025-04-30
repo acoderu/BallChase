@@ -586,9 +586,6 @@ class OptimizedPIDControllerNode(Node):
         # Diagnostic information
         self.cycle_count = 0
         
-        # Velocity history
-        self.velocity_history = CircularBuffer(max_size=6)
-        
         # Stopped state tracking with hysteresis
         self._robot_stopped = False
         self._stop_time = 0.0
@@ -1092,11 +1089,8 @@ class OptimizedPIDControllerNode(Node):
         """Apply velocity limits and publish command velocities."""
         # Apply velocity and acceleration limits
         position_data = self.target_tracker.get_position_data()
-        
-        # Extract distance once to avoid repeated dictionary lookups
         target_distance = position_data['distance'] if position_data and 'distance' in position_data else 0.0
-        
-        # Add freshness level to velocity limiting
+        # Use VelocityControlModule for all velocity state
         limited_velocities = self.velocity_control.process_velocities(
             linear_x_velocity, 
             lateral_velocity, 
@@ -1105,60 +1099,17 @@ class OptimizedPIDControllerNode(Node):
             self.desired_distance,
             freshness_level=self._data_freshness_level
         )
-        
-        # Unpack limited velocities using direct indexing instead of tuple unpacking
         linear_x_velocity = limited_velocities[0]
         lateral_velocity = limited_velocities[1]
         angular_velocity = limited_velocities[2]
-        
-        # Store new velocities in pre-allocated arrays
-        self._velocity_tuple[0] = linear_x_velocity
-        self._velocity_tuple[1] = lateral_velocity
-        self._velocity_tuple[2] = angular_velocity
-        
-        # Calculate if velocity changed significantly for logging
-        # Use vectorized operation for speed if using NumPy array
-        velocity_change = False
-        
-        # Check for significant velocity changes (optimized loop)
-        for i in range(3):
-            if abs(self._velocity_tuple[i] - self.last_logged_cmd[i]) > 0.05:
-                velocity_change = True
-                break
-        
-        # Log velocity commands with built-in throttling
-        if self.debug_level >= 1 or velocity_change:
-            throttled_logger.info(
-                f"MOTION: x={linear_x_velocity:.2f} y={lateral_velocity:.2f} θ={angular_velocity:.2f}",
-                throttle_duration_sec=0.5, log_id='motion')
-            
-            # For keeping track of last logged command (manages outside of throttling)
-            current_time = time.time()
-            if current_time - self.last_velocity_log_time >= 0.5:
-                self.last_velocity_log_time = current_time
-                self.last_logged_cmd = tuple(self._velocity_tuple)
-        
-        # Store for next cycle
-        self.last_cmd_vel = tuple(self._velocity_tuple)
-        
-        # Use pre-allocated message (avoid allocation)
+        # Publish command
         cmd_vel_msg = self._cmd_vel_msg
-        
-        # Set velocity values
         cmd_vel_msg.linear.x = float(linear_x_velocity)
         cmd_vel_msg.linear.y = float(lateral_velocity)
         cmd_vel_msg.angular.z = float(angular_velocity)
-        
-        # Save for history (create tuple once)
-        velocity_tuple = (float(linear_x_velocity), float(lateral_velocity), float(angular_velocity))
-        self.velocity_history.add(velocity_tuple)
-        
-        # Publish command
         self.cmd_vel_pub.publish(cmd_vel_msg)
-        
-        # Update error trackers only if significant movement is occurring (avoid unnecessary updates)
+        # Update error trackers only if significant movement is occurring
         motion_occurred = False
-        
         if abs(linear_x_velocity) > 0.05:
             self.distance_error_tracker.record_correction()
             motion_occurred = True
@@ -1168,9 +1119,8 @@ class OptimizedPIDControllerNode(Node):
         if abs(angular_velocity) > 0.1:
             self.angular_error_tracker.record_correction()
             motion_occurred = True
-            
         return motion_occurred
-    
+
     def _check_data_freshness(self):
         """
         Check the freshness of target data and update system state accordingly.
@@ -1245,6 +1195,8 @@ class OptimizedPIDControllerNode(Node):
             angular_degrees = angular_error * 57.29578
         else:
             angular_degrees = math.degrees(angular_error)
+        # Use velocity_control for velocity state
+        velocity_stable = all(abs(v) < 0.05 for v in self.velocity_control.last_cmd_vel)
         if (distance_error < self.distance_threshold * 0.3 and
             lateral_error < self.lateral_threshold * 0.3 and
             angular_degrees < self.angular_threshold * 0.3):
@@ -1257,7 +1209,6 @@ class OptimizedPIDControllerNode(Node):
               lateral_error < self.lateral_threshold * 1.5 and
               angular_degrees < self.angular_threshold * 1.5):
             computation_level = min(computation_level, 2)
-        velocity_stable = all(abs(v) < 0.05 for v in self.last_cmd_vel)
         if velocity_stable and computation_level > 0:
             computation_level -= 1
         if (self.distance_error_tracker.get_trend() == "stable" and
@@ -1554,7 +1505,6 @@ class OptimizedPIDControllerNode(Node):
             
             # Update history without expensive diagnostics
             new_velocity = (cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z)
-            self.velocity_history.add(new_velocity)
             self.last_cmd_vel = new_velocity
             
         # For basic computation (level 1), apply simple proportional control
@@ -1590,7 +1540,6 @@ class OptimizedPIDControllerNode(Node):
                 
                 # Update history
                 new_velocity = (linear_x, lateral_y, angular_z)
-                self.velocity_history.add(new_velocity)
                 self.last_cmd_vel = new_velocity
             else:
                 # No valid position data, apply strong damping
@@ -1605,7 +1554,6 @@ class OptimizedPIDControllerNode(Node):
                 
                 # Update history
                 new_velocity = (cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z)
-                self.velocity_history.add(new_velocity)
                 self.last_cmd_vel = new_velocity
                 
         # For medium computation (level 2), use PID but skip coordinated control
@@ -1660,7 +1608,6 @@ class OptimizedPIDControllerNode(Node):
             
             # Update history
             new_velocity = (linear_x_velocity, lateral_velocity, angular_velocity)
-            self.velocity_history.add(new_velocity)
             self.last_cmd_vel = new_velocity
         
         # Calculate cycle duration for performance monitoring
@@ -1900,46 +1847,30 @@ class OptimizedPIDControllerNode(Node):
         self.pid_linear_x.reset()
         self.pid_linear_y.reset()
         self.pid_angular.reset()
-        
         # Reset coordinated controller
         self.coordinated_controller.reset()
-        
         # Reset all error trackers
         self.distance_error_tracker.reset()
         self.lateral_error_tracker.reset()
         self.angular_error_tracker.reset()
-        
         # Reset strategy module
         self.strategy_module.reset()
-        
-        # Reset velocity control module
+        # Reset velocity control module (centralized state)
         self.velocity_control.reset()
-        
         # Reset target tracker if needed
         if hasattr(self, 'target_tracker'):
-            self.force_target_reacquisition = True
-        
-        # Reset motion state
-        self.last_cmd_vel = (0.0, 0.0, 0.0)
-        self.velocity_history = CircularBuffer(max_size=6)
-        
-        # Reset last logged command
-        self.last_logged_cmd = (0.0, 0.0, 0.0)
-        
+            if hasattr(self.target_tracker, 'reset'):
+                self.target_tracker.reset()
         # Reset movement hysteresis
         self._movement_hysteresis = 0.0
-        
         # Set stopped state
         self._robot_stopped = True
         self._stop_time = time.time()
-        
         # Reset computation tracking
         self._using_simplified_control = False
         self._last_full_computation_time = time.time()
-        
         # Reset data freshness tracking
         self._data_freshness_level = "unknown"
-        
         self.get_logger().info("Complete controller reset performed")
     
     def _log_periodic_status(self):
@@ -2138,7 +2069,7 @@ class OptimizedPIDControllerNode(Node):
                 return
                 
             # Calculate velocity statistics
-            vel_data = self.velocity_history.get_all()
+            vel_data = self.velocity_control.get_velocity_history()
             if not vel_data:
                 return
                 
