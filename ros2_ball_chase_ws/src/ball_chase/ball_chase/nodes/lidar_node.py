@@ -8,12 +8,16 @@ This node processes 2D LIDAR data to detect a basketball and provide 3D position
 It correlates LIDAR data with camera-based detections from YOLO.
 
 Key optimizations:
+- Static transform caching with one-time initialization
 - Lightweight buffer implementation with fixed memory allocation
 - Message object reuse to reduce allocations
-- Transform caching for efficient lookups
 - Motion-aware processing strategies
 - Optimized NumPy operations with explicit data types
-- Throttled logging to reduce overhead
+- Enhanced RANSAC algorithm with early termination
+- Efficient QoS profiles
+- Adaptive processing based on system load
+- Visualization components removed for performance
+- Optimized for Raspberry Pi 5 single-thread execution
 
 Physical Setup:
 - LIDAR mounted 6 inches (15.24 cm) above ground
@@ -30,11 +34,12 @@ import time
 from collections import deque
 import threading
 import psutil  # For CPU monitoring
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+from rclpy.logging import LoggingSeverity
 
 # ROS2 messages
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PointStamped, TransformStamped
-from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import String, Float32, Bool
 from tf2_ros import Buffer, TransformListener
 from tf2_geometry_msgs import PointStamped as TF2PointStamped
@@ -44,6 +49,38 @@ import os
 # Import GroundPositionFilter for shared ground movement tracking
 from ball_chase.config.config_loader import ConfigLoader
 from ball_chase.utilities.ground_position_filter import GroundPositionFilter
+
+
+class ObjectPool:
+    """Simple object pool to reuse objects and reduce allocations."""
+    
+    def __init__(self, factory_func, initial_size=5, max_size=20):
+        """Initialize the object pool.
+        
+        Args:
+            factory_func: Function that creates a new object
+            initial_size: Initial number of objects to create
+            max_size: Maximum pool size
+        """
+        self.factory_func = factory_func
+        self.max_size = max_size
+        self.pool = []
+        
+        # Pre-populate pool
+        for _ in range(initial_size):
+            self.pool.append(factory_func())
+    
+    def get(self):
+        """Get an object from the pool or create a new one."""
+        if not self.pool:
+            return self.factory_func()
+        return self.pool.pop()
+    
+    def put(self, obj):
+        """Return an object to the pool."""
+        if len(self.pool) < self.max_size:
+            self.pool.append(obj)
+        # Otherwise object is left for garbage collection
 
 
 class LightweightBuffer:
@@ -286,8 +323,11 @@ class BasketballLidarDetector(Node):
         # Track timers explicitly since Node doesn't have get_timers()
         self.node_timers = []
         
-        # Initialize transform timestamps dictionary
+        # Initialize transform timestamps dictionary 
         self.transform_timestamps = {}
+        
+        # Create object pools
+        self._create_object_pools()
         
         # Load configuration
         self.config_loader = ConfigLoader()
@@ -352,15 +392,38 @@ class BasketballLidarDetector(Node):
             0.1, self.staged_startup, callback_group=self.timer_cb_group)
         self.node_timers.append(timer)
         
-        # Set up transform cache cleanup timer
+        # Set up transform cache cleanup timer - longer interval for Pi 5
         timer = self.create_timer(
-            300.0, self.clean_transform_cache, callback_group=self.timer_cb_group)
+            900.0, self.clean_transform_cache, callback_group=self.timer_cb_group)  # 15 minutes
         self.node_timers.append(timer)
         
         self.get_logger().info("Basketball LIDAR detector initialized with optimized memory management")
         
-        # NEW: Create a flag to track successful transforms
+        # Flag to track successful transforms
         self.transform_published_successfully = False
+    
+    def _create_object_pools(self):
+        """Create object pools for frequently used objects."""
+        # Pool for point arrays
+        self.point_pool = ObjectPool(
+            lambda: np.zeros((500, 3), dtype=np.float32),
+            initial_size=3,
+            max_size=5
+        )
+        
+        # Pool for distance arrays
+        self.distance_pool = ObjectPool(
+            lambda: np.zeros(500, dtype=np.float32),
+            initial_size=3,
+            max_size=5
+        )
+        
+        # Pool for mask arrays
+        self.mask_pool = ObjectPool(
+            lambda: np.zeros(500, dtype=bool),
+            initial_size=3,
+            max_size=5
+        )
     
     def _initialize_publisher_objects(self):
         """Initialize publisher message objects for reuse."""
@@ -369,12 +432,6 @@ class BasketballLidarDetector(Node):
         self._debug_msg = PointStamped()
         self._diag_msg = String()
         self._status_msg = Bool()
-        
-        # Pre-create markers for visualization if enabled
-        if self.config.get('visualization', {}).get('enabled', False):
-            self._ball_marker = Marker()
-            self._text_marker = Marker()
-            self._marker_array = MarkerArray()
     
     def _init_vector_arrays(self):
         """Pre-allocate arrays for vector operations."""
@@ -390,6 +447,9 @@ class BasketballLidarDetector(Node):
         
         # Reusable arrays for distance calculations
         self._distances_array = np.zeros(max_size, dtype=np.float32)
+        
+        # Pre-allocate array for angle calculations to avoid allocation inside loops
+        self._angles_array = np.zeros(max_size, dtype=np.float32)
     
     def staged_startup(self):
         """Staged startup to reduce initial CPU load spikes."""
@@ -454,7 +514,7 @@ class BasketballLidarDetector(Node):
         return retry_timer
 
     def cache_transforms(self):
-        """Cache transforms for efficient lookup."""
+        """Cache static transforms with long TTL for the Raspberry Pi 5."""
         # Destroy the timer once called
         timer_index_to_remove = None
         for i, timer in enumerate(self.node_timers):
@@ -467,7 +527,7 @@ class BasketballLidarDetector(Node):
             self.node_timers.pop(timer_index_to_remove)
         
         try:
-            # Define important transform pairs
+            # Define important transform pairs - these are static in our setup
             transform_pairs = [
                 ('ascamera_color_0', 'lidar_frame'),
                 ('lidar_frame', 'ascamera_color_0'),
@@ -485,11 +545,15 @@ class BasketballLidarDetector(Node):
                         rclpy.duration.Duration(seconds=0.5)
                     )
                     
-                    # Store in cache
+                    # Store in cache with very long TTL since transforms are static
                     cache_key = f"{source}_{target}"
                     self.cached_transforms[cache_key] = transform
-                    # Add timestamp for cache management (using a dictionary)
+                    # Set initial timestamp (for static transforms this will rarely change)
                     self.transform_timestamps[cache_key] = time.time()
+                    
+                    # Pre-compute and cache transform matrices for faster 3D calculations
+                    if source == 'ascamera_color_0' and target == 'lidar_frame':
+                        self._precompute_transform_matrix(transform, f"{source}_{target}_matrix")
                     
                     # Log success (throttled)
                     self.throttled_log(
@@ -514,13 +578,6 @@ class BasketballLidarDetector(Node):
                         self.get_logger().info(f"Scheduling retry for transform {source} → {target}")                        
                         # Capture current source and target values to use in the callback
                         s, t = source, target
-                        
-                        #retry_timer = self.create_timer(
-                        #    2.0,  # Wait 2 seconds before retry
-                        #    lambda callback_timer, source=s, target=t: self.retry_transform_cache(source, target, callback_timer),
-                        #    callback_group=self.timer_cb_group
-                        #)
-                        
                         retry_timer = self.create_transform_retry_timer(s, t)
                         self.node_timers.append(retry_timer)
                     continue
@@ -536,22 +593,80 @@ class BasketballLidarDetector(Node):
                 level="error"
             )
             # Schedule a retry for the entire caching process
-            # Using a different name for the timer parameter
             cache_retry_timer = self.create_timer(
                 3.0,  # Wait 3 seconds before retry
                 lambda _: self.retry_all_transform_caches(),  # Use underscore to indicate unused parameter
                 callback_group=self.timer_cb_group
             )
             self.node_timers.append(cache_retry_timer)
+    
+    def _precompute_transform_matrix(self, transform, cache_key):
+        """Pre-compute transformation matrix for a transform and cache it."""
+        try:
+            # Extract translation
+            tx = transform.transform.translation.x
+            ty = transform.transform.translation.y
+            tz = transform.transform.translation.z
 
+            # Extract rotation quaternion
+            qx = transform.transform.rotation.x
+            qy = transform.transform.rotation.y
+            qz = transform.transform.rotation.z
+            qw = transform.transform.rotation.w
+
+            # Normalize quaternion
+            norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+            if norm > 0.001:
+                qw /= norm
+                qx /= norm
+                qy /= norm
+                qz /= norm
+
+            # Calculate rotation matrix elements
+            xx = qx * qx
+            xy = qx * qy
+            xz = qx * qz
+            xw = qx * qw
+            yy = qy * qy
+            yz = qy * qz
+            yw = qy * qw
+            zz = qz * qz
+            zw = qz * qw
+
+            # Create transformation matrix (4x4)
+            matrix = np.eye(4, dtype=np.float32)
+            
+            # Rotation part (top-left 3x3)
+            matrix[0, 0] = 1 - 2 * (yy + zz)
+            matrix[0, 1] = 2 * (xy - zw)
+            matrix[0, 2] = 2 * (xz + yw)
+            matrix[1, 0] = 2 * (xy + zw)
+            matrix[1, 1] = 1 - 2 * (xx + zz)
+            matrix[1, 2] = 2 * (yz - xw)
+            matrix[2, 0] = 2 * (xz - yw)
+            matrix[2, 1] = 2 * (yz + xw)
+            matrix[2, 2] = 1 - 2 * (xx + yy)
+            
+            # Translation part (top-right 3x1)
+            matrix[0, 3] = tx
+            matrix[1, 3] = ty
+            matrix[2, 3] = tz
+            
+            # Store in cache
+            self.cached_transforms[cache_key] = matrix
+            
+            # Also cache the inverse matrix
+            inv_matrix = np.linalg.inv(matrix)
+            self.cached_transforms[f"{cache_key}_inv"] = inv_matrix
+            
+            # Log success
+            self.get_logger().info(f"Pre-computed transform matrix for {cache_key}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error pre-computing transform matrix: {str(e)}")
+    
     def retry_transform_cache(self, source, target, timer=None):
-        """Retry caching a specific transform that failed earlier.
-        
-        Args:
-            source: Source frame
-            target: Target frame
-            timer: The timer that triggered this callback (optional)
-        """
+        """Retry caching a specific transform that failed earlier."""
         # Find and remove any timer with this callback
         timers_to_remove = []
         for i, t in enumerate(self.node_timers):
@@ -578,12 +693,15 @@ class BasketballLidarDetector(Node):
             # Add timestamp for cache management
             self.transform_timestamps[cache_key] = time.time()
             
+            # Pre-compute matrix for key transforms
+            if source == 'ascamera_color_0' and target == 'lidar_frame':
+                self._precompute_transform_matrix(transform, f"{source}_{target}_matrix")
+            
             self.get_logger().info(f"Successfully cached transform on retry: {source} → {target}")
             self.transform_published_successfully = True
             
         except Exception as e:
             self.get_logger().warn(f"Retry failed for transform {source} → {target}: {str(e)}")
-            # Could schedule another retry here if needed
 
     def retry_all_transform_caches(self, timer=None):
         """Retry the entire transform caching process."""
@@ -609,10 +727,11 @@ class BasketballLidarDetector(Node):
     
     def clean_transform_cache(self):
         """Periodically clean the transform cache to prevent memory growth."""
-        if len(self.cached_transforms) > 20:  # Arbitrary limit
+        # This function mainly handles edge cases, as most transforms are static
+        if len(self.cached_transforms) > 30:  # Higher limit for Pi 5 with 16GB RAM
             # Keep only the most used transforms
             current_time = time.time()
-            # Remove transforms older than 5 minutes
+            # Remove unused transforms older than 1 hour (much longer for static transforms)
             old_keys = []
             
             if not hasattr(self, 'transform_timestamps'):
@@ -622,7 +741,11 @@ class BasketballLidarDetector(Node):
             for key in self.cached_transforms:
                 if key not in self.transform_timestamps:
                     self.transform_timestamps[key] = current_time
-                elif current_time - self.transform_timestamps[key] > 300:  # 5 minutes
+                elif current_time - self.transform_timestamps[key] > 3600:  # 1 hour
+                    # Skip fundamental transforms - never expire them
+                    if any(k in key for k in ['ascamera_color_0_lidar_frame', 'lidar_frame_ascamera_color_0']):
+                        self.transform_timestamps[key] = current_time
+                        continue
                     old_keys.append(key)
             
             # Remove old transforms
@@ -640,10 +763,6 @@ class BasketballLidarDetector(Node):
     def _load_performance_config(self):
         """Load performance-related configuration."""
         perf_config = self.config.get('performance', {})
-        
-        # Visualization settings (disabled by default)
-        viz_config = self.config.get('visualization', {})
-        self.visualization_enabled = viz_config.get('enabled', False)
         
         # Performance adaptation settings
         self.adaptive_processing = perf_config.get('adaptive_processing', True)
@@ -671,6 +790,19 @@ class BasketballLidarDetector(Node):
         
         # Initialize throttled logging helper
         self._last_throttled_logs = {}
+        
+        # Configure logging thresholds
+        self.configure_logging()
+    
+    def configure_logging(self):
+        """Configure logging levels based on performance settings."""
+        # Set default logging level
+        if self.performance_mode == "MINIMAL":
+            self.get_logger().set_level(LoggingSeverity.WARN)
+        elif self.performance_mode == "EFFICIENT":
+            self.get_logger().set_level(LoggingSeverity.INFO)
+        else:
+            self.get_logger().set_level(LoggingSeverity.DEBUG)
     
     def _init_state(self):
         """Initialize internal state tracking with optimized data structures."""
@@ -687,7 +819,7 @@ class BasketballLidarDetector(Node):
         
         # Use LightweightBuffer instead of deque
         self.detection_times = LightweightBuffer(max_size=20)
-          # Detection sources
+        # Detection sources
         self.yolo_detections = 0
         
         # Position tracking with LightweightBuffer
@@ -709,11 +841,11 @@ class BasketballLidarDetector(Node):
         self.errors = LightweightBuffer(max_size=10)
         self.last_error_time = 0
         
-        # NEW: Transform publishing tracking
+        # Transform publishing tracking
         self.transform_publish_attempts = 0
         self.transform_publish_successes = 0
         
-        # New performance metrics
+        # Performance metrics
         self.processing_skips = 0
         self.current_cpu_load = 0.0
         self.current_memory_usage = 0.0
@@ -762,8 +894,9 @@ class BasketballLidarDetector(Node):
                             "ascamera_color_0",
                             test_time
                         )
-                        # Cache the transform
+                        # Cache the transform and pre-compute matrix
                         self.cached_transforms[cache_key] = transform
+                        self._precompute_transform_matrix(transform, f"{cache_key}_matrix")
                         self.transform_timestamps[cache_key] = time.time()
                     
                     self.transform_published_successfully = True
@@ -844,6 +977,10 @@ class BasketballLidarDetector(Node):
         # For ground movement tracking
         self.ground_movement = True  # Basketball always moves on ground
         self.z_variance_threshold = 0.02  # Small threshold for height variation (2cm)
+        
+        # New parameter for early stopping in RANSAC
+        self.ransac_early_stop_quality = 0.85  # Early stop if quality exceeds this
+        self.ransac_min_iterations_before_early_stop = 8  # Minimum iterations before early stopping
     
     def _init_transform_parameters(self):
         """Initialize coordinate transform parameters."""
@@ -874,41 +1011,56 @@ class BasketballLidarDetector(Node):
         self.last_transform_log = 0.0
     
     def _setup_subscribers(self):
-        """Set up subscribers for this node."""
+        """Set up subscribers with optimized QoS profiles."""
         # Get topic config
         topics = self.config.get('topics', {})
         input_topics = topics.get('input', {})
-        queue_size = topics.get('queue_size', 10)
         
-        # LIDAR scan subscription
+        # Create optimized QoS profiles
+        # For LIDAR scans - best effort, keep only latest
+        lidar_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1  # Only keep the most recent scan
+        )
+        
+        # For YOLO detections - reliable delivery but minimal history
+        yolo_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=2  # Keep 2 most recent detections
+        )
+        
+        # LIDAR scan subscription - best effort QoS
         lidar_topic = input_topics.get('lidar_scan', '/scan')
         self.scan_subscription = self.create_subscription(
             LaserScan,
             lidar_topic,
             self.scan_callback,
-            queue_size,
+            qos_profile=lidar_qos,
             callback_group=self.subscription_cb_group
         )
         
-        # YOLO detection subscription
+        # YOLO detection subscription - reliable QoS
         yolo_topic = input_topics.get('yolo_detection', '/basketball/yolo/position')
         self.yolo_subscription = self.create_subscription(
             PointStamped,
             yolo_topic,
             lambda msg: self.sensor_callback(msg, 'yolo'),
-            queue_size,
+            qos_profile=yolo_qos,
             callback_group=self.subscription_cb_group
         )
-          # HSV subscription removed
         
-        # YOLO bounding box subscription for 3D position estimation
+        # YOLO bounding box subscription for 3D position estimation - reliable QoS
         from std_msgs.msg import Float32MultiArray
         yolo_bbox_topic = input_topics.get('yolo_bbox', '/basketball/yolo/bbox')
         self.yolo_bbox_subscription = self.create_subscription(
             Float32MultiArray,
             yolo_bbox_topic,
             self.yolo_bbox_callback,
-            queue_size,
+            qos_profile=yolo_qos,
             callback_group=self.subscription_cb_group
         )
         
@@ -919,10 +1071,10 @@ class BasketballLidarDetector(Node):
             'timestamp': 0.0
         }
         
-        self.get_logger().info("Core subscriptions established")
+        self.get_logger().info("Core subscriptions established with optimized QoS profiles")
     
     def _setup_publishers(self):
-        """Set up publishers after a delay to spread CPU load."""
+        """Set up publishers with optimized QoS profiles."""
         # Remove the timer that triggered this
         for i, timer in enumerate(self.node_timers):
             if timer.callback == self._setup_publishers:
@@ -933,51 +1085,65 @@ class BasketballLidarDetector(Node):
         # Get topic config
         topics = self.config.get('topics', {})
         output_topics = topics.get('output', {})
-        queue_size = topics.get('queue_size', 10)
         
-        # Ball position publisher
+        # Create optimized QoS profiles
+        # For position data - reliable delivery with history
+        position_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,  # Late joiners can get last message
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=5  # Keep several recent positions
+        )
+        
+        # For debug data - best effort
+        debug_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        
+        # For diagnostics - best effort
+        diag_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        
+        # Ball position publisher - reliable QoS
         position_topic = output_topics.get('ball_position', '/basketball/lidar/position')
         self.position_publisher = self.create_publisher(
             PointStamped,
             position_topic,
-            queue_size
+            qos_profile=position_qos
         )
         
-        # Debug position publisher
+        # Debug position publisher - best effort QoS
         debug_topic = output_topics.get('debug_position', '/basketball/lidar/debug_position')
         self.debug_publisher = self.create_publisher(
             PointStamped,
             debug_topic,
-            queue_size
+            qos_profile=debug_qos
         )
         
-        # Conditionally create visualization publisher only if enabled
-        self.marker_publisher = None
-        if self.visualization_enabled:
-            viz_topic = output_topics.get('visualization', '/basketball/lidar/visualization')
-            self.marker_publisher = self.create_publisher(
-                MarkerArray,
-                viz_topic,
-                queue_size
-            )
-        
-        # Diagnostics publisher
+        # Diagnostics publisher - best effort QoS
         diag_topic = output_topics.get('diagnostics', '/basketball/lidar/diagnostics')
         self.diagnostics_publisher = self.create_publisher(
             String,
             diag_topic,
-            queue_size
+            qos_profile=diag_qos
         )
         
-        # Publisher for sharing system load with other nodes
+        # Publisher for sharing system load with other nodes - best effort QoS
         load_topic = output_topics.get('system_load', '/system/load')
         self.load_publisher = self.create_publisher(
             Float32,
             load_topic,
-            queue_size
+            qos_profile=debug_qos
         )
         
-        self.get_logger().info("Publishers established")
+        self.get_logger().info("Publishers established with optimized QoS profiles")
     
     def throttled_log(self, message, key, min_interval=1.0, level="info"):
         """Log with throttling to reduce overhead."""
@@ -995,6 +1161,10 @@ class BasketballLidarDetector(Node):
                 
         # Update last log time
         self._last_throttled_logs[key] = current_time
+        
+        # Skip most informational logging in MINIMAL mode
+        if level == "info" and self.performance_mode == "MINIMAL":
+            return
         
         # Log with appropriate level
         if level == "error":
@@ -1034,6 +1204,9 @@ class BasketballLidarDetector(Node):
                     min_interval=2.0
                 )
                 self.performance_mode = new_mode
+                
+                # Update logging configuration when mode changes
+                self.configure_logging()
             
             # Publish system load for other nodes
             load_msg = Float32()
@@ -1089,7 +1262,17 @@ class BasketballLidarDetector(Node):
                 return
             
             valid_ranges = ranges[valid_indices]
-            angles = angle_min + angle_increment * np.arange(len(ranges), dtype=np.float32)[valid_indices]
+            
+            # Pre-calculated angles array - reuse arrays when possible
+            if len(self._angles_array) < len(valid_indices):
+                # Resize if needed
+                self._angles_array = np.zeros(len(ranges), dtype=np.float32)
+            
+            # Calculate angles using pre-allocated array
+            indices = np.arange(len(ranges), dtype=np.int32)[valid_indices]
+            np.multiply(indices, angle_increment, out=self._angles_array[:len(indices)])
+            np.add(self._angles_array[:len(indices)], angle_min, out=self._angles_array[:len(indices)])
+            angles = self._angles_array[:len(indices)]
             
             # Optimize for high CPU load - limit points processed if needed
             point_limit = self.max_point_limit
@@ -1105,13 +1288,25 @@ class BasketballLidarDetector(Node):
                 valid_ranges = valid_ranges[::sample_step]
                 angles = angles[::sample_step]
             
-            # Convert to Cartesian coordinates - optimized for minimal memory allocation
-            x = valid_ranges * np.cos(angles)
-            y = valid_ranges * np.sin(angles)
-            z = np.zeros_like(x)  # No new memory allocation
+            # Get a point array from the pool or create a new one if needed
+            if self.points_array is not None and len(self.points_array) >= len(valid_ranges):
+                # Reuse existing array if it's large enough
+                points = self.points_array[:len(valid_ranges)]
+            else:
+                # Get from pool or create new
+                if len(valid_ranges) <= 500:  # Standard pool size
+                    points = self.point_pool.get()[:len(valid_ranges)]
+                else:
+                    # Create a new array for unusually large point sets
+                    points = np.zeros((len(valid_ranges), 3), dtype=np.float32)
             
-            # Stack coordinates - memory efficient with preallocated array
-            self.points_array = np.column_stack((x, y, z))
+            # Convert to Cartesian coordinates - using direct indexing for speed
+            points[:, 0] = valid_ranges * np.cos(angles)  # x
+            points[:, 1] = valid_ranges * np.sin(angles)  # y
+            points[:, 2] = 0.0  # z (all points on ground plane)
+            
+            # Store reference to points array
+            self.points_array = points
             
             # Update statistics
             self.processed_scans += 1
@@ -1134,7 +1329,7 @@ class BasketballLidarDetector(Node):
     
     def sensor_callback(self, msg, source):
         """
-        Handle ball detections from camera systems (YOLO or HSV).
+        Handle ball detections from camera systems (YOLO).
         Find matching points in LIDAR data with optimized processing.
         """
         detection_start_time = time.time()
@@ -1214,6 +1409,10 @@ class BasketballLidarDetector(Node):
                 best_match = ball_results[0]
                 center, cluster_size, circle_quality = best_match
                 
+                # Track YOLO detections
+                if source == "yolo":
+                    self.yolo_detections += 1
+                
                 # Publish ball position
                 self.publish_ball_position(center, cluster_size, circle_quality, source.upper(), msg.header.stamp)
             else:
@@ -1266,19 +1465,30 @@ class BasketballLidarDetector(Node):
             # Use only x,y coordinates for 2D search in LIDAR data
             seed_points.append([camera_seed_point[0], camera_seed_point[1], 0])
             
-            # NEW: Convert YOLO's (x, y) to polar coordinates for filtering
+            # Convert YOLO's (x, y) to polar coordinates for filtering
             estimated_x = camera_seed_point[0]
             estimated_y = camera_seed_point[1]
             r_est = math.sqrt(estimated_x**2 + estimated_y**2)
             theta_est = math.atan2(estimated_y, estimated_x)
             
-            # NEW: Filter LIDAR points by distance and angle - use pre-allocated arrays
+            # Filter LIDAR points by distance and angle - use pre-allocated arrays
             px = self.points_array[:, 0]
             py = self.points_array[:, 1]
             
-            # Use pre-allocated distance array
-            np.sqrt(px**2 + py**2, out=self._distances_array[:len(px)])
-            distances = self._distances_array[:len(px)]
+            # Get a distances array from the pool or reuse existing
+            if len(self._distances_array) >= len(px):
+                distances = self._distances_array[:len(px)]
+            else:
+                # Get from pool or create new
+                distances_array = self.distance_pool.get()
+                if len(distances_array) >= len(px):
+                    distances = distances_array[:len(px)]
+                else:
+                    # Create new if pool object is too small
+                    distances = np.zeros(len(px), dtype=np.float32)
+            
+            # Calculate distances in-place
+            np.sqrt(px**2 + py**2, out=distances)
             
             angles = np.arctan2(py, px)
             
@@ -1296,18 +1506,50 @@ class BasketballLidarDetector(Node):
                     distance_tolerance = 0.4  # Wider tolerance for fast movement
                     angular_tolerance = math.radians(20)
             
-            # Apply filters
+            # Get mask from pool or create new
+            if len(self._inlier_mask) >= len(px):
+                mask = self._inlier_mask[:len(px)]
+            else:
+                # Get from pool or create new
+                mask_array = self.mask_pool.get()
+                if len(mask_array) >= len(px):
+                    mask = mask_array[:len(px)]
+                else:
+                    # Create new if needed
+                    mask = np.zeros(len(px), dtype=bool)
+            
+            # Apply distance filter (in-place)
             valid_dist = (distances >= (r_est - distance_tolerance)) & (distances <= (r_est + distance_tolerance))
+            
+            # Apply angle filter (in-place)
             delta = np.abs(angles - theta_est)
             delta = np.where(delta > math.pi, 2*math.pi - delta, delta)  # handle angle wrap-around
             valid_angle = delta <= angular_tolerance
             
-            # Combine both masks
-            mask = valid_dist & valid_angle
-            filtered_points = self.points_array[mask]
+            # Combine both masks (in-place)
+            np.logical_and(valid_dist, valid_angle, out=mask[:len(valid_dist)])
+            
+            # Extract filtered points
+            filtered_indices = np.where(mask[:len(valid_dist)])[0]
+            if len(filtered_indices) > 0:
+                # Get point array from pool
+                if len(filtered_indices) <= 500:  # Standard pool size
+                    filtered_points_array = self.point_pool.get()
+                    filtered_points = filtered_points_array[:len(filtered_indices)]
+                else:
+                    # Create new for large sets
+                    filtered_points = np.zeros((len(filtered_indices), 3), dtype=np.float32)
+                
+                # Copy selected points
+                for i, idx in enumerate(filtered_indices):
+                    filtered_points[i, 0] = self.points_array[idx, 0]
+                    filtered_points[i, 1] = self.points_array[idx, 1]
+                    filtered_points[i, 2] = self.points_array[idx, 2]
+            else:
+                filtered_points = None
             
             # Log filtering results (throttled)
-            if len(filtered_points) >= self.min_points:
+            if filtered_points is not None and len(filtered_points) >= self.min_points:
                 self.throttled_log(
                     f"Filtered LIDAR points from {len(self.points_array)} to {len(filtered_points)} "
                     f"using cone at distance {r_est:.2f}m, angle {math.degrees(theta_est):.1f}°",
@@ -1316,7 +1558,7 @@ class BasketballLidarDetector(Node):
                 )
             else:
                 self.throttled_log(
-                    f"Not enough points ({len(filtered_points)}) in detection cone. "
+                    f"Not enough points ({0 if filtered_points is None else len(filtered_points)}) in detection cone. "
                     f"Falling back to standard detection.",
                     key="filter_fallback",
                     min_interval=1.0,
@@ -1493,6 +1735,7 @@ class BasketballLidarDetector(Node):
         best_inlier_count = 0
         best_center = None
         best_radius = 0
+        best_quality = 0.0
         
         # Limit iterations based on point count for better performance
         actual_iterations = min(max_iterations, len(points) // 2)
@@ -1505,7 +1748,7 @@ class BasketballLidarDetector(Node):
         # Pre-allocate inlier mask for reuse
         inlier_mask = self._inlier_mask[:len(points)]
         
-        for _ in range(actual_iterations):
+        for i in range(actual_iterations):
             # Randomly sample 3 points
             if len(points) < 3:
                 continue
@@ -1513,9 +1756,9 @@ class BasketballLidarDetector(Node):
             sample_indices = np.random.choice(len(points), 3, replace=False)
             
             # Directly use the pre-allocated circle points array
-            for i in range(3):
-                self._circle_points[i, 0] = points[sample_indices[i], 0]
-                self._circle_points[i, 1] = points[sample_indices[i], 1]
+            for j in range(3):
+                self._circle_points[j, 0] = points[sample_indices[j], 0]
+                self._circle_points[j, 1] = points[sample_indices[j], 1]
             
             # Fit circle to these points
             try:
@@ -1536,30 +1779,34 @@ class BasketballLidarDetector(Node):
                 np.less(distances, threshold, out=inlier_mask)
                 inlier_count = np.sum(inlier_mask)
                 
-                if inlier_count > best_inlier_count:
+                # Calculate quality metrics
+                inlier_ratio = inlier_count / len(points)
+                radius_error = abs(radius - self.ball_radius) / self.ball_radius
+                quality = 0.7 * inlier_ratio + 0.3 * (1.0 - min(radius_error, 1.0))
+                
+                if inlier_count > best_inlier_count or (inlier_count == best_inlier_count and quality > best_quality):
                     best_inlier_count = inlier_count
                     best_center = center
                     best_radius = radius
+                    best_quality = quality
+                    
+                    # Early stopping if we have a good enough result
+                    if (i >= self.ransac_min_iterations_before_early_stop and 
+                        quality > self.ransac_early_stop_quality and
+                        inlier_count >= len(points) * 0.7):
+                        break
+                
             except Exception:
                 continue
         
         if best_center is None:
             return None, 0, 0
         
-        # Refine with all inliers if we have enough
-        if best_inlier_count >= 5:
-            # Calculate quality metrics
-            inlier_ratio = best_inlier_count / len(points)
-            radius_error = abs(best_radius - self.ball_radius) / self.ball_radius
-            quality = 0.7 * inlier_ratio + 0.3 * (1.0 - min(radius_error, 1.0))
-            
-            # Add z-coordinate for 3D position - reuse existing array
-            center_3d = np.array([best_center[0], best_center[1], self.ball_center_height], dtype=np.float32)
-            
-            return center_3d, best_inlier_count, quality
+        # Add z-coordinate for 3D position - reuse existing array
+        center_3d = np.array([best_center[0], best_center[1], self.ball_center_height], dtype=np.float32)
         
-        return None, 0, 0
-
+        return center_3d, best_inlier_count, best_quality
+    
     def fit_circle(self, points_2d):
         """
         Fit a circle to 2D points.
@@ -1695,16 +1942,16 @@ class BasketballLidarDetector(Node):
         # Update statistics
         self.successful_detections += 1
         
-        # Only visualize if enabled and not in MINIMAL mode
-        if self.visualization_enabled and self.marker_publisher is not None and self.performance_mode != "MINIMAL":
-            self.visualize_detection(filtered_position, circle_quality, trigger_source)
-        
         # With the lock, update position history
         with self.lock:
             self.position_history.add(current_time, filtered_position)
         
         # Update motion from new position
         self.update_velocity_from_positions(filtered_position)
+        
+        # Publish debug point for visualization occasionally
+        if (self.successful_detections % 20 == 0) and (self.performance_mode != "MINIMAL"):
+            self.publish_debug_point()
     
     def update_velocity_from_positions(self, new_position):
         """
@@ -1767,111 +2014,6 @@ class BasketballLidarDetector(Node):
                 key="motion_state_change",
                 min_interval=0.5
             )
-    
-    def visualize_detection(self, center, quality, source):
-        """
-        Create visualization markers for the detected ball.
-        Only called when visualization is enabled and we're not in MINIMAL mode.
-        Uses pre-allocated marker objects for efficiency.
-        """
-        # Skip if visualization is disabled or publisher wasn't created
-        if not self.visualization_enabled or self.marker_publisher is None:
-            return
-            
-        # Get visualization settings
-        viz_config = self.config.get('visualization', {})
-        marker_lifetime = viz_config.get('marker_lifetime', 1.0)
-        
-        # Reuse pre-allocated ball marker
-        self._ball_marker.header.frame_id = "lidar_frame"
-        self._ball_marker.header.stamp = self.scan_timestamp
-        self._ball_marker.ns = "basketball"
-        self._ball_marker.id = 1
-        self._ball_marker.type = Marker.SPHERE
-        self._ball_marker.action = Marker.ADD
-        
-        # Set position
-        self._ball_marker.pose.position.x = center[0]
-        self._ball_marker.pose.position.y = center[1]
-        self._ball_marker.pose.position.z = center[2]
-        self._ball_marker.pose.orientation.w = 1.0
-        
-        # Set color based on source
-        colors = viz_config.get('colors', {})
-        
-        # Set color based on source and motion state for better visualization
-        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else "unknown"
-          # Always use YOLO color config since HSV is removed
-        color_config = colors.get('yolo', {'r': 0.0, 'g': 1.0, 'b': 0.3, 'base_alpha': 0.5})
-        
-        # Adjust color based on motion state
-        if motion_state == MotionStateManager.STATIONARY:
-            # More blue for stationary
-            self._ball_marker.color.r = color_config.get('r', 0.0) * 0.7
-            self._ball_marker.color.g = color_config.get('g', 1.0) * 0.7
-            self._ball_marker.color.b = min(color_config.get('b', 0.3) + 0.4, 1.0)  # More blue
-        elif motion_state == MotionStateManager.MEDIUM_FAST:
-            # More red for fast movement
-            self._ball_marker.color.r = min(color_config.get('r', 0.0) + 0.5, 1.0)  # More red
-            self._ball_marker.color.g = color_config.get('g', 1.0) * 0.8
-            self._ball_marker.color.b = color_config.get('b', 0.3) * 0.8
-        else:
-            # Default color
-            self._ball_marker.color.r = color_config.get('r', 0.0)
-            self._ball_marker.color.g = color_config.get('g', 1.0)
-            self._ball_marker.color.b = color_config.get('b', 0.3)
-        
-        # Adjust transparency based on quality
-        base_alpha = color_config.get('base_alpha', 0.5)
-        self._ball_marker.color.a = min(base_alpha + quality * 0.5, 1.0)
-        
-        # Set size (basketball diameter)
-        self._ball_marker.scale.x = self.ball_radius * 2.0
-        self._ball_marker.scale.y = self.ball_radius * 2.0
-        self._ball_marker.scale.z = self.ball_radius * 2.0
-        
-        # Set marker lifetime
-        self._ball_marker.lifetime.sec = int(marker_lifetime)
-        self._ball_marker.lifetime.nanosec = int((marker_lifetime % 1) * 1e9)
-        
-        # Reuse pre-allocated text marker
-        self._text_marker.header.frame_id = "lidar_frame"
-        self._text_marker.header.stamp = self.scan_timestamp
-        self._text_marker.ns = "basketball_text"
-        self._text_marker.id = 2
-        self._text_marker.type = Marker.TEXT_VIEW_FACING
-        self._text_marker.action = Marker.ADD
-        
-        # Position text above the ball
-        text_height_offset = viz_config.get('text_height_offset', 0.2)
-        self._text_marker.pose.position.x = center[0]
-        self._text_marker.pose.position.y = center[1]
-        self._text_marker.pose.position.z = center[2] + text_height_offset
-        self._text_marker.pose.orientation.w = 1.0
-        
-        # Set text content with motion state
-        quality_pct = int(quality * 100)
-        motion_abbr = motion_state[:3].upper() if hasattr(self, 'motion_manager') else "UNK"
-        self._text_marker.text = f"{source}: {quality_pct}% ({motion_abbr})"
-        
-        # Set text appearance
-        text_size = viz_config.get('text_size', 0.05)
-        self._text_marker.scale.z = text_size
-        
-        text_color = colors.get('text', {'r': 1.0, 'g': 1.0, 'b': 1.0, 'a': 1.0})
-        self._text_marker.color.r = text_color.get('r', 1.0)
-        self._text_marker.color.g = text_color.get('g', 1.0)
-        self._text_marker.color.b = text_color.get('b', 1.0)
-        self._text_marker.color.a = text_color.get('a', 1.0)
-        
-        self._text_marker.lifetime.sec = int(marker_lifetime)
-        self._text_marker.lifetime.nanosec = int((marker_lifetime % 1) * 1e9)
-        
-        # Reuse pre-allocated marker array
-        self._marker_array.markers = [self._ball_marker, self._text_marker]
-        
-        # Publish markers
-        self.marker_publisher.publish(self._marker_array)
     
     def estimate_3d_from_2d(self, detection_msg, bbox_width, bbox_height):
         """
@@ -2163,15 +2305,15 @@ class BasketballLidarDetector(Node):
                     "processing_skips": self.processing_skips,
                     "scan_rate": scan_rate,
                     "detection_rate": detection_rate,
-                    "avg_processing_time_ms": avg_time * 1000 if avg_time else 0,                    "sources": {
+                    "avg_processing_time_ms": avg_time * 1000 if avg_time else 0,
+                    "sources": {
                         "yolo_detections": self.yolo_detections
                     }
                 },
                 "config": {
                     "ball_radius": self.ball_radius,
                     "max_distance": self.max_distance,
-                    "min_points": self.min_points,
-                    "visualization_enabled": self.visualization_enabled
+                    "min_points": self.min_points
                 },
                 "transforms": {
                     "camera_frame": "ascamera_color_0",
@@ -2217,7 +2359,7 @@ class BasketballLidarDetector(Node):
             
         except Exception as e:
             self.log_error(f"Error publishing diagnostics: {str(e)}")
-            
+    
     def publish_debug_point(self):
         """
         Publish a debug point for calibration purposes.
@@ -2335,6 +2477,7 @@ class BasketballLidarDetector(Node):
         
         # Log shutdown
         self.get_logger().info("LIDAR node shutdown complete")
+
 
 # Main function with reusable executor
 def main(args=None):

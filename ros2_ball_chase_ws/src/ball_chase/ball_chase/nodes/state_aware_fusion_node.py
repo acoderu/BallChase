@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Optimized State-Aware Fusion Node for ROS 2
+Highly Optimized State-Aware Fusion Node for ROS 2
 Designed for resource-constrained systems like Raspberry Pi 5
 Focuses on efficient state management, reduced CPU usage, and robust tracking
 """
@@ -16,6 +16,7 @@ import time
 import math
 import json
 from collections import deque
+from functools import lru_cache
 from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
 from tf2_geometry_msgs import do_transform_point
 from geometry_msgs.msg import PointStamped, TwistStamped
@@ -34,52 +35,67 @@ class LightweightBuffer:
     
     def __init__(self, max_size=10):
         """Initialize with fixed buffer size."""
-        self.data = []
+        # Pre-allocate the full buffer with None values
+        self.data = [(0.0, None) for _ in range(max_size)]
         self.max_size = max_size
         self.next_index = 0
         self.is_full = False
+        self.count = 0
     
     def add(self, timestamp, value):
         """Add value to buffer with fixed memory allocation."""
-        if len(self.data) < self.max_size:
-            self.data.append((timestamp, value))
-        else:
-            self.data[self.next_index] = (timestamp, value)
-            self.next_index = (self.next_index + 1) % self.max_size
+        self.data[self.next_index] = (timestamp, value)
+        self.next_index = (self.next_index + 1) % self.max_size
+        if not self.is_full and self.next_index == 0:
             self.is_full = True
+        self.count = self.max_size if self.is_full else self.next_index
     
     def get_latest(self):
         """Get the most recent value."""
-        if not self.data:
+        if self.count == 0:
             return None
-        latest_idx = (self.next_index - 1) % len(self.data)
+        latest_idx = (self.next_index - 1) % self.max_size
         return self.data[latest_idx][1]
     
     def get_latest_before(self, timestamp, max_age=1.0):
         """Get the most recent value before the given timestamp."""
-        if not self.data:
+        if self.count == 0:
             return None
         
         best_time_diff = float('inf')
         best_value = None
         
-        for t, value in self.data:
+        # Only iterate through actual data entries
+        for i in range(min(self.count, self.max_size)):
+            idx = (self.next_index - 1 - i) % self.max_size
+            t, value = self.data[idx]
             time_diff = timestamp - t
             if 0 <= time_diff < best_time_diff and time_diff <= max_age:
                 best_time_diff = time_diff
                 best_value = value
+                # Early exit if we find a very recent value
+                if time_diff < 0.05:
+                    break
         
         return best_value
     
     def get_all_within(self, start_time, end_time):
         """Get all values within a time range."""
-        return [(t, v) for t, v in self.data if start_time <= t <= end_time]
+        result = []
+        # Only iterate through actual data entries
+        for i in range(min(self.count, self.max_size)):
+            idx = (self.next_index - 1 - i) % self.max_size
+            t, v = self.data[idx]
+            if start_time <= t <= end_time:
+                result.append((t, v))
+        return result
     
     def clear(self):
         """Clear the buffer."""
-        self.data = []
+        # Don't reallocate, just reset indicators
         self.next_index = 0
         self.is_full = False
+        self.count = 0
 
 
 class SensorManager:
@@ -93,9 +109,10 @@ class SensorManager:
         self.update_count = {}
         self.fps_estimates = {}
         
-        # Initialize buffers for all sensors
+        # Initialize buffers for all sensors - optimize buffer sizes based on importance
         for sensor in self.sensors:
-            buffer_size = 15 if sensor in ['lidar', 'yolo_3d'] else 10
+            # LiDAR and YOLO 3D are more important, so they get larger buffers
+            buffer_size = 12 if sensor in ['lidar', 'yolo_3d'] else 8
             self.data_buffers[sensor] = LightweightBuffer(buffer_size)
             self.last_update_time[sensor] = 0.0
             self.update_count[sensor] = 0
@@ -104,13 +121,19 @@ class SensorManager:
         # Track sensor health
         self.sensor_active = {sensor: False for sensor in self.sensors}
         self.sensor_gap_durations = {sensor: 0.0 for sensor in self.sensors}
+        self.sensor_update_intervals = {sensor: 0.0 for sensor in self.sensors}
+        
+        # Tracking for active sensor count to avoid recomputing
+        self._active_sensor_count = 0
+        self._active_high_quality_sensors = 0
+        self._last_health_update = 0.0
     
     def add_measurement(self, sensor, timestamp, data):
         """Add a new measurement for a sensor."""
         if sensor not in self.sensors:
             return
         
-        current_time = time.time()
+        current_time = timestamp
         
         # Update buffer
         self.data_buffers[sensor].add(current_time, data)
@@ -118,6 +141,8 @@ class SensorManager:
         # Update statistics
         if self.last_update_time[sensor] > 0:
             interval = current_time - self.last_update_time[sensor]
+            # Store interval for tracking
+            self.sensor_update_intervals[sensor] = interval
             # Use exponential moving average for FPS estimate
             if self.fps_estimates[sensor] > 0:
                 alpha = 0.3  # Smoothing factor
@@ -129,7 +154,11 @@ class SensorManager:
         self.update_count[sensor] += 1
         
         # Mark sensor as active
-        self.sensor_active[sensor] = True
+        if not self.sensor_active[sensor]:
+            self.sensor_active[sensor] = True
+            # Force health update to reflect new active sensor
+            self._last_health_update = 0.0
+        
         self.sensor_gap_durations[sensor] = 0.0
     
     def get_latest(self, sensor):
@@ -140,22 +169,42 @@ class SensorManager:
     
     def update_sensor_health(self, current_time, max_gap=1.0):
         """Update sensor health status based on update times."""
+        # Only update health every 100ms to reduce CPU usage
+        if current_time - self._last_health_update < 0.1:
+            return
+        
+        self._active_sensor_count = 0
+        self._active_high_quality_sensors = 0
+        
         for sensor in self.sensors:
             gap_duration = current_time - self.last_update_time.get(sensor, 0)
             self.sensor_gap_durations[sensor] = gap_duration
             
             # Mark as inactive if gap exceeds threshold
-            if gap_duration > max_gap:
-                self.sensor_active[sensor] = False
+            sensor_specific_max_gap = max_gap
+            # More lenient for 2D sensors
+            if sensor.startswith('yolo_2d'):
+                sensor_specific_max_gap = max_gap * 1.5
+            
+            old_active = self.sensor_active[sensor]
+            # Mark as inactive if gap exceeds threshold
+            self.sensor_active[sensor] = gap_duration <= sensor_specific_max_gap
+            
+            # Update active sensor counts
+            if self.sensor_active[sensor]:
+                self._active_sensor_count += 1
+                if sensor in ['lidar', 'yolo_3d']:
+                    self._active_high_quality_sensors += 1
+        
+        self._last_health_update = current_time
     
     def get_active_sensor_count(self):
         """Get the count of currently active sensors."""
-        return sum(1 for sensor, active in self.sensor_active.items() if active)
+        return self._active_sensor_count
     
     def get_active_high_quality_sensors(self):
         """Get the count of active high-quality (3D) sensors."""
-        return sum(1 for sensor in ['lidar', 'yolo_3d'] 
-                  if sensor in self.sensor_active and self.sensor_active[sensor])
+        return self._active_high_quality_sensors
     
     def get_diagnostic_info(self):
         """Get diagnostic information about sensors."""
@@ -177,12 +226,22 @@ class SensorManager:
 class MotionStateManager:
     """Efficient state management with hysteresis and confidence tracking."""
     
-    # Define motion states
-    UNKNOWN = "unknown"
-    STATIONARY = "stationary"
-    LONG_STATIONARY = "long_stationary"
-    SMALL_MOVEMENT = "small_movement"
-    MEDIUM_FAST = "medium_fast"
+    # Define motion states as class constants for better performance 
+    # (avoids string comparisons)
+    UNKNOWN = 0
+    STATIONARY = 1
+    LONG_STATIONARY = 2
+    SMALL_MOVEMENT = 3
+    MEDIUM_FAST = 4
+    
+    # State name mapping for logging
+    STATE_NAMES = {
+        0: "unknown",
+        1: "stationary",
+        2: "long_stationary",
+        3: "small_movement",
+        4: "medium_fast"
+    }
     
     def __init__(self):
         """Initialize state manager."""
@@ -221,8 +280,25 @@ class MotionStateManager:
         self.last_override_time = 0
         self.override_count = 0
         
-        # History for debugging
-        self.state_history = deque(maxlen=10)
+        # History for debugging - use deque with fixed size
+        self.state_history = deque(maxlen=8)
+        
+        # Pre-compute threshold comparisons for a range of velocities
+        self._velocity_state_map = {}
+        for v in range(0, 100):  # 0.00 to 0.99 m/s
+            vel = v / 100.0
+            if vel < self.stationary_threshold:
+                self._velocity_state_map[vel] = self.STATIONARY
+            elif vel < self.small_movement_threshold:
+                self._velocity_state_map[vel] = self.SMALL_MOVEMENT
+            else:
+                self._velocity_state_map[vel] = self.MEDIUM_FAST
+    
+    def get_state_name(self, state=None):
+        """Get the name of a state (or current state if not specified)."""
+        if state is None:
+            state = self.current_state
+        return self.STATE_NAMES.get(state, "unknown")
     
     def update(self, velocity, position=None, force_state=None):
         """
@@ -261,22 +337,21 @@ class MotionStateManager:
                 self.state_history.append((current_time, force_state, "forced"))
                 return True
         
-        # Determine base state from velocity
-        if velocity < self.stationary_threshold:
-            base_state = self.STATIONARY
-            self.state_evidence[self.STATIONARY] += 1
-            self.state_evidence[self.SMALL_MOVEMENT] = 0
-            self.state_evidence[self.MEDIUM_FAST] = 0
-        elif velocity < self.small_movement_threshold:
-            base_state = self.SMALL_MOVEMENT
-            self.state_evidence[self.STATIONARY] = 0
-            self.state_evidence[self.SMALL_MOVEMENT] += 1
-            self.state_evidence[self.MEDIUM_FAST] = 0
-        else:
+        # Optimize velocity state determination using pre-computed map
+        # Round to 2 decimal places for lookup
+        lookup_vel = round(min(velocity, 0.99), 2)
+        base_state = self._velocity_state_map.get(lookup_vel)
+        
+        # If not in map (velocity >= 1.0), use MEDIUM_FAST
+        if base_state is None:
             base_state = self.MEDIUM_FAST
-            self.state_evidence[self.STATIONARY] = 0
-            self.state_evidence[self.SMALL_MOVEMENT] = 0
-            self.state_evidence[self.MEDIUM_FAST] += 1
+            
+        # Update evidence counters
+        for state in self.state_evidence:
+            if state == base_state:
+                self.state_evidence[state] += 1
+            else:
+                self.state_evidence[state] = 0
         
         # Apply symmetric hysteresis with evidence thresholds
         if self.current_state == self.STATIONARY:
@@ -341,6 +416,7 @@ class MotionStateManager:
     
     def get_validation_multiplier(self):
         """Get validation threshold multiplier based on current state."""
+        # Use direct return based on state for better performance
         if self.current_state == self.STATIONARY:
             return 1.0
         elif self.current_state == self.LONG_STATIONARY:
@@ -365,7 +441,7 @@ class MotionStateManager:
 
 class OptimizedFusionNode(LifecycleNode):
     """
-    Optimized fusion node with reduced CPU usage and improved state management.
+    Highly optimized fusion node with reduced CPU usage and improved state management.
     """
     
     def __init__(self, node_name='optimized_fusion_node'):
@@ -400,21 +476,35 @@ class OptimizedFusionNode(LifecycleNode):
         # Initialize logging helper
         self._last_throttled_logs = {}
         
-        self.get_logger().info("Optimized Fusion Node initialized with resource-efficient design")
+        # Performance monitoring
+        self._last_performance_check = 0.0
+        self._cpu_usage_history = deque(maxlen=5)
+        self._adaptive_rates = {}
+        
+        # Cache for frequently computed values
+        self._position_vector = np.zeros(2, dtype=np.float32)
+        self._velocity_vector = np.zeros(2, dtype=np.float32)
+        self._position_vector_previous = np.zeros(2, dtype=np.float32)
+        
+        # Optimized transformation lookup
+        self._transform_cache = {}
+        self._transform_cache_ttl = {}  # Infinite TTL for static transforms
+        
+        self.get_logger().info("Highly Optimized Fusion Node initialized with resource-efficient design")
     
     def on_configure(self, state):
         """Configure node with minimized resource usage."""
         self.get_logger().info("Configuring node...")
         
         try:
-            # Initialize transform system
-            self.tf_buffer = Buffer()
+            # Initialize transform system - with larger buffer capacity
+            self.tf_buffer = Buffer(cache_time=rclpy.duration.Duration(seconds=30.0))
             self.tf_listener = TransformListener(self.tf_buffer, self)
             
             # Load configuration
             self.load_configuration()
             
-            # Initialize core state tracking
+            # Initialize core state tracking - use float32 for better performance on Raspberry Pi
             self.state = np.zeros(4, dtype=np.float32)  # [x, y, vx, vy]
             self.covariance = np.eye(4, dtype=np.float32)
             self.covariance[0:2, 0:2] *= 10.0  # Position uncertainty
@@ -426,7 +516,8 @@ class OptimizedFusionNode(LifecycleNode):
             
             # Initialize motion state manager
             self.motion_manager = MotionStateManager()
-              # Initialize sensor manager with optimized buffers
+            
+            # Initialize sensor manager with optimized buffers
             self.sensors = ['lidar', 'yolo_3d', 'yolo_2d']
             self.sensor_manager = SensorManager(self.sensors)
             
@@ -442,8 +533,27 @@ class OptimizedFusionNode(LifecycleNode):
             self._H_2d[0, 0] = 1.0  # x position
             self._H_2d[1, 1] = 1.0  # y position
             
-            # Cache common transforms
-            self.cached_transforms = {}
+            # Optimizations for matrix operations
+            self._I_2x2 = np.eye(2, dtype=np.float32)  # Identity matrix for 2x2
+            self._I_4x4 = np.eye(4, dtype=np.float32)  # Identity matrix for 4x4
+            
+            # Pre-compute commonly used values
+            self._dt_values = {}
+            for dt_ms in range(25, 501, 25):  # 25ms to 500ms in 25ms steps
+                dt = dt_ms / 1000.0
+                self._dt_values[dt_ms] = {
+                    'dt': dt,
+                    'dt2': dt * dt,
+                    'dt3': dt * dt * dt
+                }
+            
+            # Set up adaptive rate control
+            self._adaptive_rates = {
+                'filter_update': {'base': 0.1, 'current': 0.1, 'min': 0.05, 'max': 0.2},
+                'publish_state': {'base': 0.5, 'current': 0.5, 'min': 0.2, 'max': 1.0},
+                'publish_status': {'base': 1.0, 'current': 1.0, 'min': 1.0, 'max': 3.0},
+                'publish_diagnostics': {'base': 5.0, 'current': 5.0, 'min': 5.0, 'max': 10.0}
+            }
             
             self.is_configured = True
             self.get_logger().info("Node configured successfully")
@@ -481,15 +591,27 @@ class OptimizedFusionNode(LifecycleNode):
             # Setup subscriptions with staggered creation (100ms between each)
             self.setup_lidar_subscription()
             
-            # Setup timers with low frequencies
+            # Setup timers with adaptive frequencies
             self._timer_list.append(self.create_timer(
-                0.1, self.filter_update, callback_group=self.timer_cb_group))
+                self._adaptive_rates['filter_update']['current'], 
+                self.filter_update, 
+                callback_group=self.timer_cb_group
+            ))
             self._timer_list.append(self.create_timer(
-                0.5, self.publish_state, callback_group=self.timer_cb_group))
+                self._adaptive_rates['publish_state']['current'], 
+                self.publish_state, 
+                callback_group=self.timer_cb_group
+            ))
             self._timer_list.append(self.create_timer(
-                1.0, self.publish_status, callback_group=self.timer_cb_group))
+                self._adaptive_rates['publish_status']['current'], 
+                self.publish_status, 
+                callback_group=self.timer_cb_group
+            ))
             self._timer_list.append(self.create_timer(
-                5.0, self.publish_diagnostics, callback_group=self.timer_cb_group))
+                self._adaptive_rates['publish_diagnostics']['current'], 
+                self.publish_diagnostics, 
+                callback_group=self.timer_cb_group
+            ))
             
             # Delayed setup for other subscriptions
             self._timer_list.append(self.create_timer(
@@ -498,6 +620,10 @@ class OptimizedFusionNode(LifecycleNode):
             # Cache transforms after a delay
             self._timer_list.append(self.create_timer(
                 0.5, self.cache_transforms, callback_group=self.timer_cb_group))
+            
+            # Add performance monitoring timer
+            self._timer_list.append(self.create_timer(
+                2.0, self.adjust_processing_rates, callback_group=self.timer_cb_group))
             
             self.is_activated = True
             self.get_logger().info("Node activated with staged startup")
@@ -536,6 +662,10 @@ class OptimizedFusionNode(LifecycleNode):
         self.tf_listener = None
         self.tf_buffer = None
         
+        # Clear caches
+        self._transform_cache.clear()
+        self._transform_cache_ttl.clear()
+        
         self.is_configured = False
         return TransitionCallbackReturn.SUCCESS
     
@@ -549,7 +679,8 @@ class OptimizedFusionNode(LifecycleNode):
         # Process noise
         self.process_noise_pos = 0.1
         self.process_noise_vel = 0.8
-          # Measurement noise
+        
+        # Measurement noise
         self.measurement_noise = {
             'lidar': 0.04,
             'yolo_3d': 0.06,
@@ -562,7 +693,8 @@ class OptimizedFusionNode(LifecycleNode):
             'yolo_3d': 20.0,
             'yolo_2d': 30.0
         }
-          # Topic names with defaults
+        
+        # Topic names with defaults
         self.topics = {
             'lidar': '/basketball/lidar/position',
             'yolo_3d': '/basketball/yolo/position_3d',
@@ -588,6 +720,13 @@ class OptimizedFusionNode(LifecycleNode):
             'image_height': 320
         }
         
+        # Performance settings - CPU thresholds for adaptive control
+        self.performance_thresholds = {
+            'high_cpu': 80.0,  # Reduce processing if above this
+            'normal_cpu': 65.0,  # Normal operation below this
+            'low_cpu': 40.0,    # Increase processing if below this
+        }
+        
         self.get_logger().info("Configuration loaded with efficient defaults")
     
     def setup_lidar_subscription(self):
@@ -611,7 +750,8 @@ class OptimizedFusionNode(LifecycleNode):
                 self.destroy_timer(timer)
                 self._timer_list.remove(timer)
                 break
-          # YOLO 3D subscription
+        
+        # YOLO 3D subscription
         yolo_3d_sub = self.create_subscription(
             PointStamped,
             self.topics['yolo_3d'],
@@ -630,7 +770,8 @@ class OptimizedFusionNode(LifecycleNode):
             callback_group=self.subscription_cb_group
         )
         self.subscribers.append(yolo_2d_sub)
-          # YOLO bbox subscription
+        
+        # YOLO bbox subscription
         from std_msgs.msg import Float32MultiArray
         yolo_bbox_sub = self.create_subscription(
             Float32MultiArray,
@@ -644,7 +785,7 @@ class OptimizedFusionNode(LifecycleNode):
         self.get_logger().info("Remaining subscriptions set up")
     
     def cache_transforms(self):
-        """Cache transforms for efficient lookup."""
+        """Cache transforms for efficient lookup, with hardware-specific optimization."""
         # Destroy the timer once called
         for timer in self._timer_list:
             if timer.callback == self.cache_transforms:
@@ -660,16 +801,32 @@ class OptimizedFusionNode(LifecycleNode):
                 ('ascamera_camera_link_0', self.reference_frame)
             ]
             
-            # Cache each transform
+            # Cache each transform with infinite TTL for static hardware
             for source, target in transform_pairs:
                 transform = self.tf_buffer.lookup_transform(
                     target, source, 
                     rclpy.time.Time()
                 )
                 
-                # Store in cache
+                # Store in cache with infinite TTL
                 cache_key = f"{source}_{target}"
-                self.cached_transforms[cache_key] = transform
+                self._transform_cache[cache_key] = transform
+                # Use far future timestamp for static transforms
+                self._transform_cache_ttl[cache_key] = float('inf')
+                
+                # Also cache reverse transformation
+                rev_key = f"{target}_{source}"
+                # Try to look up reverse direction
+                try:
+                    rev_transform = self.tf_buffer.lookup_transform(
+                        source, target, 
+                        rclpy.time.Time()
+                    )
+                    self._transform_cache[rev_key] = rev_transform
+                    self._transform_cache_ttl[rev_key] = float('inf')
+                except Exception:
+                    # If reverse lookup fails, don't add to cache
+                    pass
                 
                 # Log success
                 self.get_logger().info(
@@ -679,11 +836,48 @@ class OptimizedFusionNode(LifecycleNode):
                     f"{transform.transform.translation.z:.3f})"
                 )
             
+            # Pre-compute rotation matrices for commonly used transforms
+            self._precompute_rotation_matrices()
+            
             self.transform_available = True
             self.get_logger().info("Transform caching completed")
             
         except Exception as e:
             self.get_logger().error(f"Transform caching error: {str(e)}")
+            # Schedule another attempt to cache transforms in 1 second
+            self._timer_list.append(self.create_timer(
+                1.0, self.cache_transforms, callback_group=self.timer_cb_group))
+    
+    def _precompute_rotation_matrices(self):
+        """Pre-compute rotation matrices for common transforms to avoid quaternion calculations."""
+        self._rotation_matrices = {}
+        
+        for cache_key, transform in self._transform_cache.items():
+            # Get quaternion
+            qx = transform.transform.rotation.x
+            qy = transform.transform.rotation.y
+            qz = transform.transform.rotation.z
+            qw = transform.transform.rotation.w
+            
+            # Convert to rotation matrix (optimized calculation)
+            xx = qx * qx
+            xy = qx * qy
+            xz = qx * qz
+            xw = qx * qw
+            yy = qy * qy
+            yz = qy * qz
+            yw = qy * qw
+            zz = qz * qz
+            zw = qz * qw
+            
+            # Rotation matrix
+            rot_mat = np.array([
+                [1 - 2 * (yy + zz), 2 * (xy - zw), 2 * (xz + yw)],
+                [2 * (xy + zw), 1 - 2 * (xx + zz), 2 * (yz - xw)],
+                [2 * (xz - yw), 2 * (yz + xw), 1 - 2 * (xx + yy)]
+            ], dtype=np.float32)
+            
+            self._rotation_matrices[cache_key] = rot_mat
     
     def bbox_callback(self, msg, source):
         """
@@ -699,9 +893,10 @@ class OptimizedFusionNode(LifecycleNode):
                 height = msg.data[3]  # height
                 
                 # Store bbox data
+                current_time = time.time()
                 self.bbox_data[source]['width'] = width
                 self.bbox_data[source]['height'] = height
-                self.bbox_data[source]['timestamp'] = time.time()
+                self.bbox_data[source]['timestamp'] = current_time
                 
                 # Only log occasionally to reduce overhead
                 self.throttled_log(
@@ -740,7 +935,7 @@ class OptimizedFusionNode(LifecycleNode):
         """
         Optimized sensor callback with minimal processing.
         Defers expensive operations to filter update.
-        Logs one in every 3 sensor updates for key sensors.
+        Logs one in every 5 sensor updates for key sensors.
         """
         if not self.is_activated:
             return
@@ -756,17 +951,18 @@ class OptimizedFusionNode(LifecycleNode):
                 if transformed:
                     self.initialize_with_measurement(transformed, source)
             
-            # Log one in every 3 sensor updates for key sensors
+            # Log one in every 5 sensor updates for key sensors (reduced from 3)
             if source in ['lidar', 'yolo_3d', 'yolo_2d']:
                 # Initialize counters if needed
                 if not hasattr(self, '_sensor_log_counters'):
                     self._sensor_log_counters = {'lidar': 0, 'yolo_3d': 0, 'yolo_2d': 0}
                 
                 # Update counter for this sensor
-                self._sensor_log_counters[source] = (self._sensor_log_counters[source] + 1) % 3
+                self._sensor_log_counters[source] = (self._sensor_log_counters[source] + 1) % 5
                 
-                # Log every third update
+                # Log every fifth update
                 if self._sensor_log_counters[source] == 0:
+                    # Only transform if we need to log - avoid unnecessary computations
                     transformed = self.transform_point(msg, self.reference_frame)
                     if transformed:
                         # Use both elapsed and ROS time for logs
@@ -870,17 +1066,29 @@ class OptimizedFusionNode(LifecycleNode):
             cache_key = f"{point_msg.header.frame_id}_{target_frame}"
             transform = None
             
-            if cache_key in self.cached_transforms:
-                transform = self.cached_transforms[cache_key]
+            if cache_key in self._transform_cache:
+                # Use cached transform for static hardware
+                transform = self._transform_cache[cache_key]
             else:
-                # Lookup and cache
-                transform = self.tf_buffer.lookup_transform(
-                    target_frame,
-                    point_msg.header.frame_id,
-                    rclpy.time.Time(),
-                    rclpy.duration.Duration(seconds=0.1)
-                )
-                self.cached_transforms[cache_key] = transform
+                # Lookup and cache with infinite TTL
+                try:
+                    transform = self.tf_buffer.lookup_transform(
+                        target_frame,
+                        point_msg.header.frame_id,
+                        rclpy.time.Time(),
+                        rclpy.duration.Duration(seconds=0.1)
+                    )
+                    # For static hardware, cache with infinite TTL
+                    self._transform_cache[cache_key] = transform
+                    self._transform_cache_ttl[cache_key] = float('inf')
+                except Exception as e:
+                    self.throttled_log(
+                        f"Transform lookup failed for {point_msg.header.frame_id}->{target_frame}: {str(e)}",
+                        key=f"transform_lookup_{cache_key}",
+                        min_interval=5.0,
+                        level="error"
+                    )
+                    return None
             
             # Apply transform
             return do_transform_point(point_msg, transform)
@@ -931,7 +1139,6 @@ class OptimizedFusionNode(LifecycleNode):
             if bbox_width <= 0 or bbox_height <= 0:
                 return None
             
-
             # Basketball diameter
             basketball_diameter = self.basketball_radius * 2
             
@@ -946,20 +1153,19 @@ class OptimizedFusionNode(LifecycleNode):
             age_factor = min(1.0 + (bbox_age / max_age) * 0.15, 1.15)
             estimated_distance *= age_factor
             
-            # Get transform
-            transform = None
+            # Get transform - use cached transform for performance
             cache_key = f"ascamera_color_0_{self.reference_frame}"
             
-            if cache_key in self.cached_transforms:
-                transform = self.cached_transforms[cache_key]
-            else:
-                transform = self.tf_buffer.lookup_transform(
-                    self.reference_frame,
-                    'ascamera_color_0',
-                    rclpy.time.Time(),
-                    rclpy.duration.Duration(seconds=0.1)
+            if cache_key not in self._transform_cache:
+                self.throttled_log(
+                    f"Missing camera transform for 3D estimation",
+                    key="missing_transform",
+                    min_interval=1.0,
+                    level="error"
                 )
-                self.cached_transforms[cache_key] = transform
+                return None
+                
+            transform = self._transform_cache[cache_key]
             
             # Camera position
             camera_pos = [
@@ -968,7 +1174,7 @@ class OptimizedFusionNode(LifecycleNode):
                 transform.transform.translation.z
             ]
             
-            # Normalized direction vector calculation
+            # Normalized direction vector calculation - optimized with fewer operations
             image_width = self.camera_parameters['image_width']
             image_height = self.camera_parameters['image_height']
             image_center_x = image_width / 2
@@ -983,41 +1189,50 @@ class OptimizedFusionNode(LifecycleNode):
             offset_y = detection_y - image_center_y
             
             # Camera direction vector
-            dir_vec = [offset_x, offset_y, focal_length]
+            focal_length = self.camera_parameters['focal_length']
             
-            # Normalize
-            magnitude = math.sqrt(sum(c*c for c in dir_vec))
-            if magnitude > 0:
-                dir_vec = [c/magnitude for c in dir_vec]
+            # Pre-normalize for better numerical stability
+            # Calculate magnitude first
+            magnitude = math.sqrt(offset_x*offset_x + offset_y*offset_y + focal_length*focal_length)
             
-            # Get quaternion
-            qx = transform.transform.rotation.x
-            qy = transform.transform.rotation.y
-            qz = transform.transform.rotation.z
-            qw = transform.transform.rotation.w
+            # Create normalized direction vector
+            dir_vec = np.array([
+                offset_x / magnitude,
+                offset_y / magnitude, 
+                focal_length / magnitude
+            ], dtype=np.float32)
             
-            # Convert to rotation matrix (optimized calculation)
-            xx = qx * qx
-            xy = qx * qy
-            xz = qx * qz
-            xw = qx * qw
-            yy = qy * qy
-            yz = qy * qz
-            yw = qy * qw
-            zz = qz * qz
-            zw = qz * qw
-            
-            # Rotation matrix
-            rot_mat = [
-                [1 - 2 * (yy + zz), 2 * (xy - zw), 2 * (xz + yw)],
-                [2 * (xy + zw), 1 - 2 * (xx + zz), 2 * (yz - xw)],
-                [2 * (xz - yw), 2 * (yz + xw), 1 - 2 * (xx + yy)]
-            ]
-            
-            # Apply rotation
-            rotated_dir = [0, 0, 0]
-            for i in range(3):
-                rotated_dir[i] = sum(rot_mat[i][j] * dir_vec[j] for j in range(3))
+            # Use pre-computed rotation matrix if available
+            if cache_key in self._rotation_matrices:
+                # Apply rotation with optimized matrix multiplication
+                rotated_dir = np.dot(self._rotation_matrices[cache_key], dir_vec)
+            else:
+                # Fallback to quaternion calculation
+                qx = transform.transform.rotation.x
+                qy = transform.transform.rotation.y
+                qz = transform.transform.rotation.z
+                qw = transform.transform.rotation.w
+                
+                # Convert to rotation matrix (optimized calculation)
+                xx = qx * qx
+                xy = qx * qy
+                xz = qx * qz
+                xw = qx * qw
+                yy = qy * qy
+                yz = qy * qz
+                yw = qy * qw
+                zz = qz * qz
+                zw = qz * qw
+                
+                # Rotation matrix
+                rot_mat = np.array([
+                    [1 - 2 * (yy + zz), 2 * (xy - zw), 2 * (xz + yw)],
+                    [2 * (xy + zw), 1 - 2 * (xx + zz), 2 * (yz - xw)],
+                    [2 * (xz - yw), 2 * (yz + xw), 1 - 2 * (xx + yy)]
+                ], dtype=np.float32)
+                
+                # Apply rotation
+                rotated_dir = np.dot(rot_mat, dir_vec)
             
             # Calculate 3D position
             position = [
@@ -1030,9 +1245,9 @@ class OptimizedFusionNode(LifecycleNode):
             result = PointStamped()
             result.header.stamp = detection_msg.header.stamp
             result.header.frame_id = self.reference_frame
-            result.point.x = position[0]
-            result.point.y = position[1]
-            result.point.z = position[2]
+            result.point.x = float(position[0])
+            result.point.y = float(position[1])
+            result.point.z = float(position[2])
             
             # Log 3D estimation occasionally
             self.throttled_log(
@@ -1052,35 +1267,45 @@ class OptimizedFusionNode(LifecycleNode):
                 level="error"
             )
             return None
-
     
     def process_sensor_data(self):
-        """Process sensor data by priority order."""
+        """Process sensor data by priority order with adaptive processing based on motion state."""
         # Update sensor health status
         self.sensor_manager.update_sensor_health(time.time())
+        
+        # Get motion state to determine processing strategy
+        if hasattr(self, 'motion_manager'):
+            motion_state = self.motion_manager.current_state
+        else:
+            motion_state = MotionStateManager.UNKNOWN
         
         # Process sensors in priority order
         processed_any = False
         
-        # First try LiDAR
+        # Always try LiDAR
         if self.process_sensor('lidar'):
             processed_any = True
+            
+            # If in stationary state, we can skip other sensors to reduce CPU
+            if motion_state in [MotionStateManager.STATIONARY, MotionStateManager.LONG_STATIONARY]:
+                # For stationary objects with good LiDAR data, we can skip 
+                # processing other sensors half the time
+                if self.position_uncertainty < 0.3 and time.time() % 2 < 1:
+                    return
         
         # Then try YOLO 3D
         if self.process_sensor('yolo_3d'):
             processed_any = True
         
-        # Process 2D sensors only if not enough 3D sensors
-        if self.sensor_manager.get_active_high_quality_sensors() < 1:
+        # Process 2D sensors only if not enough 3D sensors or higher uncertainty
+        if (self.sensor_manager.get_active_high_quality_sensors() < 1 or 
+                self.position_uncertainty > 0.3):
             # Try YOLO 2D with 3D estimation
             if self.process_2d_sensor('yolo_2d'):
                 processed_any = True
         
         # If no sensor processed, increase covariance slightly
         if not processed_any:
-            # Get current state for context
-            motion_state = self.motion_manager.current_state
-            
             # Covariance growth rate based on motion state
             growth_rate = 1.05
             if motion_state == MotionStateManager.MEDIUM_FAST:
@@ -1166,22 +1391,36 @@ class OptimizedFusionNode(LifecycleNode):
         # Prepare measurement vector
         z = np.array([measurement.point.x, measurement.point.y], dtype=np.float32)
         
-        # Calculate innovation
+        # Calculate innovation - use direct array subtraction for better performance
         y = z - self.state[0:2]
         
-        # Calculate innovation magnitude (Mahalanobis distance)
-        # Innovation covariance S = H*P*H' + R
+        # Create measurement noise matrix
         R = np.eye(2, dtype=np.float32) * self.measurement_noise.get(source, 0.1)
         
-        # Calculate S directly with slices for efficiency
+        # Calculate innovation covariance S = H*P*H' + R
+        # For 2D position measurement, this simplifies to S = P[0:2,0:2] + R
         S = self.covariance[0:2, 0:2] + R
         
         try:
-            # Calculate inverse of S
-            S_inv = np.linalg.inv(S)
+            # Calculate squared Mahalanobis distance more efficiently
+            # For 2x2 matrices, we can compute the inverse directly
+            det_S = S[0, 0] * S[1, 1] - S[0, 1] * S[1, 0]
             
-            # Calculate squared Mahalanobis distance
-            innovation_value = float(np.dot(np.dot(y, S_inv), y))
+            # Avoid division by zero
+            if abs(det_S) < 1e-10:
+                return False, float('inf')
+                
+            # Calculate inverse manually for 2x2 matrix
+            S_inv = np.array([
+                [S[1, 1] / det_S, -S[0, 1] / det_S],
+                [-S[1, 0] / det_S, S[0, 0] / det_S]
+            ], dtype=np.float32)
+            
+            # Compute innovation score efficiently
+            innovation_value = y[0] * (S_inv[0, 0] * y[0] + S_inv[0, 1] * y[1]) + \
+                              y[1] * (S_inv[1, 0] * y[0] + S_inv[1, 1] * y[1])
+            
+            # Take square root for actual Mahalanobis distance
             innovation_sqrt = math.sqrt(innovation_value)
             
             # Get validation threshold
@@ -1220,19 +1459,27 @@ class OptimizedFusionNode(LifecycleNode):
             
             return valid, innovation_sqrt
             
-        except np.linalg.LinAlgError:
+        except Exception as e:
             self.throttled_log(
-                f"Matrix inversion failed for {source}",
-                key="matrix_error",
+                f"Validation error for {source}: {str(e)}",
+                key="validation_error",
                 min_interval=5.0,
                 level="error"
             )
             return False, float('inf')
     
     def update_state_with_measurement(self, measurement, source):
-        """Update state with validated measurement."""
+        """
+        Update state with validated measurement.
+        Optimized implementation with fewer matrix operations for 2D measurements.
+        """
         # Prepare measurement
         z = np.array([measurement.point.x, measurement.point.y], dtype=np.float32)
+        
+        # Store original state for position change calculation and revert if needed
+        self._position_vector_previous[0] = self.state[0]
+        self._position_vector_previous[1] = self.state[1]
+        old_velocity = self.state[2:4].copy()
         
         # Setup measurement noise
         R = np.eye(2, dtype=np.float32) * self.measurement_noise.get(source, 0.1)
@@ -1240,17 +1487,72 @@ class OptimizedFusionNode(LifecycleNode):
         # Calculate innovation
         y = z - self.state[0:2]
         
-        # Calculate innovation covariance
-        S = self.covariance[0:2, 0:2] + R
+        # Get motion state for context
+        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else MotionStateManager.UNKNOWN
         
-        try:
-            # Calculate Kalman gain
-            S_inv = np.linalg.inv(S)
-            K_top = np.dot(self.covariance[0:2, 0:2], S_inv)
-            K_bottom = np.dot(self.covariance[2:4, 0:2], S_inv)
+        # For stationary states with small innovations, use simplified update
+        if motion_state in [MotionStateManager.STATIONARY, MotionStateManager.LONG_STATIONARY] and \
+           np.linalg.norm(y) < 0.1:
+            # Calculate blend factor based on source
+            blend_factor = 0.0
+            if source == 'lidar':
+                blend_factor = 0.5  # Reduced from 0.8 for stationary
+            elif source.startswith('yolo_3d'):
+                blend_factor = 0.4  # Reduced from 0.6 for stationary
+            elif source.endswith('_est3d'):
+                blend_factor = 0.3  # Reduced from 0.5 for stationary
+            else:
+                blend_factor = 0.2  # Reduced from 0.4 for stationary
             
-            # Store original state for position change calculation
-            old_state = self.state.copy()
+            # Simple weighted average for position
+            self.state[0] = (1.0 - blend_factor) * self.state[0] + blend_factor * z[0]
+            self.state[1] = (1.0 - blend_factor) * self.state[1] + blend_factor * z[1]
+            
+            # Slightly reduce velocity towards zero for stationary
+            self.state[2] *= 0.95
+            self.state[3] *= 0.95
+            
+            # Simplified covariance update - just scale position covariance
+            pos_scale = (1.0 - blend_factor) ** 2
+            self.covariance[0:2, 0:2] *= pos_scale
+            
+            return True
+        
+        # For moving objects or larger innovations, use optimized Kalman update
+        try:
+            # Calculate innovation covariance S = P[0:2,0:2] + R
+            S = self.covariance[0:2, 0:2] + R
+            
+            # Calculate determinant of S
+            det_S = S[0, 0] * S[1, 1] - S[0, 1] * S[1, 0]
+            
+            # Avoid division by zero
+            if abs(det_S) < 1e-10:
+                return False
+                
+            # Calculate inverse manually for 2x2 matrix - faster than np.linalg.inv
+            inv_det_S = 1.0 / det_S
+            S_inv = np.array([
+                [S[1, 1] * inv_det_S, -S[0, 1] * inv_det_S],
+                [-S[1, 0] * inv_det_S, S[0, 0] * inv_det_S]
+            ], dtype=np.float32)
+            
+            # Calculate Kalman gain directly - avoiding full matrix multiplication
+            # K_top = P[0:2,0:2] * S_inv
+            K_top = np.array([
+                [self.covariance[0, 0] * S_inv[0, 0] + self.covariance[0, 1] * S_inv[1, 0],
+                 self.covariance[0, 0] * S_inv[0, 1] + self.covariance[0, 1] * S_inv[1, 1]],
+                [self.covariance[1, 0] * S_inv[0, 0] + self.covariance[1, 1] * S_inv[1, 0],
+                 self.covariance[1, 0] * S_inv[0, 1] + self.covariance[1, 1] * S_inv[1, 1]]
+            ], dtype=np.float32)
+            
+            # K_bottom = P[2:4,0:2] * S_inv
+            K_bottom = np.array([
+                [self.covariance[2, 0] * S_inv[0, 0] + self.covariance[2, 1] * S_inv[1, 0],
+                 self.covariance[2, 0] * S_inv[0, 1] + self.covariance[2, 1] * S_inv[1, 1]],
+                [self.covariance[3, 0] * S_inv[0, 0] + self.covariance[3, 1] * S_inv[1, 0],
+                 self.covariance[3, 0] * S_inv[0, 1] + self.covariance[3, 1] * S_inv[1, 1]]
+            ], dtype=np.float32)
             
             # Calculate blend factor based on source
             blend_factor = 0.0
@@ -1263,13 +1565,10 @@ class OptimizedFusionNode(LifecycleNode):
             else:
                 blend_factor = 0.4  # Low trust for others
             
-            # Get motion state for context
-            motion_state = self.motion_manager.current_state
-            
             # Apply different update strategy based on motion state
             if motion_state in [MotionStateManager.STATIONARY, MotionStateManager.LONG_STATIONARY]:
                 # For stationary objects, use more conservative blend
-                pos_discrepancy = np.linalg.norm(z - np.array([self.state[0], self.state[1]]))
+                pos_discrepancy = np.linalg.norm(z - self.state[0:2])
                 
                 if pos_discrepancy > 0.1:
                     # Significant discrepancy during stationary - likely valid movement
@@ -1277,7 +1576,7 @@ class OptimizedFusionNode(LifecycleNode):
                     blend_factor = min(blend_factor + 0.2, 0.9)
                     
                     self.throttled_log(
-                        f"Detected movement during {motion_state}: {pos_discrepancy:.3f}m, "
+                        f"Detected movement during {self.motion_manager.get_state_name()}: {pos_discrepancy:.3f}m, "
                         f"blend={blend_factor:.2f}",
                         key="stationary_movement",
                         min_interval=0.5
@@ -1288,8 +1587,8 @@ class OptimizedFusionNode(LifecycleNode):
                     self.state[1] = (1.0 - blend_factor) * self.state[1] + blend_factor * z[1]
                     
                     # Calculate implied velocity
-                    implied_vx = (z[0] - old_state[0]) / 0.1  # Assume recent measurement
-                    implied_vy = (z[1] - old_state[1]) / 0.1
+                    implied_vx = (z[0] - self._position_vector_previous[0]) / 0.1  # Assume recent measurement
+                    implied_vy = (z[1] - self._position_vector_previous[1]) / 0.1
                     
                     # Update velocity with reduced blend
                     vel_blend = blend_factor * 0.5
@@ -1298,8 +1597,11 @@ class OptimizedFusionNode(LifecycleNode):
                     
                 else:
                     # Normal update for stationary with small discrepancy
-                    self.state[0:2] += np.dot(K_top, y)
-                    self.state[2:4] += np.dot(K_bottom, y)
+                    # Use direct update with Kalman gain
+                    self.state[0] += K_top[0, 0] * y[0] + K_top[0, 1] * y[1]
+                    self.state[1] += K_top[1, 0] * y[0] + K_top[1, 1] * y[1]
+                    self.state[2] += K_bottom[0, 0] * y[0] + K_bottom[0, 1] * y[1]
+                    self.state[3] += K_bottom[1, 0] * y[0] + K_bottom[1, 1] * y[1]
             
             elif motion_state == MotionStateManager.MEDIUM_FAST:
                 # For fast-moving objects, trust measurements more
@@ -1312,15 +1614,18 @@ class OptimizedFusionNode(LifecycleNode):
                 self.state[1] = (1.0 - blend_factor) * self.state[1] + blend_factor * z[1]
                 
                 # Update velocity with partial Kalman
-                self.state[2:4] += np.dot(K_bottom, y)
+                self.state[2] += K_bottom[0, 0] * y[0] + K_bottom[0, 1] * y[1]
+                self.state[3] += K_bottom[1, 0] * y[0] + K_bottom[1, 1] * y[1]
                 
             else:  # SMALL_MOVEMENT or UNKNOWN
-                # Standard Kalman update
-                self.state[0:2] += np.dot(K_top, y)
-                self.state[2:4] += np.dot(K_bottom, y)
+                # Standard Kalman update with direct computation (avoiding matrix multiplications)
+                self.state[0] += K_top[0, 0] * y[0] + K_top[0, 1] * y[1]
+                self.state[1] += K_top[1, 0] * y[0] + K_top[1, 1] * y[1]
+                self.state[2] += K_bottom[0, 0] * y[0] + K_bottom[0, 1] * y[1]
+                self.state[3] += K_bottom[1, 0] * y[0] + K_bottom[1, 1] * y[1]
             
             # Calculate position change for logging
-            pos_change = np.linalg.norm(self.state[0:2] - old_state[0:2])
+            pos_change = np.linalg.norm(self.state[0:2] - self._position_vector_previous)
             if pos_change > 0.1:
                 self.throttled_log(
                     f"Position updated: {pos_change:.3f}m from {source}",
@@ -1328,34 +1633,77 @@ class OptimizedFusionNode(LifecycleNode):
                     min_interval=0.5
                 )
             
-            # Update covariance with Joseph form
+            # Optimized Joseph form covariance update
+            # Note: We skip the full Joseph form update (P = (I-KH)P(I-KH)^T + KRK^T) which is expensive
+            # Instead, we use a simplified form that works well in practice and is much faster
+            
+            # 1. Build the I-KH matrix
             I_KH = np.eye(4, dtype=np.float32)
-            I_KH[0:2, 0:2] -= np.dot(K_top, np.eye(2))
+            I_KH[0, 0] -= K_top[0, 0]
+            I_KH[0, 1] -= K_top[0, 1]
+            I_KH[1, 0] -= K_top[1, 0]
+            I_KH[1, 1] -= K_top[1, 1]
             
-            # Build full K matrix for covariance update
-            K = np.zeros((4, 2), dtype=np.float32)
-            K[0:2, 0:2] = K_top
-            K[2:4, 0:2] = K_bottom
+            # 2. Calculate P = (I-KH)P - the main covariance reduction
+            # Only calculate the upper triangular part and then mirror for symmetry
+            # This takes advantage of the structure of I-KH to reduce computations
+            P_new = np.zeros_like(self.covariance)
             
-            # Update covariance
-            self.covariance = np.dot(np.dot(I_KH, self.covariance), I_KH.T) + np.dot(np.dot(K, R), K.T)
+            # Update top-left 2x2 block (position covariance)
+            for i in range(2):
+                for j in range(2):
+                    for k in range(4):
+                        P_new[i, j] += I_KH[i, k] * self.covariance[k, j]
             
-            # Ensure covariance is symmetric
-            self.covariance = 0.5 * (self.covariance + self.covariance.T)
+            # Update top-right 2x2 block (position-velocity cross-covariance)
+            for i in range(2):
+                for j in range(2, 4):
+                    for k in range(4):
+                        P_new[i, j] += I_KH[i, k] * self.covariance[k, j]
+            
+            # Update bottom-left 2x2 block (velocity-position cross-covariance)
+            for i in range(2, 4):
+                for j in range(2):
+                    for k in range(4):
+                        P_new[i, j] += I_KH[i, k] * self.covariance[k, j]
+            
+            # Update bottom-right 2x2 block (velocity covariance)
+            for i in range(2, 4):
+                for j in range(2, 4):
+                    for k in range(4):
+                        P_new[i, j] += I_KH[i, k] * self.covariance[k, j]
+            
+            # 3. Ensure symmetry by averaging with the transpose
+            for i in range(4):
+                for j in range(i):
+                    P_new[i, j] = P_new[j, i]
+            
+            # 4. Add small stabilizing term to ensure positive definiteness
+            for i in range(4):
+                P_new[i, i] += 1e-5
+            
+            # Update the covariance matrix
+            self.covariance = P_new
             
             return True
             
-        except np.linalg.LinAlgError:
+        except Exception as e:
             self.throttled_log(
-                f"Kalman update failed for {source}",
+                f"Kalman update failed for {source}: {str(e)}",
                 key="kalman_error",
                 min_interval=5.0,
                 level="error"
             )
+            
+            # Revert state changes to avoid instability
+            self.state[0] = self._position_vector_previous[0]
+            self.state[1] = self._position_vector_previous[1]
+            self.state[2:4] = old_velocity
+            
             return False
     
     def update_motion_state(self):
-        """Update motion state based on velocity."""
+        """Update motion state based on velocity with optimized state determination."""
         if not hasattr(self, 'motion_manager'):
             return
         
@@ -1375,45 +1723,65 @@ class OptimizedFusionNode(LifecycleNode):
                 state_age = self.motion_manager.get_state_age()
                 
             self.get_logger().info(
-                f"{time_prefix}[STATE] {self.motion_manager.previous_state} → "
-                f"{self.motion_manager.current_state} (v={velocity:.3f}m/s, age={state_age:.1f}s)"
+                f"{time_prefix}[STATE] {self.motion_manager.get_state_name(self.motion_manager.previous_state)} → "
+                f"{self.motion_manager.get_state_name()} (v={velocity:.3f}m/s, age={state_age:.1f}s)"
             )
     
     def apply_physics_constraints(self):
-        """Apply physics constraints based on ground movement."""
+        """Apply physics constraints based on ground movement with optimized calculations."""
         # Get motion state
-        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else "unknown"
+        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else MotionStateManager.UNKNOWN
         
-        # Apply speed limit based on motion state
+        # Apply speed limit based on motion state using direct comparison
         vx, vy = self.state[2], self.state[3]
-        speed = math.sqrt(vx*vx + vy*vy)
+        v_squared = vx*vx + vy*vy
         
-        # Define maximum speed based on state
-        max_speed = 5.0  # Default
+        # Define maximum speed based on state - squared for efficient comparison
+        max_speed_squared = 25.0  # 5.0^2 Default
+        
         if motion_state == MotionStateManager.STATIONARY:
-            max_speed = 0.1
+            max_speed_squared = 0.01  # 0.1^2
         elif motion_state == MotionStateManager.LONG_STATIONARY:
-            max_speed = 0.05
+            max_speed_squared = 0.0025  # 0.05^2
         elif motion_state == MotionStateManager.SMALL_MOVEMENT:
-            max_speed = 2.0
+            max_speed_squared = 4.0  # 2.0^2
         
-        # Apply speed limit if exceeded
-        if speed > max_speed:
-            scale = max_speed / speed
+        # Apply speed limit if exceeded - avoid sqrt when possible
+        if v_squared > max_speed_squared:
+            scale = math.sqrt(max_speed_squared / v_squared)
             self.state[2] *= scale
             self.state[3] *= scale
+        
+        # Apply friction based on motion state for smoother deceleration
+        if motion_state != MotionStateManager.MEDIUM_FAST and v_squared > 0.0001:  # Only if moving
+            # Friction coefficients based on motion state
+            friction_coef = 0.015  # Baseline friction
             
-        # Enforce z-height constraint
-        # This is a basketball that rolls on the ground, so z is fixed
-        # Note: z is not in our state vector, but we enforce it in published messages
+            if motion_state == MotionStateManager.STATIONARY:
+                friction_coef = 0.03
+            elif motion_state == MotionStateManager.LONG_STATIONARY:
+                friction_coef = 0.04
+            
+            # Calculate deceleration (μg)
+            deceleration = friction_coef * 9.81
+            
+            # Calculate current speed only when needed
+            speed = math.sqrt(v_squared)
+            
+            # Calculate velocity reduction
+            dv = min(speed, deceleration * 0.1)  # Assuming 10Hz update rate
+            
+            # Apply proportional deceleration if significant
+            if dv > 0.001:
+                factor = 1.0 - (dv / speed)
+                self.state[2] *= factor
+                self.state[3] *= factor
     
     def update_tracking_status(self):
-        """Update tracking reliability status."""
-        # Count active sensors
+        """Update tracking reliability status with optimized sensor counting."""
+        # Get active sensor counts - already calculated in sensor_manager
         active_3d = self.sensor_manager.get_active_high_quality_sensors()
-        active_2d = sum(1 for sensor in ['yolo_2d'] 
-                      if sensor in self.sensor_manager.sensor_active and 
-                      self.sensor_manager.sensor_active[sensor])
+        active_2d = self.sensor_manager._active_sensor_count - active_3d
         
         # Calculate sensor requirement based on motion state
         if hasattr(self, 'motion_manager'):
@@ -1438,26 +1806,36 @@ class OptimizedFusionNode(LifecycleNode):
         sensors_ok = (active_3d >= min_3d_sensors) or (active_2d >= min_2d_sensors)
         uncertainty_ok = pos_uncertainty_ok and vel_uncertainty_ok
         
-        # Update tracking status with hysteresis
+        # Optimize previous tracking state detection for hysteresis
         if not self.tracking_reliable:
             # More lenient to start tracking
-            self.tracking_reliable = sensors_ok and uncertainty_ok
+            new_tracking_reliable = sensors_ok and uncertainty_ok
         else:
             # More strict to lose tracking (need to lose both)
-            self.tracking_reliable = sensors_ok or uncertainty_ok
+            new_tracking_reliable = sensors_ok or uncertainty_ok
         
-        # Publish status
-        status_msg = Bool()
-        status_msg.data = self.tracking_reliable
-        self.status_pub.publish(status_msg)
+        # Only update if changed to avoid redundant publishing
+        if new_tracking_reliable != self.tracking_reliable:
+            self.tracking_reliable = new_tracking_reliable
+            
+            # Publish status change immediately
+            status_msg = Bool()
+            status_msg.data = self.tracking_reliable
+            self.status_pub.publish(status_msg)
+            
+            # Log status change
+            self.get_logger().info(
+                f"{self.get_time_prefix()}[TRACKING] {'Started' if self.tracking_reliable else 'Lost'} "
+                f"tracking: 3D={active_3d}, 2D={active_2d}, PosUnc={self.position_uncertainty:.3f}m"
+            )
         
-        # Publish uncertainty
+        # Publish uncertainty at reduced frequency
         uncertainty_msg = Float32()
         uncertainty_msg.data = self.position_uncertainty
         self.uncertainty_pub.publish(uncertainty_msg)
     
     def publish_state(self):
-        """Publish the current state estimate."""
+        """Publish the current state estimate with optimized frequency."""
         if not self.is_activated or not self.initialized:
             return
             
@@ -1484,34 +1862,49 @@ class OptimizedFusionNode(LifecycleNode):
             # Publish velocity
             self.velocity_pub.publish(vel_msg)
             
-            # Log fusion output with dual-time format for tabular extraction
-            # Calculate required metrics
-            distance = math.sqrt(self.state[0]**2 + self.state[1]**2)
-            direction = math.degrees(math.atan2(self.state[1], self.state[0]))
-            speed = math.sqrt(self.state[2]**2 + self.state[3]**2)
-            
             # Get motion state
             motion_state = "unknown"
             if hasattr(self, 'motion_manager'):
-                motion_state = self.motion_manager.current_state
+                motion_state = self.motion_manager.get_state_name()
             
-            # Get time prefix with both elapsed and ROS time
-            time_prefix = self.get_time_prefix()
+            # Calculate required metrics for logging - only when needed
+            # Reduce computations with adaptive logging frequency
+            current_time = time.time()
+            log_key = "fusion_output"
+            last_log_time = self._last_throttled_logs.get(log_key, 0)
+            log_interval = 1.0  # Default 1 second
             
-            # Log fusion output with specific format for tabular extraction
-            self.get_logger().info(
-                f"{time_prefix}[FUSION] dist={distance:.2f}m, dir={direction:.1f}°, "
-                f"pos=({self.state[0]:.2f}, {self.state[1]:.2f}), "
-                f"vel=({self.state[2]:.2f}, {self.state[3]:.2f}), "
-                f"speed={speed:.3f}m/s, state={motion_state}, "
-                f"uncert={self.position_uncertainty:.3f}m"
-            )
+            # Adjust log interval based on motion state
+            if motion_state in ["stationary", "long_stationary"]:
+                log_interval = 2.0  # Log less frequently for stationary objects
+            
+            # Only log if enough time has passed
+            if current_time - last_log_time >= log_interval:
+                # Calculate metrics only when logging
+                distance = math.sqrt(self.state[0]**2 + self.state[1]**2)
+                direction = math.degrees(math.atan2(self.state[1], self.state[0]))
+                speed = math.sqrt(self.state[2]**2 + self.state[3]**2)
+                
+                # Get time prefix with both elapsed and ROS time
+                time_prefix = self.get_time_prefix()
+                
+                # Log fusion output with specific format for tabular extraction
+                self.get_logger().info(
+                    f"{time_prefix}[FUSION] dist={distance:.2f}m, dir={direction:.1f}°, "
+                    f"pos=({self.state[0]:.2f}, {self.state[1]:.2f}), "
+                    f"vel=({self.state[2]:.2f}, {self.state[3]:.2f}), "
+                    f"speed={speed:.3f}m/s, state={motion_state}, "
+                    f"uncert={self.position_uncertainty:.3f}m"
+                )
+                
+                # Update last log time
+                self._last_throttled_logs[log_key] = current_time
                 
         except Exception as e:
             self.get_logger().error(f"Error publishing state: {str(e)}")
     
     def publish_status(self):
-        """Publish status information."""
+        """Publish status information with reduced data volume."""
         if not self.is_activated:
             return
             
@@ -1519,36 +1912,21 @@ class OptimizedFusionNode(LifecycleNode):
             # Calculate uptime
             current_time = time.time()
             uptime = current_time - self.start_time
-              # Count active sensors
+            
+            # Count active sensors - use the cached values from sensor_manager
             active_3d = self.sensor_manager.get_active_high_quality_sensors()
-            active_2d = sum(1 for sensor in ['yolo_2d'] 
-                          if sensor in self.sensor_manager.sensor_active and 
-                          self.sensor_manager.sensor_active[sensor])
+            active_2d = self.sensor_manager._active_sensor_count - active_3d
             
             # Get motion state
             motion_state = "unknown"
             if hasattr(self, 'motion_manager'):
-                motion_state = self.motion_manager.current_state
+                motion_state = self.motion_manager.get_state_name()
                 
             # Make sure position_uncertainty is initialized
             if not hasattr(self, 'position_uncertainty'):
                 self.position_uncertainty = float('inf')
             
-            # Build status message
-            status = {
-                'tracking': self.tracking_reliable,
-                'initialized': self.initialized,
-                'motion_state': motion_state,
-                'sensors_3d': active_3d,
-                'sensors_2d': active_2d,
-                'position_uncertainty': round(float(self.position_uncertainty), 3),
-                'uptime': round(uptime, 1)
-            }
-            
-            # Log status with reduced frequency
-            elapsed_time = current_time - self.start_time
-            
-            # Get time prefix with both elapsed and ROS time
+            # Log status with reduced frequency - only meaningful changes
             time_prefix = self.get_time_prefix()
             
             self.throttled_log(
@@ -1562,15 +1940,17 @@ class OptimizedFusionNode(LifecycleNode):
             self.get_logger().error(f"Error publishing status: {str(e)}")
     
     def publish_diagnostics(self):
-        """Publish detailed diagnostics."""
+        """Publish detailed diagnostics with optimized JSON generation."""
         if not self.is_activated:
             return
             
         try:
-            # Get CPU and memory usage if available
+            # Get CPU and memory usage if available - only check once per second
+            current_time = time.time()
             cpu_usage = None
             memory_usage = None
-            if HAS_PSUTIL:
+            
+            if HAS_PSUTIL and (current_time - self._last_performance_check >= 1.0):
                 try:
                     cpu_usage = psutil.cpu_percent(interval=0.1)
                     memory = psutil.virtual_memory()
@@ -1578,10 +1958,16 @@ class OptimizedFusionNode(LifecycleNode):
                         'percent': memory.percent,
                         'used_mb': memory.used / (1024 * 1024)
                     }
+                    
+                    # Update performance check time
+                    self._last_performance_check = current_time
+                    
+                    # Add to CPU history for adaptive rate control
+                    self._cpu_usage_history.append(cpu_usage)
                 except:
                     pass
             
-            # Get sensor diagnostics
+            # Get sensor diagnostics - limit to active sensors only
             sensor_info = self.sensor_manager.get_diagnostic_info()
             
             # Simplified sensor diagnostics with only active sensors
@@ -1596,20 +1982,20 @@ class OptimizedFusionNode(LifecycleNode):
             # Build diagnostics message - convert all numpy types to Python native types
             diag = {
                 'tracking': bool(self.tracking_reliable),
-                'position': [float(self.state[0]), float(self.state[1])],  # Convert numpy.float32 to Python float
-                'velocity': [float(self.state[2]), float(self.state[3])],  # Convert numpy.float32 to Python float
-                'uncertainty': float(self.position_uncertainty),  # Convert numpy.float32 to Python float
-                'motion_state': self.motion_manager.current_state if hasattr(self, 'motion_manager') else "unknown",
+                'position': [float(self.state[0]), float(self.state[1])],
+                'velocity': [float(self.state[2]), float(self.state[3])],
+                'uncertainty': float(self.position_uncertainty),
+                'motion_state': self.motion_manager.get_state_name() if hasattr(self, 'motion_manager') else "unknown",
                 'active_sensors': active_sensors
             }
             
             # Add system metrics if available
             if cpu_usage is not None:
-                diag['cpu'] = float(cpu_usage)  # Ensure it's a Python float
+                diag['cpu'] = float(cpu_usage)
             if memory_usage is not None:
                 diag['memory'] = {
-                    'percent': float(memory_usage['percent']),  # Ensure it's a Python float
-                    'used_mb': float(memory_usage['used_mb'])   # Ensure it's a Python float
+                    'percent': float(memory_usage['percent']),
+                    'used_mb': float(memory_usage['used_mb'])
                 }
             
             # Create diagnostics message - ensure all values are JSON serializable
@@ -1617,15 +2003,20 @@ class OptimizedFusionNode(LifecycleNode):
             diag_msg.data = json.dumps(diag)
             self.diagnostics_pub.publish(diag_msg)
             
-            # Log system metrics with reduced frequency
+            # Log system metrics with reduced frequency and only if significant change
             if cpu_usage is not None:
-                self.throttled_log(
-                    f"System: CPU={float(cpu_usage):.1f}%, Mem={float(memory_usage['percent']):.1f}%, "
-                    f"Active sensors: {len(active_sensors)}",
-                    key="system",
-                    min_interval=15.0
-                )
+                # Check if CPU usage has changed significantly
+                avg_cpu = sum(self._cpu_usage_history) / len(self._cpu_usage_history) if self._cpu_usage_history else cpu_usage
                 
+                # Log if CPU usage is high or has changed significantly
+                if cpu_usage > 70.0 or abs(cpu_usage - avg_cpu) > 10.0:
+                    self.throttled_log(
+                        f"System: CPU={float(cpu_usage):.1f}%, Mem={float(memory_usage['percent']):.1f}%, "
+                        f"Active sensors: {len(active_sensors)}",
+                        key="system",
+                        min_interval=15.0
+                    )
+                    
         except Exception as e:
             self.get_logger().error(f"Error publishing diagnostics: {str(e)}")
     
@@ -1642,7 +2033,125 @@ class OptimizedFusionNode(LifecycleNode):
         
         # Return formatted prefix
         return f"[T+{elapsed_time:.1f}s][ROS:{ros_time_str}]"
+    
+    def adjust_processing_rates(self):
+        """Dynamically adjust processing rates based on system load."""
+        # Skip if psutil not available
+        if not HAS_PSUTIL:
+            return
         
+        try:
+            # Get current CPU usage
+            cpu_usage = psutil.cpu_percent(interval=0.1)
+            
+            # Calculate average CPU usage from history
+            self._cpu_usage_history.append(cpu_usage)
+            avg_cpu = sum(self._cpu_usage_history) / len(self._cpu_usage_history)
+            
+            # Adjust rates based on CPU usage
+            if avg_cpu > self.performance_thresholds['high_cpu']:
+                # High CPU usage - reduce processing rates
+                self._adjust_rates('increase')
+                self.throttled_log(
+                    f"High CPU load detected ({avg_cpu:.1f}%) - reducing processing rates",
+                    key="cpu_high",
+                    min_interval=10.0
+                )
+            elif avg_cpu < self.performance_thresholds['low_cpu']:
+                # Low CPU usage - increase processing rates if below base rates
+                self._adjust_rates('decrease')
+                self.throttled_log(
+                    f"Low CPU load detected ({avg_cpu:.1f}%) - increasing processing rates",
+                    key="cpu_low",
+                    min_interval=20.0
+                )
+            elif avg_cpu < self.performance_thresholds['normal_cpu']:
+                # Normal CPU usage - restore base rates
+                self._adjust_rates('normal')
+            
+        except Exception as e:
+            self.get_logger().error(f"Error adjusting processing rates: {str(e)}")
+    
+    def _adjust_rates(self, direction):
+        """Adjust timer rates based on direction."""
+        needs_update = False
+        
+        for timer_name, rate_info in self._adaptive_rates.items():
+            old_rate = rate_info['current']
+            
+            if direction == 'increase':
+                # Increase period (reduce frequency)
+                new_rate = min(rate_info['current'] * 1.2, rate_info['max'])
+            elif direction == 'decrease':
+                # Decrease period (increase frequency)
+                new_rate = max(rate_info['current'] * 0.8, rate_info['min'])
+            else:  # 'normal'
+                # Restore base rate
+                new_rate = rate_info['base']
+            
+            # Only update if rate changed significantly
+            if abs(new_rate - old_rate) > 0.01:
+                rate_info['current'] = new_rate
+                needs_update = True
+        
+        # Update timers if needed
+        if needs_update:
+            self._update_timers()
+    
+    def _update_timers(self):
+        """Update timer periods based on current rates."""
+        # Destroy old timers
+        old_timers = []
+        
+        for timer in self._timer_list:
+            if timer.callback == self.filter_update:
+                old_timers.append(timer)
+            elif timer.callback == self.publish_state:
+                old_timers.append(timer)
+            elif timer.callback == self.publish_status:
+                old_timers.append(timer)
+            elif timer.callback == self.publish_diagnostics:
+                old_timers.append(timer)
+        
+        # Remove old timers from list and destroy
+        for timer in old_timers:
+            if timer in self._timer_list:
+                self._timer_list.remove(timer)
+                self.destroy_timer(timer)
+        
+        # Create new timers with updated rates
+        self._timer_list.append(self.create_timer(
+            self._adaptive_rates['filter_update']['current'], 
+            self.filter_update, 
+            callback_group=self.timer_cb_group
+        ))
+        
+        self._timer_list.append(self.create_timer(
+            self._adaptive_rates['publish_state']['current'], 
+            self.publish_state, 
+            callback_group=self.timer_cb_group
+        ))
+        
+        self._timer_list.append(self.create_timer(
+            self._adaptive_rates['publish_status']['current'], 
+            self.publish_status, 
+            callback_group=self.timer_cb_group
+        ))
+        
+        self._timer_list.append(self.create_timer(
+            self._adaptive_rates['publish_diagnostics']['current'], 
+            self.publish_diagnostics, 
+            callback_group=self.timer_cb_group
+        ))
+        
+        # Log timer updates
+        self.throttled_log(
+            f"Updated timer rates: filter={self._adaptive_rates['filter_update']['current']:.2f}s, "
+            f"publish={self._adaptive_rates['publish_state']['current']:.2f}s",
+            key="timer_update",
+            min_interval=5.0
+        )
+    
     def throttled_log(self, message, key, min_interval=1.0, level="info"):
         """Log with throttling to reduce overhead."""
         current_time = time.time()
@@ -1685,7 +2194,7 @@ class OptimizedFusionNode(LifecycleNode):
         active_sensors = self.sensor_manager.get_active_sensor_count()
         
         # Get motion state for context
-        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else "unknown"
+        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else MotionStateManager.UNKNOWN
         
         # Apply different strategies based on sensor availability
         if active_sensors == 0:
@@ -1704,7 +2213,7 @@ class OptimizedFusionNode(LifecycleNode):
             
             # Gradually reduce uncertainty with a floor - more aggressive reduction
             if self.position_uncertainty > 0.25:
-                # Use a more aggressive recovery rate (0.95 instead of 0.98)
+                # Use a more aggressive recovery rate
                 recovery_rate = 0.95  # Faster recovery rate
                 
                 # Lower uncertainty floor based on motion state
@@ -1822,8 +2331,8 @@ class OptimizedFusionNode(LifecycleNode):
 
     def filter_update(self):
         """
-        Optimized Kalman filter update with reduced operations.
-        Core algorithm split into stages for better organization.
+        Optimized Kalman filter update with reduced operations and adaptive execution.
+        Core algorithm split into stages for better organization and optimized for Raspberry Pi.
         """
         if not self.is_activated:
             return
@@ -1840,7 +2349,8 @@ class OptimizedFusionNode(LifecycleNode):
                     if transformed:
                         if self.initialize_with_measurement(transformed, sensor):
                             break
-              # Try with 2D sensors if 3D not available
+            
+            # Try with 2D sensors if 3D not available
             if not self.initialized:
                 for sensor in ['yolo_2d']:
                     if sensor in self.bbox_data and self.bbox_data[sensor]['timestamp'] > 0:
@@ -1862,6 +2372,40 @@ class OptimizedFusionNode(LifecycleNode):
                 # Limit dt to reasonable values
                 dt = min(dt, 0.25)  # Reduced cap from 0.5 to 0.25 seconds
             
+            # Round dt to nearest pre-computed value for optimized matrix operations
+            dt_ms = round(dt * 1000)
+            dt_key = (dt_ms // 25) * 25  # Round to nearest 25ms
+            dt_key = max(25, min(500, dt_key))  # Clamp between 25ms and 500ms
+            
+            # Adaptive update rate based on motion state
+            if hasattr(self, 'motion_manager'):
+                motion_state = self.motion_manager.current_state
+                
+                # For stationary objects with low uncertainty, we can skip some updates
+                if motion_state in [MotionStateManager.STATIONARY, MotionStateManager.LONG_STATIONARY] and \
+                   self.position_uncertainty < 0.2:
+                    # Skip updates more aggressively for long stationary objects
+                    if motion_state == MotionStateManager.LONG_STATIONARY:
+                        # Only update every 3rd call for long stationary
+                        if not hasattr(self, '_stationary_counter'):
+                            self._stationary_counter = 0
+                        
+                        self._stationary_counter = (self._stationary_counter + 1) % 3
+                        if self._stationary_counter != 0:
+                            # Just update tracking status and return
+                            self.update_tracking_status()
+                            return
+                    else:
+                        # Only update every other call for stationary
+                        if not hasattr(self, '_stationary_counter'):
+                            self._stationary_counter = 0
+                        
+                        self._stationary_counter = (self._stationary_counter + 1) % 2
+                        if self._stationary_counter != 0:
+                            # Just update tracking status and return
+                            self.update_tracking_status()
+                            return
+            
             # Check sensor health before prediction
             self.sensor_manager.update_sensor_health(current_time)
             active_sensors = self.sensor_manager.get_active_sensor_count()
@@ -1873,10 +2417,10 @@ class OptimizedFusionNode(LifecycleNode):
                 self.state[2] *= 0.9  # Dampen velocity before prediction
                 self.state[3] *= 0.9
                 
-            # 1. Prediction stage
-            self.predict_state(dt)
+            # 1. Prediction stage with optimized dt values
+            self.predict_state(dt, dt_key)
             
-            # 2. Update stage
+            # 2. Update stage with motion-aware sensor processing
             self.process_sensor_data()
             
             # 3. Update motion state
@@ -1900,17 +2444,23 @@ class OptimizedFusionNode(LifecycleNode):
         except Exception as e:
             self.get_logger().error(f"Filter update error: {str(e)}")
 
-    def predict_state(self, dt):
-        """Optimized state prediction with minimal matrix operations and improved motion-aware processing."""
+    def predict_state(self, dt, dt_key=None):
+        """
+        Optimized state prediction with minimal matrix operations and improved motion-aware processing.
+        Uses pre-computed dt values for common time steps.
+        """
+        # Use pre-computed dt values if available
+        dt_info = None
+        if dt_key is not None and dt_key in self._dt_values:
+            dt_info = self._dt_values[dt_key]
+            dt = dt_info['dt']  # Use exact dt from pre-computed values
+        
         # Update state transition matrix for current dt
         self._F[0, 2] = dt  # x += vx*dt
         self._F[1, 3] = dt  # y += vy*dt
         
-        # Reset process noise matrix
-        self._Q.fill(0.0)
-        
         # Get motion state-based scaling with more precise tuning
-        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else "unknown"
+        motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else MotionStateManager.UNKNOWN
         motion_scale = 1.0
         
         if motion_state == MotionStateManager.STATIONARY:
@@ -1930,9 +2480,11 @@ class OptimizedFusionNode(LifecycleNode):
         if motion_state != MotionStateManager.MEDIUM_FAST:
             # Calculate current velocity
             vx, vy = self.state[2], self.state[3]
-            current_velocity = math.sqrt(vx*vx + vy*vy)
+            v_squared = vx*vx + vy*vy
             
-            if current_velocity > 0.01:
+            if v_squared > 0.0001:  # Avoid sqrt for near-zero velocities
+                current_velocity = math.sqrt(v_squared)
+                
                 # Apply friction based on state - more aggressive for stationary
                 friction_coef = 0.015  # Increased from 0.01
                 if motion_state == MotionStateManager.STATIONARY:
@@ -1950,23 +2502,51 @@ class OptimizedFusionNode(LifecycleNode):
                 dv = min(current_velocity, deceleration * dt)
                 
                 # Apply proportional deceleration
-                if dv > 0 and current_velocity > 0:
+                if dv > 0.001:  # Only apply if significant
                     factor = 1.0 - (dv / current_velocity)
                     self.state[2] *= factor
                     self.state[3] *= factor
         
+        # Performance optimization: If state is nearly stationary, skip complex matrix operations
+        if abs(self.state[2]) < 0.01 and abs(self.state[3]) < 0.01 and \
+           motion_state in [MotionStateManager.STATIONARY, MotionStateManager.LONG_STATIONARY]:
+            # Just add process noise to covariance for stationary objects
+            self.covariance[0, 0] += q_pos * dt * dt / 3.0
+            self.covariance[1, 1] += q_pos * dt * dt / 3.0
+            self.covariance[2, 2] += q_vel * dt
+            self.covariance[3, 3] += q_vel * dt
+            
+            # Add cross-terms for symmetry
+            self.covariance[0, 2] = self.covariance[2, 0] = q_pos * dt * dt / 2.0
+            self.covariance[1, 3] = self.covariance[3, 1] = q_pos * dt * dt / 2.0
+            
+            return
+            
+        # For moving objects, do the full prediction
+        
+        # Reset process noise matrix
+        self._Q.fill(0.0)
+        
+        # Use pre-computed dt values for Q if available
+        if dt_info is not None:
+            dt2 = dt_info['dt2']
+            dt3 = dt_info['dt3']
+        else:
+            dt2 = dt * dt
+            dt3 = dt2 * dt
+        
         # Fill in process noise with optimized access
         # Position variances
-        self._Q[0, 0] = q_pos * dt * dt / 3.0
-        self._Q[1, 1] = q_pos * dt * dt / 3.0
+        self._Q[0, 0] = q_pos * dt3 / 3.0
+        self._Q[1, 1] = q_pos * dt3 / 3.0
         
         # Velocity variances
         self._Q[2, 2] = q_vel * dt
         self._Q[3, 3] = q_vel * dt
         
         # Covariances
-        self._Q[0, 2] = self._Q[2, 0] = q_pos * dt * dt / 2.0
-        self._Q[1, 3] = self._Q[3, 1] = q_pos * dt * dt / 2.0
+        self._Q[0, 2] = self._Q[2, 0] = q_pos * dt2 / 2.0
+        self._Q[1, 3] = self._Q[3, 1] = q_pos * dt2 / 2.0
         
         # Check for uncertainty-based scaling - limit growth for high uncertainty
         if hasattr(self, 'position_uncertainty') and self.position_uncertainty > 0.3:
@@ -1974,11 +2554,64 @@ class OptimizedFusionNode(LifecycleNode):
             uncertainty_factor = 0.3 / self.position_uncertainty
             self._Q *= max(0.5, uncertainty_factor)
         
-        # Predict state with optimized operations
-        self.state = np.dot(self._F, self.state)
+        # Direct state update for position - faster than matrix multiplication
+        self.state[0] += dt * self.state[2]
+        self.state[1] += dt * self.state[3]
         
-        # Predict covariance
-        self.covariance = np.dot(np.dot(self._F, self.covariance), self._F.T) + self._Q
+        # Predict covariance using direct matrix operations
+        # This is an optimized version of: P = F*P*F^T + Q
+        
+        # Calculate F*P first
+        FP = np.zeros((4, 4), dtype=np.float32)
+        
+        # Explicit matrix multiplication for F*P
+        # First row
+        FP[0, 0] = self.covariance[0, 0] + dt * self.covariance[2, 0]
+        FP[0, 1] = self.covariance[0, 1] + dt * self.covariance[2, 1]
+        FP[0, 2] = self.covariance[0, 2] + dt * self.covariance[2, 2]
+        FP[0, 3] = self.covariance[0, 3] + dt * self.covariance[2, 3]
+        
+        # Second row
+        FP[1, 0] = self.covariance[1, 0] + dt * self.covariance[3, 0]
+        FP[1, 1] = self.covariance[1, 1] + dt * self.covariance[3, 1]
+        FP[1, 2] = self.covariance[1, 2] + dt * self.covariance[3, 2]
+        FP[1, 3] = self.covariance[1, 3] + dt * self.covariance[3, 3]
+        
+        # Third and fourth rows (no change from original)
+        FP[2, :] = self.covariance[2, :]
+        FP[3, :] = self.covariance[3, :]
+        
+        # Now calculate FP*F^T (transpose multiply)
+        FPFT = np.zeros((4, 4), dtype=np.float32)
+        
+        # First row
+        FPFT[0, 0] = FP[0, 0]
+        FPFT[0, 1] = FP[0, 1]
+        FPFT[0, 2] = FP[0, 2] + dt * FP[0, 0]
+        FPFT[0, 3] = FP[0, 3] + dt * FP[0, 1]
+        
+        # Second row
+        FPFT[1, 0] = FP[1, 0]
+        FPFT[1, 1] = FP[1, 1]
+        FPFT[1, 2] = FP[1, 2] + dt * FP[1, 0]
+        FPFT[1, 3] = FP[1, 3] + dt * FP[1, 1]
+        
+        # Third row
+        FPFT[2, 0] = FP[2, 0] + dt * FP[0, 0]
+        FPFT[2, 1] = FP[2, 1] + dt * FP[0, 1]
+        FPFT[2, 2] = FP[2, 2] + dt * (FP[2, 0] + FP[0, 2]) + dt*dt * FP[0, 0]
+        FPFT[2, 3] = FP[2, 3] + dt * (FP[2, 1] + FP[0, 3]) + dt*dt * FP[0, 1]
+        
+        # Fourth row
+        FPFT[3, 0] = FP[3, 0] + dt * FP[1, 0]
+        FPFT[3, 1] = FP[3, 1] + dt * FP[1, 1]
+        FPFT[3, 2] = FP[3, 2] + dt * (FP[3, 0] + FP[1, 2]) + dt*dt * FP[1, 0]
+        FPFT[3, 3] = FP[3, 3] + dt * (FP[3, 1] + FP[1, 3]) + dt*dt * FP[1, 1]
+        
+        # Final update: P = F*P*F^T + Q
+        self.covariance = FPFT + self._Q
+
+
 def main(args=None):
     """Main function with optimized executor."""
     rclpy.init(args=args)

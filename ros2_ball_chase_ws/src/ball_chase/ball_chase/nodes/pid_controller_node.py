@@ -353,7 +353,7 @@ class OptimizedPIDControllerNode(Node):
                 ('linear_x_ki', 0.05), # handle steady state errors
                 ('linear_x_kd', 0.25), # controls dampening during approach
                 ('linear_x_min', 0.0),
-                ('linear_x_max', 0.15),  
+                ('linear_x_max', 0.1),  
                 
                 # Linear Y velocity PID parameters - improved lateral damping
                 ('linear_y_kp', 0.08),
@@ -991,7 +991,8 @@ class OptimizedPIDControllerNode(Node):
                 self.recovery_start_time = time.time()
                 self.recovery_phase = "stop"
                 # Stop robot immediately when entering recovery
-                self.recovery_module.stop_robot()
+                stop_cmd = self.recovery_module.stop_robot()
+                self.cmd_vel_pub.publish(stop_cmd)
                 self.get_logger().info("Entering recovery mode - stopping robot")
             elif self.previous_state == "recovery" and new_state != "recovery":
                 self.in_recovery = False
@@ -1009,13 +1010,15 @@ class OptimizedPIDControllerNode(Node):
             # If we're not in tracking mode, ensure the robot is stopped
             # (unless it's in searching or lost_ball mode, where the state manager controls motion)
             if new_state != "tracking" and new_state != "searching" and new_state != "lost_ball":
-                self.recovery_module.stop_robot()
+                stop_cmd = self.recovery_module.stop_robot()
+                self.cmd_vel_pub.publish(stop_cmd)
     
     def _handle_non_tracking_state(self):
         """Handle robot behavior when not in tracking mode."""
         # When not tracking, ensure robot is stopped (unless controlled by another node)
         if self.robot_state not in ["searching", "lost_ball"]:
-            self.recovery_module.stop_robot()
+            stop_cmd = self.recovery_module.stop_robot()
+            self.cmd_vel_pub.publish(stop_cmd)
         return True  # Indicate that the method handled the situation
 
     def _calculate_errors(self):
@@ -1666,9 +1669,9 @@ class OptimizedPIDControllerNode(Node):
                 
                 # Simple proportional control with reduced gains
                 kp_factor = 0.7  # Reduce gains for smoother control
-                linear_x = max(-0.1, min(0.1, -distance_error * self.linear_x_kp * kp_factor))
-                lateral_y = max(-0.1, min(0.1, -lateral_error * self.linear_y_kp * kp_factor))
-                angular_z = max(-0.3, min(0.3, -angular_error * self.angular_kp * kp_factor))
+                linear_x = max(-0.1, min(0.1, distance_error * self.linear_x_kp * kp_factor))
+                lateral_y = max(-0.1, min(0.1, lateral_error * self.linear_y_kp * kp_factor))
+                angular_z = max(-0.3, min(0.3, angular_error * self.angular_kp * kp_factor))
                 
                 # Apply damping from previous velocities for smoothness
                 damping = 0.3  # 30% of previous velocity
@@ -2403,13 +2406,11 @@ class OptimizedPIDControllerNode(Node):
     def prepare_shutdown(self):
         """Prepare for node shutdown."""
         self.get_logger().info("Preparing for shutdown")
-        
-        # Set shutdown flag
         self._shutting_down = True
-        
-        # Immediately stop the robot
         try:
-            self.recovery_module.stop_robot()
+            stop_cmd = self.recovery_module.stop_robot()
+            # Publish the stop command to actually halt the robot
+            self.cmd_vel_pub.publish(stop_cmd)
             self.get_logger().info("Robot motion stopped during shutdown")
         except Exception as e:
             self.get_logger().error(f"Error stopping robot during shutdown: {str(e)}")

@@ -2,8 +2,8 @@
 
 # Basketball physical properties
 basketball:
-  radius: 0.127      # Basketball radius in meters (10 inch diameter / 2)
-  expected_height: 0.127  # Expected height of ball center relative to ground (5 inches)
+  radius: 0.1143       # Basketball radius in meters (4.5 inch diameter / 2)
+  expected_height: 0.1143  # Expected height of ball center relative to ground (4.5 inches)
   max_distance: 0.2    # Maximum distance for clustering points
   min_points: 3        # Minimum points to consider a valid cluster
   quality_threshold:   # Thresholds for circle quality assessment

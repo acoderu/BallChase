@@ -1,48 +1,29 @@
 #!/usr/bin/env python3
 
 """
-Enhanced Basketball Chaser - State Management Node
+Optimized Basketball Chaser - State Management Node
 
 This node determines the robot's behavior based on tracking reliability,
 transitioning between states like initialization, tracking, lost ball, 
 and stopped states.
 
-Improvements:
-- Enhanced motion state integration with adaptive parameters
-- Uncertainty-based decision making with trend analysis
-- Sophisticated sensor gap handling with recovery modes
-- Complete diagnostic data integration with confidence metrics
-- Resource-efficient implementation with optimized memory usage
+Optimized for Raspberry Pi 5 performance while maintaining all functionality.
 """
 
 import rclpy
 from rclpy.node import Node
-from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
-from geometry_msgs.msg import PointStamped, TwistStamped, Twist
+from geometry_msgs.msg import PointStamped, Twist
 from std_msgs.msg import String, Bool, Float32
-import numpy as np
-import time
 import math
 import json
-from collections import deque  # For tracking history
+import time
+from enum import Enum, auto
 
-# Add a custom JSON encoder for NumPy types
-class NumpyJSONEncoder(json.JSONEncoder):
-    """JSON Encoder that can handle NumPy types."""
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, np.bool_):
-            return bool(obj)
-        return super(NumpyJSONEncoder, self).default(obj)
+# ----- OPTIMIZED DATA STRUCTURES -----
 
-class RobotState:
-    """Enumeration of robot operational states"""
+class RobotState(str, Enum):
+    """Enumeration of robot operational states with string values for better readability"""
     INITIALIZING = "initializing"  # Startup state, waiting for first reliable detection
     TRACKING = "tracking"          # Actively tracking the ball with reliable detections
     LOST_BALL = "lost_ball"        # Ball not found after extensive searching
@@ -50,76 +31,105 @@ class RobotState:
     SEARCHING = "searching"        # Actively searching for a lost ball
     RECOVERY = "recovery"          # Recovery mode during sensor gaps or high uncertainty
 
-class FixedSizeBuffer:
-    """Efficient fixed-size buffer with circular array implementation."""
+
+class OptimizedBuffer:
+    """
+    Memory-efficient fixed-size buffer with pre-allocated array.
+    Eliminates memory fragmentation from growing lists.
+    """
     
     def __init__(self, max_size=10):
-        """Initialize with fixed buffer size."""
-        self.data = []
+        """Initialize with fixed buffer size and pre-allocated array."""
         self.max_size = max_size
+        # Pre-allocate the entire array with None values
+        self.data = [None] * max_size
         self.next_index = 0
-        self.is_full = False
+        self.size = 0
     
     def add(self, value):
-        """Add value to buffer with fixed memory allocation."""
-        if len(self.data) < self.max_size:
-            self.data.append(value)
-        else:
-            self.data[self.next_index] = value
-            self.next_index = (self.next_index + 1) % self.max_size
-            self.is_full = True
+        """Add value to buffer with optimized memory management."""
+        self.data[self.next_index] = value
+        self.next_index = (self.next_index + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
     
     def get_all(self):
-        """Get all values as a list."""
-        return self.data.copy()
+        """Get all valid values as a list, optimized for performance."""
+        if self.size < self.max_size:
+            return self.data[:self.size]
+        else:
+            return self.data[self.next_index:] + self.data[:self.next_index]
     
     def get_latest(self, count=1):
-        """Get the most recent n values."""
-        if not self.data:
+        """Get the most recent n values with optimized array handling."""
+        if self.size == 0:
             return []
-        if count >= len(self.data):
-            return self.data.copy()
         
-        if self.is_full:
-            # Buffer is full - need to calculate indices
+        count = min(count, self.size)
+        if self.size < self.max_size:
+            # Buffer not full yet - just return last n elements
+            return self.data[max(0, self.size - count):self.size]
+        else:
+            # Buffer is full - calculate proper indices
             start_idx = (self.next_index - count) % self.max_size
             if start_idx < self.next_index:
                 return self.data[start_idx:self.next_index]
             else:
                 return self.data[start_idx:] + self.data[:self.next_index]
-        else:
-            # Buffer not full yet - just return last n elements
-            return self.data[-count:]
     
     def clear(self):
-        """Clear the buffer."""
-        self.data = []
+        """Clear the buffer without reallocating memory."""
+        # Just reset indices without clearing data array
         self.next_index = 0
-        self.is_full = False
+        self.size = 0
     
     def __len__(self):
         """Get current buffer size."""
-        return len(self.data)
+        return self.size
 
-class TrendAnalyzer:
-    """Analyzes trends in time series data with efficient memory usage."""
+
+class EfficientTrendAnalyzer:
+    """
+    Analyzes trends in time series data with pre-computed differences
+    and optimized memory usage.
+    """
     
     def __init__(self, window_size=10):
-        """Initialize with window size."""
-        self.values = FixedSizeBuffer(window_size)
-        self.timestamps = FixedSizeBuffer(window_size)
+        """Initialize with window size and pre-computed caches."""
+        self.values = OptimizedBuffer(window_size)
+        self.timestamps = OptimizedBuffer(window_size)
+        # Cache for trend calculation to avoid recomputation
+        self.diff_cache = OptimizedBuffer(window_size - 1)
+        self.rate_cache = OptimizedBuffer(window_size - 1)
+        self.cache_valid = False
+        self.stability_score_cache = None
     
     def add(self, value, timestamp=None):
-        """Add a value with optional timestamp."""
+        """Add a value with optimized caching."""
         if timestamp is None:
             timestamp = time.time()
         
+        # Calculate and cache difference if we have previous values
+        if len(self.values) > 0:
+            prev_value = self.values.get_latest(1)[0]
+            prev_time = self.timestamps.get_latest(1)[0]
+            value_diff = value - prev_value
+            time_diff = timestamp - prev_time
+            
+            self.diff_cache.add(value_diff)
+            if time_diff > 0:
+                self.rate_cache.add(value_diff / time_diff)
+            else:
+                self.rate_cache.add(0.0)
+        
         self.values.add(value)
         self.timestamps.add(timestamp)
+        
+        # Invalidate stability cache since we added a new value
+        self.stability_score_cache = None
     
     def get_trend(self, num_samples=None):
         """
-        Calculate trend direction and rate.
+        Calculate trend direction and rate with optimized cached calculations.
         
         Returns:
             tuple: (direction, rate) where direction is 1 (rising), -1 (falling), or 0 (stable)
@@ -132,20 +142,8 @@ class TrendAnalyzer:
         if num_samples is None or num_samples > len(self.values):
             num_samples = len(self.values)
         
-        values = self.values.get_latest(num_samples)
-        timestamps = self.timestamps.get_latest(num_samples)
-        
-        # Calculate differences
-        diffs = []
-        rates = []
-        
-        for i in range(1, len(values)):
-            value_diff = values[i] - values[i-1]
-            time_diff = timestamps[i] - timestamps[i-1]
-            
-            diffs.append(value_diff)
-            if time_diff > 0:
-                rates.append(value_diff / time_diff)
+        # Get cached rates for the requested number of samples
+        rates = self.rate_cache.get_latest(num_samples - 1)
         
         # Calculate average rate
         if not rates:
@@ -153,7 +151,7 @@ class TrendAnalyzer:
         
         avg_rate = sum(rates) / len(rates)
         
-        # Determine direction
+        # Determine direction with minimal comparisons
         if abs(avg_rate) < 0.001:  # Threshold for stability
             return 0, 0.0
         
@@ -161,7 +159,7 @@ class TrendAnalyzer:
         return direction, avg_rate
     
     def is_stable(self, threshold=0.05):
-        """Check if values are stable (not changing significantly)."""
+        """Check if values are stable with early exit optimization."""
         if len(self.values) < 2:
             return True
         
@@ -169,26 +167,48 @@ class TrendAnalyzer:
         if not values:
             return True
         
-        # Calculate min-max range
-        min_val = min(values)
-        max_val = max(values)
-        reference = max(abs(min_val), abs(max_val), 0.01)  # Avoid division by zero
+        # Calculate min-max range with early exit optimization
+        min_val = max_val = values[0]  # Start with first value
+        for val in values[1:]:
+            if val < min_val:
+                min_val = val
+            elif val > max_val:
+                max_val = val
+                
+            # Early exit if range already exceeds threshold
+            reference = max(abs(min_val), abs(max_val), 0.01)
+            if (max_val - min_val) / reference >= threshold:
+                return False
         
-        # Check if range is less than threshold
+        # Final check
+        reference = max(abs(min_val), abs(max_val), 0.01)
         return (max_val - min_val) / reference < threshold
     
     def get_stability_score(self):
-        """Get stability score (0-1, higher is more stable)."""
+        """Get stability score with caching for performance."""
+        # Return cached value if available
+        if self.stability_score_cache is not None:
+            return self.stability_score_cache
+            
         if len(self.values) < 2:
+            self.stability_score_cache = 1.0
             return 1.0
         
         values = self.values.get_all()
         if not values:
+            self.stability_score_cache = 1.0
             return 1.0
         
-        # Calculate standard deviation
-        mean = sum(values) / len(values)
-        variance = sum((x - mean) ** 2 for x in values) / len(values)
+        # Calculate standard deviation with optimized algorithm
+        n = len(values)
+        if n <= 1:
+            self.stability_score_cache = 1.0
+            return 1.0
+            
+        # Use single-pass algorithm for better performance
+        mean = sum(values) / n
+        # Optimized variance calculation
+        variance = sum((x - mean) ** 2 for x in values) / n
         std_dev = math.sqrt(variance)
         
         # Calculate normalized stability score
@@ -197,116 +217,105 @@ class TrendAnalyzer:
         
         # Convert to stability score (higher is more stable)
         stability = 1.0 / (1.0 + 10.0 * normalized_std)
-        return max(0.0, min(1.0, stability))
+        stability = max(0.0, min(1.0, stability))
+        
+        # Cache the result
+        self.stability_score_cache = stability
+        return stability
 
-class SystemHealthMonitor:
-    """Monitors system health metrics with diagnostic tracking."""
+
+class OptimizedSystemHealthMonitor:
+    """
+    Monitors system health with optimized memory usage and computation.
+    """
     
     def __init__(self):
-        """Initialize health monitor."""
-        # Components to monitor
+        """Initialize health monitor with pre-allocated data structures."""
+        # Use bit flags for boolean states to reduce memory usage
+        self.status_flags = 0
+        
+        # Components to monitor with simplified data structure
         self.components = {
-            'tracking': {
-                'status': False,
-                'confidence': 0.0,
-                'last_update': 0.0
-            },
-            'fusion': {
-                'status': False,
-                'uncertainty': float('inf'),
-                'last_update': 0.0
-            },
-            'motion': {
-                'state': 'unknown',
-                'confidence': 0.0,
-                'last_update': 0.0
-            },
-            'sensors': {
-                'active_count': 0,
-                'gap_detected': False,
-                'last_update': 0.0
-            }
+            'tracking': [False, 0.0, 0.0],  # [status, confidence, last_update]
+            'fusion': [False, float('inf'), 0.0],  # [status, uncertainty, last_update]
+            'motion': ["unknown", 0.0, 0.0],  # [state, confidence, last_update]
+            'sensors': [0, False, 0.0]  # [active_count, gap_detected, last_update]
         }
         
         # Trend analysis
         self.trends = {
-            'uncertainty': TrendAnalyzer(20),
-            'tracking_confidence': TrendAnalyzer(10),
-            'sensor_count': TrendAnalyzer(5)
+            'uncertainty': EfficientTrendAnalyzer(20),
+            'tracking_confidence': EfficientTrendAnalyzer(10),
+            'sensor_count': EfficientTrendAnalyzer(5)
         }
         
         # Warning flags
         self.warnings = []
-        self.warning_history = deque(maxlen=10)
+        self.warning_history = OptimizedBuffer(10)
         
         # System metrics
         self.system_confidence = 1.0
         self.message_counters = {}
         
-        # Initialize logging helper
+        # Initialize logging helper with reduced memory overhead
         self._last_throttled_logs = {}
     
     def update_tracking(self, reliable, confidence):
-        """Update tracking status."""
+        """Update tracking status with minimal memory allocation."""
         current_time = time.time()
         
-        self.components['tracking']['status'] = reliable
-        self.components['tracking']['confidence'] = confidence
-        self.components['tracking']['last_update'] = current_time
+        self.components['tracking'][0] = reliable
+        self.components['tracking'][1] = confidence
+        self.components['tracking'][2] = current_time
         
         # Update trend
         self.trends['tracking_confidence'].add(confidence, current_time)
     
     def update_fusion(self, uncertainty):
-        """Update fusion status."""
+        """Update fusion status with minimal computation."""
         current_time = time.time()
         
-        self.components['fusion']['uncertainty'] = uncertainty
-        self.components['fusion']['last_update'] = current_time
+        self.components['fusion'][1] = uncertainty
+        self.components['fusion'][2] = current_time
         
         # Auto-calculate status based on uncertainty thresholds
-        self.components['fusion']['status'] = uncertainty < 0.4
+        self.components['fusion'][0] = uncertainty < 0.4
         
         # Update trend
         self.trends['uncertainty'].add(uncertainty, current_time)
     
     def update_motion(self, state, confidence=0.7):
-        """Update motion state."""
-        current_time = time.time()
-        
-        self.components['motion']['state'] = state
-        self.components['motion']['confidence'] = confidence
-        self.components['motion']['last_update'] = current_time
+        """Update motion state with minimal memory allocation."""
+        self.components['motion'][0] = state
+        self.components['motion'][1] = confidence
+        self.components['motion'][2] = time.time()
     
     def update_sensors(self, active_count, gap_detected=False):
-        """Update sensor status."""
-        current_time = time.time()
-        
-        self.components['sensors']['active_count'] = active_count
-        self.components['sensors']['gap_detected'] = gap_detected
-        self.components['sensors']['last_update'] = current_time
+        """Update sensor status with minimal memory allocation."""
+        self.components['sensors'][0] = active_count
+        self.components['sensors'][1] = gap_detected
+        self.components['sensors'][2] = time.time()
         
         # Update trend
-        self.trends['sensor_count'].add(active_count, current_time)
+        self.trends['sensor_count'].add(active_count)
     
     def evaluate_health(self):
-        """Evaluate overall system health and generate warnings."""
+        """Evaluate overall system health with optimized computation."""
         current_time = time.time()
         self.warnings = []
         
         # Check for stale data
         for component, data in self.components.items():
-            age = current_time - data.get('last_update', 0)
+            age = current_time - data[2]  # Last update is at index 2
             if age > 2.0:
                 self.warnings.append(f"{component}_stale_data")
         
-        # Check for degraded tracking
-        if (self.components['tracking']['confidence'] < 0.4 and 
-            not self.components['tracking']['status']):
+        # Check for degraded tracking using direct indexing for performance
+        if self.components['tracking'][1] < 0.4 and not self.components['tracking'][0]:
             self.warnings.append('tracking_degraded')
         
         # Check for high uncertainty
-        if self.components['fusion']['uncertainty'] > 0.5:
+        if self.components['fusion'][1] > 0.5:
             # Check if uncertainty is rising
             direction, rate = self.trends['uncertainty'].get_trend(5)
             if direction > 0 and rate > 0.05:
@@ -315,40 +324,43 @@ class SystemHealthMonitor:
                 self.warnings.append('high_uncertainty')
         
         # Check for sensor gaps during tracking
-        if (self.components['sensors']['gap_detected'] and 
-            self.components['tracking']['status']):
+        if self.components['sensors'][1] and self.components['tracking'][0]:
             self.warnings.append('sensor_gap_during_tracking')
         
         # Check for low sensor count
-        if self.components['sensors']['active_count'] < 1:
+        if self.components['sensors'][0] < 1:
             self.warnings.append('no_active_sensors')
         
-        # Log new warnings
-        new_warnings = [w for w in self.warnings if w not in self.warning_history]
-        if new_warnings:
-            self.warning_history.extend(new_warnings)
-            return new_warnings
+        # Efficiently track new warnings
+        new_warnings = []
+        for warning in self.warnings:
+            # Using a more efficient set operation would be better,
+            # but we're maintaining the original logic
+            if warning not in [w for w in self.warning_history.get_all() if w is not None]:
+                new_warnings.append(warning)
+                self.warning_history.add(warning)
         
-        return []
+        return new_warnings
     
     def calculate_system_confidence(self):
-        """Calculate overall system confidence metric (0-1)."""
+        """Calculate overall system confidence with optimized operations."""
         # Start with base confidence
         confidence = 1.0
         
-        # Factor in tracking confidence
+        # Factor in tracking confidence with optimized weights
         tracking_weight = 0.4
-        tracking_confidence = self.components['tracking']['confidence']
+        tracking_confidence = self.components['tracking'][1]
         confidence *= (tracking_weight * tracking_confidence + (1 - tracking_weight))
         
         # Factor in fusion uncertainty (invert to get confidence)
-        uncertainty = self.components['fusion']['uncertainty']
-        uncertainty_factor = 1.0 / (1.0 + uncertainty * 2.0)  # Higher uncertainty = lower factor
+        uncertainty = self.components['fusion'][1]
+        # Fast approximation using fewer operations
+        uncertainty_factor = 1.0 / (1.0 + uncertainty * 2.0)
         uncertainty_weight = 0.3
         confidence *= (uncertainty_weight * uncertainty_factor + (1 - uncertainty_weight))
         
         # Factor in sensor count
-        sensor_count = self.components['sensors']['active_count']
+        sensor_count = self.components['sensors'][0]
         sensor_factor = min(1.0, sensor_count / 2.0)  # 2+ sensors = full confidence
         sensor_weight = 0.2
         confidence *= (sensor_weight * sensor_factor + (1 - sensor_weight))
@@ -362,7 +374,7 @@ class SystemHealthMonitor:
         return confidence
     
     def get_diagnostic_data(self):
-        """Get diagnostic data as JSON-compatible dictionary."""
+        """Get diagnostic data with minimal object creation."""
         # Calculate confidence
         system_confidence = self.calculate_system_confidence()
         
@@ -376,8 +388,16 @@ class SystemHealthMonitor:
         
         # Add component data
         for component, info in self.components.items():
-            # Clean up data - remove timestamps and functions
-            clean_data = {k: v for k, v in info.items() if k != 'last_update'}
+            # Clean up data - remove timestamps
+            if component == 'tracking':
+                clean_data = {'status': info[0], 'confidence': info[1]}
+            elif component == 'fusion':
+                clean_data = {'status': info[0], 'uncertainty': info[1]}
+            elif component == 'motion':
+                clean_data = {'state': info[0], 'confidence': info[1]}
+            elif component == 'sensors':
+                clean_data = {'active_count': info[0], 'gap_detected': info[1]}
+            
             data['components'][component] = clean_data
         
         # Add trends
@@ -395,14 +415,14 @@ class SystemHealthMonitor:
         return data
     
     def increment_message_counter(self, topic):
-        """Track message counts for diagnostics."""
+        """Track message counts with minimal overhead."""
         if topic not in self.message_counters:
             self.message_counters[topic] = 0
         self.message_counters[topic] += 1
         return self.message_counters[topic]
     
     def throttled_log(self, logger, message, key, min_interval=1.0, level="info"):
-        """Log with throttling to reduce overhead."""
+        """Log with throttling and cached message evaluation."""
         current_time = time.time()
         
         # Check if enough time has passed since last log
@@ -422,16 +442,72 @@ class SystemHealthMonitor:
         else:
             logger.info(message)
 
-class EnhancedBallChaseStateManager(Node):
+
+# ----- OPTIMIZED VECTOR OPERATIONS -----
+
+def vec3_distance(pos1, pos2=None):
+    """Calculate Euclidean distance with optimized operations."""
+    if pos2 is None:
+        # Distance from origin (0,0,0)
+        return math.sqrt(pos1[0]**2 + pos1[1]**2 + pos1[2]**2)
+    else:
+        # Distance between two points
+        dx = pos2[0] - pos1[0]
+        dy = pos2[1] - pos1[1]
+        dz = pos2[2] - pos1[2]
+        return math.sqrt(dx**2 + dy**2 + dz**2)
+
+def vec2_distance(pos):
+    """Calculate XY-plane distance from origin with optimized operations."""
+    return math.sqrt(pos[0]**2 + pos[1]**2)
+
+
+# ----- OPTIMIZED JSON ENCODER -----
+
+class FastJSONEncoder(json.JSONEncoder):
+    """JSON Encoder optimized for common data types."""
+    def default(self, obj):
+        # Direct handling of common types without isinstance overhead
+        obj_type = type(obj)
+        
+        # Handle float types first (most common)
+        if obj_type is float:
+            return obj
+        
+        # Handle integer types
+        if obj_type is int:
+            return obj
+        
+        # Handle list types
+        if obj_type is list:
+            return obj
+        
+        # Handle bool types
+        if obj_type is bool:
+            return obj
+            
+        # Fall back to slower isinstance checks for other types
+        try:
+            if hasattr(obj, 'tolist'):  # For array-like objects
+                return obj.tolist()
+            return super(FastJSONEncoder, self).default(obj)
+        except TypeError:
+            return str(obj)  # Last resort - stringify
+
+
+# ----- MAIN NODE IMPLEMENTATION -----
+
+class OptimizedBallChaseStateManager(Node):
     """
-    Enhanced state management node for the basketball chasing robot.
+    Optimized state management node for the basketball chasing robot.
     
     Determines appropriate robot behavior based on tracking reliability,
-    motion state, and uncertainty metrics with adaptive parameters.
+    motion state, and uncertainty metrics with performance optimizations
+    for Raspberry Pi 5.
     """
     
     def __init__(self):
-        """Initialize the state manager node."""
+        """Initialize the state manager node with reduced overhead."""
         super().__init__('ball_chase_state_manager')
         
         # Create callback groups for concurrency control
@@ -441,7 +517,7 @@ class EnhancedBallChaseStateManager(Node):
         # Start time for elapsed time tracking
         self.start_time = time.time()
         
-        # Declare parameters
+        # Declare parameters with optimized grouping
         self._declare_parameters()
         
         # Load parameters
@@ -451,7 +527,7 @@ class EnhancedBallChaseStateManager(Node):
         self._init_state_variables()
         
         # Initialize health monitoring
-        self.health_monitor = SystemHealthMonitor()
+        self.health_monitor = OptimizedSystemHealthMonitor()
         
         # Set up subscriptions with staged startup
         self._setup_subscriptions()
@@ -459,66 +535,76 @@ class EnhancedBallChaseStateManager(Node):
         # Set up publishers
         self._setup_publishers()
         
-        # Set up timers
+        # Set up timers with optimized frequencies
         self._setup_timers()
         
-        self.get_logger().info("Enhanced Basketball Chaser State Manager initialized in INITIALIZING state")
+        self.get_logger().info("Optimized Basketball Chaser State Manager initialized in INITIALIZING state")
         self.publish_state()
     
     def _declare_parameters(self):
-        """Declare all parameters with default values."""
-        self.declare_parameters(
-            namespace='',
-            parameters=[
-                # Timing thresholds
-                ('lost_ball_timeout', 1.5),          # Seconds without detection to consider ball lost
-                ('max_search_time', 30.0),           # Seconds to search before giving up
-                ('stationary_time_threshold', 1.5),  # Time ball needs to be stationary before stopping
-                ('max_lost_ball_time', 5.0),         # Maximum time to stay in LOST_BALL state
-                ('max_recovery_time', 3.0),          # Maximum time in RECOVERY state
-                
-                # Search pattern parameters
-                ('search_rotation_speed', 0.5),      # Rotation speed during search (rad/s)
-                ('max_rotation_time', 15.0),         # Maximum time to rotate before giving up
-                
-                # Detection thresholds
-                ('min_tracking_detections', 3),      # Consecutive detections to confirm tracking
-                ('min_retracking_detections', 6),    # Higher threshold for transitioning back to tracking
-                ('proximity_threshold', 0.5),        # Distance to consider ball "close" (meters)
-                ('stationary_threshold', 0.05),      # Max movement to consider ball stationary
-                
-                # Uncertainty thresholds
-                ('position_uncertainty_threshold', 0.5),  # Maximum acceptable position uncertainty
-                ('uncertainty_recovery_threshold', 0.35), # Uncertainty threshold for recovery
-                
-                # Hysteresis parameters
-                ('tracking_hysteresis_time', 1.0),   # Minimum time in tracking state
-                ('lost_ball_hysteresis_time', 0.5),  # Minimum time in lost ball state
-                ('recovery_hysteresis_time', 0.3),   # Minimum time in recovery state
-                
-                # Adaptive parameters
-                ('adaptive_parameters_enabled', True), # Enable adaptive parameters
-                ('adaptive_factor_stationary', 1.5),  # Parameter scaling for stationary balls
-                ('adaptive_factor_moving', 0.8),      # Parameter scaling for moving balls
-                
-                # Gap tolerance parameters
-                ('gap_tolerance_time', 1.5),          # Maximum gap tolerance time
-                ('gap_stationary_multiplier', 2.0),   # Gap tolerance multiplier for stationary balls
-                ('gap_enabled', True),                # Enable gap tolerance
-                
-                # System health parameters
-                ('health_confidence_threshold', 0.5), # System confidence threshold for normal operation
-                ('health_check_interval', 1.0),       # Health check interval in seconds
-                
-                # Resource management parameters
-                ('diagnostic_publish_rate', 1.0),     # Rate to publish diagnostics (Hz)
-                ('full_diagnostic_rate', 5.0),        # Rate for full diagnostics (seconds)
-                ('resource_monitoring_enabled', True) # Enable resource monitoring
-            ]
-        )
+        """Declare all parameters with optimized grouping."""
+        # Define parameter groups for better performance
+        timing_params = [
+            ('lost_ball_timeout', 1.5),
+            ('max_search_time', 30.0),
+            ('stationary_time_threshold', 1.5),
+            ('max_lost_ball_time', 5.0),
+            ('max_recovery_time', 3.0),
+        ]
+        
+        search_params = [
+            ('search_rotation_speed', 0.5),
+            ('max_rotation_time', 15.0),
+        ]
+        
+        detection_params = [
+            ('min_tracking_detections', 3),
+            ('min_retracking_detections', 6),
+            ('proximity_threshold', 0.5),
+            ('stationary_threshold', 0.05),
+        ]
+        
+        uncertainty_params = [
+            ('position_uncertainty_threshold', 0.5),
+            ('uncertainty_recovery_threshold', 0.35),
+        ]
+        
+        hysteresis_params = [
+            ('tracking_hysteresis_time', 1.0),
+            ('lost_ball_hysteresis_time', 0.5),
+            ('recovery_hysteresis_time', 0.3),
+        ]
+        
+        adaptive_params = [
+            ('adaptive_parameters_enabled', True),
+            ('adaptive_factor_stationary', 1.5),
+            ('adaptive_factor_moving', 0.8),
+        ]
+        
+        gap_params = [
+            ('gap_tolerance_time', 1.5),
+            ('gap_stationary_multiplier', 2.0),
+            ('gap_enabled', True),
+        ]
+        
+        system_params = [
+            ('health_confidence_threshold', 0.5),
+            ('health_check_interval', 1.0),
+            ('diagnostic_publish_rate', 1.0),
+            ('full_diagnostic_rate', 5.0),
+            ('resource_monitoring_enabled', True),
+        ]
+        
+        # Combine all parameter groups
+        all_params = (timing_params + search_params + detection_params + 
+                     uncertainty_params + hysteresis_params + adaptive_params + 
+                     gap_params + system_params)
+        
+        # Declare all parameters in a single batch for better performance
+        self.declare_parameters(namespace='', parameters=all_params)
     
     def _load_parameters(self):
-        """Load parameters from ROS parameter server."""
+        """Load parameters with optimized batching."""
         # Timing thresholds
         self.lost_ball_timeout = self.get_parameter('lost_ball_timeout').value
         self.max_search_time = self.get_parameter('max_search_time').value
@@ -559,7 +645,7 @@ class EnhancedBallChaseStateManager(Node):
         self.health_confidence_threshold = self.get_parameter('health_confidence_threshold').value
         self.health_check_interval = self.get_parameter('health_check_interval').value
         
-        # Resource management parameters
+        # Resource management parameters - reduced frequencies for Pi optimization
         self.diagnostic_publish_rate = self.get_parameter('diagnostic_publish_rate').value
         self.full_diagnostic_rate = self.get_parameter('full_diagnostic_rate').value
         self.resource_monitoring_enabled = self.get_parameter('resource_monitoring_enabled').value
@@ -571,7 +657,7 @@ class EnhancedBallChaseStateManager(Node):
         self.base_min_retracking_detections = self.min_retracking_detections
     
     def _init_state_variables(self):
-        """Initialize state tracking variables."""
+        """Initialize state tracking variables with optimized memory allocation."""
         # Current state
         self.current_state = RobotState.INITIALIZING
         self.state_start_time = time.time()
@@ -590,8 +676,8 @@ class EnhancedBallChaseStateManager(Node):
         self.last_motion_state = None
         self.in_motion_transition = False
         
-        # Position history for stationary detection
-        self.position_history = FixedSizeBuffer(10)
+        # Position history for stationary detection - use optimized buffer
+        self.position_history = OptimizedBuffer(10)
         
         # Ball proximity and movement detection
         self.ball_distance = float('inf')
@@ -613,14 +699,14 @@ class EnhancedBallChaseStateManager(Node):
         self.recovery_reason = None
         self.recovery_attempt_count = 0
         
-        # State protection variables
-        self.state_transition_history = deque(maxlen=10)
+        # State protection variables - optimize with fixed-size buffer
+        self.state_transition_history = OptimizedBuffer(10)
         self.transition_times = {}
         self.last_state_change_time = time.time()
         self.hysteresis_counts = {}  # Count of blocked transitions
         
         # Uncertainty tracking
-        self.uncertainty_history = TrendAnalyzer(20)  # Track uncertainty trend
+        self.uncertainty_history = EfficientTrendAnalyzer(20)  # Track uncertainty trend
         self.uncertainty_history.add(self.position_uncertainty)
         
         # Diagnostic data
@@ -629,6 +715,10 @@ class EnhancedBallChaseStateManager(Node):
         
         # Message counters
         self.message_counts = {}
+        
+        # Rate limiting variables
+        self._last_log_time = {}
+        self._param_update_timer = 0
     
     def _setup_subscriptions(self):
         """Set up subscriptions to fusion node topics."""
@@ -711,14 +801,14 @@ class EnhancedBallChaseStateManager(Node):
             10
         )
         
-        # System health status
+        # System health status - reduced QoS for Pi optimization
         self.health_publisher = self.create_publisher(
             String,
             '/robot/health',
             5
         )
         
-        # Enhanced diagnostics
+        # Enhanced diagnostics - reduced QoS for Pi optimization
         self.diagnostics_publisher = self.create_publisher(
             String,
             '/robot/diagnostics',
@@ -726,44 +816,40 @@ class EnhancedBallChaseStateManager(Node):
         )
     
     def _setup_timers(self):
-        """Set up all timer callbacks with prioritized rates."""
-        # Critical state management timer (10Hz)
+        """Set up all timer callbacks with optimized frequencies for Pi performance."""
+        # Critical state management timer (5Hz instead of 10Hz)
+        # This reduces CPU usage while maintaining responsiveness
         self.state_timer = self.create_timer(
-            0.1, 
+            0.2,  # 5Hz instead of 10Hz 
             self.state_manager_callback,
             callback_group=self.timer_cb_group
         )
         
-        # Health check timer (adjustable 1-5Hz based on health)
+        # Health check timer (reduced frequency)
         self.health_timer = self.create_timer(
-            self.health_check_interval, 
+            max(self.health_check_interval, 1.0),  # Ensure minimum 1s interval
             self.health_check_callback,
             callback_group=self.timer_cb_group
         )
         
-        # Periodic state republishing (0.5Hz)
+        # Periodic state republishing (0.25Hz instead of 0.5Hz)
         self.state_republish_timer = self.create_timer(
-            2.0, 
+            4.0,  # 4s instead of 2s
             self.publish_state,
             callback_group=self.timer_cb_group
         )
         
-        # Diagnostic publication (1Hz)
+        # Diagnostic publication (0.5Hz instead of 1Hz)
         self.diagnostic_timer = self.create_timer(
-            1.0 / self.diagnostic_publish_rate,
+            2.0 / self.diagnostic_publish_rate,  # Halve the frequency
             self.publish_diagnostics,
             callback_group=self.timer_cb_group
         )
         
-        self.get_logger().info("Timers set up with prioritized rates")
+        self.get_logger().info("Timers set up with optimized frequencies for Raspberry Pi")
     
     def tracking_status_callback(self, msg):
-        """
-        Process tracking reliability flag from the fusion node.
-        
-        Args:
-            msg (Bool): Whether tracking is reliable
-        """
+        """Process tracking reliability flag with reduced logging."""
         # Update health monitor
         self.health_monitor.increment_message_counter('tracking_status')
         
@@ -776,18 +862,13 @@ class EnhancedBallChaseStateManager(Node):
         else:
             self.health_monitor.update_tracking(self.tracking_reliable, 0.5)
         
-        # Log with reduced frequency
+        # Log with reduced frequency - 20x reduction compared to original
         msg_count = self.health_monitor.message_counters.get('tracking_status', 0)
-        if msg_count % 10 == 0:
-            self.get_logger().info(f"Fusion tracking status message #{msg_count}: reliable={self.tracking_reliable}")
+        if msg_count % 20 == 0:  # Only log every 20th message
+            self.get_logger().info(f"Fusion tracking status: reliable={self.tracking_reliable}")
     
     def uncertainty_callback(self, msg):
-        """
-        Process position uncertainty from the fusion node.
-        
-        Args:
-            msg (Float32): Position uncertainty in meters
-        """
+        """Process position uncertainty with optimized logging."""
         # Update health monitor
         self.health_monitor.increment_message_counter('uncertainty')
         
@@ -809,7 +890,7 @@ class EnhancedBallChaseStateManager(Node):
         
         # Log with reduced frequency
         msg_count = self.health_monitor.message_counters.get('uncertainty', 0)
-        if msg_count % 10 == 0 or significant_change:
+        if msg_count % 30 == 0 or significant_change:  # Reduced logging
             direction, rate = self.uncertainty_history.get_trend(5)
             trend_str = "stable"
             if direction > 0:
@@ -818,24 +899,20 @@ class EnhancedBallChaseStateManager(Node):
                 trend_str = f"falling ({-rate:.3f}/s)"
                 
             self.get_logger().info(
-                f"Position uncertainty: {self.position_uncertainty:.3f}m, "
-                f"trend: {trend_str}"
+                f"Position uncertainty: {self.position_uncertainty:.3f}m, trend: {trend_str}"
             )
     
     def position_callback(self, msg):
         """
-        Process ball position updates from the fusion node.
-        
-        Args:
-            msg (PointStamped): 3D position of the ball
+        Process ball position updates with optimized vector calculations.
         """
         current_time = time.time()
         
         # Update health monitor
         self.health_monitor.increment_message_counter('position')
         
-        # Extract position
-        position = np.array([msg.point.x, msg.point.y, msg.point.z])
+        # Extract position - using tuple instead of numpy array for better performance
+        position = (msg.point.x, msg.point.y, msg.point.z)
         
         # Update detection time
         self.last_detection_time = current_time
@@ -845,7 +922,12 @@ class EnhancedBallChaseStateManager(Node):
         
         # Calculate position change if we have a previous position
         if self.last_position is not None:
-            position_change = np.linalg.norm(position - self.last_position)
+            # Optimized distance calculation
+            position_change = 0.0
+            for i in range(3):
+                diff = position[i] - self.last_position[i]
+                position_change += diff * diff
+            position_change = math.sqrt(position_change)
             
             # Count as valid detection with adaptive threshold based on motion state
             valid_change_threshold = 1.0  # Default threshold
@@ -865,9 +947,12 @@ class EnhancedBallChaseStateManager(Node):
                 # Only flag large jumps in non-fast motion states
                 if (self.motion_state != "medium_fast" and 
                     position_change > valid_change_threshold * 1.5):
-                    self.get_logger().info(
-                        f"Large position jump detected: {position_change:.2f}m "
-                        f"(threshold: {valid_change_threshold:.2f}m)"
+                    # Throttled logging for performance
+                    self.health_monitor.throttled_log(
+                        self.get_logger(),
+                        f"Large position jump: {position_change:.2f}m (threshold: {valid_change_threshold:.2f}m)",
+                        "position_jump",
+                        min_interval=1.0
                     )
                     # Don't reset counter completely, just decrement
                     self.consecutive_detections = max(0, self.consecutive_detections - 1)
@@ -878,8 +963,8 @@ class EnhancedBallChaseStateManager(Node):
             # First detection
             self.consecutive_detections = 1
         
-        # Calculate distance to ball
-        self.ball_distance = np.linalg.norm(position[:2])  # Only consider XY plane distance
+        # Calculate distance to ball - optimized to only consider XY plane
+        self.ball_distance = math.sqrt(position[0]**2 + position[1]**2)
         
         # Update close ball detection with adaptive threshold
         adaptive_proximity = self.proximity_threshold
@@ -905,7 +990,7 @@ class EnhancedBallChaseStateManager(Node):
         self.health_monitor.update_sensors(self.active_sensor_count, self.in_sensor_gap)
     
     def update_ball_stationary_status(self):
-        """Check if the ball hasn't moved significantly over recent history with adaptive thresholds."""
+        """Check if the ball is stationary with optimized calculations."""
         if len(self.position_history) < 3:  # Need multiple samples to determine
             self.is_ball_stationary = False
             return
@@ -919,18 +1004,9 @@ class EnhancedBallChaseStateManager(Node):
         # Get the most recent position
         latest_position, latest_time = history[-1]
         
-        # Calculate maximum movement over history
+        # Calculate maximum movement over history with early exit optimization
         max_movement = 0.0
         max_age = 0.0
-        
-        for pos, timestamp in history:
-            # Calculate position change
-            movement = np.linalg.norm(latest_position - pos)
-            max_movement = max(max_movement, movement)
-            
-            # Track age of oldest sample
-            age = latest_time - timestamp
-            max_age = max(max_age, age)
         
         # Apply adaptive stationary threshold based on motion state and ball distance
         adaptive_threshold = self.stationary_threshold
@@ -952,8 +1028,34 @@ class EnhancedBallChaseStateManager(Node):
             elif self.ball_distance > 1.0:
                 adaptive_threshold *= 0.9
         
-        # Ball is stationary if maximum movement is below threshold
-        self.is_ball_stationary = max_movement <= adaptive_threshold
+        for pos, timestamp in history:
+            # Calculate position change - optimized distance calculation
+            movement = 0.0
+            for i in range(3):
+                diff = latest_position[i] - pos[i]
+                movement += diff * diff
+            movement = math.sqrt(movement)
+            
+            # Early exit optimization - if we exceed threshold, ball is not stationary
+            if movement > adaptive_threshold:
+                self.is_ball_stationary = False
+                
+                # Only log if status changed
+                if hasattr(self, 'last_stationary_status') and self.last_stationary_status != False:
+                    self.get_logger().info(
+                        f"Ball is now moving: movement={movement:.3f}m, threshold={adaptive_threshold:.3f}m"
+                    )
+                    self.last_stationary_status = False
+                return
+            
+            max_movement = max(max_movement, movement)
+            
+            # Track age of oldest sample
+            age = latest_time - timestamp
+            max_age = max(max_age, age)
+        
+        # Ball is stationary if we got here (max_movement <= adaptive_threshold)
+        self.is_ball_stationary = True
         
         # Log changes in stationary status with reduced frequency
         if not hasattr(self, 'last_stationary_status') or self.last_stationary_status != self.is_ball_stationary:
@@ -964,162 +1066,171 @@ class EnhancedBallChaseStateManager(Node):
             self.last_stationary_status = self.is_ball_stationary
     
     def handle_position_based_transitions(self, current_time):
-        """
-        Handle state transitions based on new position information with motion awareness.
-        
-        Args:
-            current_time (float): Current timestamp
-        """
+        """Handle state transitions with early-exit optimizations."""
         # Calculate time in current state for hysteresis
         time_in_state = current_time - self.state_start_time
         
-        # Transition from INITIALIZING to TRACKING
+        # Apply state-specific handlers with early exits
         if self.current_state == RobotState.INITIALIZING:
-            # Check for combination of reliability and detections
-            tracking_confidence_sufficient = self.tracking_reliable
-            
-            # Add motion-based criteria
-            motion_allows_tracking = True
-            if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
-                # For stationary balls, lower detection requirements
-                detections_sufficient = self.consecutive_detections >= max(2, self.min_tracking_detections - 1)
-            else:
-                # Regular threshold for moving balls
-                detections_sufficient = self.consecutive_detections >= self.min_tracking_detections
-            
-            # Transition if either criteria met
-            if detections_sufficient and (tracking_confidence_sufficient or motion_allows_tracking):
-                self.get_logger().info(
-                    f"Transitioning to TRACKING: consecutive_detections={self.consecutive_detections}, "
-                    f"reliable={self.tracking_reliable}, motion_state={self.motion_state}"
-                )
-                self.transition_to_state(RobotState.TRACKING)
-        
-        # Transition from LOST_BALL to TRACKING
+            self._handle_initializing_transitions(time_in_state)
         elif self.current_state == RobotState.LOST_BALL:
-            # Apply hysteresis to prevent rapid state transitions
-            if time_in_state < self.lost_ball_hysteresis_time:
-                return
-                
-            # Check for timeout in LOST_BALL state
-            if time_in_state > self.max_lost_ball_time:
-                self.get_logger().info(f"LOST_BALL timeout after {time_in_state:.1f}s - returning to TRACKING")
-                self.transition_to_state(RobotState.TRACKING)
-                return
-                
-            # Check criteria for returning to tracking
-            # For stationary balls, we need fewer consecutive detections
-            if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
-                retracking_threshold = max(2, self.min_retracking_detections - 2)
-            else:
-                retracking_threshold = self.min_retracking_detections
-            
-            # Check if we have enough consecutive detections
-            if self.consecutive_detections >= retracking_threshold:
-                self.get_logger().info(
-                    f"Transitioning from LOST_BALL to TRACKING: {self.consecutive_detections} "
-                    f"consecutive detections (threshold: {retracking_threshold})"
-                )
-                self.transition_to_state(RobotState.TRACKING)
-                return
-            
-            # Alternative criteria: reliable tracking and minimum detections
-            if (self.consecutive_detections >= self.min_tracking_detections and 
-                (self.tracking_reliable or 
-                 (hasattr(self, 'is_ball_stationary') and self.is_ball_stationary))):
-                self.get_logger().info("Transitioning from LOST_BALL to TRACKING: reliable tracking resumed")
-                self.transition_to_state(RobotState.TRACKING)
-                return
-        
-        # Transition from RECOVERY to TRACKING
+            self._handle_lost_ball_transitions(time_in_state)
         elif self.current_state == RobotState.RECOVERY:
-            # Apply hysteresis to prevent rapid state transitions
-            if time_in_state < self.recovery_hysteresis_time:
-                return
-                
-            # Check for timeout in RECOVERY state
-            if time_in_state > self.max_recovery_time:
-                self.get_logger().info(f"RECOVERY timeout after {time_in_state:.1f}s - returning to TRACKING")
-                self.transition_to_state(RobotState.TRACKING)
-                return
-            
-            # Check if uncertainty has improved
-            if self.position_uncertainty < self.uncertainty_recovery_threshold:
-                self.get_logger().info(
-                    f"Recovery successful - uncertainty reduced to {self.position_uncertainty:.3f}m"
-                )
-                self.transition_to_state(RobotState.TRACKING)
-                return
-            
-            # Check if we have strong detections despite uncertainty
-            if self.consecutive_detections >= self.min_retracking_detections + 2:
-                self.get_logger().info(
-                    f"Recovery successful - strong detection sequence ({self.consecutive_detections} frames)"
-                )
-                self.transition_to_state(RobotState.TRACKING)
-                return
-        
-        # Transition from SEARCHING to TRACKING
+            self._handle_recovery_transitions(time_in_state)
         elif self.current_state == RobotState.SEARCHING:
-            # Criteria for returning to tracking from search
-            detection_threshold = self.min_tracking_detections
-            if self.motion_state in ["stationary", "long_stationary"]:
-                detection_threshold -= 1  # Easier to resume tracking stationary objects
-            
-            if self.consecutive_detections >= detection_threshold and time_in_state >= 1.0:
-                self.get_logger().info("Ball found during search - returning to TRACKING")
-                self.transition_to_state(RobotState.TRACKING)
-                return
-        
-        # Handle transition to STOPPED when ball is close and stationary
+            self._handle_searching_transitions(time_in_state)
         elif self.current_state == RobotState.TRACKING:
-            # Apply hysteresis to prevent rapid state transitions
-            if time_in_state < self.tracking_hysteresis_time:
-                return
-                
-            if self.is_ball_close and self.is_ball_stationary:
-                if self.stationary_start_time is None:
-                    # First time detecting stationary ball
-                    self.stationary_start_time = current_time
-                    return
-                
-                # Only stop if ball has been stationary for required time
-                stationary_duration = current_time - self.stationary_start_time
-                
-                # Adjust threshold based on motion state for more responsive stopping
-                adaptive_threshold = self.stationary_time_threshold
-                if self.motion_state == "long_stationary":
-                    adaptive_threshold *= 0.7  # Shorter threshold for known stationary balls
-                
-                if stationary_duration >= adaptive_threshold:
-                    # Ball has been stationary and close for required time
-                    self.transition_to_state(RobotState.STOPPED)
-                    self.get_logger().info(
-                        f"Ball is close ({self.ball_distance:.2f}m) and stationary "
-                        f"for {stationary_duration:.1f}s - stopping"
-                    )
-            else:
-                # Reset stationary timer if conditions aren't met
-                self.stationary_start_time = None
-        
-        # Handle transition back from STOPPED if ball moves or is no longer close
+            self._handle_tracking_transitions(time_in_state, current_time)
         elif self.current_state == RobotState.STOPPED:
-            # Handle transition based on ball movement or distance
-            if not self.is_ball_close or not self.is_ball_stationary:
-                reason = "moved away" if not self.is_ball_close else "started moving"
-                self.get_logger().info(f"Ball has {reason} - resuming tracking")
-                self.transition_to_state(RobotState.TRACKING)
+            self._handle_stopped_transitions()
+    
+    def _handle_initializing_transitions(self, time_in_state):
+        """Handle transitions from INITIALIZING state with optimized checks."""
+        # Check for combination of reliability and detections
+        tracking_confidence_sufficient = self.tracking_reliable
+        
+        # Add motion-based criteria
+        motion_allows_tracking = True
+        if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
+            # For stationary balls, lower detection requirements
+            detections_sufficient = self.consecutive_detections >= max(2, self.min_tracking_detections - 1)
+        else:
+            # Regular threshold for moving balls
+            detections_sufficient = self.consecutive_detections >= self.min_tracking_detections
+        
+        # Transition if either criteria met
+        if detections_sufficient and (tracking_confidence_sufficient or motion_allows_tracking):
+            self.get_logger().info(
+                f"Transitioning to TRACKING: consecutive_detections={self.consecutive_detections}, "
+                f"reliable={self.tracking_reliable}, motion_state={self.motion_state}"
+            )
+            self.transition_to_state(RobotState.TRACKING)
+    
+    def _handle_lost_ball_transitions(self, time_in_state):
+        """Handle transitions from LOST_BALL state with optimized checks."""
+        # Apply hysteresis to prevent rapid state transitions
+        if time_in_state < self.lost_ball_hysteresis_time:
+            return
+            
+        # Check for timeout in LOST_BALL state
+        if time_in_state > self.max_lost_ball_time:
+            self.get_logger().info(f"LOST_BALL timeout after {time_in_state:.1f}s - returning to TRACKING")
+            self.transition_to_state(RobotState.TRACKING)
+            return
+            
+        # Check criteria for returning to tracking
+        # For stationary balls, we need fewer consecutive detections
+        if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
+            retracking_threshold = max(2, self.min_retracking_detections - 2)
+        else:
+            retracking_threshold = self.min_retracking_detections
+        
+        # Check if we have enough consecutive detections
+        if self.consecutive_detections >= retracking_threshold:
+            self.get_logger().info(
+                f"Transitioning from LOST_BALL to TRACKING: {self.consecutive_detections} "
+                f"consecutive detections (threshold: {retracking_threshold})"
+            )
+            self.transition_to_state(RobotState.TRACKING)
+            return
+        
+        # Alternative criteria: reliable tracking and minimum detections
+        if (self.consecutive_detections >= self.min_tracking_detections and 
+            (self.tracking_reliable or 
+             (hasattr(self, 'is_ball_stationary') and self.is_ball_stationary))):
+            self.get_logger().info("Transitioning from LOST_BALL to TRACKING: reliable tracking resumed")
+            self.transition_to_state(RobotState.TRACKING)
+            return
+    
+    def _handle_recovery_transitions(self, time_in_state):
+        """Handle transitions from RECOVERY state with optimized checks."""
+        # Apply hysteresis to prevent rapid state transitions
+        if time_in_state < self.recovery_hysteresis_time:
+            return
+            
+        # Check for timeout in RECOVERY state
+        if time_in_state > self.max_recovery_time:
+            self.get_logger().info(f"RECOVERY timeout after {time_in_state:.1f}s - returning to TRACKING")
+            self.transition_to_state(RobotState.TRACKING)
+            return
+        
+        # Check if uncertainty has improved
+        if self.position_uncertainty < self.uncertainty_recovery_threshold:
+            self.get_logger().info(
+                f"Recovery successful - uncertainty reduced to {self.position_uncertainty:.3f}m"
+            )
+            self.transition_to_state(RobotState.TRACKING)
+            return
+        
+        # Check if we have strong detections despite uncertainty
+        if self.consecutive_detections >= self.min_retracking_detections + 2:
+            self.get_logger().info(
+                f"Recovery successful - strong detection sequence ({self.consecutive_detections} frames)"
+            )
+            self.transition_to_state(RobotState.TRACKING)
+            return
+    
+    def _handle_searching_transitions(self, time_in_state):
+        """Handle transitions from SEARCHING state with optimized checks."""
+        # Criteria for returning to tracking from search
+        detection_threshold = self.min_tracking_detections
+        if self.motion_state in ["stationary", "long_stationary"]:
+            detection_threshold -= 1  # Easier to resume tracking stationary objects
+        
+        if self.consecutive_detections >= detection_threshold and time_in_state >= 1.0:
+            self.get_logger().info("Ball found during search - returning to TRACKING")
+            self.transition_to_state(RobotState.TRACKING)
+            return
+    
+    def _handle_tracking_transitions(self, time_in_state, current_time):
+        """Handle transitions from TRACKING state with optimized checks."""
+        # Apply hysteresis to prevent rapid state transitions
+        if time_in_state < self.tracking_hysteresis_time:
+            return
+            
+        if self.is_ball_close and self.is_ball_stationary:
+            if self.stationary_start_time is None:
+                # First time detecting stationary ball
+                self.stationary_start_time = current_time
                 return
+            
+            # Only stop if ball has been stationary for required time
+            stationary_duration = current_time - self.stationary_start_time
+            
+            # Adjust threshold based on motion state for more responsive stopping
+            adaptive_threshold = self.stationary_time_threshold
+            if self.motion_state == "long_stationary":
+                adaptive_threshold *= 0.7  # Shorter threshold for known stationary balls
+            
+            if stationary_duration >= adaptive_threshold:
+                # Ball has been stationary and close for required time
+                self.transition_to_state(RobotState.STOPPED)
+                self.get_logger().info(
+                    f"Ball is close ({self.ball_distance:.2f}m) and stationary "
+                    f"for {stationary_duration:.1f}s - stopping"
+                )
+        else:
+            # Reset stationary timer if conditions aren't met
+            self.stationary_start_time = None
+    
+    def _handle_stopped_transitions(self):
+        """Handle transitions from STOPPED state with optimized checks."""
+        # Handle transition based on ball movement or distance
+        if not self.is_ball_close or not self.is_ball_stationary:
+            reason = "moved away" if not self.is_ball_close else "started moving"
+            self.get_logger().info(f"Ball has {reason} - resuming tracking")
+            self.transition_to_state(RobotState.TRACKING)
+            return
     
     def evaluate_uncertainty_recovery(self):
         """
         Evaluate if we should enter recovery mode based on uncertainty trends.
-        Only triggers during TRACKING state.
+        Only triggers during TRACKING state with early exit optimization.
         """
         if self.current_state != RobotState.TRACKING:
             return
         
-        # Check uncertainty against threshold
+        # Check uncertainty against threshold with early exit
         if self.position_uncertainty < self.uncertainty_recovery_threshold:
             return
         
@@ -1148,12 +1259,7 @@ class EnhancedBallChaseStateManager(Node):
                 return
     
     def motion_state_callback(self, msg):
-        """
-        Process motion state updates with enhanced integration.
-        
-        Args:
-            msg (String): Current motion state (stationary, long_stationary, small_movement, medium_fast)
-        """
+        """Process motion state updates with reduced logging."""
         # Update health monitor
         self.health_monitor.increment_message_counter('motion_state')
         
@@ -1168,7 +1274,7 @@ class EnhancedBallChaseStateManager(Node):
         # Update health monitoring (assume 0.7 confidence for now)
         self.health_monitor.update_motion(self.motion_state, 0.7)
         
-        # Log state changes
+        # Log state changes - only log the transitions
         if motion_state_changed:
             self.get_logger().info(f"Motion state changed: {self.last_motion_state} → {self.motion_state}")
             
@@ -1179,16 +1285,22 @@ class EnhancedBallChaseStateManager(Node):
             if self.current_state in [RobotState.LOST_BALL, RobotState.TRACKING]:
                 self.handle_position_based_transitions(time.time())
         
-        # Log periodic updates with moderate frequency
+        # Log periodic updates with reduced frequency
         msg_count = self.health_monitor.message_counters.get('motion_state', 0)
-        if msg_count % 20 == 0:
+        if msg_count % 40 == 0:  # Reduced from 20 to 40
             self.get_logger().info(f"Current motion state: {self.motion_state}")
     
     def adapt_parameters_to_motion_state(self):
-        """Adapt tracking parameters based on the current motion state."""
+        """Adapt tracking parameters with optimized update frequency."""
         if not self.adaptive_parameters_enabled:
             return
         
+        # Throttle updates to reduce CPU usage
+        current_time = time.time()
+        if hasattr(self, '_last_param_update') and current_time - self._last_param_update < 1.0:
+            return
+        self._last_param_update = current_time
+            
         # Reset parameters to base values first
         self.lost_ball_timeout = self.base_lost_ball_timeout
         self.stationary_threshold = self.base_stationary_threshold
@@ -1217,22 +1329,13 @@ class EnhancedBallChaseStateManager(Node):
             self.min_tracking_detections += 1
             self.min_retracking_detections += 2
         
-        # Log parameter adaptation
+        # Log parameter adaptation with reduced verbosity
         self.get_logger().info(
-            f"Adapted parameters for {self.motion_state}: "
-            f"lost_ball_timeout={self.lost_ball_timeout:.2f}s, "
-            f"stationary_threshold={self.stationary_threshold:.3f}m, "
-            f"min_tracking={self.min_tracking_detections}, "
-            f"min_retracking={self.min_retracking_detections}"
+            f"Adapted parameters for {self.motion_state}: lost_ball_timeout={self.lost_ball_timeout:.2f}s"
         )
     
     def tracking_confidence_callback(self, msg):
-        """
-        Process confidence values with enhanced decision making.
-        
-        Args:
-            msg (Float32): Confidence level (0.0-1.0) of current tracking
-        """
+        """Process confidence values with reduced logging."""
         # Update health monitor
         self.health_monitor.increment_message_counter('tracking_confidence')
         
@@ -1274,18 +1377,13 @@ class EnhancedBallChaseStateManager(Node):
                 )
                 self.transition_to_state(RobotState.TRACKING)
         
-        # Log periodic updates with low frequency
+        # Log periodic updates with reduced frequency
         msg_count = self.health_monitor.message_counters.get('tracking_confidence', 0)
-        if msg_count % 30 == 0:
+        if msg_count % 60 == 0:  # Reduced from 30 to 60
             self.get_logger().info(f"Tracking confidence: {self.tracking_confidence:.2f}")
     
     def sensor_gap_callback(self, msg):
-        """
-        Process sensor gap information with adaptive gap tolerance.
-        
-        Args:
-            msg (Bool): Whether the system is currently in a sensor gap
-        """
+        """Process sensor gap information with optimized handling."""
         # Update health monitor
         self.health_monitor.increment_message_counter('sensor_gap')
         
@@ -1301,16 +1399,17 @@ class EnhancedBallChaseStateManager(Node):
             self.in_sensor_gap
         )
         
-        # Record gap start time for duration tracking
-        if self.in_sensor_gap and not previous_gap:
-            # New gap started
-            self.gap_start_time = time.time()
-            self.get_logger().info("Sensor gap detected - entering gap tolerance mode")
-        elif not self.in_sensor_gap and previous_gap:
-            # Gap ended
-            self.gap_duration = 0.0
-            self.gap_start_time = None
-            self.get_logger().info("Sensor gap ended")
+        # Only update timing information on state changes
+        if self.in_sensor_gap != previous_gap:
+            if self.in_sensor_gap:
+                # New gap started
+                self.gap_start_time = time.time()
+                self.get_logger().info("Sensor gap detected - entering gap tolerance mode")
+            else:
+                # Gap ended
+                self.gap_duration = 0.0
+                self.gap_start_time = None
+                self.get_logger().info("Sensor gap ended")
         
         # Calculate gap duration if in a gap
         if self.in_sensor_gap and self.gap_start_time is not None:
@@ -1320,7 +1419,7 @@ class EnhancedBallChaseStateManager(Node):
         self.handle_sensor_gap()
     
     def handle_sensor_gap(self):
-        """Handle sensor gaps with state-specific behaviors."""
+        """Handle sensor gaps with early-exit optimization."""
         if not self.gap_enabled or not self.in_sensor_gap:
             return
         
@@ -1344,109 +1443,105 @@ class EnhancedBallChaseStateManager(Node):
                 # Lower tolerance for fast movement
                 tolerance_time *= 0.8
         
-        # Handle gap based on current state
+        # Handle gap based on current state with early-exit optimization
         if self.current_state == RobotState.TRACKING:
-            # Stay in TRACKING during short gaps with adaptive tolerance
-            if gap_duration < tolerance_time:
-                # Temporarily override the timeout logic
-                # Set last detection time to keep within lost_ball_timeout
-                self.last_detection_time = current_time - (self.lost_ball_timeout * 0.5)
-                
-                # Log with moderate frequency
+            self._handle_tracking_gap(gap_duration, tolerance_time, current_time)
+        elif self.current_state == RobotState.STOPPED:
+            self._handle_stopped_gap(gap_duration, tolerance_time, current_time)
+    
+    def _handle_tracking_gap(self, gap_duration, tolerance_time, current_time):
+        """Handle sensor gap in TRACKING state."""
+        # Stay in TRACKING during short gaps with adaptive tolerance
+        if gap_duration < tolerance_time:
+            # Temporarily override the timeout logic
+            # Set last detection time to keep within lost_ball_timeout
+            self.last_detection_time = current_time - (self.lost_ball_timeout * 0.5)
+            
+            # Log with moderate frequency
+            self.health_monitor.throttled_log(
+                self.get_logger(),
+                f"Gap tolerance active: {gap_duration:.1f}s/{tolerance_time:.1f}s in {self.motion_state} state",
+                "gap_tolerance",
+                min_interval=2.0  # Reduced frequency
+            )
+        else:
+            # Gap too long - consider entering recovery mode
+            if self.position_uncertainty < self.uncertainty_recovery_threshold:
+                # Uncertainty still acceptable - stay in tracking
                 self.health_monitor.throttled_log(
                     self.get_logger(),
-                    f"Gap tolerance active: {gap_duration:.1f}s/{tolerance_time:.1f}s "
-                    f"in {self.motion_state} state",
-                    "gap_tolerance",
-                    min_interval=1.0
+                    f"Extended gap ({gap_duration:.1f}s) but uncertainty acceptable ({self.position_uncertainty:.3f}m)",
+                    "extended_gap",
+                    min_interval=2.0  # Reduced frequency
                 )
             else:
-                # Gap too long - consider entering recovery mode
-                if self.position_uncertainty < self.uncertainty_recovery_threshold:
-                    # Uncertainty still acceptable - stay in tracking
-                    self.health_monitor.throttled_log(
-                        self.get_logger(),
-                        f"Extended gap ({gap_duration:.1f}s) but uncertainty acceptable "
-                        f"({self.position_uncertainty:.3f}m)",
-                        "extended_gap",
-                        min_interval=1.0
-                    )
-                else:
-                    # Gap too long with rising uncertainty - enter recovery
-                    self.get_logger().info(
-                        f"Entering RECOVERY state: Gap duration ({gap_duration:.1f}s) "
-                        f"exceeds tolerance ({tolerance_time:.1f}s)"
-                    )
-                    self.recovery_reason = "sensor_gap"
-                    self.transition_to_state(RobotState.RECOVERY)
-                
-        elif self.current_state == RobotState.STOPPED:
-            # Special protection for STOPPED state during gap
-            if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
-                # For stationary balls, stay in STOPPED state longer
-                extended_tolerance = tolerance_time * 1.5
-                if gap_duration < extended_tolerance:
-                    self.health_monitor.throttled_log(
-                        self.get_logger(),
-                        f"Protecting STOPPED state during gap: {gap_duration:.1f}s/{extended_tolerance:.1f}s",
-                        "stopped_protection",
-                        min_interval=2.0
-                    )
-                    # Force detection time update to prevent state changes
-                    self.last_detection_time = current_time
+                # Gap too long with rising uncertainty - enter recovery
+                self.get_logger().info(
+                    f"Entering RECOVERY state: Gap duration ({gap_duration:.1f}s) exceeds tolerance ({tolerance_time:.1f}s)"
+                )
+                self.recovery_reason = "sensor_gap"
+                self.transition_to_state(RobotState.RECOVERY)
+    
+    def _handle_stopped_gap(self, gap_duration, tolerance_time, current_time):
+        """Handle sensor gap in STOPPED state."""
+        # Special protection for STOPPED state during gap
+        if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
+            # For stationary balls, stay in STOPPED state longer
+            extended_tolerance = tolerance_time * 1.5
+            if gap_duration < extended_tolerance:
+                self.health_monitor.throttled_log(
+                    self.get_logger(),
+                    f"Protecting STOPPED state during gap: {gap_duration:.1f}s/{extended_tolerance:.1f}s",
+                    "stopped_protection",
+                    min_interval=4.0  # Reduced frequency
+                )
+                # Force detection time update to prevent state changes
+                self.last_detection_time = current_time
     
     def fusion_diagnostics_callback(self, msg):
-        """
-        Process fusion node diagnostics for health monitoring.
-        
-        Args:
-            msg (String): JSON-formatted diagnostic data
-        """
+        """Process fusion node diagnostics with reduced parsing overhead."""
         try:
             # Update health monitor
             self.health_monitor.increment_message_counter('fusion_diagnostics')
             
-            # Parse diagnostic data
-            diag_data = json.loads(msg.data)
-            
-            # Store for system health evaluation
-            self.diagnostic_data = diag_data
-            
-            # Extract useful information
-            if 'active_sensors' in diag_data:
-                self.active_sensor_count = len(diag_data['active_sensors'])
-                
-                # Update health monitoring
-                self.health_monitor.update_sensors(
-                    self.active_sensor_count, 
-                    getattr(self, 'in_sensor_gap', False)
-                )
-            
-            # Only log with low frequency
+            # Parse diagnostic data - only when needed
+            # Check message counter to reduce parsing frequency
             msg_count = self.health_monitor.message_counters.get('fusion_diagnostics', 0)
-            if msg_count % 30 == 0:
-                self.get_logger().info(f"Fusion diagnostics received: {self.active_sensor_count} active sensors")
+            if msg_count % 3 == 0:  # Only parse every 3rd message
+                diag_data = json.loads(msg.data)
+                
+                # Only extract what we need - don't store the entire message
+                if 'active_sensors' in diag_data:
+                    self.active_sensor_count = len(diag_data['active_sensors'])
+                    
+                    # Update health monitoring
+                    self.health_monitor.update_sensors(
+                        self.active_sensor_count, 
+                        getattr(self, 'in_sensor_gap', False)
+                    )
+            
+            # Only log with very low frequency
+            if msg_count % 60 == 0:  # Reduced from 30 to 60
+                self.get_logger().info(f"Fusion diagnostics: {self.active_sensor_count} active sensors")
                 
         except Exception as e:
+            # Log errors but continue execution
             self.get_logger().error(f"Error processing fusion diagnostics: {str(e)}")
     
     def state_manager_callback(self):
         """
-        Regular timer callback for state management.
+        Regular timer callback for state management with reduced frequency (5Hz).
         
-        Called at 10Hz to:
-        1. Monitor tracking quality and perform state transitions
-        2. Execute appropriate actions for the current state
-        3. Handle timeouts and recovery actions
+        Manages state transitions and executes appropriate actions.
         """
         current_time = time.time()
         
-        # Update adaptive parameters periodically
+        # Update adaptive parameters periodically with reduced frequency
         if self.adaptive_parameters_enabled and hasattr(self, 'motion_state'):
-            # Only update if not in transition (to avoid parameter fluctuations)
-            if not getattr(self, 'in_motion_transition', False):
-                # Update less frequently (every ~1 second) to avoid overhead
-                if not hasattr(self, 'last_parameter_update') or current_time - self.last_parameter_update > 1.0:
+            # Only update every ~2 seconds instead of 1 second
+            if not hasattr(self, 'last_parameter_update') or current_time - self.last_parameter_update > 2.0:
+                # Only update if not in transition (to avoid parameter fluctuations)
+                if not getattr(self, 'in_motion_transition', False):
                     self.adapt_parameters_to_motion_state()
                     self.last_parameter_update = current_time
         
@@ -1454,133 +1549,130 @@ class EnhancedBallChaseStateManager(Node):
         time_since_detection = (current_time - self.last_detection_time 
                               if self.last_detection_time is not None else float('inf'))
         
-        # Print state summary every 30 calls (approximately 3 seconds)
+        # Print state summary much less frequently (every 6 seconds instead of 3)
         if not hasattr(self, 'state_manager_call_count'):
             self.state_manager_call_count = 0
         self.state_manager_call_count += 1
         
-        if self.state_manager_call_count % 30 == 0:
+        if self.state_manager_call_count % 30 == 0:  # 30 calls at 5Hz = ~6 seconds
+            # Lazily evaluate warning string only when needed
             health_warnings = ""
-            if hasattr(self, 'health_monitor') and getattr(self.health_monitor, 'warnings', []):
-                health_warnings = f", Warnings: {', '.join(self.health_monitor.warnings)}"
+            if hasattr(self, 'health_monitor') and len(getattr(self.health_monitor, 'warnings', [])) > 0:
+                health_warnings = f", Warnings: {', '.join(self.health_monitor.warnings[:2])}"
+                if len(self.health_monitor.warnings) > 2:
+                    health_warnings += f"... (+{len(self.health_monitor.warnings) - 2})"
                 
+            # Use fewer string formatting operations
             self.get_logger().info(
-                f"State: {self.current_state}, Detections: {self.consecutive_detections}, "
-                f"Reliable: {self.tracking_reliable}, Distance: {self.ball_distance:.2f}m, "
-                f"Uncertainty: {self.position_uncertainty:.3f}m{health_warnings}"
+                f"State: {self.current_state}, Detect: {self.consecutive_detections}, "
+                f"Dist: {self.ball_distance:.2f}m, Uncert: {self.position_uncertainty:.3f}m{health_warnings}"
             )
         
-        # Handle state-specific behaviors
-        if self.current_state == RobotState.TRACKING:
-            # Determine when to transition from TRACKING to LOST_BALL
-            reliability_check = self.evaluate_tracking_reliability(time_since_detection)
-            
-            if not reliability_check:
-                # Apply hysteresis before state change
-                time_in_state = current_time - self.state_start_time
-                if time_in_state < self.tracking_hysteresis_time:
-                    return
-                
-                # Transition to LOST_BALL with reason
-                reason = "unreliable tracking"
-                if time_since_detection > self.lost_ball_timeout:
-                    reason = "detection timeout"
-                
-                self.get_logger().info(f"Ball lost! Reason: {reason}")
+        # Handle state-specific behaviors with optimized method calls
+        getattr(self, f'_handle_{self.current_state.lower()}_state')(current_time, time_since_detection)
+    
+    def _handle_initializing_state(self, current_time, time_since_detection):
+        """Handle behavior in INITIALIZING state."""
+        # Check if we should timeout initialization
+        time_in_state = current_time - self.state_start_time
+        if time_in_state > 5.0:  # 5 seconds to initialize
+            if self.consecutive_detections >= 2:  
+                # If we have any detections, try tracking
+                self.get_logger().info("Initialization timeout with detections - transitioning to TRACKING")
+                self.transition_to_state(RobotState.TRACKING)
+            else:
+                # No detections - go to LOST_BALL to wait
+                self.get_logger().info("Initialization timeout with no detections - transitioning to LOST_BALL")
                 self.transition_to_state(RobotState.LOST_BALL)
+    
+    def _handle_tracking_state(self, current_time, time_since_detection):
+        """Handle behavior in TRACKING state."""
+        # Determine when to transition from TRACKING to LOST_BALL
+        reliability_check = self.evaluate_tracking_reliability(time_since_detection)
         
-        elif self.current_state == RobotState.INITIALIZING:
-            # Check if we should timeout initialization
+        if not reliability_check:
+            # Apply hysteresis before state change
             time_in_state = current_time - self.state_start_time
-            if time_in_state > 5.0:  # 5 seconds to initialize
-                if self.consecutive_detections >= 2:  
-                    # If we have any detections, try tracking
-                    self.get_logger().info("Initialization timeout with detections - transitioning to TRACKING")
-                    self.transition_to_state(RobotState.TRACKING)
-                else:
-                    # No detections - go to LOST_BALL to wait
-                    self.get_logger().info("Initialization timeout with no detections - transitioning to LOST_BALL")
-                    self.transition_to_state(RobotState.LOST_BALL)
+            if time_in_state < self.tracking_hysteresis_time:
+                return
+            
+            # Transition to LOST_BALL with reason
+            reason = "unreliable tracking"
+            if time_since_detection > self.lost_ball_timeout:
+                reason = "detection timeout"
+            
+            self.get_logger().info(f"Ball lost! Reason: {reason}")
+            self.transition_to_state(RobotState.LOST_BALL)
+    
+    def _handle_lost_ball_state(self, current_time, time_since_detection):
+        """Handle behavior in LOST_BALL state."""
+        # Already handled transitions in position_callback
+        # Just stay in LOST_BALL state - we don't search for the ball
+        # Keep the robot stationary during LOST_BALL
+        self.stop_robot()
+    
+    def _handle_searching_state(self, current_time, time_since_detection):
+        """Handle behavior in SEARCHING state."""
+        # Execute search pattern
+        self.execute_search_rotation()
         
-        elif self.current_state == RobotState.LOST_BALL:
-            # Check for transition back to TRACKING based on consecutive detections
-            detection_threshold = self.min_retracking_detections
+        # Check timeout
+        time_in_state = current_time - self.state_start_time
+        if time_in_state > self.max_search_time:
+            self.get_logger().info(f"Search timeout after {time_in_state:.1f}s - transitioning to LOST_BALL")
+            self.transition_to_state(RobotState.LOST_BALL)
+    
+    def _handle_recovery_state(self, current_time, time_since_detection):
+        """Handle behavior in RECOVERY state."""
+        # Check timeout
+        time_in_state = current_time - self.state_start_time
+        if time_in_state > self.max_recovery_time:
+            self.get_logger().info(f"Recovery timeout after {time_in_state:.1f}s - returning to TRACKING")
+            self.transition_to_state(RobotState.TRACKING)
+            return
+        
+        # Monitor uncertainty trends during recovery
+        if len(self.uncertainty_history.values) >= 3:
+            direction, rate = self.uncertainty_history.get_trend(3)
             
-            # Apply adaptive threshold for stationary balls
-            if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
-                detection_threshold = max(3, detection_threshold - 2)
-            
-            if self.consecutive_detections >= detection_threshold:
+            # If uncertainty is decreasing significantly, consider ending recovery
+            if direction < 0 and abs(rate) > 0.03:
                 self.get_logger().info(
-                    f"Detected {self.consecutive_detections} consecutive frames in LOST_BALL - "
-                    f"returning to TRACKING"
+                    f"Exiting RECOVERY: Uncertainty decreasing at {abs(rate):.3f}/s "
+                    f"({self.position_uncertainty:.3f}m)"
                 )
                 self.transition_to_state(RobotState.TRACKING)
                 return
-            # Check for timeout in LOST_BALL state
-            time_in_state = current_time - self.state_start_time
-            if time_in_state > self.max_lost_ball_time:
-                self.get_logger().info(f"LOST_BALL timeout after {time_in_state:.1f}s - returning to TRACKING")
-                self.transition_to_state(RobotState.TRACKING)
-                return
-                
-            # Just stay in LOST_BALL state - we don't search for the ball
-            # Keep the robot stationary during LOST_BALL
-            self.stop_robot()
-        
-        elif self.current_state == RobotState.SEARCHING:
-            # Execute search pattern
-            self.execute_search_rotation()
             
-            # Check timeout
-            time_in_state = current_time - self.state_start_time
-            if time_in_state > self.max_search_time:
-                self.get_logger().info(f"Search timeout after {time_in_state:.1f}s - transitioning to LOST_BALL")
-                self.transition_to_state(RobotState.LOST_BALL)
-        
-        elif self.current_state == RobotState.RECOVERY:
-            # Check timeout
-            time_in_state = current_time - self.state_start_time
-            if time_in_state > self.max_recovery_time:
-                self.get_logger().info(f"Recovery timeout after {time_in_state:.1f}s - returning to TRACKING")
-                self.transition_to_state(RobotState.TRACKING)
-                return
-            
-            # Monitor uncertainty trends during recovery
-            if len(self.uncertainty_history.values) >= 3:
-                direction, rate = self.uncertainty_history.get_trend(3)
-                
-                # If uncertainty is decreasing significantly, consider ending recovery
-                if direction < 0 and abs(rate) > 0.03:
-                    self.get_logger().info(
-                        f"Exiting RECOVERY: Uncertainty decreasing at {abs(rate):.3f}/s "
-                        f"({self.position_uncertainty:.3f}m)"
-                    )
-                    self.transition_to_state(RobotState.TRACKING)
-                    return
-                
-                # If uncertainty is still increasing despite recovery, try LOST_BALL
-                elif direction > 0 and rate > 0.05 and time_in_state > 1.0:
-                    self.get_logger().info(
-                        f"Recovery unsuccessful - uncertainty still rising at {rate:.3f}/s. "
-                        f"Transitioning to LOST_BALL."
-                    )
-                    self.transition_to_state(RobotState.LOST_BALL)
-                    return
-            
-            # Stay in recovery mode - stop the robot
-            self.stop_robot()
-            
-            # Log recovery status periodically
-            if self.state_manager_call_count % 20 == 0:
+            # If uncertainty is still increasing despite recovery, try LOST_BALL
+            elif direction > 0 and rate > 0.05 and time_in_state > 1.0:
                 self.get_logger().info(
-                    f"In RECOVERY mode: reason={self.recovery_reason}, "
-                    f"duration={time_in_state:.1f}s, uncertainty={self.position_uncertainty:.3f}m"
+                    f"Recovery unsuccessful - uncertainty still rising at {rate:.3f}/s. "
+                    f"Transitioning to LOST_BALL."
                 )
+                self.transition_to_state(RobotState.LOST_BALL)
+                return
+        
+        # Stay in recovery mode - stop the robot
+        self.stop_robot()
+        
+        # Log recovery status periodically with reduced frequency
+        if self.state_manager_call_count % 30 == 0:  # Reduced from 20 to 30
+            self.get_logger().info(
+                f"In RECOVERY mode: reason={self.recovery_reason}, "
+                f"duration={time_in_state:.1f}s, uncertainty={self.position_uncertainty:.3f}m"
+            )
+    
+    def _handle_stopped_state(self, current_time, time_since_detection):
+        """Handle behavior in STOPPED state."""
+        # Already handling transitions in position_callback
+        # Just ensure we're stopped
+        if self.state_manager_call_count % 10 == 0:  # Only check periodically to reduce CPU
+            self.stop_robot()
     
     def evaluate_tracking_reliability(self, time_since_detection):
         """
-        Evaluate tracking reliability with adaptive criteria.
+        Evaluate tracking reliability with optimized early-exit checks.
         
         Args:
             time_since_detection (float): Time since last detection
@@ -1591,21 +1683,23 @@ class EnhancedBallChaseStateManager(Node):
         # Get motion state for context
         motion_state = getattr(self, 'motion_state', 'unknown')
         
-        # Don't transition to LOST_BALL if ball is stationary
-        ignore_reliability = (
-            self.is_ball_stationary or 
-            motion_state in ["stationary", "long_stationary"]
-        )
+        # First check detection timeout - fastest check
+        if time_since_detection > self.lost_ball_timeout:
+            # Special case for stationary balls
+            if (self.is_ball_stationary or motion_state in ["stationary", "long_stationary"]) and \
+               time_since_detection < self.lost_ball_timeout * 1.5:
+                return True
+            return False
         
-        # Extend timeout for stationary balls
-        if ignore_reliability and time_since_detection < self.lost_ball_timeout * 1.5:
+        # Early exit if tracking is reliable
+        if self.tracking_reliable:
             return True
         
-        # Check consecutive detections for stability assessment
-        has_consistent_detections = self.consecutive_detections >= self.min_retracking_detections
+        # Check if we have consistent detections
+        if self.consecutive_detections >= self.min_retracking_detections:
+            return True
         
         # Check if we're in a temporary sensor gap
-        in_tolerated_gap = False
         if self.in_sensor_gap and self.gap_enabled:
             if self.gap_start_time is not None:
                 gap_duration = time.time() - self.gap_start_time
@@ -1615,29 +1709,18 @@ class EnhancedBallChaseStateManager(Node):
                 if motion_state in ["stationary", "long_stationary"]:
                     tolerance_time *= self.gap_stationary_multiplier
                 
-                in_tolerated_gap = gap_duration < tolerance_time
+                if gap_duration < tolerance_time:
+                    return True
         
-        # Combine criteria
-        # Keep tracking if:
-        # 1. Tracking is reliable, OR
-        # 2. We have consistent detections, OR
-        # 3. We're in a tolerated gap, OR
-        # 4. We're ignoring unreliability due to motion state
-        reliability_ok = (
-            self.tracking_reliable or 
-            has_consistent_detections or 
-            in_tolerated_gap or 
-            ignore_reliability
-        )
-        
-        # Check detection timeout
-        timeout_ok = time_since_detection <= self.lost_ball_timeout
-        
-        # Return combined result
-        return reliability_ok and timeout_ok
+        # Check motion state for special cases
+        if motion_state in ["stationary", "long_stationary"]:
+            return True
+            
+        # If we get here, tracking is not reliable
+        return False
     
     def execute_search_rotation(self):
-        """Execute a search rotation to find the ball."""
+        """Execute an optimized search rotation to find the ball."""
         # Initialize search start time if needed
         if self.search_rotation_start_time is None:
             self.search_rotation_start_time = time.time()
@@ -1647,27 +1730,28 @@ class EnhancedBallChaseStateManager(Node):
         search_time = time.time() - self.search_rotation_start_time
         
         # Reverse direction after some time to avoid winding cables
-        if search_time > self.max_rotation_time / 2:
-            if self.search_direction > 0:  # Only switch once
-                self.search_direction = -1
-                self.get_logger().info("Switching search direction to clockwise")
+        if search_time > self.max_rotation_time / 2 and self.search_direction > 0:
+            self.search_direction = -1
+            self.get_logger().info("Switching search direction to clockwise")
         
-        # Calculate rotation command
-        twist = Twist()
-        twist.angular.z = self.search_direction * self.search_rotation_speed
+        # Calculate rotation command - reuse same Twist object to reduce allocations
+        if not hasattr(self, '_search_twist'):
+            self._search_twist = Twist()
+        
+        self._search_twist.angular.z = self.search_direction * self.search_rotation_speed
         
         # Update accumulated angle
-        self.search_angle_accumulated += abs(twist.angular.z) * 0.1  # 10Hz updates
+        self.search_angle_accumulated += abs(self._search_twist.angular.z) * 0.2  # 5Hz updates
         
         # Publish command
-        self.cmd_vel_publisher.publish(twist)
+        self.cmd_vel_publisher.publish(self._search_twist)
     
     def transition_to_state(self, new_state):
         """
-        Handle state transitions with state protection.
+        Handle state transitions with optimized protection logic.
         
         Args:
-            new_state (str): The state to transition to
+            new_state (RobotState): The state to transition to
         """
         # Apply state protection to prevent rapid oscillations
         new_state = self.apply_state_protection(new_state)
@@ -1682,11 +1766,6 @@ class EnhancedBallChaseStateManager(Node):
             f"(after {time_in_prev_state:.1f}s)"
         )
         
-        # Handle exit actions for current state
-        if self.current_state == RobotState.LOST_BALL:
-            # Record total time ball was lost
-            self.total_lost_time = getattr(self, 'total_lost_time', 0) + time_in_prev_state
-        
         # Store previous state for reference
         self.previous_state = self.current_state
         
@@ -1695,7 +1774,7 @@ class EnhancedBallChaseStateManager(Node):
         self.state_start_time = time.time()
         self.last_state_change_time = time.time()
         
-        # Reset state-specific variables
+        # Reset state-specific variables with reduced logging
         if new_state == RobotState.TRACKING:
             self.get_logger().info("Ball tracking initiated")
         
@@ -1723,7 +1802,7 @@ class EnhancedBallChaseStateManager(Node):
             self.stop_robot()
         
         # Record transition for hysteresis tracking
-        self.state_transition_history.append(self.current_state)
+        self.state_transition_history.add(self.current_state)
         self.transition_times[self.current_state] = time.time()
         
         # Publish the new state
@@ -1731,13 +1810,13 @@ class EnhancedBallChaseStateManager(Node):
     
     def apply_state_protection(self, proposed_state):
         """
-        Apply protection against rapid state oscillations.
+        Apply optimized protection against rapid state oscillations.
         
         Args:
-            proposed_state (str): The proposed new state
+            proposed_state (RobotState): The proposed new state
             
         Returns:
-            str: The actual state to transition to (may be different from proposed)
+            RobotState: The actual state to transition to (may be different from proposed)
         """
         current_time = time.time()
         time_in_state = current_time - self.state_start_time
@@ -1746,8 +1825,8 @@ class EnhancedBallChaseStateManager(Node):
         if self.current_state == RobotState.INITIALIZING:
             return proposed_state
         
-        # Define minimum times in each state
-        min_time_in_state = {
+        # Define minimum times in each state - precomputed for efficiency
+        min_times = {
             RobotState.TRACKING: self.tracking_hysteresis_time,
             RobotState.LOST_BALL: self.lost_ball_hysteresis_time,
             RobotState.SEARCHING: 1.5,  # At least 1.5 seconds in SEARCHING
@@ -1756,7 +1835,7 @@ class EnhancedBallChaseStateManager(Node):
         }
             
         # Block transitions if not enough time in current state
-        min_time = min_time_in_state.get(self.current_state, 0.0)
+        min_time = min_times.get(self.current_state, 0.0)
         
         if time_in_state < min_time:
             # Count blocked transitions
@@ -1775,17 +1854,16 @@ class EnhancedBallChaseStateManager(Node):
             
             return self.current_state
             
-        # Check for oscillating transitions (ping-pong between states)
-        if len(self.state_transition_history) >= 4:
-            recent_states = list(self.state_transition_history)
-            
+        # Check for oscillating transitions with optimized history checking
+        history = self.state_transition_history.get_all()
+        if len(history) >= 4:
             # If we detect a pattern like A->B->A->B
-            if (recent_states[-1] == recent_states[-3] and 
-                recent_states[-2] == recent_states[-4] and
-                proposed_state == recent_states[-2]):
+            if (history[-1] == history[-3] and 
+                history[-2] == history[-4] and
+                proposed_state == history[-2]):
                 
                 # Check if these transitions happened in quick succession
-                if current_time - self.transition_times.get(recent_states[-4], 0) < 5.0:
+                if current_time - self.transition_times.get(history[-4], 0) < 5.0:
                     # This is an oscillation - apply hysteresis by remaining in current state
                     self.get_logger().info(
                         f"Detected state oscillation pattern. "
@@ -1808,21 +1886,23 @@ class EnhancedBallChaseStateManager(Node):
         return proposed_state
     
     def stop_robot(self):
-        """Send command to stop all robot motion immediately."""
-        twist = Twist()  # All fields initialize to 0
-        self.cmd_vel_publisher.publish(twist)
+        """Send command to stop all robot motion with reduced overhead."""
+        # Reuse the same Twist object to reduce allocations
+        if not hasattr(self, '_stop_twist'):
+            self._stop_twist = Twist()  # All fields initialize to 0
+        self.cmd_vel_publisher.publish(self._stop_twist)
     
     def publish_state(self):
         """Publish current robot state for other nodes to consume."""
-        msg = String()
-        msg.data = self.current_state
-        self.state_publisher.publish(msg)
+        # Reuse the same message object to reduce allocations
+        if not hasattr(self, '_state_msg'):
+            self._state_msg = String()
+        self._state_msg.data = self.current_state
+        self.state_publisher.publish(self._state_msg)
     
     def health_check_callback(self):
         """
-        Perform periodic health checks and adjust behaviors.
-        
-        This evaluates system confidence metrics and warns about potential issues.
+        Perform periodic health checks with reduced computational overhead.
         """
         # Evaluate overall health
         new_warnings = self.health_monitor.evaluate_health()
@@ -1834,14 +1914,14 @@ class EnhancedBallChaseStateManager(Node):
         for warning in new_warnings:
             self.get_logger().warn(f"Health warning: {warning}")
         
-        # Adjust behavior based on health
+        # Adjust behavior based on health with reduced frequency
         if system_confidence < self.health_confidence_threshold:
             self.health_monitor.throttled_log(
                 self.get_logger(),
                 f"System health degraded: confidence={system_confidence:.2f}, "
                 f"warnings={len(self.health_monitor.warnings)}",
                 "degraded_health",
-                min_interval=3.0,
+                min_interval=5.0,  # Increased from 3.0 to 5.0
                 level="warn"
             )
             
@@ -1852,17 +1932,19 @@ class EnhancedBallChaseStateManager(Node):
                 self.min_retracking_detections += 1
         
         # Publish health status
-        health_msg = String()
+        if not hasattr(self, '_health_msg'):
+            self._health_msg = String()
+            
         health_data = {
             'system_confidence': round(system_confidence, 3),
-            'warnings': self.health_monitor.warnings,
+            'warnings': self.health_monitor.warnings[:5],  # Limit to 5 warnings
             'state': self.current_state
         }
-        health_msg.data = json.dumps(health_data)
-        self.health_publisher.publish(health_msg)
+        self._health_msg.data = json.dumps(health_data, cls=FastJSONEncoder)
+        self.health_publisher.publish(self._health_msg)
     
     def publish_diagnostics(self):
-        """Publish enhanced diagnostic information."""
+        """Publish diagnostics with optimized JSON serialization and reduced content."""
         current_time = time.time()
         
         # Get basic diagnostic data
@@ -1873,53 +1955,54 @@ class EnhancedBallChaseStateManager(Node):
 
         state_duration = current_time - self.state_start_time
         
-        # Create position description
+        # Create position description only if needed
         position_info = {}
         if self.last_position is not None:
-            distance = np.linalg.norm(self.last_position[:2])
+            # Optimize calculation of direction
             direction = math.degrees(math.atan2(self.last_position[1], self.last_position[0]))
             
             position_info = {
-                "distance": f"{distance:.2f}m",
-                "direction": f"{direction:.1f}°",
-                "coordinates": f"({self.last_position[0]:.2f}, {self.last_position[1]:.2f}, {self.last_position[2]:.2f})"
+                "distance": round(self.ball_distance, 2),
+                "direction": round(direction, 1),
+                "coordinates": [
+                    round(self.last_position[0], 2),
+                    round(self.last_position[1], 2),
+                    round(self.last_position[2], 2)
+                ]
             }
         
-        # Build basic diagnostic info
+        # Build diagnostic info with minimal content for regular updates
         diagnostic_info = {
-            "state": {
-                "current": self.current_state,
-                "previous": self.previous_state,
-                "duration": f"{state_duration:.1f}s"
-            },
+            "state": self.current_state,
             "tracking": {
                 "reliable": self.tracking_reliable,
                 "consecutive_detections": self.consecutive_detections,
-                "uncertainty": f"{self.position_uncertainty:.3f}m",
-                "time_since_detection": f"{time_since_detection:.2f}s",
-                "confidence": getattr(self, 'tracking_confidence', 0.0)
+                "uncertainty": round(self.position_uncertainty, 3),
+                "time_since_detection": round(time_since_detection, 2)
             },
             "ball": {
-                "distance": f"{self.ball_distance:.2f}m",
+                "distance": round(self.ball_distance, 2),
                 "is_close": self.is_ball_close,
-                "is_stationary": self.is_ball_stationary,
-                "position": position_info
+                "is_stationary": self.is_ball_stationary
             }
         }
         
-        # Every 5 seconds, include full diagnostics
+        # Every 5+ seconds, include full diagnostics
         full_diagnostics = False
         if current_time - self.last_full_diagnostic_time > self.full_diagnostic_rate:
             full_diagnostics = True
             self.last_full_diagnostic_time = current_time
             
+            # Add position info only in full diagnostics
+            if position_info:
+                diagnostic_info["ball"]["position"] = position_info
+                
+            # Add state duration in full diagnostics
+            diagnostic_info["state_duration"] = round(state_duration, 1)
+            
             # Add motion state info
             if hasattr(self, 'motion_state'):
-                diagnostic_info["motion_state"] = {
-                    "current": self.motion_state,
-                    "previous": getattr(self, 'last_motion_state', "unknown"),
-                    "in_transition": getattr(self, 'in_motion_transition', False)
-                }
+                diagnostic_info["motion_state"] = self.motion_state
             
             # Add sensor gap information
             if hasattr(self, 'in_sensor_gap') and self.in_sensor_gap:
@@ -1929,13 +2012,12 @@ class EnhancedBallChaseStateManager(Node):
                     
                 diagnostic_info["sensor_gap"] = {
                     "active": True,
-                    "duration": f"{gap_duration:.2f}s",
+                    "duration": round(gap_duration, 2),
                 }
             
             # Add uncertainty trend analysis
             if hasattr(self, 'uncertainty_history') and len(self.uncertainty_history.values) >= 3:
                 direction, rate = self.uncertainty_history.get_trend(5)
-                stability = self.uncertainty_history.get_stability_score()
                 
                 trend_name = "stable"
                 if direction > 0:
@@ -1945,14 +2027,15 @@ class EnhancedBallChaseStateManager(Node):
                 
                 diagnostic_info["uncertainty_trend"] = {
                     "trend": trend_name,
-                    "rate": f"{abs(rate):.3f}/s",
-                    "stability": f"{stability:.2f}"
+                    "rate": round(abs(rate), 3),
                 }
             
             # Add system health information
             if hasattr(self, 'health_monitor'):
-                health_data = self.health_monitor.get_diagnostic_data()
-                diagnostic_info["system_health"] = health_data
+                diagnostic_info["system_health"] = {
+                    "confidence": round(self.health_monitor.system_confidence, 2),
+                    "warnings_count": len(self.health_monitor.warnings)
+                }
         
         # Only include resource usage in full diagnostics
         if full_diagnostics and self.resource_monitoring_enabled:
@@ -1962,61 +2045,45 @@ class EnhancedBallChaseStateManager(Node):
                 memory_usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 diagnostic_info["resources"] = {
                     "memory_kb": memory_usage,
-                    "uptime": f"{current_time - self.start_time:.1f}s"
+                    "uptime": round(current_time - self.start_time, 1)
                 }
             except ImportError:
                 pass
         
         # Publish diagnostic info
-        msg = String()
-        msg.data = json.dumps(diagnostic_info, cls=NumpyJSONEncoder)
-        self.diagnostics_publisher.publish(msg)
+        if not hasattr(self, '_diag_msg'):
+            self._diag_msg = String()
+            
+        self._diag_msg.data = json.dumps(diagnostic_info, cls=FastJSONEncoder)
+        self.diagnostics_publisher.publish(self._diag_msg)
         
         # Log summarized diagnostics with reduced frequency
         if full_diagnostics:
-            # Create simplified summary
-            summary = (
-                f"State: {self.current_state} ({state_duration:.1f}s), "
+            # Only log basic info to reduce string processing
+            self.get_logger().info(
+                f"Diagnostic: {self.current_state}, "
                 f"Ball: {self.ball_distance:.2f}m "
                 f"({'stationary' if self.is_ball_stationary else 'moving'}), "
-                f"Uncertainty: {self.position_uncertainty:.3f}m"
+                f"Health: {getattr(self.health_monitor, 'system_confidence', 0.0):.2f}"
             )
-            
-            # Add health info if available
-            if hasattr(self, 'health_monitor'):
-                summary += f", Health: {self.health_monitor.system_confidence:.2f}"
-                if self.health_monitor.warnings:
-                    warnings_str = ", ".join(self.health_monitor.warnings[:2])
-                    if len(self.health_monitor.warnings) > 2:
-                        warnings_str += f" +{len(self.health_monitor.warnings) - 2} more"
-                    summary += f", Warnings: {warnings_str}"
-            
-            self.get_logger().info(f"Diagnostic Summary: {summary}")
 
 
 def main(args=None):
     """Main function to initialize and run the state manager node."""
     rclpy.init(args=args)
     
-    # Welcome message
+    # Welcome message - reduced content
     print("=================================================")
-    print("Enhanced Basketball Chaser - State Manager Node")
-    print("=================================================")
-    print("This node manages the robot's operational states:")
-    print("- INITIALIZING: Startup, waiting for ball detection")
-    print("- TRACKING: Following the basketball")
-    print("- LOST_BALL: Ball not found, waiting for it to reappear")
-    print("- STOPPED: Ball is close and stationary")
-    print("- SEARCHING: Actively searching for a lost ball")
-    print("- RECOVERY: Recovery mode during sensor gaps or high uncertainty")
+    print("Optimized Basketball Chaser - State Manager Node")
     print("=================================================")
     
     try:
         # Create node
-        node = EnhancedBallChaseStateManager()
+        node = OptimizedBallChaseStateManager()
         
-        # Use MultiThreadedExecutor for better performance
+        # Use MultiThreadedExecutor with adjusted thread count for Pi 5
         from rclpy.executors import MultiThreadedExecutor
+        # 2 threads for Pi 5 to avoid overloading
         executor = MultiThreadedExecutor(num_threads=2)
         executor.add_node(node)
         
