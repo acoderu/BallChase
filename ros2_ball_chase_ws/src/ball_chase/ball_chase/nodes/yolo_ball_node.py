@@ -46,9 +46,11 @@ import time
 from collections import deque
 
 # Add the parent directory of 'config' to the Python path
+# This allows us to import configuration files and utilities from other folders in the project.
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 
 # Add the 'src' directory to the Python path
+# This is needed so we can import our own modules easily.
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 # ROS imports
@@ -76,6 +78,7 @@ from ball_chase.utilities.time_utils import TimeUtils
 from ball_chase.config.config_loader import ConfigLoader
 
 # Load configuration
+# This loads settings from a YAML file so we can easily change things like model path or topics.
 config_loader = ConfigLoader()
 config = config_loader.load_yaml('yolo_config.yaml')
 
@@ -114,6 +117,7 @@ class LightweightBuffer:
     """
     Fixed-size buffer for storing recent detections with efficient memory usage.
     Uses pre-allocated memory to avoid dynamic allocations during runtime.
+    This is like a small, fast notebook that only keeps the last N things you write in it.
     """
     def __init__(self, max_size=10):
         """Initialize a fixed-size buffer."""
@@ -181,13 +185,16 @@ class OptimizedBasketballDetector(Node):
     
     def __init__(self):
         """Initialize the basketball detector node."""
+        # Call the parent class constructor to set up the ROS node
         super().__init__('optimized_basketball_detector')
         
         # Initialize performance tracking variables first - needed for logging
+        # These help us keep track of how fast the node is running and how many images it has seen.
         self.start_time = TimeUtils.now_as_float()
         self.image_count = 0
         
         # Allocate throttle tracking dictionary early for _log function
+        # This is used to prevent spamming the logs with repeated messages.
         self._throttle_times = {}
         
         # Initialize parameters with reasonable defaults
@@ -239,6 +246,7 @@ class OptimizedBasketballDetector(Node):
         }
         
         # Settings for adaptable behavior
+        # If running on a Raspberry Pi or low-power device, we can skip frames to save CPU.
         self.low_power_mode = config.get('raspberry_pi', {}).get('low_power_mode', False)
         self.frame_skip_count = 1 if self.low_power_mode else 0
         self.detection_threshold = MODEL_CONFIG["confidence_threshold"]
@@ -253,6 +261,7 @@ class OptimizedBasketballDetector(Node):
         
     def _setup_resource_monitoring(self):
         """Set up resource monitoring for the node."""
+        # This monitors CPU, memory, and temperature to help us avoid overheating or overloading the system.
         self.resource_monitor = ResourceMonitor(
             node=self,
             publish_interval=15.0,  # Less frequent to reduce overhead
@@ -406,6 +415,7 @@ class OptimizedBasketballDetector(Node):
     def _log(self, level, category, message, data=None, throttle=0):
         """
         Unified logging with component tags, throttling, and optional data.
+        This function helps us keep track of what the node is doing, and makes debugging easier.
         
         Args:
             level (str): Log level ('debug', 'info', 'warn', 'error')
@@ -531,6 +541,7 @@ class OptimizedBasketballDetector(Node):
     def load_model(self, config):
         """
         Load the YOLO model for tennis ball detection.
+        This function loads the neural network that will help us find basketballs in images.
         
         Args:
             config (dict): Configuration parameters for the MNN runtime
@@ -593,6 +604,7 @@ class OptimizedBasketballDetector(Node):
     def preprocess_image(self, cv_image):
         """
         Preprocess the camera image for YOLO inference.
+        This function prepares the image so the neural network can understand it.
         
         Args:
             cv_image (numpy.ndarray): Raw OpenCV image in BGR format
@@ -636,6 +648,7 @@ class OptimizedBasketballDetector(Node):
     def process_detections(self, output_var):
         """
         Process YOLO output to extract basketball detections.
+        This function takes the output from the neural network and figures out where the basketball is.
         
         Args:
             output_var (MNN.expr.Var): Raw output from YOLO model
@@ -708,6 +721,8 @@ class OptimizedBasketballDetector(Node):
     def image_callback(self, msg):
         """
         Process each incoming camera image to detect tennis balls.
+        This function is called every time a new image arrives from the camera.
+        It runs the neural network, finds the basketball, and publishes the result.
         
         Args:
             msg (sensor_msgs.msg.Image): The incoming camera image from ROS
@@ -715,6 +730,7 @@ class OptimizedBasketballDetector(Node):
         self._trace_start('overall')
         
         # Skip frames based on low power mode
+        # If we're in low power mode, we don't process every frame to save CPU.
         self.frame_counter += 1
         if self.frame_skip_count > 0 and (self.frame_counter % (self.frame_skip_count + 1)) != 0:
             return
@@ -736,6 +752,7 @@ class OptimizedBasketballDetector(Node):
         
         try:
             # Convert ROS image to OpenCV format
+            # This makes it easy to work with the image using standard computer vision tools.
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             
             # Preprocess the image for model input
@@ -1064,6 +1081,7 @@ class OptimizedBasketballDetector(Node):
         self._log('info', 'SHUTDOWN', "YOLO detector resources released")
         super().destroy_node()
 
+# The main function is the entry point of the program. It sets up ROS, creates the node, and keeps it running.
 def main(args=None):
     """Main function to initialize and run the basketball detector."""
     # Initialize ROS

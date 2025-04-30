@@ -52,7 +52,17 @@ from ball_chase.utilities.ground_position_filter import GroundPositionFilter
 
 
 class ObjectPool:
-    """Simple object pool to reuse objects and reduce allocations."""
+    """
+    ObjectPool is a design pattern that helps manage a set of reusable objects.
+    Instead of creating and destroying objects all the time (which can be slow and use a lot of memory),
+    we keep a pool (a collection) of objects that we can reuse. This is especially useful in robotics
+    where we need to create many similar objects (like arrays for LIDAR points) very quickly and often.
+    
+    Why use an object pool?
+    - Saves time: Creating new objects is slower than reusing existing ones.
+    - Saves memory: We avoid memory fragmentation and reduce garbage collection.
+    - Makes the program more efficient, especially on devices with limited resources (like Raspberry Pi).
+    """
     
     def __init__(self, factory_func, initial_size=5, max_size=20):
         """Initialize the object pool.
@@ -84,7 +94,15 @@ class ObjectPool:
 
 
 class LightweightBuffer:
-    """Lightweight buffer implementation with fixed memory allocation."""
+    """
+    LightweightBuffer is a simple, efficient way to store a fixed number of recent values.
+    It's like a small notebook that only keeps the last N things you write in it.
+    
+    Why use a lightweight buffer?
+    - Uses a fixed amount of memory, so it won't grow too large and slow down the program.
+    - Fast to add and retrieve recent data, which is important for real-time robotics.
+    - Useful for keeping track of recent positions, errors, or other time-series data.
+    """
     
     def __init__(self, max_size=10):
         """Initialize with fixed buffer size."""
@@ -137,7 +155,15 @@ class LightweightBuffer:
 
 
 class MotionStateManager:
-    """Efficient motion state management with hysteresis."""
+    """
+    MotionStateManager keeps track of how the basketball is moving: is it stationary, moving slowly, or moving fast?
+    It uses a concept called "hysteresis" to avoid switching states too quickly due to small changes or noise.
+    
+    Why is this important?
+    - In robotics, we want to know if the ball is stopped, rolling slowly, or moving fast so we can react appropriately.
+    - Hysteresis means we require several pieces of evidence before changing state, which makes the system more stable.
+    - This class also keeps a history of state changes for debugging and analysis.
+    """
     
     # Define motion states
     UNKNOWN = "unknown"
@@ -309,11 +335,20 @@ class MotionStateManager:
 
 class BasketballLidarDetector(Node):
     """
-    A ROS2 node to detect basketballs using a 2D laser scanner.
+    BasketballLidarDetector is the main class for this node. It brings together all the components needed to detect a basketball using LIDAR and camera data.
     
-    Correlates LIDAR data with camera detections to provide 3D position
-    information for detected basketballs. Optimized for Raspberry Pi with
-    memory-efficient operations and adaptive processing.
+    What does this class do?
+    - Sets up ROS2 publishers and subscribers to communicate with other parts of the robot.
+    - Manages object pools and buffers for efficient memory use.
+    - Processes LIDAR scans to find the basketball using circle fitting and RANSAC.
+    - Correlates LIDAR data with camera detections for more accurate 3D position estimation.
+    - Tracks the motion state of the ball (stopped, slow, fast) and adapts processing accordingly.
+    - Publishes the detected position and diagnostics for monitoring.
+    - Handles system resource monitoring and adapts performance if the CPU is overloaded.
+    
+    Why is this class important?
+    - It is the "brain" of the basketball detection system, coordinating all the parts to work together efficiently.
+    - It is optimized for running on a Raspberry Pi, which has limited resources, so every optimization helps!
     """
     
     def __init__(self):
@@ -403,7 +438,11 @@ class BasketballLidarDetector(Node):
         self.transform_published_successfully = False
     
     def _create_object_pools(self):
-        """Create object pools for frequently used objects."""
+        """
+        Create object pools for frequently used objects.
+        This helps us avoid creating and destroying large arrays all the time, which saves time and memory.
+        For example, we use pools for arrays that store LIDAR points, distances, and masks.
+        """
         # Pool for point arrays
         self.point_pool = ObjectPool(
             lambda: np.zeros((500, 3), dtype=np.float32),
@@ -426,7 +465,11 @@ class BasketballLidarDetector(Node):
         )
     
     def _initialize_publisher_objects(self):
-        """Initialize publisher message objects for reuse."""
+        """
+        Initialize publisher message objects for reuse.
+        Instead of creating new message objects every time we want to publish, we reuse the same ones.
+        This is more efficient and reduces memory usage.
+        """
         # Pre-create common message objects that will be reused
         self._pos_msg = PointStamped()
         self._debug_msg = PointStamped()
@@ -434,7 +477,11 @@ class BasketballLidarDetector(Node):
         self._status_msg = Bool()
     
     def _init_vector_arrays(self):
-        """Pre-allocate arrays for vector operations."""
+        """
+        Pre-allocate arrays for vector operations.
+        By creating arrays ahead of time, we avoid having to allocate memory inside loops, which makes the code faster.
+        This is especially important for real-time robotics where every millisecond counts.
+        """
         # Small array for circle fitting
         self._circle_points = np.zeros((3, 2), dtype=np.float32)
         
@@ -452,7 +499,11 @@ class BasketballLidarDetector(Node):
         self._angles_array = np.zeros(max_size, dtype=np.float32)
     
     def staged_startup(self):
-        """Staged startup to reduce initial CPU load spikes."""
+        """
+        Staged startup to reduce initial CPU load spikes.
+        Instead of starting everything at once (which can overload the CPU), we start subscribers, publishers, and transform caching in stages.
+        This makes the node start up more smoothly, especially on slower hardware.
+        """
         # Remove the timer
         for i, timer in enumerate(self.node_timers):
             if timer.callback == self.staged_startup:
@@ -474,7 +525,11 @@ class BasketballLidarDetector(Node):
         self.node_timers.append(timer)
     
     def create_transform_retry_timer(self, source, target):
-        """Create a timer to retry a specific transform cache operation."""
+        """
+        Create a timer to retry a specific transform cache operation.
+        If a transform (coordinate conversion) isn't available at startup, we schedule a retry after a short delay.
+        This helps ensure the system can recover if something isn't ready right away.
+        """
         retry_timer = None  # Declare in outer scope
 
         def transform_retry_callback():
@@ -514,7 +569,11 @@ class BasketballLidarDetector(Node):
         return retry_timer
 
     def cache_transforms(self):
-        """Cache static transforms with long TTL for the Raspberry Pi 5."""
+        """
+        Cache static transforms with long TTL for the Raspberry Pi 5.
+        Transforms are used to convert positions between different coordinate frames (like camera and LIDAR).
+        By caching them, we avoid having to look them up every time, which saves time and CPU.
+        """
         # Destroy the timer once called
         timer_index_to_remove = None
         for i, timer in enumerate(self.node_timers):
@@ -601,7 +660,48 @@ class BasketballLidarDetector(Node):
             self.node_timers.append(cache_retry_timer)
     
     def _precompute_transform_matrix(self, transform, cache_key):
-        """Pre-compute transformation matrix for a transform and cache it."""
+        """
+        Pre-compute transformation matrix for a transform and cache it.
+        This allows us to quickly convert points between coordinate frames using matrix multiplication, which is much faster than recalculating every time.
+        
+        ---
+        TEXTBOOK EXPLANATION FOR STUDENTS:
+        Why do we need transformations in robotics?
+        - On a robot, sensors like cameras and LIDARs are mounted at different physical locations and orientations.
+        - Each sensor "sees" the world from its own point of view (called a coordinate frame).
+        - To combine data from different sensors, we need to convert (transform) points from one frame to another.
+        - For example, if the camera sees a ball at (x, y, z) in its frame, we need to know where that is in the LIDAR's frame to compare or fuse the data.
+        
+        What is a transformation matrix?
+        - A transformation matrix is a mathematical tool that combines rotation and translation.
+        - It lets us convert a point from one coordinate frame to another using matrix multiplication.
+        - In 3D, we use a 4x4 matrix (homogeneous coordinates) to handle both rotation and translation in one step.
+        
+        How does this function work?
+        1. **Extract translation:**
+           - Translation is the shift in position between the two frames (e.g., the camera is 10cm to the right of the LIDAR).
+           - In code: `tx`, `ty`, `tz` are the translation components.
+        2. **Extract rotation (quaternion):**
+           - Rotation describes how the two frames are turned relative to each other (e.g., the camera is tilted up).
+           - Quaternions (`qx`, `qy`, `qz`, `qw`) are a way to represent 3D rotations without gimbal lock.
+        3. **Convert quaternion to rotation matrix:**
+           - The code computes the 3x3 rotation part of the 4x4 matrix using the quaternion values.
+           - This math fills in the top-left 3x3 part of the matrix (see the code for how each element is calculated).
+        4. **Fill in translation:**
+           - The translation values go in the last column of the matrix (except the bottom row).
+        5. **Result:**
+           - The final 4x4 matrix can be used to transform any 3D point from the camera frame to the LIDAR frame (or vice versa).
+           - To transform a point, you multiply the matrix by the point (in homogeneous coordinates).
+        6. **Cache the matrix:**
+           - The matrix is stored for fast reuse, so we don't have to recalculate it every time.
+        
+        Intuition:
+        - Imagine you are standing at the camera, and you want to tell your friend at the LIDAR where the ball is.
+        - You need to account for how far away your friend is (translation) and which way they are facing (rotation).
+        - The transformation matrix does all this math for you!
+        
+        This is a fundamental concept in robotics and computer vision, and mastering it will help you work with any multi-sensor robot.
+        """
         try:
             # Extract translation
             tx = transform.transform.translation.x
@@ -666,7 +766,10 @@ class BasketballLidarDetector(Node):
             self.get_logger().error(f"Error pre-computing transform matrix: {str(e)}")
     
     def retry_transform_cache(self, source, target, timer=None):
-        """Retry caching a specific transform that failed earlier."""
+        """
+        Retry caching a specific transform that failed earlier.
+        This is a recovery mechanism to make the system more robust if something goes wrong at startup.
+        """
         # Find and remove any timer with this callback
         timers_to_remove = []
         for i, t in enumerate(self.node_timers):
@@ -704,7 +807,10 @@ class BasketballLidarDetector(Node):
             self.get_logger().warn(f"Retry failed for transform {source} → {target}: {str(e)}")
 
     def retry_all_transform_caches(self, timer=None):
-        """Retry the entire transform caching process."""
+        """
+        Retry the entire transform caching process.
+        If multiple transforms failed, this method tries to cache all of them again.
+        """
         # Remove all lambda timers
         timers_to_remove = []
         for i, t in enumerate(self.node_timers):
@@ -726,7 +832,10 @@ class BasketballLidarDetector(Node):
         self.cache_transforms()
     
     def clean_transform_cache(self):
-        """Periodically clean the transform cache to prevent memory growth."""
+        """
+        Periodically clean the transform cache to prevent memory growth.
+        This keeps the program from using too much memory over time by removing old or unused transforms.
+        """
         # This function mainly handles edge cases, as most transforms are static
         if len(self.cached_transforms) > 30:  # Higher limit for Pi 5 with 16GB RAM
             # Keep only the most used transforms
@@ -761,7 +870,10 @@ class BasketballLidarDetector(Node):
             )
     
     def _load_performance_config(self):
-        """Load performance-related configuration."""
+        """
+        Load performance-related configuration.
+        This method reads settings from the configuration file to control how the node adapts to system load (like CPU usage).
+        """
         perf_config = self.config.get('performance', {})
         
         # Performance adaptation settings
@@ -795,7 +907,10 @@ class BasketballLidarDetector(Node):
         self.configure_logging()
     
     def configure_logging(self):
-        """Configure logging levels based on performance settings."""
+        """
+        Configure logging levels based on performance settings.
+        This lets us control how much information is printed to the console, which can help with debugging or reduce CPU usage.
+        """
         # Set default logging level
         if self.performance_mode == "MINIMAL":
             self.get_logger().set_level(LoggingSeverity.WARN)
@@ -805,7 +920,10 @@ class BasketballLidarDetector(Node):
             self.get_logger().set_level(LoggingSeverity.DEBUG)
     
     def _init_state(self):
-        """Initialize internal state tracking with optimized data structures."""
+        """
+        Initialize internal state tracking with optimized data structures.
+        This sets up all the variables and buffers needed to keep track of LIDAR scans, positions, errors, and performance metrics.
+        """
         # Scan data
         self.latest_scan = None
         self.scan_timestamp = None
@@ -856,7 +974,10 @@ class BasketballLidarDetector(Node):
         self.last_position_time = time.time()
     
     def check_transform(self):
-        """Periodically check if transform is available in TF tree."""
+        """
+        Periodically check if transform is available in TF tree.
+        This helps ensure that coordinate conversions between camera and LIDAR are working, and logs any problems for debugging.
+        """
         try:
             test_time = rclpy.time.Time()
             
@@ -938,7 +1059,10 @@ class BasketballLidarDetector(Node):
             )
     
     def _load_basketball_parameters(self):
-        """Load basketball physical parameters from config."""
+        """
+        Load basketball physical parameters from config.
+        Reads the size and other properties of the basketball from the configuration file, so the detection algorithms know what to look for.
+        """
         # Get basketball configuration
         basketball_config = self.config.get('basketball', {})
         
@@ -983,7 +1107,10 @@ class BasketballLidarDetector(Node):
         self.ransac_min_iterations_before_early_stop = 8  # Minimum iterations before early stopping
     
     def _init_transform_parameters(self):
-        """Initialize coordinate transform parameters."""
+        """
+        Initialize coordinate transform parameters.
+        Sets up the default frames and translation/rotation values for converting between camera and LIDAR coordinates.
+        """
         transform_config = self.config.get('transform', {})
         
         # Frame IDs - Update default camera frame to match what we need
@@ -1011,7 +1138,11 @@ class BasketballLidarDetector(Node):
         self.last_transform_log = 0.0
     
     def _setup_subscribers(self):
-        """Set up subscribers with optimized QoS profiles."""
+        """
+        Set up subscribers with optimized QoS profiles.
+        Subscribers listen for messages from other parts of the robot (like LIDAR scans or camera detections).
+        QoS (Quality of Service) settings control how messages are delivered and stored.
+        """
         # Get topic config
         topics = self.config.get('topics', {})
         input_topics = topics.get('input', {})
@@ -1074,7 +1205,11 @@ class BasketballLidarDetector(Node):
         self.get_logger().info("Core subscriptions established with optimized QoS profiles")
     
     def _setup_publishers(self):
-        """Set up publishers with optimized QoS profiles."""
+        """
+        Set up publishers with optimized QoS profiles.
+        Publishers send messages to other parts of the robot (like the detected ball position or diagnostics).
+        QoS settings help ensure important messages are delivered reliably.
+        """
         # Remove the timer that triggered this
         for i, timer in enumerate(self.node_timers):
             if timer.callback == self._setup_publishers:
@@ -1146,7 +1281,11 @@ class BasketballLidarDetector(Node):
         self.get_logger().info("Publishers established with optimized QoS profiles")
     
     def throttled_log(self, message, key, min_interval=1.0, level="info"):
-        """Log with throttling to reduce overhead."""
+        """
+        Log with throttling to reduce overhead.
+        Throttling means we only print a message if enough time has passed since the last one with the same key.
+        This prevents flooding the console with too many messages, which can slow down the program.
+        """
         current_time = time.time()
         
         # Initialize tracking dict if needed
@@ -1175,7 +1314,11 @@ class BasketballLidarDetector(Node):
             self.get_logger().info(message)
 
     def monitor_resources(self):
-        """Monitor system resources and adapt processing accordingly."""
+        """
+        Monitor system resources and adapt processing accordingly.
+        Checks CPU and memory usage, and changes the node's performance mode if the system is overloaded.
+        This helps keep the robot running smoothly even if the CPU is very busy.
+        """
         try:
             # Get CPU and memory usage
             self.current_cpu_load = psutil.cpu_percent()
@@ -1330,7 +1473,8 @@ class BasketballLidarDetector(Node):
     def sensor_callback(self, msg, source):
         """
         Handle ball detections from camera systems (YOLO).
-        Find matching points in LIDAR data with optimized processing.
+        Matches camera detections with LIDAR points to improve accuracy.
+        If no LIDAR match is found, can fall back to using the camera's estimated 3D position.
         """
         detection_start_time = time.time()
         
@@ -1445,9 +1589,21 @@ class BasketballLidarDetector(Node):
         Find a basketball in LIDAR data using RANSAC for robust circle fitting.
         Optimized for a basketball (9-inch diameter) rolling on the ground.
         
+        ---
+        TEXTBOOK EXPLANATION FOR STUDENTS:
+        This function uses a famous algorithm called RANSAC (Random Sample Consensus) to find circles in noisy data.
+        Imagine you have a bunch of points from a LIDAR scan, and you want to find which ones form a circle (the basketball).
+        But some points are just noise (not part of the ball). RANSAC helps us find the best circle by:
+        1. Randomly picking 3 points (since 3 points define a circle).
+        2. Fitting a circle through those 3 points.
+        3. Counting how many other points are close to that circle (these are called "inliers").
+        4. Repeating this many times, keeping the circle with the most inliers and best fit.
+        5. The best circle is our detected basketball!
+        
+        Why do we use RANSAC? Because it's robust to outliers (bad points), so even if there is a lot of noise, it can still find the real circle.
+        
         Args:
             camera_seed_point: Optional point in LIDAR frame transformed from camera detection
-        
         Returns:
             list: List of (center, cluster_size, quality) tuples for detected basketballs
         """
@@ -1637,7 +1793,13 @@ class BasketballLidarDetector(Node):
                 best_center = center
                 best_inlier_count = inlier_count
                 best_quality = quality
-        
+                
+                # Early stopping if we have a good enough result
+                if (i >= self.ransac_min_iterations_before_early_stop and 
+                    quality > self.ransac_early_stop_quality and
+                    inlier_count >= len(points) * 0.7):
+                    break
+            
         # Return result if found
         if best_center is not None and best_quality >= self.quality_low:
             # Store the position for future reference
@@ -1728,6 +1890,22 @@ class BasketballLidarDetector(Node):
         """
         Use RANSAC to fit a circle to points, robust to outliers.
         Optimized for performance with explicit data types and minimal allocations.
+        
+        ---
+        TEXTBOOK EXPLANATION FOR STUDENTS:
+        RANSAC (Random Sample Consensus) is an algorithm for fitting models (like lines or circles) to data that may have lots of noise or outliers.
+        Here, we use it to fit a circle to 2D points from the LIDAR.
+        
+        The steps are:
+        1. Repeat for a number of iterations:
+           a. Randomly pick 3 points from the data (since 3 points define a unique circle).
+           b. Calculate the circle that passes through these 3 points (see fit_circle).
+           c. For every other point, check if it lies close to this circle (within a threshold distance). If so, it's an "inlier".
+           d. Count the number of inliers. If this is the best so far, remember this circle.
+           e. If the fit is very good (enough inliers and high quality), stop early.
+        2. After all iterations, return the best circle found.
+        
+        Why is this useful? Because in real data, not all points are perfect. Some are noise. RANSAC helps us ignore the noise and find the real shape.
         """
         if points is None or len(points) < 3:
             return None, 0, 0
@@ -1811,6 +1989,30 @@ class BasketballLidarDetector(Node):
         """
         Fit a circle to 2D points.
         Optimized for basketball size (9-inch diameter) on Raspberry Pi.
+        
+        ---
+        TEXTBOOK EXPLANATION FOR STUDENTS:
+        This function finds the best-fitting circle for a set of 2D points. This is useful for detecting round objects like a basketball in LIDAR data.
+        
+        There are two main cases:
+        1. **Exactly 3 points:**
+           - Any 3 non-collinear points define a unique circle.
+           - We use geometry to solve for the center (x0, y0) and radius r.
+           - The math involves solving equations for the perpendicular bisectors of the lines between the points, which intersect at the circle's center.
+           - The formulas used here are derived from the general equation of a circle: (x - x0)^2 + (y - y0)^2 = r^2.
+           - We solve for x0 and y0 using determinants and then compute the radius as the distance from the center to any of the points.
+        2. **More than 3 points:**
+           - We use a method called "least squares fitting" to find the circle that best fits all the points, even if they are noisy.
+           - The idea is to minimize the sum of squared differences between the distance from each point to the center and the radius.
+           - We first center the data (subtract the mean) for numerical stability.
+           - We then set up a system of equations based on the expanded circle equation and solve for the center using matrix algebra.
+           - The solution involves solving a 2x2 linear system (matrix A and vector B), which gives us the center offset from the mean.
+           - The radius is then calculated as the average distance from the center to the points.
+        
+        Why do we care about centering and least squares?
+        - Centering helps avoid numerical errors when points are far from the origin.
+        - Least squares gives the "best fit" even if the points are not perfectly on a circle (which is common with real sensor data).
+        - This method is fast and works well for detecting round objects in robotics!
         """
         # Need at least 3 points
         if len(points_2d) < 3:
@@ -1957,6 +2159,37 @@ class BasketballLidarDetector(Node):
         """
         Update velocity estimate from position history.
         Used to update the motion state manager.
+        
+        ---
+        TEXTBOOK EXPLANATION FOR STUDENTS:
+        This function calculates how fast the basketball is moving (its velocity) using its recent positions.
+        
+        Why do we care about velocity?
+        - In robotics, knowing how fast an object is moving helps us predict where it will be next.
+        - Velocity is a key part of tracking and following moving objects.
+        
+        How is velocity calculated?
+        - Velocity is the change in position over time: v = Δx / Δt
+        - For 2D movement, we calculate the change in x and y separately, then combine them to get the speed (magnitude).
+        - We use the most recent two positions and their timestamps to compute this.
+        
+        Why do we use smoothing (exponential moving average)?
+        - Real sensor data is noisy: small errors or jitters can make the velocity jump around.
+        - Smoothing helps us get a more stable estimate by blending the new velocity with the previous estimate.
+        - The formula is: v_smoothed = α * v_new + (1 - α) * v_old, where α is a smoothing factor (between 0 and 1).
+        - A smaller α means more smoothing (slower to react), a larger α means less smoothing (faster to react).
+        
+        What are the steps in this function?
+        1. If this is the first position, just store it and return (can't calculate velocity yet).
+        2. Calculate the time difference (dt) between the new and previous positions.
+        3. If dt is too small or too large, skip the update (to avoid errors).
+        4. Compute the change in x and y, divide by dt to get velocity components.
+        5. Calculate the speed as the magnitude: sqrt(vx^2 + vy^2).
+        6. Update the stored position and time.
+        7. Apply smoothing to the velocity estimate.
+        8. Store the smoothed velocity for use by the motion state manager.
+        
+        This approach is common in robotics, physics, and engineering for tracking moving objects!
         """
         # Need at least 2 positions to calculate velocity
         if not hasattr(self, 'last_position') or self.last_position is None:
@@ -2021,13 +2254,21 @@ class BasketballLidarDetector(Node):
         Similar to the fusion node's implementation but optimized for LIDAR use.
         Uses cached transforms and reused matrices for efficiency.
         
-        Args:
-            detection_msg (PointStamped): The 2D detection message
-            bbox_width (float): Width of bounding box in pixels
-            bbox_height (float): Height of bounding box in pixels
-            
-        Returns:
-            np.ndarray: Estimated 3D position [x, y, z] or None if estimation fails
+        ---
+        TEXTBOOK EXPLANATION FOR STUDENTS:
+        This function takes a 2D detection from a camera (like the center and size of a bounding box around the basketball)
+        and estimates where the ball is in 3D space (real world coordinates).
+        
+        The math behind it:
+        1. The camera sees the ball as a circle of a certain size (in pixels). The real ball has a known diameter (in meters).
+        2. Using the formula: distance = (real_diameter * focal_length) / observed_diameter_in_pixels
+           - This comes from the pinhole camera model in geometry.
+        3. The center of the bounding box tells us the direction from the camera center to the ball (in image coordinates).
+        4. We convert this direction into a 3D vector using the camera's focal length.
+        5. We then use the camera's position and orientation (from the transform) to convert this direction into the LIDAR's frame.
+        6. Finally, we multiply the direction by the estimated distance to get the 3D position of the ball.
+        
+        This is a classic example of using geometry and camera calibration to go from 2D images to 3D positions!
         """
         try:
             # Known basketball diameter in meters
@@ -2205,7 +2446,10 @@ class BasketballLidarDetector(Node):
             return None
     
     def log_error(self, message):
-        """Log an error and update health status."""
+        """
+        Log an error and update health status.
+        Adds the error to a buffer for diagnostics, and reduces the health score of the LIDAR system.
+        """
         # Add to error collection using LightweightBuffer
         current_time = time.time()
         self.errors.add(current_time, message)
@@ -2254,7 +2498,10 @@ class BasketballLidarDetector(Node):
             )
     
     def publish_diagnostics(self):
-        """Publish diagnostic information about the node with optimized message reuse."""
+        """
+        Publish diagnostic information about the node with optimized message reuse.
+        Sends a summary of the node's status, performance, and health to other parts of the system for monitoring.
+        """
         try:
             # Calculate statistics
             current_time = time.time()
@@ -2363,8 +2610,8 @@ class BasketballLidarDetector(Node):
     def publish_debug_point(self):
         """
         Publish a debug point for calibration purposes.
-        Only executed when not in MINIMAL mode.
-        Uses message object reuse for efficiency.
+        Selects a point from the LIDAR data to help with calibration and visualization.
+        Only runs when not in minimal performance mode.
         """
         # Skip in MINIMAL performance mode
         if self.performance_mode == "MINIMAL":
@@ -2460,7 +2707,11 @@ class BasketballLidarDetector(Node):
             )
     
     def shutdown(self):
-        """Clean shutdown of the node."""
+        """
+        Clean shutdown of the node.
+        Destroys timers, clears caches and buffers, and logs that the node has shut down.
+        This helps prevent memory leaks and ensures a clean exit.
+        """
         # Destroy timers - iterate through the timers list we maintain
         for timer in self.node_timers:
             self.destroy_timer(timer)
