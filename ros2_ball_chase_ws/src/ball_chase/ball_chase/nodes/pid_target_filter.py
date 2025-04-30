@@ -1,7 +1,7 @@
 import time
 import math
 import numpy as np
-from collections import deque
+from pid_helpers import CircularBuffer
 import logging
 
 class EnhancedTargetFilter:
@@ -10,9 +10,9 @@ class EnhancedTargetFilter:
     def __init__(self, logger, buffer_size=8, prediction_horizon=0.3, debug_level=0):
         self.logger = logger
         self.debug_level = debug_level
-        # Pre-allocate buffers to reduce memory allocations
-        self.position_buffer = deque([(0.0, 0.0, 0.0, 0.0)] * buffer_size, maxlen=buffer_size)
-        self.trajectory_history = deque([(((0.0, 0.0, 0.0), 0.0))] * 10, maxlen=10)
+        # Use CircularBuffer for position and trajectory history
+        self.position_buffer = CircularBuffer(buffer_size, default=(0.0, 0.0, 0.0, 0.0))
+        self.trajectory_history = CircularBuffer(10, default=((0.0, 0.0, 0.0), 0.0))
         
         # Configuration parameters
         self.prediction_horizon = prediction_horizon  # seconds
@@ -35,11 +35,8 @@ class EnhancedTargetFilter:
         
     def _update_buffers(self, position, current_time):
         """Update position and trajectory buffers with new measurement."""
-        # Add to position buffer
-        self.position_buffer.append((position[0], position[1], position[2], current_time))
-        
-        # Add to trajectory history
-        self.trajectory_history.append((position, current_time))
+        self.position_buffer.add((position[0], position[1], position[2], current_time))
+        self.trajectory_history.add((position, current_time))
         
         if self.debug_level >= 3:
             if not hasattr(self, '_last_logged_position') or \
@@ -49,9 +46,10 @@ class EnhancedTargetFilter:
         
     def _calculate_filtered_position(self):
         """Calculate filtered position from recent measurements."""
-        if len(self.position_buffer) >= 3:
+        pos_data = self.position_buffer.get_all()
+        if len(pos_data) >= 3:
             # Get the three most recent positions
-            recent = list(self.position_buffer)[-3:]
+            recent = pos_data[-3:]
             
             # Weights for weighted average (more weight to recent measurements)
             weights = np.array([0.2, 0.3, 0.5])
@@ -61,7 +59,7 @@ class EnhancedTargetFilter:
             self.filtered_position = tuple(np.sum(positions * weights[:, np.newaxis], axis=0))
         else:
             # Not enough data, use the latest position
-            latest = self.position_buffer[-1]
+            latest = pos_data[-1]
             self.filtered_position = (latest[0], latest[1], latest[2])
         
         if self.debug_level >= 3:
@@ -72,7 +70,8 @@ class EnhancedTargetFilter:
     
     def _update_velocity(self, current_time):
         """Update velocity and acceleration estimates."""
-        if len(self.position_buffer) < 2 or self.last_update_time is None:
+        pos_data = self.position_buffer.get_all()
+        if len(pos_data) < 2 or self.last_update_time is None:
             return
             
         dt = current_time - self.last_update_time
@@ -80,8 +79,8 @@ class EnhancedTargetFilter:
             return
             
         # Get the two most recent positions
-        prev_pos = self.position_buffer[-2]
-        curr_pos = self.position_buffer[-1]
+        prev_pos = pos_data[-2]
+        curr_pos = pos_data[-1]
         
         # Calculate raw velocity
         raw_velocity = np.array([
@@ -115,7 +114,7 @@ class EnhancedTargetFilter:
             self.logger.info(f"Direction change detected in velocity at {current_time:.3f}", throttle_duration_sec=2.0)
         
         # Calculate acceleration if we have enough data
-        if len(self.position_buffer) >= 3 and dt > 0.001:
+        if len(pos_data) >= 3 and dt > 0.001:
             # Acceleration = change in velocity / time
             raw_accel = (raw_velocity - self.current_velocity) / dt
             
@@ -171,12 +170,13 @@ class EnhancedTargetFilter:
     
     def _calculate_movement_consistency(self):
         """Calculate how consistently the target is moving in one direction."""
-        if len(self.trajectory_history) < 5:
+        traj_data = self.trajectory_history.get_all()
+        if len(traj_data) < 5:
             self.movement_consistency = 0.0
             return
             
         # Get recent positions
-        recent_positions = [entry[0] for entry in list(self.trajectory_history)[-5:]]
+        recent_positions = [entry[0] for entry in traj_data[-5:]]
         
         # Calculate overall displacement vector
         start_pos = np.array(recent_positions[0][:2])  # x,y only
@@ -222,7 +222,7 @@ class EnhancedTargetFilter:
     def _predict_future_position(self):
         """Predict future position based on current state."""
         if self.filtered_position is None:
-            self.predicted_position = self.position_buffer[-1][:3] if self.position_buffer else None
+            self.predicted_position = self.position_buffer.get_all()[-1][:3] if self.position_buffer else None
             return
             
         # Time horizon for prediction
@@ -265,7 +265,7 @@ class EnhancedTargetFilter:
         
         # Early return if this is the first measurement
         if self.last_update_time is None:
-            self.position_buffer.append((position[0], position[1], position[2], current_time))
+            self.position_buffer.add((position[0], position[1], position[2], current_time))
             self.filtered_position = position
             self.predicted_position = position
             self.last_update_time = current_time
@@ -298,7 +298,7 @@ class EnhancedTargetFilter:
             return self.filtered_position
             
         # Fallback to last position if available
-        return self.position_buffer[-1][:3] if self.position_buffer else None
+        return self.position_buffer.get_all()[-1][:3] if self.position_buffer else None
     
     def get_predicted_position(self):
         """Get the predicted future position based on velocity and acceleration."""
@@ -313,10 +313,7 @@ class EnhancedTargetFilter:
         return tuple(self.acceleration)
     
     def get_recent_positions(self, n=3):
-        """Get the n most recent positions."""
-        # More efficient extraction of positions using list comprehension
-        positions = list(self.position_buffer)[-n:] if len(self.position_buffer) >= n else list(self.position_buffer)
-        return [p[:3] for p in positions]
+        return self.position_buffer.get_latest(n)
     
     def get_movement_info(self):
         """Get information about the movement characteristics."""
@@ -341,10 +338,10 @@ class EnhancedTargetFilter:
         
         # Pre-fill with zeros
         for _ in range(buffer_size):
-            self.position_buffer.append((0.0, 0.0, 0.0, 0.0))
+            self.position_buffer.add((0.0, 0.0, 0.0, 0.0))
             
         for _ in range(traj_size):
-            self.trajectory_history.append(((0.0, 0.0, 0.0), 0.0))
+            self.trajectory_history.add(((0.0, 0.0, 0.0), 0.0))
         
         # Reset state variables
         self.last_update_time = None
@@ -365,15 +362,14 @@ class ErrorTracker:
     """Lightweight error tracker that monitors error values over time."""
     
     def __init__(self, name, logger, max_history=8, debug_level=0):
-        self.logger = logger
-        self.debug_level = debug_level
         self.name = name
+        self.logger = logger
+        self.max_history = max_history
+        self.debug_level = debug_level
+        self.error_history = CircularBuffer(max_history, default=0.0)
         self.current_error = 0.0
         self.previous_error = 0.0
         self.previous_category = None  # For tracking error category with hysteresis
-        
-        # Pre-allocate error history buffer
-        self.error_history = deque([0.0] * max_history, maxlen=max_history)
         
         # State variables
         self.last_correction_time = 0.0
@@ -401,7 +397,7 @@ class ErrorTracker:
             self.sign_changes += 1
             
         # Update error history (deque handles the rolling window)
-        self.error_history.append(error)
+        self.error_history.add(error)
         
         # Track if error is increasing (with 5% threshold to avoid noise)
         error_abs = abs(error)
@@ -434,7 +430,9 @@ class ErrorTracker:
     
     def reset(self):
         """Reset all tracked errors."""
-        # Reset scalar values
+        # Reset error history buffer to its original size
+        max_len = getattr(self.error_history, 'max_size', 8)
+        self.error_history = CircularBuffer(max_len, default=0.0)
         self.current_error = 0.0
         self.previous_error = 0.0
         self.accumulated_error = 0.0
@@ -443,12 +441,6 @@ class ErrorTracker:
         self.peak_error = 0.0
         self.last_sign = 0
         self.previous_category = None
-        
-        # Clear and pre-fill error history
-        max_len = self.error_history.maxlen
-        self.error_history.clear()
-        for _ in range(max_len):
-            self.error_history.append(0.0)
         
         if hasattr(self, 'debug_level') and self.debug_level >= 2:
             self.logger.info("Error tracker state reset", throttle_duration_sec=2.0)
@@ -472,7 +464,7 @@ class ErrorTracker:
             return 0.0  # Not enough data
             
         # Get the last n values as numpy array
-        history = np.array(list(self.error_history)[-n:])
+        history = np.array(self.error_history.get_latest(n))
         x = np.arange(len(history))
         
         if len(x) < 2:

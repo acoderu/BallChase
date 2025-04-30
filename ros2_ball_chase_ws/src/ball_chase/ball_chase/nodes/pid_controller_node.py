@@ -34,7 +34,7 @@ import logging
 import traceback  
 
 # Import modules from refactored files
-from pid_helpers import LightweightBuffer
+from pid_helpers import LightweightBuffer, CircularBuffer
 from pid_target_filter import EnhancedTargetFilter, ErrorTracker
 from pid_computation import PIDControllers
 from pid_target_tracking import TargetTrackingModule, MovementStrategyModule, VelocityControlModule, TransformSystem
@@ -642,7 +642,7 @@ class OptimizedPIDControllerNode(Node):
         self.cycle_count = 0
         
         # Velocity history
-        self.velocity_history = LightweightBuffer(max_size=6)
+        self.velocity_history = CircularBuffer(max_size=6)
         
         # Stopped state tracking with hysteresis
         self._robot_stopped = False
@@ -1977,7 +1977,7 @@ class OptimizedPIDControllerNode(Node):
         
         # Reset motion state
         self.last_cmd_vel = (0.0, 0.0, 0.0)
-        self.velocity_history = LightweightBuffer(max_size=6)
+        self.velocity_history = CircularBuffer(max_size=6)
         
         # Reset last logged command
         self.last_logged_cmd = (0.0, 0.0, 0.0)

@@ -7,87 +7,46 @@ import threading
 from collections import deque
 from functools import lru_cache
 
-class LightweightBuffer:
-    """Memory-efficient buffer for storing historical data with pre-allocated storage."""
-    
-    def __init__(self, max_size=10, default_value=(0.0, 0.0, 0.0)):
-        """Initialize a fixed-size circular buffer."""
-        self.data = [default_value] * max_size  # Pre-allocate with default values
+class CircularBuffer:
+    """Generic fixed-size circular buffer for any data type."""
+    def __init__(self, max_size, default=None):
+        self.data = [default] * max_size
+        self.max_size = max_size
         self.next_index = 0
         self.count = 0
-        self.max_size = max_size
-        # Cache for get_all to avoid repeated list creation
-        self._cached_result = None
-        self._cache_valid = False
-    
+
+    def __len__(self):
+        return self.count
+
     def add(self, value):
-        """Add a new value to the buffer, overwriting oldest if full."""
         self.data[self.next_index] = value
         self.next_index = (self.next_index + 1) % self.max_size
         self.count = min(self.count + 1, self.max_size)
-        # Invalidate cache when data changes
-        self._cache_valid = False
-    
+
     def get_all(self):
-        """Get all values currently in the buffer in chronological order."""
         if self.count == 0:
             return []
-        
-        # Return cached result if valid
-        if self._cache_valid and self._cached_result is not None:
-            return self._cached_result
-        
-        result = []
-        
         if self.count < self.max_size:
-            # Buffer isn't full yet, return all items from 0 to count
-            for i in range(self.count):
-                result.append(self.data[i])
-        else:
-            # Buffer is full, need to wrap around
-            # Start from oldest item (at next_index) and go around
-            for i in range(self.max_size):
-                idx = (self.next_index + i) % self.max_size
-                result.append(self.data[idx])
-        
-        # Cache the result
-        self._cached_result = result
-        self._cache_valid = True
-        
-        return result
-        
+            return self.data[:self.count]
+        return self.data[self.next_index:] + self.data[:self.next_index]
+
     def get_latest(self, n=1):
-        """Get the latest n values (default is just the latest one)."""
         if self.count == 0:
             return []
-        
         n = min(n, self.count)
         result = []
-        
-        # Calculate positions of the n latest elements
         for i in range(n):
-            if self.count < self.max_size:
-                # Simple case: buffer isn't full yet
-                idx = self.count - n + i
-            else:
-                # Buffer is full, handle circular indexing
-                idx = (self.next_index - n + i) % self.max_size
-            
-            # Append item at calculated index
+            idx = (self.next_index - 1 - i) % self.max_size
             result.append(self.data[idx])
-        
-        return result
-    
+        return result[::-1]
+
     def clear(self):
-        """Clear the buffer efficiently by resetting indices."""
-        # Simply reset counters without clearing data
-        # Values will be overwritten as new data is added
         self.next_index = 0
         self.count = 0
-        # Invalidate cache
-        self._cache_valid = False
-        self._cached_result = None
+        self.data = [self.data[0]] * self.max_size
 
+# Optionally, alias LightweightBuffer to CircularBuffer for backward compatibility
+LightweightBuffer = CircularBuffer
 
 class TTLDict:
     """
