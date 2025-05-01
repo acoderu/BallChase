@@ -31,7 +31,8 @@ import signal
 import sys
 from collections import deque
 import logging
-import traceback  
+import traceback
+from abc import ABC, abstractmethod
 
 # Import modules from refactored files
 from pid_helpers import LightweightBuffer, CircularBuffer, ThrottledLogger, FastTrigonometry, ResourceMonitor
@@ -66,7 +67,7 @@ TOPICS = {
 # Log throttling parameters
 LOG_THROTTLE_CONTROL = 2.0     # Seconds between control loop status logs
 LOG_THROTTLE_STATE = 0.5       # Seconds between state change logs
-LOG_THROTTLE_DIAG = 1.0        # Seconds between diagnostic logs
+LOG_THROTTLE_DIAG = 2.0        # Seconds between diagnostic logs
 
 
 # Centralized object pool manager
@@ -287,7 +288,21 @@ class ParameterManager:
         self.desired_distance = 1.0  # Default value
 
 
+# Phase 3: Extract State Manager - Define component interfaces
+class StateObserver(ABC):
+    """Interface for classes that observe state changes."""
+    @abstractmethod
+    def on_state_change(self, old_state, new_state, reason=""):
+        """Called when robot state changes."""
+        pass
+    
+    @abstractmethod
+    def on_freshness_change(self, freshness_level, data_age):
+        """Called when data freshness level changes."""
+        pass
 
+
+# Extract these data classes from the original code
 class RobotStateData:
     """Core robot state data"""
     def __init__(self):
@@ -314,9 +329,9 @@ class MovementStateData:
         self.initial_movement_boost = True
         
         # Pre-allocated vectors for movement calculations
-        self.prev_velocities = None  # Will be initialized with numpy arrays
-        self.target_velocities = None
-        self.vel_diffs = None
+        self.prev_velocities = np.zeros(3, dtype=np.float32)
+        self.target_velocities = np.zeros(3, dtype=np.float32)
+        self.vel_diffs = np.zeros(3, dtype=np.float32)
         self.velocity_tuple = [0.0, 0.0, 0.0]
         self.velocity_change_check = [False, False, False]
 
@@ -355,8 +370,9 @@ class RecoveryStateData:
         self.recovery_phase = "none"
 
 
-class EfficientStateManager:
-    """Efficient state manager optimized for Raspberry Pi"""
+# Phase 3: Enhanced State Manager 
+class EnhancedStateManager:
+    """Enhanced state manager that provides observation capabilities"""
     def __init__(self):
         self.robot = RobotStateData()
         self.movement = MovementStateData()
@@ -366,24 +382,43 @@ class EfficientStateManager:
         self.shutting_down = False
         self.last_control_time = time.time()
         self.skip_next_cycle = False
+        self.observers = []
         
         # Pre-allocate numpy arrays for movement calculations
-        self.movement.prev_velocities = np.zeros(3, dtype=np.float32)
-        self.movement.target_velocities = np.zeros(3, dtype=np.float32)
-        self.movement.vel_diffs = np.zeros(3, dtype=np.float32)
         self._limited_velocities = np.zeros(3, dtype=np.float32)
 
-    def transition_state(self, new_state):
+    def register_observer(self, observer):
+        """Register a state observer."""
+        if isinstance(observer, StateObserver):
+            self.observers.append(observer)
+        
+    def transition_state(self, new_state, reason=""):
         """Handle state transition and return True if state changed"""
         if new_state == self.robot.state:
             return False
             
         # Store previous state and update current state
-        self.robot.previous_state = self.robot.state
+        old_state = self.robot.state
+        self.robot.previous_state = old_state
         self.robot.state = new_state
         self.robot.last_state_change_time = time.time()
         
+        # Notify observers
+        for observer in self.observers:
+            observer.on_state_change(old_state, new_state, reason)
+            
         return True
+        
+    def update_freshness(self, freshness_level, data_age):
+        """Update data freshness state."""
+        if freshness_level != self.freshness.level:
+            old_level = self.freshness.level
+            self.freshness.level = freshness_level
+            self.freshness.state_change_time = time.time()
+            
+            # Notify observers
+            for observer in self.observers:
+                observer.on_freshness_change(freshness_level, data_age)
         
     def is_state(self, state_name):
         """Efficient state check"""
@@ -394,14 +429,595 @@ class EfficientStateManager:
         return self.robot.previous_state == state_name
 
 
-class OptimizedPIDControllerNode(Node):
-    """Enhanced PID Controller node with improved movement strategy and error handling."""
-    def __init__(self):
-        """Initialize the enhanced PID controller node with phased, dependency-driven initialization."""
-        super().__init__('pid_controller')
-        # Centralized state - replaced StateController with EfficientStateManager
-        self.state_mgr = EfficientStateManager()  
+# Phase 1: Extract Diagnostics Publisher
+class DiagnosticsPublisher:
+    """Handles collection and publishing of diagnostic data."""
+    def __init__(self, node, pid_controllers, target_tracker, strategy_module, velocity_control, resource_monitor, parameter_manager, logger, throttled_logger):
+        self.node = node
+        self.pid_controllers = pid_controllers
+        self.target_tracker = target_tracker
+        self.strategy_module = strategy_module
+        self.velocity_control = velocity_control
+        self.resource_monitor = resource_monitor
+        self.parameter_manager = parameter_manager
+        self.logger = logger
+        self.throttled_logger = ThrottledLogger(logger)
         
+        # Setup publishers
+        self.pid_diag_pub = node.create_publisher(
+            Float32MultiArray,
+            TOPICS["output"]["diagnostics"],
+            10
+        )
+        
+        self.performance_pub = node.create_publisher(
+            String,
+            TOPICS["output"]["performance"],
+            10
+        )
+        
+        # Setup data containers
+        self._diag_msg = Float32MultiArray()
+        self._diag_data = np.zeros(14, dtype=np.float32)
+        
+        # Logging helper
+        self.throttled_logger = throttled_logger  # Use the global throttled logger
+    
+    def publish_diagnostics(self, state_manager):
+        """Publish detailed diagnostic information at a slower rate."""
+        try:
+            if state_manager.shutting_down:
+                return
+                
+            # Calculate velocity statistics
+            vel_data = self.velocity_control.get_velocity_history()
+            if not vel_data:
+                return
+                
+            # Use NumPy for vectorized calculations when possible
+            if len(vel_data) > 0:
+                # Convert to NumPy array for efficient calculation
+                vel_array = np.array(vel_data)
+                
+                # Extract velocities by column (more efficient than list comprehensions)
+                if vel_array.size > 0:  # Check that array has elements
+                    lin_x_velocities = vel_array[:, 0]
+                    lin_y_velocities = vel_array[:, 1]
+                    ang_velocities = vel_array[:, 2]
+                    
+                    # Calculate statistics using NumPy
+                    avg_lin_x_vel = np.mean(lin_x_velocities) if lin_x_velocities.size > 0 else 0.0
+                    avg_lin_y_vel = np.mean(lin_y_velocities) if lin_y_velocities.size > 0 else 0.0
+                    avg_ang_vel = np.mean(ang_velocities) if ang_velocities.size > 0 else 0.0
+                else:
+                    avg_lin_x_vel = avg_lin_y_vel = avg_ang_vel = 0.0
+            else:
+                avg_lin_x_vel = avg_lin_y_vel = avg_ang_vel = 0.0
+            
+            # Log detailed information with built-in throttling
+            if hasattr(self.parameter_manager, 'debug_level') and self.parameter_manager.debug_level >= 1:
+                # Get PID components
+                p_x, i_x, d_x = self.pid_controllers['linear_x'].get_components()
+                p_y, i_y, d_y = self.pid_controllers['linear_y'].get_components()
+                p_a, i_a, d_a = self.pid_controllers['angular'].get_components()
+                
+                # Get stats on simplified control usage
+                simplified_pct = state_manager.perf.simplified_control_count / max(1, state_manager.robot.cycle_count) * 100.0
+                
+                diag_msg = (
+                    f"DIAGNOSTICS: "
+                    f"Avg Vel=[{avg_lin_x_vel:.2f}, {avg_lin_y_vel:.2f}, {avg_ang_vel:.2f}], "
+                    f"PID X=[{p_x:.2f}, {i_x:.2f}, {d_x:.2f}], "
+                    f"PID Y=[{p_y:.2f}, {i_y:.2f}, {d_y:.2f}], "
+                    f"PID A=[{p_a:.2f}, {i_a:.2f}, {d_a:.2f}], "
+                    f"Strategy={self.strategy_module.current_strategy}, "
+                    f"Simp={simplified_pct:.1f}%, "
+                    f"Freshness={state_manager.freshness.level}"
+                )
+                if self.parameter_manager.debug_level >= 1:
+                    self.throttled_logger.info(diag_msg, throttle_duration_sec=LOG_THROTTLE_DIAG, log_id='diagnostics')
+            
+            # Publish PID diagnostic data
+            self._publish_pid_diagnostics()
+            
+            # Publish performance metrics
+            self._publish_performance_metrics(state_manager)
+        except Exception as e:
+            if self.parameter_manager.debug_level >= 1:
+                self.logger.error(f"Error in publish_diagnostics: {str(e)}")
+    
+    def _publish_pid_diagnostics(self):
+        """Publish detailed PID diagnostics for analysis."""
+        try:
+            # Get PID components
+            p_x, i_x, d_x = self.pid_controllers['linear_x'].get_components()
+            p_y, i_y, d_y = self.pid_controllers['linear_y'].get_components()
+            p_a, i_a, d_a = self.pid_controllers['angular'].get_components()
+            
+            # Get current gains
+            kp_x, ki_x, kd_x = self.pid_controllers['linear_x'].get_current_gains()
+            kp_y, ki_y, kd_y = self.pid_controllers['linear_y'].get_current_gains()
+            kp_a, ki_a, kd_a = self.pid_controllers['angular'].get_current_gains()
+            
+            # Get current errors
+            e_x = self.pid_controllers['linear_x'].error_tracker.current_error
+            e_y = self.pid_controllers['linear_y'].error_tracker.current_error
+            e_a = self.pid_controllers['angular'].error_tracker.current_error
+            
+            # Pack all data into the array - no unnecessary float() conversions
+            # Direct array access is more efficient
+            self._diag_data[0] = p_x
+            self._diag_data[1] = i_x
+            self._diag_data[2] = d_x
+            self._diag_data[3] = p_y
+            self._diag_data[4] = i_y
+            self._diag_data[5] = d_y
+            self._diag_data[6] = p_a
+            self._diag_data[7] = i_a
+            self._diag_data[8] = d_a
+            self._diag_data[9] = e_x
+            self._diag_data[10] = e_y
+            self._diag_data[11] = e_a
+            self._diag_data[12] = kp_a  # Track angular P gain
+            self._diag_data[13] = kd_a  # Track angular D gain
+            
+            # Update Float32MultiArray data
+            self._diag_msg.data = self._diag_data.tolist()
+            
+            # Publish diagnostics
+            self.pid_diag_pub.publish(self._diag_msg)
+        except Exception as e:
+            if self.parameter_manager.debug_level >= 1:
+                self.logger.error(f"Error in _publish_pid_diagnostics: {str(e)}")
+    
+    def _publish_performance_metrics(self, state_manager):
+        """Publish performance metrics for monitoring."""
+        try:
+            # Get performance stats
+            perf_stats = self.resource_monitor.get_performance_stats()
+            
+            # Check if we have valid stats
+            if not perf_stats or not all(k in perf_stats for k in ['cpu_avg', 'cycle_time_ms', 'update_rate']):
+                # Create default stats if missing
+                perf_stats = {
+                    'cpu_avg': 0.0,
+                    'cycle_time_ms': 0.0,
+                    'skips': 0,
+                    'update_rate': getattr(self.parameter_manager, 'update_rate', 3.0)
+                }
+            
+            # Get current strategy
+            strategy_name = "unknown"
+            if hasattr(self.strategy_module, 'current_strategy'):
+                strategy_name = self.strategy_module.current_strategy
+            
+            # Add optimization stats
+            adaptive_rate = getattr(state_manager.perf, 'adaptive_rate', perf_stats['update_rate'])
+            using_simplified = 1 if state_manager.movement.using_simplified_control else 0
+            
+            # Add freshness and event stats
+            freshness_level = state_manager.freshness.level
+            event_ratio = 0.0
+            total_cycles = max(1, state_manager.perf.event_control_count + state_manager.perf.timer_control_count)
+            event_ratio = state_manager.perf.event_control_count / total_cycles * 100.0
+            
+            # Create performance message - use string formatting for better performance
+            # in tight loops
+            performance_msg = String()
+            performance_msg.data = (
+                '{{"cpu": {0:.1f}, '
+                '"cycle_time_ms": {1:.2f}, '
+                '"strategy": "{2}", '
+                '"skips": {3}, '
+                '"update_rate": {4:.1f}, '
+                '"adaptive_rate": {5:.1f}, '
+                '"simplified": {6}, '
+                '"freshness": "{7}", '
+                '"event_ratio": {8:.1f}}}'
+            ).format(
+                perf_stats["cpu_avg"],
+                perf_stats["cycle_time_ms"],
+                strategy_name,
+                perf_stats.get("skips", state_manager.perf.skipped_cycle_count),
+                perf_stats["update_rate"],
+                adaptive_rate,
+                using_simplified,
+                state_manager.freshness.level,
+                event_ratio
+            )
+            
+            # Publish
+            self.performance_pub.publish(performance_msg)
+        except Exception as e:
+            if self.parameter_manager.debug_level >= 1:
+                self.logger.error(f"Error publishing performance metrics: {str(e)}")
+
+
+# Phase 2: Extract Performance Monitor
+class EnhancedPerformanceMonitor:
+    """Enhanced performance monitoring with adaptive rate control."""
+    def __init__(self, resource_monitor, parameter_manager, logger, throttled_logger):
+        self.resource_monitor = resource_monitor
+        self.parameter_manager = parameter_manager
+        self.logger = logger
+        self.throttled_logger = ThrottledLogger(logger)
+        self.detected_fusion_rate = 1.0
+        self.fusion_rate_updated = False
+        self.last_rate_adjustment_time = 0.0
+        self.current_rate = parameter_manager.update_rate
+        self.last_logged_rate = 0.0
+        self.adaptive_rate_history = deque(maxlen=10)
+        
+    def calculate_adaptive_rate(self, state_manager, base_rate, cpu_usage):
+        """Calculate adaptive control rate based on CPU usage and fusion rate."""
+        try:
+            current_time = time.time()
+            if not isinstance(base_rate, (int, float)) or base_rate <= 0:
+                if self.parameter_manager.debug_level >= 1:
+                    self.logger.warning(f"Invalid base_rate: {base_rate}, using default 3.0Hz")
+                base_rate = 3.0
+            if not isinstance(cpu_usage, (int, float)) or cpu_usage < 0:
+                if self.parameter_manager.debug_level >= 1:
+                    self.logger.warning(f"Invalid cpu_usage: {cpu_usage}, using 50%")
+                cpu_usage = 50.0
+                
+            # Only adjust rate periodically to avoid oscillation
+            if current_time - self.last_rate_adjustment_time < 1.0:
+                return self.current_rate or base_rate
+                
+            self.last_rate_adjustment_time = current_time
+            
+            # Apply fusion rate consideration if detected
+            if self.fusion_rate_updated and self.parameter_manager.enable_fusion_rate_detection:
+                fusion_rate = self.detected_fusion_rate
+                if fusion_rate > 0 and fusion_rate < 100:
+                    adjusted_base_rate = min(max(fusion_rate * 1.2, self.parameter_manager.min_control_rate), self.parameter_manager.max_control_rate)
+                    if abs(adjusted_base_rate - base_rate) > 0.3:
+                        if self.parameter_manager.debug_level >= 1:
+                            self.logger.info(
+                                f"Adjusted base rate using fusion detection: {base_rate:.1f}Hz -> {adjusted_base_rate:.1f}Hz "
+                                f"(fusion_rate: {fusion_rate:.1f}Hz)"
+                            )
+                    base_rate = adjusted_base_rate
+                    
+            # Adjusted thresholds for high baseline CPU
+            if cpu_usage > 95.0:
+                new_rate = self.parameter_manager.min_control_rate
+            elif cpu_usage > 90.0:
+                new_rate = base_rate * 0.5
+            elif cpu_usage > 85.0:
+                new_rate = base_rate * 0.7
+            elif cpu_usage > 80.0:
+                new_rate = base_rate * 0.85
+            elif cpu_usage < 40.0:
+                new_rate = base_rate * 1.1
+            else:
+                new_rate = base_rate
+                
+            new_rate = max(self.parameter_manager.min_control_rate, min(self.parameter_manager.max_control_rate, new_rate))
+            self.current_rate = new_rate
+            self.adaptive_rate_history.append((current_time, new_rate))
+            
+            if abs(new_rate - self.last_logged_rate) > 0.5:
+                if self.parameter_manager.debug_level >= 1:
+                    self.throttled_logger.info(
+                        f"Adaptive rate adjusted: {self.last_logged_rate:.1f}Hz -> {new_rate:.1f}Hz "
+                        f"(CPU: {cpu_usage:.1f}%)",
+                        throttle_duration_sec=2.0,
+                        log_id='adaptive_rate'
+                    )
+                self.last_logged_rate = new_rate
+                
+            return new_rate
+        except Exception as e:
+            if self.parameter_manager.debug_level >= 1:
+                self.logger.error(f"Error in calculate_adaptive_rate: {str(e)}")
+            return max(base_rate, self.parameter_manager.min_control_rate)
+    
+    def update_fusion_rate(self, fusion_rate):
+        """Update the detected fusion rate."""
+        if fusion_rate > 0:
+            self.detected_fusion_rate = fusion_rate
+            self.fusion_rate_updated = True
+            
+            # Update the resource monitor with the new fusion rate
+            if hasattr(self.resource_monitor, 'set_fusion_rate'):
+                self.resource_monitor.set_fusion_rate(fusion_rate)
+    
+    def should_skip_cycle(self, cpu_usage, last_control_time, adaptive_rate):
+        """Determine if the current cycle should be skipped based on CPU usage and timing."""
+        # Skip based on CPU threshold
+        if self.parameter_manager.enable_cycle_skipping and cpu_usage > self.parameter_manager.max_cpu_skip_threshold:
+            return True
+            
+        # Skip based on timing
+        if adaptive_rate > 0:
+            current_time = time.time()
+            time_since_last = current_time - last_control_time
+            if time_since_last < (1.0 / adaptive_rate):
+                return True
+                
+        return False
+    
+    def update_performance_stats(self, cycle_duration):
+        """Update performance statistics in the resource monitor."""
+        try:
+            if hasattr(self.resource_monitor, '_update_cycle_stats'):
+                self.resource_monitor._update_cycle_stats(cycle_duration)
+        except Exception as e:
+            if self.parameter_manager.debug_level >= 1:
+                self.logger.warning(f"Error updating performance stats: {str(e)}")
+
+
+# Phase 4: Extract Control Strategies
+class ControlStrategy(ABC):
+    """Base class for control strategies."""
+    @abstractmethod
+    def compute_velocity_command(self, errors, position_data, current_time, freshness_level="fresh"):
+        """Compute velocity commands based on errors and other data."""
+        pass
+    
+    @abstractmethod
+    def get_strategy_name(self):
+        """Get the name of this strategy."""
+        pass
+
+
+class StandardControlStrategy(ControlStrategy):
+    """Full control strategy with PID and coordination."""
+    def __init__(self, pid_controllers, coordinated_controller, parameter_manager, distance_error_tracker,
+                 lateral_error_tracker, angular_error_tracker, velocity_control):
+        self.pid_controllers = pid_controllers
+        self.coordinated_controller = coordinated_controller
+        self.parameter_manager = parameter_manager
+        self.distance_error_tracker = distance_error_tracker
+        self.lateral_error_tracker = lateral_error_tracker
+        self.angular_error_tracker = angular_error_tracker
+        self.velocity_control = velocity_control
+        
+    def compute_velocity_command(self, errors, position_data, current_time, freshness_level="fresh"):
+        """Compute velocity commands using full PID control with coordination."""
+        # Unpack errors
+        distance_error, lateral_error, angular_error = errors
+        
+        # Determine strategy flags
+        use_forward = True
+        use_lateral = True
+        use_angular = True
+        
+        # Compute velocities based on the selected strategy
+        if self.parameter_manager.coordinated_movement and use_lateral and use_angular:
+            # Use coordinated controller for lateral and angular movements
+            linear_x_velocity = self.pid_controllers['linear_x'].compute(
+                distance_error, 
+                current_time, 
+                not use_forward,
+                self.distance_error_tracker.get_trend()
+            )
+            
+            # Use coordinated control for lateral and angular velocities
+            lateral_velocity, angular_velocity = self.coordinated_controller.compute(
+                lateral_error,   # lateral error
+                angular_error,   # angular error
+                current_time,    # current time
+                0.0              # current orientation - this is taken directly from the coordinated controller
+            )
+            
+            # Disable individual components if strategy requires
+            if not use_lateral:
+                lateral_velocity = 0.0
+            if not use_angular:
+                angular_velocity = 0.0
+        else:
+            # Traditional separate PID controllers
+            linear_x_velocity = self.pid_controllers['linear_x'].compute(
+                distance_error, 
+                current_time, 
+                not use_forward,
+                self.distance_error_tracker.get_trend()
+            )
+            
+            lateral_velocity = self.pid_controllers['linear_y'].compute(
+                lateral_error, 
+                current_time, 
+                not use_lateral,
+                self.lateral_error_tracker.get_trend()
+            )
+            
+            angular_velocity = self.pid_controllers['angular'].compute(
+                angular_error, 
+                current_time, 
+                not use_angular,
+                self.angular_error_tracker.get_trend()
+            )
+        
+        # Apply freshness-based velocity scaling
+        if freshness_level == "stale":
+            # Reduced speed (50%) for stale data
+            stale_scale = 0.5
+            linear_x_velocity *= stale_scale
+            lateral_velocity *= stale_scale
+            angular_velocity *= stale_scale
+        elif freshness_level == "critical" or freshness_level == "invalid":
+            # Stop for critical or invalid data
+            linear_x_velocity = 0.0
+            lateral_velocity = 0.0
+            angular_velocity = 0.0
+        
+        # Apply velocity control limits
+        target_distance = position_data['distance'] if position_data and 'distance' in position_data else 0.0
+        limited_velocities = self.velocity_control.process_velocities(
+            linear_x_velocity, 
+            lateral_velocity, 
+            angular_velocity, 
+            target_distance, 
+            self.parameter_manager.desired_distance,
+            freshness_level=freshness_level
+        )
+        
+        return limited_velocities
+    
+    def get_strategy_name(self):
+        return "standard"
+
+
+class SimplifiedControlStrategy(ControlStrategy):
+    """Simplified control strategy for reduced CPU usage."""
+    def __init__(self, pid_controllers, parameter_manager, velocity_control, last_cmd_vel, level=1):
+        self.pid_controllers = pid_controllers
+        self.parameter_manager = parameter_manager
+        self.velocity_control = velocity_control
+        self.last_cmd_vel = last_cmd_vel
+        self.level = level  # 0: minimal, 1: basic, 2: medium
+        
+    def compute_velocity_command(self, errors, position_data, current_time, freshness_level="fresh"):
+        """Compute velocity commands using simplified control."""
+        if self.level == 0:
+            # Minimal computation - just dampen previous velocities
+            damping = 0.85
+            linear_x = self.last_cmd_vel[0] * damping
+            lateral_y = self.last_cmd_vel[1] * damping
+            angular_z = self.last_cmd_vel[2] * damping
+            return [linear_x, lateral_y, angular_z]
+            
+        elif self.level == 1:
+            # Basic computation - simple proportional control
+            if position_data and all(k in position_data for k in ['distance', 'lateral', 'bearing']):
+                # Calculate basic errors
+                distance_error = position_data['distance'] - self.parameter_manager.desired_distance
+                lateral_error = position_data['lateral']
+                angular_error = position_data['bearing']
+                
+                # Simple proportional control with reduced gains
+                kp_factor = 0.7  # Reduce gains for smoother control
+                linear_x = max(-0.1, min(0.1, distance_error * self.parameter_manager.linear_x_kp * kp_factor))
+                lateral_y = max(-0.1, min(0.1, lateral_error * self.parameter_manager.linear_y_kp * kp_factor))
+                angular_z = max(-0.3, min(0.3, angular_error * self.parameter_manager.angular_kp * kp_factor))
+                
+                # Apply damping from previous velocities for smoothness
+                damping = 0.3  # 30% of previous velocity
+                linear_x = linear_x * (1.0 - damping) + self.last_cmd_vel[0] * damping
+                lateral_y = lateral_y * (1.0 - damping) + self.last_cmd_vel[1] * damping
+                angular_z = angular_z * (1.0 - damping) + self.last_cmd_vel[2] * damping
+                
+                return [linear_x, lateral_y, angular_z]
+            else:
+                # No valid position data, apply strong damping
+                damping = 0.7
+                linear_x = self.last_cmd_vel[0] * damping
+                lateral_y = self.last_cmd_vel[1] * damping
+                angular_z = self.last_cmd_vel[2] * damping
+                return [linear_x, lateral_y, angular_z]
+                
+        elif self.level == 2:
+            # Medium computation - use PID but skip coordinated control
+            distance_error, lateral_error, angular_error = errors
+            
+            # Use separate PID controllers for efficiency - no coordination
+            linear_x_velocity = self.pid_controllers['linear_x'].compute(
+                distance_error, 
+                current_time, 
+                False,
+                self.pid_controllers['linear_x'].error_tracker.get_trend()
+            )
+            
+            lateral_velocity = self.pid_controllers['linear_y'].compute(
+                lateral_error, 
+                current_time, 
+                False,
+                self.pid_controllers['linear_y'].error_tracker.get_trend()
+            )
+            
+            angular_velocity = self.pid_controllers['angular'].compute(
+                angular_error, 
+                current_time, 
+                False,
+                self.pid_controllers['angular'].error_tracker.get_trend()
+            )
+            
+            # Apply velocity limits directly (simplified)
+            linear_x_velocity = max(self.parameter_manager.linear_x_min, min(self.parameter_manager.linear_x_max, linear_x_velocity))
+            lateral_velocity = max(self.parameter_manager.linear_y_min, min(self.parameter_manager.linear_y_max, lateral_velocity))
+            angular_velocity = max(self.parameter_manager.angular_min, min(self.parameter_manager.angular_max, angular_velocity))
+            
+            return [linear_x_velocity, lateral_velocity, angular_velocity]
+            
+        # Default fallback
+        return list(self.last_cmd_vel)
+    
+    def get_strategy_name(self):
+        return f"simplified_level_{self.level}"
+
+
+class RecoveryControlStrategy(ControlStrategy):
+    """Strategy for recovery behavior."""
+    def __init__(self, recovery_module):
+        self.recovery_module = recovery_module
+        
+    def compute_velocity_command(self, errors, position_data, current_time, freshness_level="fresh"):
+        """Compute velocity commands for recovery behavior."""
+        orientation_data = {'yaw': 0.0}  # This will be set by the controller
+        cmd_vel, is_complete = self.recovery_module.handle_recovery(
+            current_time, position_data, orientation_data
+        )
+        return [cmd_vel.linear.x, cmd_vel.linear.y, cmd_vel.angular.z]
+    
+    def get_strategy_name(self):
+        return "recovery"
+
+
+class ControlStrategyFactory:
+    """Factory for creating appropriate control strategies."""
+    def __init__(self, pid_controllers, coordinated_controller, parameter_manager, 
+                 distance_error_tracker, lateral_error_tracker, angular_error_tracker,
+                 velocity_control, recovery_module):
+        self.pid_controllers = pid_controllers
+        self.coordinated_controller = coordinated_controller
+        self.parameter_manager = parameter_manager
+        self.distance_error_tracker = distance_error_tracker
+        self.lateral_error_tracker = lateral_error_tracker
+        self.angular_error_tracker = angular_error_tracker
+        self.velocity_control = velocity_control
+        self.recovery_module = recovery_module
+        self.last_cmd_vel = (0.0, 0.0, 0.0)
+        
+    def set_last_cmd_vel(self, cmd_vel):
+        """Update the last command velocity."""
+        self.last_cmd_vel = cmd_vel
+        
+    def create_strategy(self, robot_state, computation_level):
+        """Create the appropriate control strategy based on state and computation level."""
+        if robot_state == "recovery":
+            return RecoveryControlStrategy(self.recovery_module)
+        
+        if computation_level < 3:
+            return SimplifiedControlStrategy(
+                self.pid_controllers,
+                self.parameter_manager,
+                self.velocity_control,
+                self.last_cmd_vel,
+                level=computation_level
+            )
+            
+        # Default to standard control strategy
+        return StandardControlStrategy(
+            self.pid_controllers,
+            self.coordinated_controller,
+            self.parameter_manager,
+            self.distance_error_tracker,
+            self.lateral_error_tracker,
+            self.angular_error_tracker,
+            self.velocity_control
+        )
+
+
+# Phase 5: Refactored Controller Manager
+class PIDControllerNode(Node, StateObserver):
+    """Optimized PID Controller node with modular components."""
+    def __init__(self):
+        """Initialize the enhanced PID controller node with phased initialization."""
+        super().__init__('pid_controller')
+        self.throttled_logger = ThrottledLogger(self.get_logger())
         try:
             # Phase 1: Parameter initialization (must come first)
             self._initialize_parameters()
@@ -409,14 +1025,21 @@ class OptimizedPIDControllerNode(Node):
                 self.get_logger().set_level(rclpy.logging.LoggingSeverity.DEBUG)
             else:
                 self.get_logger().set_level(rclpy.logging.LoggingSeverity.INFO)
-            # Phase 2: Core initialization
+            
+            # Phase 2: Initialize core components
             self._initialize_core_components()
-            # Phase 3: Basic utility components
-            self._initialize_utility_components()
-            # Phase 4: Dependent components
+            
+            # Phase 3: Initialize state manager and register as observer
+            self._initialize_state_manager()
+            
+            # Phase 4: Initialize dependent components
             self._initialize_dependent_components()
-            # Phase 5: Final setup
-            self._initialize_final_components()
+            
+            # Phase 5: Setup communications
+            self._setup_publishers()
+            self._setup_subscriptions()
+            self._setup_timers()
+            
             # Validate complete initialization
             self._validate_initialization()
             self.get_logger().info("Initialization complete - all components ready")
@@ -424,22 +1047,93 @@ class OptimizedPIDControllerNode(Node):
             self.get_logger().error(f"Initialization failed: {str(e)}")
             raise RuntimeError(f"PID Controller initialization failed: {str(e)}")
 
+    def _initialize_parameters(self):
+        """Initialize and validate all parameters."""
+        self.parameter_manager = ParameterManager(self)
+        # No validation needed here - moved to _validate_initialization
+        
     def _initialize_core_components(self):
         """Initialize core components with no dependencies."""
         self.callback_group = ReentrantCallbackGroup()
         self.fast_trig = FastTrigonometry()
         self._init_memory_pools()
-        self._init_state_variables()
-
-    def _initialize_parameters(self):
-        """Initialize and validate all parameters."""
-        self.parameter_manager = ParameterManager(self)
-        self._validate_parameters()
-
-    def _initialize_utility_components(self):
-        """Initialize utility components that depend only on parameters."""
+        
+        # Pre-allocated message objects
+        self._cmd_vel_msg = Twist()
+        
+        # Pre-allocated objects for frequent operations
+        self._key_tuple = ["none", "none", "none"]  # Use list instead of tuple for mutability
+        
+        # Pre-allocated error container
+        self._current_errors = [0.0, 0.0, 0.0]  # distance, lateral, angular
+        
+        # Initialize transform check timer variable
+        self.transform_check_timer = None
+        
+        # Create resource monitor
+        self.resource_monitor = ResourceMonitor(throttled_logger, debug_level=self.parameter_manager.debug_level)
+        
+    def _initialize_state_manager(self):
+        """Initialize state manager and register as observer."""
+        self.state_manager = EnhancedStateManager()
+        self.state_manager.register_observer(self)
+        
+    def _initialize_dependent_components(self):
+        """Initialize components that depend on core components."""
+        # Initialize transform system
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        
+        self.transform_system = TransformSystem(self, throttled_logger, self.tf_buffer)
+        self.transform_system.add_transform_dependency("base_link", "imu_link", required=True)
+        if not self.transform_system.start_initialization():
+            raise RuntimeError("Failed to start transform system initialization")
+            
+        # Initialize PID controllers
+        self._init_controllers()
+        
+        # Initialize target tracking
         pm = self.parameter_manager
-        self.resource_monitor = ResourceMonitor(throttled_logger, debug_level=pm.debug_level)
+        self.target_tracker = TargetTrackingModule(
+            throttled_logger,
+            filter_buffer_size=pm.filter_buffer_size,
+            prediction_horizon=pm.prediction_horizon,
+            debug_level=pm.debug_level
+        )
+        
+        # Initialize strategy module
+        self.strategy_module = MovementStrategyModule(throttled_logger, pm.debug_level)
+        
+        # Initialize velocity control
+        self.velocity_control = VelocityControlModule(throttled_logger)
+        self.velocity_control.set_approach_parameters(
+            pm.approach_distance, 
+            pm.min_approach_factor
+        )
+        
+        # Initialize recovery module
+        self.recovery_module = RecoveryBehaviorModule(throttled_logger)
+        
+        # Initialize control strategy factory
+        self.strategy_factory = ControlStrategyFactory(
+            self.pid_controllers,
+            self.coordinated_controller,
+            self.parameter_manager,
+            self.distance_error_tracker,
+            self.lateral_error_tracker,
+            self.angular_error_tracker,
+            self.velocity_control,
+            self.recovery_module
+        )
+        
+        # Initialize performance monitor
+        self.performance_monitor = EnhancedPerformanceMonitor(
+            self.resource_monitor,
+            self.parameter_manager,
+            self.get_logger(),
+            throttled_logger
+        )
+        
         if hasattr(self.resource_monitor, 'set_rate_limits'):
             self.resource_monitor.set_rate_limits(
                 min_rate=pm.min_control_rate,
@@ -452,62 +1146,12 @@ class OptimizedPIDControllerNode(Node):
                 high_threshold=pm.cpu_high_threshold
             )
         self.resource_monitor.start()
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
         
-        self.transform_system = TransformSystem(self, throttled_logger, self.tf_buffer)
-        self.transform_system.add_transform_dependency("base_link", "imu_link", required=True)
-        if not self.transform_system.start_initialization():
-            raise RuntimeError("Failed to start transform system initialization")
-
-    def _initialize_dependent_components(self):
-        """Initialize components that depend on utility components."""
-        self._init_controllers()
-        pm = self.parameter_manager
-        self.target_tracker = TargetTrackingModule(
-            throttled_logger,
-            filter_buffer_size=pm.filter_buffer_size,
-            prediction_horizon=pm.prediction_horizon,
-            debug_level=pm.debug_level
-        )
-        if not hasattr(self.target_tracker, 'target_filter') or self.target_tracker.target_filter is None:
-            raise RuntimeError("Target tracking filter was not properly initialized")
-        self.strategy_module = MovementStrategyModule(throttled_logger, pm.debug_level)
-        self.velocity_control = VelocityControlModule(throttled_logger)
-        self.velocity_control.set_approach_parameters(
-            pm.approach_distance, 
-            pm.min_approach_factor
-        )
-        self.recovery_module = RecoveryBehaviorModule(throttled_logger)
-
-    def _initialize_final_components(self):
-        """Initialize communication and timer components."""
-        self._setup_publishers()
-        self._setup_subscriptions()
-        self._setup_timers()
-
-    def _validate_parameters(self):
-        pm = self.parameter_manager
-        """Validate that all required parameters are properly set."""
-        required_params = [
-            'update_rate', 'min_control_rate', 'max_control_rate',
-            'approach_distance', 'min_approach_factor',
-            'distance_threshold', 'lateral_threshold', 'angular_threshold'
-        ]
-        for param in required_params:
-            if not hasattr(pm, param) or getattr(pm, param) is None:
-                raise ValueError(f"Required parameter '{param}' is not initialized")
-
-    def _validate_initialization(self):
-        """Validate that all components are properly initialized."""
-        required_components = [
-            'resource_monitor', 'transform_system', 'target_tracker',
-            'strategy_module', 'velocity_control', 'recovery_module'
-        ]
-        for component in required_components:
-            if not hasattr(self, component) or getattr(self, component) is None:
-                raise RuntimeError(f"Required component '{component}' is not initialized")
-       
+    def _init_memory_pools(self):
+        """Setup memory pools and reusable objects for efficiency."""
+        # Initialize object pool manager
+        self.object_pool = ObjectPoolManager(max_twist=10, max_vector3=15)
+        
     def _init_controllers(self):
         """Initialize the controllers with improved tuning for controlled velocity."""
         pm = self.parameter_manager
@@ -533,6 +1177,14 @@ class OptimizedPIDControllerNode(Node):
             self.pid_linear_x.validate_initialization()
             self.pid_linear_y.validate_initialization()
             self.pid_angular.validate_initialization()
+            
+            # Store controllers in a dictionary for easy access
+            self.pid_controllers = {
+                'linear_x': self.pid_linear_x,
+                'linear_y': self.pid_linear_y,
+                'angular': self.pid_angular
+            }
+            
             self.coordinated_controller = PIDControllers.CoordinatedController(
                 self.pid_linear_y, 
                 self.pid_angular,
@@ -547,6 +1199,7 @@ class OptimizedPIDControllerNode(Node):
                     'opposite_sign_scale': 1.1,
                 }
             )
+            
             self.get_logger().info("PID controllers initialized successfully with error trackers")
         except Exception as e:
             handle_initialization_error(
@@ -554,35 +1207,28 @@ class OptimizedPIDControllerNode(Node):
                 "Failed to initialize PID controllers",
                 e
             )
-
-    def _init_memory_pools(self):
-        """Setup memory pools and reusable objects for efficiency."""
-        # Initialize object pool manager
-        self.object_pool = ObjectPoolManager(max_twist=10, max_vector3=15)
-        
-        # Pre-allocate commonly used arrays - now using state_mgr
-        # Pre-allocate reusable message objects
-        self._cmd_vel_msg = Twist()
-        self._diag_msg = Float32MultiArray()
-        self._diag_data = np.zeros(14, dtype=np.float32)
-        
-        # Pre-allocated objects for frequent operations
-        self._key_tuple = ["none", "none", "none"]  # Use list instead of tuple for mutability
-        
-        # Pre-allocated error container
-        self._current_errors = [0.0, 0.0, 0.0]  # distance, lateral, angular
-        
-        # Initialize transform check timer variable
-        self.transform_check_timer = None
-    
-    def _init_state_variables(self):
-        """Initialize all state tracking variables."""
-        # Most state is now managed by self.state_mgr
-        self.get_logger().info(
-            f"Initialized state: desired_distance={self.parameter_manager.desired_distance:.3f}m, "
-            f"robot_state={self.state_mgr.robot.state}"
+            
+    def _setup_publishers(self):
+        """Set up all publishers for this node."""
+        self.cmd_vel_pub = self.create_publisher(
+            Twist,
+            TOPICS["output"]["cmd_vel"],
+            10
         )
-    
+        
+        # Initialize diagnostics publisher
+        self.diagnostics_publisher = DiagnosticsPublisher(
+            self,
+            self.pid_controllers,
+            self.target_tracker,
+            self.strategy_module,
+            self.velocity_control,
+            self.resource_monitor,
+            self.parameter_manager,
+            self.get_logger(),
+            throttled_logger
+        )
+        
     def _setup_subscriptions(self):
         """Set up all subscriptions for this node."""
         self.state_sub = self.create_subscription(
@@ -609,140 +1255,204 @@ class OptimizedPIDControllerNode(Node):
             10,
             callback_group=self.callback_group
         )
-    
-    def _setup_publishers(self):
-        """Set up all publishers for this node."""
-        self.cmd_vel_pub = self.create_publisher(
-            Twist,
-            TOPICS["output"]["cmd_vel"],
-            10
-        )
         
-        self.pid_diag_pub = self.create_publisher(
-            Float32MultiArray,
-            TOPICS["output"]["diagnostics"],
-            10
-        )
-        
-        # Performance metrics publisher
-        self.performance_pub = self.create_publisher(
-            String,
-            TOPICS["output"]["performance"],
-            10
-        )
-    
     def _setup_timers(self):
         """Set up timer callbacks for periodic tasks with tiered frequencies."""
         # Main control loop timer
         self.timer = self.create_timer(1.0 / self.parameter_manager.update_rate, self.control_loop_callback)
         
         # Diagnostic timer
-        self.diagnostic_timer = self.create_timer(1.0 / self.parameter_manager.diagnostics_rate, self.publish_diagnostics)
+        self.diagnostic_timer = self.create_timer(
+            1.0 / self.parameter_manager.diagnostics_rate, 
+            lambda: self.diagnostics_publisher.publish_diagnostics(self.state_manager)
+        )
         
         # Resource monitoring timer
-        self.resource_timer = self.create_timer(self.parameter_manager.cpu_throttle_interval, self._update_resource_monitoring)
+        self.resource_timer = self.create_timer(
+            self.parameter_manager.cpu_throttle_interval, 
+            self._update_resource_monitoring
+        )
+    
+    def _validate_initialization(self):
+        """Validate that all components are properly initialized."""
+        pm = self.parameter_manager
         
+        # Validate parameters
+        required_params = [
+            'update_rate', 'min_control_rate', 'max_control_rate',
+            'approach_distance', 'min_approach_factor',
+            'distance_threshold', 'lateral_threshold', 'angular_threshold'
+        ]
+        for param in required_params:
+            if not hasattr(pm, param) or getattr(pm, param) is None:
+                raise ValueError(f"Required parameter '{param}' is not initialized")
+                
+        # Validate components
+        required_components = [
+            'resource_monitor', 'transform_system', 'target_tracker',
+            'strategy_module', 'velocity_control', 'recovery_module',
+            'diagnostics_publisher', 'performance_monitor', 'strategy_factory'
+        ]
+        for component in required_components:
+            if not hasattr(self, component) or getattr(self, component) is None:
+                raise RuntimeError(f"Required component '{component}' is not initialized")
+    
+    # StateObserver Implementation
+    def on_state_change(self, old_state, new_state, reason=""):
+        """Called when robot state changes."""
+        if self.parameter_manager.debug_level >= 1:
+            self.throttled_logger.info(
+                f"STATE TRANSITION: {old_state} → {new_state} {reason}",
+                throttle_duration_sec=LOG_THROTTLE_STATE,
+                log_id='state_transition'
+            )
+        
+        # Handle recovery state transitions
+        if new_state == "recovery":
+            stop_cmd = self.recovery_module.start_recovery()
+            self.cmd_vel_pub.publish(stop_cmd)
+        elif old_state == "recovery" and new_state != "recovery":
+            self.recovery_module.reset()
+            if self.parameter_manager.debug_level >= 1:
+                self.throttled_logger.info("Exiting recovery mode", throttle_duration_sec=LOG_THROTTLE_STATE, log_id='recovery_exit')
+            
+        # Complete controller reset when transitioning between tracking and other states
+        if new_state == "tracking" or old_state == "tracking":
+            self._complete_controller_reset()
+            if new_state == "tracking":
+                self.state_manager.robot.force_target_reacquisition = True
+                
+        if new_state != "tracking" and new_state != "searching" and new_state != "lost_ball":
+            stop_cmd = self.recovery_module.stop_robot()
+            self.cmd_vel_pub.publish(stop_cmd)
+    
+    def on_freshness_change(self, freshness_level, data_age):
+        """Called when data freshness level changes."""
+        if freshness_level != "unknown" and self.parameter_manager.debug_level >= 1:
+            self.throttled_logger.info(
+                f"Data freshness changed: {freshness_level} "
+                f"(age: {data_age:.3f}s)",
+                throttle_duration_sec=1.0,
+                log_id='freshness_change'
+            )
+            
+        # Handle critical freshness
+        if freshness_level == "critical" and not self.state_manager.movement.robot_stopped:
+            self.get_logger().warning(f"CRITICAL DATA AGE: {data_age:.3f}s - Safety stop triggered")
+            stop_cmd = self.recovery_module.stop_robot()
+            self.cmd_vel_pub.publish(stop_cmd)
+            
+    def state_callback(self, msg):
+        """Handle robot state updates with improved recovery behavior."""
+        new_state = msg.data
+        # If state changed, handle the transition using state manager
+        if new_state != self.state_manager.robot.state:
+            current_time = time.time()
+            if self.parameter_manager.debug_level >= 2:
+                time_in_state = current_time - self.state_manager.robot.last_state_change_time
+                self.get_logger().info(f"Time in state '{self.state_manager.robot.state}': {time_in_state:.2f}s")
+            
+            # Use state manager to handle transition
+            self.state_manager.transition_state(new_state)
+    
     def orientation_callback(self, msg):
         """Handle orientation updates from the IMU with improved transform handling."""
         # Extract yaw (z component) from the Vector3Stamped message
         raw_orientation = msg.vector.z
         
         # Store timestamp for freshness checking
-        self.state_mgr.robot.last_orientation_time = time.time()
+        self.state_manager.robot.last_orientation_time = time.time()
         
         # Check if transform system is ready before attempting transforms
-        if (not hasattr(self, 'transform_utils') or 
-            not self.transform_utils.is_transform_system_ready()):
+        if (not hasattr(self, 'transform_system') or 
+            not self.transform_system.is_transform_system_ready()):
             # If transforms aren't ready, use raw orientation
-            self.state_mgr.robot.robot_orientation = raw_orientation
+            self.state_manager.robot.robot_orientation = raw_orientation
             return
         
         # If we need to transform the orientation to another frame
-        if self.transform_utils.imu_frame != self.transform_utils.reference_frame:
-            try:
-                # First approach: direct transform using quaternion math
-                transform = self.transform_utils.get_transform_between_frames(
-                    self.transform_utils.imu_frame, 
-                    self.transform_utils.reference_frame
-                )
-                if (transform and hasattr(transform, 'transform') and 
-                    hasattr(transform.transform, 'rotation')):
-                    # Extract quaternion components from transform
-                    qx = transform.transform.rotation.x
-                    qy = transform.transform.rotation.y
-                    qz = transform.transform.rotation.z
-                    qw = transform.transform.rotation.w
-                    
-                    # Create forward unit vector in IMU frame
-                    # Use optimized trigonometry if enabled
-                    if self.parameter_manager.use_fast_trigonometry:
-                        forward_x = self.fast_trig.cos(raw_orientation)
-                        forward_y = self.fast_trig.sin(raw_orientation)
-                    else:
-                        forward_x = math.cos(raw_orientation)
-                        forward_y = math.sin(raw_orientation)
-                    forward_z = 0.0
-                    
-                    # Calculate rotation matrix elements from quaternion - optimized
-                    # Pre-calculate common terms
-                    xx = qx * qx
-                    xy = qx * qy
-                    xz = qx * qz
-                    xw = qx * qw
-                    yy = qy * qy
-                    yz = qy * qz
-                    yw = qy * qw
-                    zz = qz * qz
-                    zw = qz * qw
-                    
-                    # Apply rotation to forward vector
-                    r00 = 1.0 - 2.0 * (yy + zz)
-                    r01 = 2.0 * (xy - zw)
-                    r02 = 2.0 * (xz + yw)
-                    r10 = 2.0 * (xy + zw)
-                    r11 = 1.0 - 2.0 * (xx + zz)
-                    r12 = 2.0 * (yz - xw)
-                    
-                    # Transform forward vector
-                    tx = r00 * forward_x + r01 * forward_y + r02 * forward_z
-                    ty = r10 * forward_x + r11 * forward_y + r12 * forward_z
-                    
-                    # Calculate new orientation angle
-                    # Use optimized atan2 if enabled
-                    if self.parameter_manager.use_fast_trigonometry:
-                        self.state_mgr.robot.robot_orientation = self.fast_trig.atan2(ty, tx)
-                    else:
-                        self.state_mgr.robot.robot_orientation = math.atan2(ty, tx)
+        try:
+            # First approach: direct transform using quaternion math
+            transform = self.transform_system.get_transform_between_frames(
+                self.transform_system.imu_frame, 
+                self.transform_system.reference_frame
+            )
+            if (transform and hasattr(transform, 'transform') and 
+                hasattr(transform.transform, 'rotation')):
+                # Extract quaternion components from transform
+                qx = transform.transform.rotation.x
+                qy = transform.transform.rotation.y
+                qz = transform.transform.rotation.z
+                qw = transform.transform.rotation.w
+                
+                # Create forward unit vector in IMU frame
+                # Use optimized trigonometry if enabled
+                if self.parameter_manager.use_fast_trigonometry:
+                    forward_x = self.fast_trig.cos(raw_orientation)
+                    forward_y = self.fast_trig.sin(raw_orientation)
                 else:
-                    # If transform not available, use raw orientation
-                    self.state_mgr.robot.robot_orientation = raw_orientation
-                    
-            except Exception as e:
-                # In case of error, fall back to raw orientation
-                if self.parameter_manager.debug_level >= 2:
-                    self.get_logger().warning(f"Orientation transform error: {str(e)}")
-                self.state_mgr.robot.robot_orientation = raw_orientation
-        else:
-            # No transform needed
-            self.state_mgr.robot.robot_orientation = raw_orientation
+                    forward_x = math.cos(raw_orientation)
+                    forward_y = math.sin(raw_orientation)
+                forward_z = 0.0
+                
+                # Calculate rotation matrix elements from quaternion - optimized
+                # Pre-calculate common terms
+                xx = qx * qx
+                xy = qx * qy
+                xz = qx * qz
+                xw = qx * qw
+                yy = qy * qy
+                yz = qy * qz
+                yw = qy * qw
+                zz = qz * qz
+                zw = qz * qw
+                
+                # Apply rotation to forward vector
+                r00 = 1.0 - 2.0 * (yy + zz)
+                r01 = 2.0 * (xy - zw)
+                r02 = 2.0 * (xz + yw)
+                r10 = 2.0 * (xy + zw)
+                r11 = 1.0 - 2.0 * (xx + zz)
+                r12 = 2.0 * (yz - xw)
+                
+                # Transform forward vector
+                tx = r00 * forward_x + r01 * forward_y + r02 * forward_z
+                ty = r10 * forward_x + r11 * forward_y + r12 * forward_z
+                
+                # Calculate new orientation angle
+                # Use optimized atan2 if enabled
+                if self.parameter_manager.use_fast_trigonometry:
+                    self.state_manager.robot.robot_orientation = self.fast_trig.atan2(ty, tx)
+                else:
+                    self.state_manager.robot.robot_orientation = math.atan2(ty, tx)
+            else:
+                # If transform not available, use raw orientation
+                self.state_manager.robot.robot_orientation = raw_orientation
+                
+        except Exception as e:
+            # In case of error, fall back to raw orientation
+            if self.parameter_manager.debug_level >= 2:
+                self.get_logger().warning(f"Orientation transform error: {str(e)}")
+            self.state_manager.robot.robot_orientation = raw_orientation
         
         # Log orientation updates at high debug level
         if self.parameter_manager.debug_level >= 3:
             # Use pre-computed table for degrees conversion if fast trig is enabled
             if self.parameter_manager.use_fast_trigonometry:
-                orientation_degrees = self.state_mgr.robot.robot_orientation * 57.29578  # 180/pi
+                orientation_degrees = self.state_manager.robot.robot_orientation * 57.29578  # 180/pi
             else:
-                orientation_degrees = math.degrees(self.state_mgr.robot.robot_orientation)
-                
-            self.get_logger().debug(f"Orientation update: yaw={orientation_degrees:.2f}°")
+                orientation_degrees = math.degrees(self.state_manager.robot.robot_orientation)
+                            
+            self.throttled_logger.info(f"Orientation update: yaw={orientation_degrees:.2f}°", 
+                throttle_duration_sec=LOG_THROTTLE_CONTROL, log_id='Orientation_update')
     
     def _is_orientation_fresh(self):
         """Check if orientation data is fresh enough to use."""
-        if self.state_mgr.robot.last_orientation_time is None:
+        if self.state_manager.robot.last_orientation_time is None:
             return False
             
         current_time = time.time()
-        age = current_time - self.state_mgr.robot.last_orientation_time
+        age = current_time - self.state_manager.robot.last_orientation_time
         
         # Consider orientation data older than 0.5 seconds as stale
         return age < 0.5
@@ -755,10 +1465,10 @@ class OptimizedPIDControllerNode(Node):
         can trigger immediate control cycle for improved responsiveness.
         """
         # Early exit if shutting down
-        if self.state_mgr.shutting_down:
+        if self.state_manager.shutting_down:
             return
         
-        # ADDED: Record time for event tracking
+        # Record time for event tracking
         event_time = time.time()
         
         # Update target data in the target tracking module
@@ -767,7 +1477,7 @@ class OptimizedPIDControllerNode(Node):
         if not update_success:
             return
         
-        # ADDED: Check for fusion rate updates
+        # Check for fusion rate updates
         if self.parameter_manager.enable_fusion_rate_detection:
             try:
                 # Make sure the method exists and handle possible exceptions
@@ -775,78 +1485,355 @@ class OptimizedPIDControllerNode(Node):
                     fusion_rate, was_updated = self.target_tracker.get_fusion_rate()
                     
                     if was_updated and fusion_rate > 0:  # Ensure rate is positive
-                        # Update our stored fusion rate
-                        self.state_mgr.perf.detected_fusion_rate = fusion_rate
-                        self.state_mgr.perf.fusion_rate_updated = True
+                        # Update performance monitor with fusion rate
+                        self.performance_monitor.update_fusion_rate(fusion_rate)
                         
-                        # Update the resource monitor with the new fusion rate
-                        if hasattr(self.resource_monitor, 'set_fusion_rate'):
-                            self.resource_monitor.set_fusion_rate(fusion_rate)
-                            
                         self.get_logger().info(f"Detected fusion rate: {fusion_rate:.2f}Hz")
             except Exception as e:
                 self.get_logger().warning(f"Error getting fusion rate: {str(e)}")
         
-        # ADDED: Event-based control execution
+        # Event-based control execution
         # Only trigger if we're in tracking mode and it's been long enough since last execution
-        # This prevents excessive CPU usage while ensuring responsiveness
         try:
-            if (self.state_mgr.robot.state == "tracking" and 
-                (event_time - self.state_mgr.perf.last_event_execution) > (1.0 / self.parameter_manager.max_control_rate) and
-                (event_time - self.state_mgr.perf.last_timer_execution) > 0.05):  # Minimum 50ms between executions
+            if (self.state_manager.robot.state == "tracking" and 
+                (event_time - self.state_manager.perf.last_event_execution) > (1.0 / self.parameter_manager.max_control_rate) and
+                (event_time - self.state_manager.perf.last_timer_execution) > 0.05):  # Minimum 50ms between executions
                 
                 # Execute control loop directly in response to new data
                 self.execute_control_cycle(event_triggered=True)
-                self.state_mgr.perf.last_event_execution = event_time
-                self.state_mgr.perf.event_control_count += 1
+                self.state_manager.perf.last_event_execution = event_time
+                self.state_manager.perf.event_control_count += 1
         except Exception as e:
             self.get_logger().error(f"Error in event-based control: {str(e)}")
     
-    def state_callback(self, msg):
-        """Handle robot state updates with improved recovery behavior."""
-        new_state = msg.data
-        # If state changed, handle the transition
-        if new_state != self.state_mgr.robot.state:
-            self.get_logger().info(
-                f"STATE TRANSITION: {self.state_mgr.robot.state} → {new_state}",
-                throttle_duration_sec=LOG_THROTTLE_STATE
-            )
-            current_time = time.time()
-            if self.parameter_manager.debug_level >= 2:
-                time_in_state = current_time - self.state_mgr.robot.last_state_change_time
-                self.get_logger().info(f"Time in state '{self.state_mgr.robot.state}': {time_in_state:.2f}s")
-            
-            # Store state transition info
-            self.state_mgr.robot.previous_state = self.state_mgr.robot.state
-            self.state_mgr.robot.state = new_state
-            self.state_mgr.robot.last_state_change_time = current_time
-            
-            # Handle recovery state transitions using RecoveryBehaviorModule only
-            if new_state == "recovery":
-                stop_cmd = self.recovery_module.start_recovery()
-                self.cmd_vel_pub.publish(stop_cmd)
-            elif self.state_mgr.robot.previous_state == "recovery" and new_state != "recovery":
-                self.recovery_module.reset()
-                self.get_logger().info("Exiting recovery mode")
+    def _update_resource_monitoring(self):
+        """Update resource monitoring stats."""
+        try:
+            # Update CPU stats if the method exists
+            if hasattr(self.resource_monitor, 'update_cpu_stats'):
+                self.resource_monitor.update_cpu_stats()
                 
-            # Complete controller reset when transitioning between tracking and other states
-            if new_state == "tracking" or self.state_mgr.robot.previous_state == "tracking":
-                self._complete_controller_reset()
-                if new_state == "tracking":
-                    self.state_mgr.robot.force_target_reacquisition = True
+                # Check for high CPU - trigger cycle skipping if needed
+                if (self.parameter_manager.enable_cycle_skipping and 
+                    hasattr(self.resource_monitor, 'current_cpu_usage') and
+                    self.resource_monitor.current_cpu_usage > self.parameter_manager.max_cpu_skip_threshold):
                     
-            if new_state != "tracking" and new_state != "searching" and new_state != "lost_ball":
+                    self.state_manager.skip_next_cycle = True
+                    
+                    current_time = time.time()
+                    if current_time - self.state_manager.perf.last_cpu_warning_time >= 2.0:
+                        self.get_logger().warning(
+                            f"HIGH CPU LOAD: {self.resource_monitor.current_cpu_usage:.1f}% - skipping next cycle"
+                        )
+                        self.state_manager.perf.last_cpu_warning_time = current_time
+                else:
+                    self.state_manager.skip_next_cycle = False
+                
+            # Log pool statistics periodically if in debug mode
+            if self.parameter_manager.debug_level >= 2 and hasattr(self, 'object_pool'):
+                pool_stats = self.object_pool.get_stats()
+                current_time = time.time()
+                if current_time - self.state_manager.perf.last_pool_log_time >= 10.0:
+                    pool_msg = (
+                        f"Object pool stats: "
+                        f"Twist={pool_stats['Twist']['pool_size']}/{pool_stats['Twist']['max_usage']} "
+                        f"(misses={pool_stats['Twist']['misses']}), "
+                        f"Vector3={pool_stats['Vector3']['pool_size']}/{pool_stats['Vector3']['max_usage']} "
+                        f"(misses={pool_stats['Vector3']['misses']}), "
+                        f"Float32MultiArray={pool_stats['Float32MultiArray']['pool_size']}/{pool_stats['Float32MultiArray']['max_usage']} "
+                        f"(misses={pool_stats['Float32MultiArray']['misses']})"
+                    )
+                    self.throttled_logger.info(pool_msg, throttle_duration_sec=10.0, log_id='pool_stats')
+                    self.state_manager.perf.last_pool_log_time = current_time
+        except Exception as e:
+            if self.parameter_manager.debug_level >= 1:
+                self.get_logger().error(f"Error in resource monitoring: {str(e)}")
+    
+    def _log_periodic_status(self):
+        """Log periodic status updates."""
+        if self.parameter_manager.debug_level < 1:
+            return
+        perf_stats = self.resource_monitor.get_performance_stats()
+        if not perf_stats or not all(k in perf_stats for k in ['cpu_avg', 'cycle_time_ms', 'update_rate']):
+            perf_stats = {
+                'cpu_avg': 0.0,
+                'cycle_time_ms': 0.0,
+                'update_rate': getattr(self.parameter_manager, 'update_rate', 3.0),
+                'skips': 0
+            }
+        strategy_name = getattr(self.strategy_module, 'current_strategy', 'unknown')
+        total_cycles = max(1, self.state_manager.perf.event_control_count + self.state_manager.perf.timer_control_count)
+        event_ratio = self.state_manager.perf.event_control_count / total_cycles * 100.0
+        status_msg = (
+            f"Status: Robot state={self.state_manager.robot.state}, "
+            f"Strategy={strategy_name}, "
+            f"CPU={perf_stats['cpu_avg']:.1f}%, "
+            f"Cycle time={perf_stats['cycle_time_ms']:.2f}ms, "
+            f"Rate={perf_stats['update_rate']:.1f}Hz, "
+            f"Simplified={self.state_manager.movement.using_simplified_control}, "
+            f"Freshness={self.state_manager.freshness.level}, "
+            f"Event-driven={event_ratio:.1f}%, "
+            f"Skips={self.state_manager.perf.skipped_cycle_count}"
+        )
+        if self.parameter_manager.debug_level >= 1:
+            self.throttled_logger.info(status_msg, throttle_duration_sec=LOG_THROTTLE_CONTROL, log_id='periodic_status')
+    
+    def control_loop_callback(self):
+        """Regular control loop to calculate and publish velocity commands with CPU optimization."""
+        try:
+            # Skip if shutting down
+            if self.state_manager.shutting_down:
+                return
+            
+            # Skip if transform system is not initialized and required
+            if (hasattr(self, 'transform_system') and 
+                not self.transform_system.is_transform_system_ready()):
+                
+                # Log at most once per 20 cycles to avoid spamming
+                if self.state_manager.robot.cycle_count % 20 == 0:
+                    status = self.transform_system.get_status()
+                    self.get_logger().warn(
+                        f"Control loop waiting for transform initialization: {status['message']}"
+                    )
+                    
+                    # Try to restart initialization if it's in error state
+                    if status['status'] == TransformStatus.ERROR:
+                        self.get_logger().warn("Attempting to restart transform initialization")
+                        self.transform_system.start_initialization()
+                
+                # Still increment cycle count
+                self.state_manager.robot.cycle_count += 1
+                return
+                    
+            # Apply adaptive rate control if enabled
+            if (self.parameter_manager.adaptive_control_rate and 
+                hasattr(self.resource_monitor, 'current_cpu_usage') and 
+                hasattr(self.parameter_manager, 'update_rate')):
+                
+                # Calculate adaptive rate
+                adaptive_rate = self.performance_monitor.calculate_adaptive_rate(
+                    self.state_manager,
+                    self.parameter_manager.update_rate, 
+                    self.resource_monitor.current_cpu_usage
+                )
+                
+                # Check if we should skip this cycle
+                if self.performance_monitor.should_skip_cycle(
+                    self.resource_monitor.current_cpu_usage,
+                    self.state_manager.last_control_time,
+                    adaptive_rate
+                ):
+                    # Increment skipped cycle count
+                    self.state_manager.perf.skipped_cycle_count += 1
+                    return
+            
+            # Execute the control cycle
+            self.execute_control_cycle(event_triggered=False)
+                    
+        except Exception as e:
+            stack_trace = traceback.format_exc()
+            self.get_logger().error(f"Unexpected error in control_loop_callback: {str(e)}\nStack trace:\n{stack_trace}")
+            
+            # Try to safely stop the robot
+            try:
+                self.recovery_module.stop_robot()
+            except Exception as stop_error:
+                self.get_logger().error(f"Failed to stop robot after error: {str(stop_error)}")
+    
+    def execute_control_cycle(self, event_triggered=False):
+        """Execute one complete control cycle with improved error handling and state management."""
+        try:
+            # Skip if shutting down
+            if self.state_manager.shutting_down:
+                return
+            
+            # Skip if transform system is not initialized and required
+            if (hasattr(self, 'transform_system') and 
+                not self.transform_system.is_transform_system_ready()):
+                return
+            
+            # Track execution time source for metrics
+            if event_triggered:
+                self.state_manager.perf.last_event_execution = time.time()
+            else:
+                self.state_manager.perf.last_timer_execution = time.time()
+                self.state_manager.perf.timer_control_count += 1
+            
+            # Mark cycle start for performance tracking
+            cycle_start_time = time.time()
+            
+            # Calculate dt since last control
+            current_time = time.time()
+            dt = current_time - self.state_manager.last_control_time
+            # Ensure dt is reasonable (protect against time jumps)
+            if dt > 1.0:
+                self.get_logger().warning(f"Large time step detected: {dt:.3f}s - capping at 0.1s")
+                dt = 0.1  # Cap at 100ms to prevent instability
+            elif dt <= 0.0:
+                dt = 0.001  # Ensure positive dt to prevent division by zero
+            
+            self.state_manager.last_control_time = current_time
+            
+            # Increment cycle counter
+            self.state_manager.robot.cycle_count += 1
+            
+            # Check data freshness - critical for safety
+            is_fresh, freshness_level, data_age = self._check_data_freshness()
+            
+            # Update state manager with freshness info
+            self.state_manager.update_freshness(freshness_level, data_age)
+            
+            # Log periodic status updates (once every 50 cycles)
+            if self.state_manager.robot.cycle_count % 50 == 0:
+                self._log_periodic_status()
+            
+            # Handle critical data freshness (prioritized over other state handling)
+            if freshness_level == "critical":
+                if not self.state_manager.movement.robot_stopped:
+                    self.get_logger().warning(f"CRITICAL DATA AGE: {data_age:.3f}s - Safety stop triggered")
+                    stop_cmd = self.recovery_module.stop_robot()
+                    self.cmd_vel_pub.publish(stop_cmd)  # Ensure command is published
+                    self.state_manager.movement.robot_stopped = True
+                    self.state_manager.movement.stop_time = time.time()
+                return  # Exit early when data is critically stale
+                
+            # Special handling for recovery mode (higher priority than other states)
+            if self.state_manager.robot.state == "recovery":
+                position_data = self.target_tracker.get_position_data()
+                orientation_data = {'yaw': self.state_manager.robot.robot_orientation}
+                cmd_vel, is_complete = self.recovery_module.handle_recovery(
+                    time.time(), position_data, orientation_data
+                )
+                self.cmd_vel_pub.publish(cmd_vel)
+                if is_complete:
+                    self.recovery_module.reset()
+                    self.get_logger().info("Recovery sequence completed")
+                return
+            
+            # Handle non-tracking states (searching/lost_ball have their own handling)
+            if self.state_manager.robot.state != "tracking":
+                if self._handle_non_tracking_state():
+                    return  # Exit after handling non-tracking state
+            
+            # Check if orientation data is fresh (prevents race conditions)
+            if not self._is_orientation_fresh():
+                if self.parameter_manager.debug_level >= 2:
+                    self.get_logger().warning("Skipping control cycle - orientation data is stale")
+                return
+            
+            # Determine computation level needed
+            # The key CPU optimization - avoid expensive calculations when appropriate
+            if self.parameter_manager.use_simplified_control_when_possible:
+                computation_level = self._determine_computation_level()
+                self.state_manager.movement.computation_level = computation_level
+                
+                # Create appropriate control strategy based on computation level
+                current_strategy = self.strategy_factory.create_strategy(
+                    self.state_manager.robot.state,
+                    computation_level
+                )
+                
+                if computation_level < 3:
+                    self.state_manager.movement.using_simplified_control = True
+                    self.state_manager.perf.simplified_control_count += 1
+                else:
+                    self.state_manager.movement.using_simplified_control = False
+                    # Record that we did full computation
+                    self.state_manager.movement.last_full_computation_time = time.time()
+            else:
+                # Standard control path
+                self.state_manager.movement.using_simplified_control = False
+                current_strategy = self.strategy_factory.create_strategy(
+                    self.state_manager.robot.state,
+                    3  # Full computation
+                )
+            
+            # Calculate current errors
+            distance, lateral, bearing, angular_degrees = self._calculate_errors()
+            
+            if self.parameter_manager.debug_level >= 2:
+                debug_msg = (
+                    f"PRE-STOP CHECK: distance={distance:.3f}m (target={self.parameter_manager.desired_distance:.3f}m), "
+                    f"lateral={lateral:.3f}m, angular={angular_degrees:.2f}°, "
+                    f"is_stopped={self.state_manager.movement.robot_stopped}"
+                )
+                self.get_logger().info(debug_msg)
+            
+            # Check stop conditions and handle if needed
+            if self._handle_stop_conditions(distance, lateral, angular_degrees, dt):
+                return  # Exit if stop conditions were met
+            
+            # Get position data for control strategy
+            position_data = self.target_tracker.get_position_data()
+            
+            # Compute velocities using selected strategy
+            velocities = current_strategy.compute_velocity_command(
+                self._current_errors,
+                position_data, 
+                current_time,
+                freshness_level
+            )
+            
+            # Update strategy factory with last velocity
+            self.strategy_factory.set_last_cmd_vel(velocities)
+            
+            # Guard against NaN values which can cause silent failures
+            if any(math.isnan(v) for v in velocities):
+                self.get_logger().error("NaN velocity detected - resetting to zero")
+                velocities = [0.0, 0.0, 0.0]
+            
+            # Publish command
+            cmd_vel_msg = self._cmd_vel_msg
+            cmd_vel_msg.linear.x = float(velocities[0])
+            cmd_vel_msg.linear.y = float(velocities[1])
+            cmd_vel_msg.angular.z = float(velocities[2])
+            self.cmd_vel_pub.publish(cmd_vel_msg)
+            
+            # Update last command velocity in state manager
+            self.state_manager.movement.last_cmd_vel = (velocities[0], velocities[1], velocities[2])
+            
+            # Update performance stats
+            cycle_duration = time.time() - cycle_start_time
+            self.performance_monitor.update_performance_stats(cycle_duration)
+                
+        except Exception as e:
+            stack_trace = traceback.format_exc()
+            self.get_logger().error(f"Unexpected error in execute_control_cycle: {str(e)}\nStack trace:\n{stack_trace}")
+            
+            # Try to safely stop the robot
+            try:
                 stop_cmd = self.recovery_module.stop_robot()
-                self.cmd_vel_pub.publish(stop_cmd)
-
-    def _handle_non_tracking_state(self):
-        """Handle robot behavior when not in tracking mode."""
-        # When not tracking, ensure robot is stopped (unless controlled by another node)
-        if self.state_mgr.robot.state not in ["searching", "lost_ball"]:
-            stop_cmd = self.recovery_module.stop_robot()
-            self.cmd_vel_pub.publish(stop_cmd)
-        return True  # Indicate that the method handled the situation
-
+                self.cmd_vel_pub.publish(stop_cmd)  # Ensure the stop command is published
+            except Exception as stop_error:
+                self.get_logger().error(f"Failed to stop robot after error: {str(stop_error)}")
+    
+    def _check_data_freshness(self):
+        """
+        Check the freshness of target data and update system state accordingly.
+        
+        Returns:
+            tuple: (is_fresh, freshness_level, age)
+        """
+        try:
+            # Get freshness information from the target tracker
+            is_fresh, freshness_level, data_age = self.target_tracker.is_target_fresh(
+                max_age=self.parameter_manager.fresh_data_timeout
+            )
+            
+            # Validate returned data (guard against unexpected return values)
+            if not isinstance(freshness_level, str):
+                self.get_logger().warning(f"Invalid freshness level type: {type(freshness_level)}")
+                freshness_level = "critical"  # Default to critical for safety
+            if not isinstance(data_age, (int, float)):
+                self.get_logger().warning(f"Invalid data age type: {type(data_age)}")
+                data_age = 999.0  # Default to high age for safety
+            
+            return is_fresh, freshness_level, data_age            
+        except Exception as e:
+            self.get_logger().error(f"Error checking data freshness: {str(e)}")
+            # Default to critical for safety in case of errors
+            return False, "critical", 999.0
+    
     def _calculate_errors(self):
         """Calculate tracking errors using filtered values."""
         # Get filtered position data from target tracker
@@ -875,7 +1862,15 @@ class OptimizedPIDControllerNode(Node):
             angular_degrees = math.degrees(bearing)
         
         return distance, lateral, bearing, angular_degrees
-
+    
+    def _handle_non_tracking_state(self):
+        """Handle robot behavior when not in tracking mode."""
+        # When not tracking, ensure robot is stopped (unless controlled by another node)
+        if self.state_manager.robot.state not in ["searching", "lost_ball"]:
+            stop_cmd = self.recovery_module.stop_robot()
+            self.cmd_vel_pub.publish(stop_cmd)
+        return True  # Indicate that the method handled the situation
+    
     def _handle_stop_conditions(self, distance, lateral, angular_degrees, dt):
         """Check and handle stop conditions if needed."""
         # Check if we need to reset stopped state based on errors with enhanced hysteresis
@@ -889,14 +1884,14 @@ class OptimizedPIDControllerNode(Node):
         if not state_reset:
             # Check stop conditions
             should_stop, stop_reason = self._evaluate_stop_conditions(
-                distance, lateral, angular_degrees, self.state_mgr.movement.robot_stopped
+                distance, lateral, angular_degrees, self.state_manager.movement.robot_stopped
             )
             
             if should_stop:
-                if not self.state_mgr.movement.robot_stopped:
+                if not self.state_manager.movement.robot_stopped:
                     self.get_logger().info(stop_reason)
-                    self.state_mgr.movement.robot_stopped = True
-                    self.state_mgr.movement.stop_time = time.time()
+                    self.state_manager.movement.robot_stopped = True
+                    self.state_manager.movement.stop_time = time.time()
                     # Generate stop command
                     stop_cmd = self.recovery_module.stop_robot()
                     # Publish stop command to actually stop the robot
@@ -909,196 +1904,181 @@ class OptimizedPIDControllerNode(Node):
         self.angular_error_tracker.update(self._current_errors[2], dt)
         
         return False  # Not handled, continue with normal control
-
-    def _determine_and_apply_strategy(self, dt):
-        """Determine movement strategy and apply it to calculate velocities."""
-        # Determine the optimal movement strategy with hysteresis
-        strategy = self.strategy_module.determine_strategy(
-            self._current_errors[0], 
-            self._current_errors[1], 
-            math.degrees(self._current_errors[2]),
-            self.state_mgr.movement.robot_stopped
-        )
-        
-        # Apply strategy to movement decisions (use object attributes)
-        use_forward = strategy.use_forward
-        use_lateral = strategy.use_lateral
-        use_angular = strategy.use_angular
-        
-        forward_scale = strategy.forward_scale
-        lateral_scale = strategy.lateral_scale
-        angular_scale = strategy.angular_scale
-        
-        if self.parameter_manager.debug_level >= 3:
-            strategy_log = (
-                f"Using strategy: {strategy.strategy_name}, "
-                f"forward={use_forward}, lateral={use_lateral}, angular={use_angular}"
-            )
-            throttled_logger.info(strategy_log, throttle_duration_sec=0.5, log_id='strategy')
-
-        # Compute velocities based on the selected strategy
-        current_time = time.time()
-        
-        # Compute velocities
-        if self.parameter_manager.coordinated_movement and use_lateral and use_angular:
-            # Use coordinated controller for lateral and angular movements
-            linear_x_velocity = self.pid_linear_x.compute(
-                self._current_errors[0], 
-                current_time, 
-                not use_forward,
-                self.distance_error_tracker.get_trend()
-            )
-            
-            # Use coordinated control for lateral and angular velocities
-            lateral_velocity, angular_velocity = self.coordinated_controller.compute(
-                self._current_errors[1],   # lateral error
-                self._current_errors[2],   # angular error
-                current_time,              # current time
-                self.state_mgr.robot.robot_orientation     # current orientation from IMU
-            )
-            
-            # Disable individual components if strategy requires
-            if not use_lateral:
-                lateral_velocity = 0.0
-            if not use_angular:
-                angular_velocity = 0.0
-        else:
-            # Traditional separate PID controllers
-            linear_x_velocity = self.pid_linear_x.compute(
-                self._current_errors[0], 
-                current_time, 
-                not use_forward,
-                self.distance_error_tracker.get_trend()
-            )
-            
-            lateral_velocity = self.pid_linear_y.compute(
-                self._current_errors[1], 
-                current_time, 
-                not use_lateral,
-                self.lateral_error_tracker.get_trend()
-            )
-            
-            angular_velocity = self.pid_angular.compute(
-                self._current_errors[2], 
-                current_time, 
-                not use_angular,
-                self.angular_error_tracker.get_trend()
-            )
-        
-        # Apply strategy scaling factors
-        linear_x_velocity *= forward_scale
-        lateral_velocity *= lateral_scale
-        angular_velocity *= angular_scale
-        
-        # ADDED: Apply freshness-based velocity scaling
-        if self.state_mgr.freshness.level == "stale":
-            # Reduced speed (50%) for stale data
-            stale_scale = 0.5
-            linear_x_velocity *= stale_scale
-            lateral_velocity *= stale_scale
-            angular_velocity *= stale_scale
-            
-            if self.parameter_manager.debug_level >= 1:
-                self.get_logger().warning(
-                    f"Using stale sensor data - scaling velocities to {stale_scale*100:.0f}%",
-                    throttle_duration_sec=2.0
-                )
-        elif self.state_mgr.freshness.level == "critical" or self.state_mgr.freshness.level == "invalid":
-            # Stop for critical or invalid data
-            linear_x_velocity = 0.0
-            lateral_velocity = 0.0
-            angular_velocity = 0.0
-        
-        if self.parameter_manager.debug_level >= 2:
-            velocity_log = (
-                f"After scaling: linear_x={linear_x_velocity:.3f}, "
-                f"lateral={lateral_velocity:.3f}, angular={angular_velocity:.3f}"
-            )
-            throttled_logger.info(velocity_log, throttle_duration_sec=1.0, log_id='velocity')
-            
-        return linear_x_velocity, lateral_velocity, angular_velocity
-
-    def _apply_and_publish_velocities(self, linear_x_velocity, lateral_velocity, angular_velocity):
-        """Apply velocity limits and publish command velocities."""
-        # Apply velocity and acceleration limits
-        position_data = self.target_tracker.get_position_data()
-        target_distance = position_data['distance'] if position_data and 'distance' in position_data else 0.0
-        # Use VelocityControlModule for all velocity state
-        limited_velocities = self.velocity_control.process_velocities(
-            linear_x_velocity, 
-            lateral_velocity, 
-            angular_velocity, 
-            target_distance, 
-            self.parameter_manager.desired_distance,
-            freshness_level=self.state_mgr.freshness.level
-        )
-        linear_x_velocity = limited_velocities[0]
-        lateral_velocity = limited_velocities[1]
-        angular_velocity = limited_velocities[2]
-        # Publish command
-        cmd_vel_msg = self._cmd_vel_msg
-        cmd_vel_msg.linear.x = float(linear_x_velocity)
-        cmd_vel_msg.linear.y = float(lateral_velocity)
-        cmd_vel_msg.angular.z = float(angular_velocity)
-        self.cmd_vel_pub.publish(cmd_vel_msg)
-        
-        # Update last command velocity in state manager
-        self.state_mgr.movement.last_cmd_vel = (linear_x_velocity, lateral_velocity, angular_velocity)
-        
-        # Update error trackers only if significant movement is occurring
-        motion_occurred = False
-        if abs(linear_x_velocity) > 0.05:
-            self.distance_error_tracker.record_correction()
-            motion_occurred = True
-        if abs(lateral_velocity) > 0.05:
-            self.lateral_error_tracker.record_correction()
-            motion_occurred = True
-        if abs(angular_velocity) > 0.1:
-            self.angular_error_tracker.record_correction()
-            motion_occurred = True
-        return motion_occurred
-
-    def _check_data_freshness(self):
+    
+    def _evaluate_stop_conditions(self, distance, lateral, angular_degrees, is_stopped):
         """
-        Check the freshness of target data and update system state accordingly.
+        Evaluate if the robot should stop based on current errors.
         
+        Args:
+            distance: Current distance to target
+            lateral: Current lateral offset
+            angular_degrees: Current angular error in degrees
+            is_stopped: Whether the robot is currently stopped
+            
         Returns:
-            tuple: (is_fresh, freshness_level, age)
+            tuple: (should_stop, reason) - True if robot should stop, False if it should move
         """
-        try:
-            # Get freshness information from the target tracker
-            is_fresh, freshness_level, data_age = self.target_tracker.is_target_fresh(
-                max_age=self.parameter_manager.fresh_data_timeout
+        # Calculate error values
+        distance_error = abs(distance - self.parameter_manager.desired_distance)
+        lateral_error = abs(lateral)
+        angular_error = abs(angular_degrees)
+        
+        # Start with base thresholds
+        distance_threshold = self.parameter_manager.distance_threshold
+        lateral_threshold = self.parameter_manager.lateral_threshold
+        angular_threshold = self.parameter_manager.angular_threshold
+        
+        # Increase angular threshold when at target distance
+        if distance_error < self.parameter_manager.distance_threshold * 1.5:
+            angular_threshold *= self.parameter_manager.angular_at_target_factor
+            if self.parameter_manager.debug_level >= 2:
+                threshold_msg = f"At target distance: increased angular threshold to {angular_threshold:.2f}°"
+                self.throttled_logger.info(threshold_msg, throttle_duration_sec=LOG_THROTTLE_DIAG, log_id='angular_thresholds')
+        
+        # Apply state-dependent hysteresis
+        if is_stopped:
+            # Higher thresholds to start moving (requires larger errors)
+            hysteresis = 1.5 + self.state_manager.movement.movement_hysteresis
+            distance_threshold = min(distance_threshold * hysteresis, 0.2)
+            lateral_threshold = min(lateral_threshold * hysteresis, 0.15)
+            angular_threshold = min(angular_threshold * hysteresis, 15.0)
+        else:
+            # Lower thresholds to stop (more precision when near target)
+            hysteresis = 0.8
+            distance_threshold *= hysteresis
+            lateral_threshold *= hysteresis
+            angular_threshold *= hysteresis
+        
+        # Log thresholds for debugging
+        if self.parameter_manager.debug_level >= 2:
+            debug_msg = (
+                f"Stop thresholds: d={distance_error:.3f}/{distance_threshold:.3f}, "
+                f"l={lateral_error:.3f}/{lateral_threshold:.3f}, "
+                f"a={angular_error:.2f}/{angular_threshold:.2f}"
             )
+            self.throttled_logger.info(debug_msg, throttle_duration_sec=LOG_THROTTLE_DIAG, log_id='stop_thresholds')
             
-            # Validate returned data (guard against unexpected return values)
-            if not isinstance(freshness_level, str):
-                self.get_logger().warning(f"Invalid freshness level type: {type(freshness_level)}")
-                freshness_level = "critical"  # Default to critical for safety
-            if not isinstance(data_age, (int, float)):
-                self.get_logger().warning(f"Invalid data age type: {type(data_age)}")
-                data_age = 999.0  # Default to high age for safety
+        
+        # Check if any error exceeds thresholds
+        if (distance_error > distance_threshold or
+            lateral_error > lateral_threshold or
+            angular_error > angular_threshold):
             
-            # Check if the freshness level has changed
-            if freshness_level != self.state_mgr.freshness.level:
-                # Log the transition
-                if self.state_mgr.freshness.level != "unknown":  # Skip initial setting
-                    self.get_logger().info(
-                        f"Data freshness changed: {self.state_mgr.freshness.level} → {freshness_level} "
-                        f"(age: {data_age:.3f}s)"
-                    )
-                # Record the time of state change
-                self.state_mgr.freshness.state_change_time = time.time()
-                # Update the freshness level
-                self.state_mgr.freshness.level = freshness_level
+            reason = (
+                f"Movement needed: distance_error={distance_error:.3f}m, "
+                f"lateral_error={lateral_error:.3f}m, "
+                f"angular_error={angular_error:.2f}°"
+            )
+            return False, reason  # Return False to indicate robot should NOT stop
+        
+        # All errors within thresholds - robot should stop
+        reason = (
+            f"Target reached: distance_error={distance_error:.3f}m, "
+            f"lateral_error={lateral_error:.3f}m, "
+            f"angular_error={angular_error:.2f}°"
+        )
+        
+        # Accumulate hysteresis for sustained stops
+        if not is_stopped:
+            self.state_manager.movement.movement_hysteresis += 0.05
+            self.state_manager.movement.movement_hysteresis = min(0.3, self.state_manager.movement.movement_hysteresis)  # Cap at 0.3
+        
+        return True, reason  # Return True to indicate robot SHOULD stop
+    
+    def _reset_stopped_state_if_needed(self, distance_error, lateral_error, angular_error):
+        """
+        Reset stopped state if significant movement is required.
+        
+        Args:
+            distance_error: Error in distance (meters)
+            lateral_error: Error in lateral position (meters)
+            angular_error: Error in angular position (degrees)
             
-            #caller handles the stop when data is not fresh
-            return is_fresh, freshness_level, data_age            
-        except Exception as e:
-            self.get_logger().error(f"Error checking data freshness: {str(e)}")
-            # Default to critical for safety in case of errors
-            return False, "critical", 999.0
-
+        Returns:
+            bool: True if stopped state was reset, False otherwise
+        """
+        # If already moving, no need to reset
+        if not self.state_manager.movement.robot_stopped:
+            return False
+        
+        # Handle initialization for first movement after startup
+        if self.state_manager.movement.initial_movement_boost:
+            hysteresis = 0.5  # Much lower hysteresis for first movement
+            self.state_manager.movement.initial_movement_boost = False
+        else:
+            # Regular hysteresis calculation
+            stop_duration = time.time() - self.state_manager.movement.stop_time
+            hysteresis = min(1.1, 1.0 + stop_duration * 0.1)
+        
+        # Calculate movement thresholds with hysteresis
+        distance_threshold = self.parameter_manager.distance_threshold * hysteresis * 0.7
+        lateral_threshold = self.parameter_manager.lateral_threshold * hysteresis * 0.7
+        
+        # Adjust angular threshold based on distance to target
+        if abs(distance_error) < self.parameter_manager.distance_threshold * 1.2:
+            # More lenient when at target distance
+            angular_threshold = self.parameter_manager.angular_threshold * self.parameter_manager.angular_at_target_factor * hysteresis
+        else:
+            # Standard threshold otherwise
+            angular_threshold = self.parameter_manager.angular_threshold * hysteresis
+        
+        # Check if any error exceeds thresholds
+        if (abs(distance_error) > distance_threshold or
+            abs(lateral_error) > lateral_threshold or
+            abs(angular_error) > angular_threshold):
+            
+            # Log the decision to exit stopped state
+            log_msg = (
+                f"Exiting stopped state - Movement required: "
+                f"distance_error={distance_error:.3f}m(threshold={distance_threshold:.3f}), "
+                f"lateral_error={lateral_error:.3f}m(threshold={lateral_threshold:.3f}), "
+                f"angular_error={angular_error:.2f}°(threshold={angular_threshold:.2f})"
+            )
+            if self.parameter_manager.debug_level >= 1:
+                self.throttled_logger.info(log_msg, throttle_duration_sec=2.0, log_id='exit_stopped')
+            
+            # Reset stopped state
+            self.state_manager.movement.robot_stopped = False
+            
+            # Reset movement hysteresis
+            self.state_manager.movement.movement_hysteresis = 0.0
+            
+            return True
+        
+        return False
+    
+    def _complete_controller_reset(self):
+        """Complete reset of all controllers and error states."""
+        # Reset all PID controllers
+        self.pid_linear_x.reset()
+        self.pid_linear_y.reset()
+        self.pid_angular.reset()
+        # Reset coordinated controller
+        self.coordinated_controller.reset()
+        # Reset all error trackers
+        self.distance_error_tracker.reset()
+        self.lateral_error_tracker.reset()
+        self.angular_error_tracker.reset()
+        # Reset strategy module
+        self.strategy_module.reset()
+        # Reset velocity control module (centralized state)
+        self.velocity_control.reset()
+        # Reset target tracker if needed
+        if hasattr(self, 'target_tracker'):
+            if hasattr(self.target_tracker, 'reset'):
+                self.target_tracker.reset()
+        # Reset movement hysteresis
+        self.state_manager.movement.movement_hysteresis = 0.0
+        # Set stopped state
+        self.state_manager.movement.robot_stopped = True
+        self.state_manager.movement.stop_time = time.time()
+        # Reset computation tracking
+        self.state_manager.movement.using_simplified_control = False
+        self.state_manager.movement.last_full_computation_time = time.time()
+        # Reset data freshness tracking
+        self.state_manager.freshness.level = "unknown"
+        self.get_logger().info("Complete controller reset performed")
+    
     def _determine_computation_level(self):
         """
         Determine the level of computation needed for the current cycle.
@@ -1119,7 +2099,7 @@ class OptimizedPIDControllerNode(Node):
         elif cpu_usage > 85.0:
             computation_level = min(computation_level, 2)
         # Always perform full computation periodically to ensure accuracy
-        time_since_full = time.time() - self.state_mgr.movement.last_full_computation_time
+        time_since_full = time.time() - self.state_manager.movement.last_full_computation_time
         if time_since_full > 0.5:
             return 3
         position_data = self.target_tracker.get_position_data()
@@ -1153,1004 +2133,14 @@ class OptimizedPIDControllerNode(Node):
             self.angular_error_tracker.get_trend() == "stable"):
             computation_level = min(computation_level, 1)
         return computation_level
-
-    def calculate_adaptive_rate(self, base_rate, cpu_usage):
-        """
-        Calculate adaptive control rate based on CPU usage and fusion rate.
-        
-        Args:
-            base_rate: The base update rate
-            cpu_usage: Current CPU usage percentage
-            
-        Returns:
-            float: Adjusted update rate
-        Notes:
-            - Full control rate is now allowed up to 85% CPU usage.
-            - Scaling down only starts above 85% CPU.
-        """
-        try:
-            current_time = time.time()
-            if not isinstance(base_rate, (int, float)) or base_rate <= 0:
-                self.get_logger().warning(f"Invalid base_rate: {base_rate}, using default 3.0Hz")
-                base_rate = 3.0
-            if not isinstance(cpu_usage, (int, float)) or cpu_usage < 0:
-                self.get_logger().warning(f"Invalid cpu_usage: {cpu_usage}, using 50%")
-                cpu_usage = 50.0
-                
-            # Only adjust rate periodically to avoid oscillation
-            if current_time - self.state_mgr.perf.last_rate_adjustment_time < 1.0:
-                return self.state_mgr.perf.current_rate or base_rate
-                
-            self.state_mgr.perf.last_rate_adjustment_time = current_time
-            
-            # Apply fusion rate consideration if detected
-            if self.state_mgr.perf.fusion_rate_updated and self.parameter_manager.enable_fusion_rate_detection:
-                fusion_rate = self.state_mgr.perf.detected_fusion_rate
-                if fusion_rate > 0 and fusion_rate < 100:
-                    adjusted_base_rate = min(max(fusion_rate * 1.2, self.parameter_manager.min_control_rate), self.parameter_manager.max_control_rate)
-                    if abs(adjusted_base_rate - base_rate) > 0.3:
-                        self.get_logger().info(
-                            f"Adjusted base rate using fusion detection: {base_rate:.1f}Hz -> {adjusted_base_rate:.1f}Hz "
-                            f"(fusion_rate: {fusion_rate:.1f}Hz)"
-                        )
-                    base_rate = adjusted_base_rate
-                    
-            # Adjusted thresholds for high baseline CPU
-            if cpu_usage > 95.0:
-                new_rate = self.parameter_manager.min_control_rate
-            elif cpu_usage > 90.0:
-                new_rate = base_rate * 0.5
-            elif cpu_usage > 85.0:
-                new_rate = base_rate * 0.7
-            elif cpu_usage > 80.0:
-                new_rate = base_rate * 0.85
-            elif cpu_usage < 40.0:
-                new_rate = base_rate * 1.1
-            else:
-                new_rate = base_rate
-                
-            new_rate = max(self.parameter_manager.min_control_rate, min(self.parameter_manager.max_control_rate, new_rate))
-            self.state_mgr.perf.current_rate = new_rate
-            self.state_mgr.perf.adaptive_rate_history.append((current_time, new_rate))
-            
-            if abs(new_rate - self.state_mgr.perf.last_logged_rate) > 0.5:
-                self.get_logger().info(
-                    f"Adaptive rate adjusted: {self.state_mgr.perf.last_logged_rate:.1f}Hz -> {new_rate:.1f}Hz "
-                    f"(CPU: {cpu_usage:.1f}%)"
-                )
-                self.state_mgr.perf.last_logged_rate = new_rate
-                
-            return new_rate
-        except Exception as e:
-            self.get_logger().error(f"Error in calculate_adaptive_rate: {str(e)}")
-            return max(base_rate, self.parameter_manager.min_control_rate)
-
-    def execute_control_cycle(self, event_triggered=False):
-        """Execute one complete control cycle with improved error handling and state management."""
-        try:
-            # Skip if shutting down
-            if self.state_mgr.shutting_down:
-                return
-            
-            # Skip if transform system is not initialized and required for this operation
-            if (hasattr(self, 'transform_system') and 
-                not self.transform_system.is_transform_system_ready()):
-                return
-            
-            # Track execution time source for metrics
-            if event_triggered:
-                self.state_mgr.perf.last_event_execution = time.time()
-            else:
-                self.state_mgr.perf.last_timer_execution = time.time()
-                self.state_mgr.perf.timer_control_count += 1
-            
-            # Mark cycle start for performance tracking
-            self.cycle_start_time = time.time()
-            
-            # Calculate dt since last control
-            current_time = time.time()
-            dt = current_time - self.state_mgr.last_control_time
-            # Ensure dt is reasonable (protect against time jumps)
-            if dt > 1.0:
-                self.get_logger().warning(f"Large time step detected: {dt:.3f}s - capping at 0.1s")
-                dt = 0.1  # Cap at 100ms to prevent instability
-            elif dt <= 0.0:
-                dt = 0.001  # Ensure positive dt to prevent division by zero
-            
-            self.state_mgr.last_control_time = current_time
-            
-            # Increment cycle counter
-            self.state_mgr.robot.cycle_count += 1
-            
-            # Check data freshness - critical for safety
-            is_fresh, freshness_level, data_age = self._check_data_freshness()
-            
-            # Log periodic status updates (once every 50 cycles)
-            if self.state_mgr.robot.cycle_count % 50 == 0:
-                self._log_periodic_status()
-            
-            # Handle critical data freshness (prioritized over other state handling)
-            if freshness_level == "critical":
-                if not self.state_mgr.movement.robot_stopped:
-                    self.get_logger().warning(f"CRITICAL DATA AGE: {data_age:.3f}s - Safety stop triggered")
-                    stop_cmd = self.recovery_module.stop_robot()
-                    self.cmd_vel_pub.publish(stop_cmd)  # Ensure command is published
-                    self.state_mgr.movement.robot_stopped = True
-                    self.state_mgr.movement.stop_time = time.time()
-                return  # Exit early when data is critically stale
-                
-            # Special handling for recovery mode (higher priority than other states)
-            if self.state_mgr.robot.state == "recovery":
-                position_data = self.target_tracker.get_position_data()
-                orientation_data = {'yaw': self.state_mgr.robot.robot_orientation}
-                cmd_vel, is_complete = self.recovery_module.handle_recovery(
-                    time.time(), position_data, orientation_data
-                )
-                self.cmd_vel_pub.publish(cmd_vel)
-                if is_complete:
-                    self.recovery_module.reset()
-                    self.get_logger().info("Recovery sequence completed")
-                return
-            
-            # Handle non-tracking states (searching/lost_ball have their own handling)
-            if self.state_mgr.robot.state != "tracking":
-                if self._handle_non_tracking_state():
-                    return  # Exit after handling non-tracking state
-            
-            # Check if orientation data is fresh (prevents race conditions)
-            if not self._is_orientation_fresh():
-                if self.parameter_manager.debug_level >= 2:
-                    self.get_logger().warning("Skipping control cycle - orientation data is stale", 
-                                            throttle_duration_sec=1.0)
-                return
-            
-            # Determine computation level needed
-            # The key CPU optimization - avoid expensive calculations when appropriate
-            if self.parameter_manager.use_simplified_control_when_possible:
-                computation_level = self._determine_computation_level()
-                self.state_mgr.movement.computation_level = computation_level
-                
-                if computation_level < 3 and self._apply_simplified_control(computation_level):
-                    # Simplified control was applied, skip the rest of the processing
-                    return
-                else:
-                    # Record that we did full computation
-                    self.state_mgr.movement.last_full_computation_time = time.time()
-            else:
-                # Standard control path
-                self.state_mgr.movement.using_simplified_control = False
-                
-            # Perform expensive transform operations at reduced frequency
-            #self._optimize_transforms_and_filtering()
-            
-            # Calculate current errors
-            distance, lateral, bearing, angular_degrees = self._calculate_errors()
-            
-            if self.parameter_manager.debug_level >= 2:
-                debug_msg = (
-                    f"PRE-STOP CHECK: distance={distance:.3f}m (target={self.parameter_manager.desired_distance:.3f}m), "
-                    f"lateral={lateral:.3f}m, angular={angular_degrees:.2f}°, "
-                    f"is_stopped={self.state_mgr.movement.robot_stopped}"
-                )
-                self.get_logger().info(debug_msg, throttle_duration_sec=2.0)
-            
-            # Check stop conditions and handle if needed
-            if self._handle_stop_conditions(distance, lateral, angular_degrees, dt):
-                return  # Exit if stop conditions were met
-            
-            # Apply stale data handling - reduce velocity if data is stale
-            velocity_scale = 1.0
-            if freshness_level == "stale":
-                # Apply significant reduction for stale data
-                velocity_scale = 0.5  # 50% reduction
-                if self.parameter_manager.debug_level >= 1:
-                    self.get_logger().warning(
-                        f"Using stale sensor data ({data_age:.3f}s old) - scaling velocities to {velocity_scale*100:.0f}%",
-                        throttle_duration_sec=2.0
-                    )
-            
-            # Determine strategy and calculate velocities
-            linear_x_velocity, lateral_velocity, angular_velocity = self._determine_and_apply_strategy(dt)
-            
-            # Apply stale data velocity scaling
-            if velocity_scale < 1.0:
-                linear_x_velocity *= velocity_scale
-                lateral_velocity *= velocity_scale
-                angular_velocity *= velocity_scale
-            
-            # Guard against NaN values which can cause silent failures
-            if (math.isnan(linear_x_velocity) or math.isnan(lateral_velocity) or 
-                math.isnan(angular_velocity)):
-                self.get_logger().error("NaN velocity detected - resetting to zero")
-                linear_x_velocity = 0.0
-                lateral_velocity = 0.0
-                angular_velocity = 0.0
-            
-            # Apply velocity limits and publish commands
-            motion_occurred = self._apply_and_publish_velocities(linear_x_velocity, lateral_velocity, angular_velocity)
-            
-            # Update performance stats
-            cycle_duration = time.time() - self.cycle_start_time
-            self.update_performance_stats(cycle_duration)
-                
-        except Exception as e:
-            stack_trace = traceback.format_exc()
-        
-            # Log the error with stack trace
-            self.get_logger().error(f"Unexpected error in execute_control_cycle: {str(e)}\nStack trace:\n{stack_trace}")
-
-            self.get_logger().error(f"Unexpected error in control cycle: {str(e)}")
-            # Try to safely stop the robot
-            try:
-                stop_cmd = self.recovery_module.stop_robot()
-                self.cmd_vel_pub.publish(stop_cmd)  # Ensure the stop command is published
-            except Exception as stop_error:
-                self.get_logger().error(f"Failed to stop robot after error: {str(stop_error)}")
-
-    def _apply_simplified_control(self, computation_level):
-        """
-        Apply a simplified control update based on the computation level.
-        
-        Args:
-            computation_level: 0-3 indicating computation level (0=minimal, 3=full)
-            
-        Returns:
-            bool: True if simplified control was applied, False if full computation is needed
-        """
-        # Validate input
-        if not isinstance(computation_level, int) or computation_level < 0:
-            self.get_logger().warning(f"Invalid computation level: {computation_level}, using full computation")
-            return False
-            
-        if computation_level == 3:
-            # Full computation needed
-            return False
-            
-        # Track that we're using simplified control
-        self.state_mgr.movement.using_simplified_control = True
-        
-        # Increment simplified control count
-        self.state_mgr.perf.simplified_control_count += 1
-        
-        # Get current time for performance tracking
-        start_time = time.time()
-        
-        # For minimal computation (level 0), just dampen previous velocities
-        if computation_level == 0:
-            # Reuse previous velocity commands with significant damping
-            damping = 0.85  # Stronger reduction for level 0
-            
-            # Use pre-allocated message
-            cmd_vel_msg = self._cmd_vel_msg
-            cmd_vel_msg.linear.x = float(self.state_mgr.movement.last_cmd_vel[0] * damping)
-            cmd_vel_msg.linear.y = float(self.state_mgr.movement.last_cmd_vel[1] * damping)
-            cmd_vel_msg.angular.z = float(self.state_mgr.movement.last_cmd_vel[2] * damping)
-            
-            # Publish command
-            self.cmd_vel_pub.publish(cmd_vel_msg)
-            
-            # Update history without expensive diagnostics
-            new_velocity = (cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z)
-            self.state_mgr.movement.last_cmd_vel = new_velocity
-            
-        # For basic computation (level 1), apply simple proportional control
-        elif computation_level == 1:
-            # Get current errors
-            position_data = self.target_tracker.get_position_data()
-            
-            if position_data and all(k in position_data for k in ['distance', 'lateral', 'bearing']):
-                # Calculate basic errors
-                distance_error = position_data['distance'] - self.parameter_manager.desired_distance
-                lateral_error = position_data['lateral']
-                angular_error = position_data['bearing']
-                
-                # Simple proportional control with reduced gains
-                kp_factor = 0.7  # Reduce gains for smoother control
-                linear_x = max(-0.1, min(0.1, distance_error * self.parameter_manager.linear_x_kp * kp_factor))
-                lateral_y = max(-0.1, min(0.1, lateral_error * self.parameter_manager.linear_y_kp * kp_factor))
-                angular_z = max(-0.3, min(0.3, angular_error * self.parameter_manager.angular_kp * kp_factor))
-                
-                # Apply damping from previous velocities for smoothness
-                damping = 0.3  # 30% of previous velocity
-                linear_x = linear_x * (1.0 - damping) + self.state_mgr.movement.last_cmd_vel[0] * damping
-                lateral_y = lateral_y * (1.0 - damping) + self.state_mgr.movement.last_cmd_vel[1] * damping
-                angular_z = angular_z * (1.0 - damping) + self.state_mgr.movement.last_cmd_vel[2] * damping
-                
-                # Publish
-                cmd_vel_msg = self._cmd_vel_msg
-                cmd_vel_msg.linear.x = float(linear_x)
-                cmd_vel_msg.linear.y = float(lateral_y)
-                cmd_vel_msg.angular.z = float(angular_z)
-                
-                self.cmd_vel_pub.publish(cmd_vel_msg)
-                
-                # Update history
-                new_velocity = (linear_x, lateral_y, angular_z)
-                self.state_mgr.movement.last_cmd_vel = new_velocity
-            else:
-                # No valid position data, apply strong damping
-                damping = 0.7
-                cmd_vel_msg = self._cmd_vel_msg
-                cmd_vel_msg.linear.x = float(self.state_mgr.movement.last_cmd_vel[0] * damping)
-                cmd_vel_msg.linear.y = float(self.state_mgr.movement.last_cmd_vel[1] * damping)
-                cmd_vel_msg.angular.z = float(self.state_mgr.movement.last_cmd_vel[2] * damping)
-                
-                # Publish command
-                self.cmd_vel_pub.publish(cmd_vel_msg)
-                
-                # Update history
-                new_velocity = (cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z)
-                self.state_mgr.movement.last_cmd_vel = new_velocity
-                
-        # For medium computation (level 2), use PID but skip coordinated control
-        elif computation_level == 2:
-            # Calculate errors - reuse existing method
-            distance, lateral, bearing, angular_degrees = self._calculate_errors()
-            
-            # Calculate current time and dt
-            current_time = time.time()
-            dt = current_time - self.state_mgr.last_control_time
-            self.state_mgr.last_control_time = current_time
-            
-            # Update error trackers
-            self.distance_error_tracker.update(self._current_errors[0], dt)
-            self.lateral_error_tracker.update(self._current_errors[1], dt)
-            self.angular_error_tracker.update(self._current_errors[2], dt)
-            
-            # Use separate PID controllers for efficiency - no coordination
-            linear_x_velocity = self.pid_linear_x.compute(
-                self._current_errors[0], 
-                current_time, 
-                False,
-                self.distance_error_tracker.get_trend()
-            )
-            
-            lateral_velocity = self.pid_linear_y.compute(
-                self._current_errors[1], 
-                current_time, 
-                False,
-                self.lateral_error_tracker.get_trend()
-            )
-            
-            angular_velocity = self.pid_angular.compute(
-                self._current_errors[2], 
-                current_time, 
-                False,
-                self.angular_error_tracker.get_trend()
-            )
-            
-            # Apply velocity limits directly (simplified)
-            linear_x_velocity = max(self.parameter_manager.linear_x_min, min(self.parameter_manager.linear_x_max, linear_x_velocity))
-            lateral_velocity = max(self.parameter_manager.linear_y_min, min(self.parameter_manager.linear_y_max, lateral_velocity))
-            angular_velocity = max(self.parameter_manager.angular_min, min(self.parameter_manager.angular_max, angular_velocity))
-            
-            # Publish
-            cmd_vel_msg = self._cmd_vel_msg
-            cmd_vel_msg.linear.x = float(linear_x_velocity)
-            cmd_vel_msg.linear.y = float(lateral_velocity)
-            cmd_vel_msg.angular.z = float(angular_velocity)
-            
-            self.cmd_vel_pub.publish(cmd_vel_msg)
-            
-            # Update history
-            new_velocity = (linear_x_velocity, lateral_velocity, angular_velocity)
-            self.state_mgr.movement.last_cmd_vel = new_velocity
-        
-        # Calculate cycle duration for performance monitoring
-        cycle_duration = time.time() - start_time
-        if hasattr(self.resource_monitor, '_update_cycle_stats'):
-            self.resource_monitor._update_cycle_stats(cycle_duration)
-        
-        return True
-        
-    def control_loop_callback(self):
-        """Regular control loop to calculate and publish velocity commands with CPU optimization."""
-        try:
-            # Skip if shutting down
-            if self.state_mgr.shutting_down:
-                return
-            
-            # Skip if transform system is not initialized and required
-            if (hasattr(self, 'transform_system') and 
-                not self.transform_system.is_transform_system_ready()):
-                
-                # Log at most once per 20 cycles to avoid spamming
-                if self.state_mgr.robot.cycle_count % 20 == 0:
-                    status = self.transform_system.get_status()
-                    self.get_logger().warn(
-                        f"Control loop waiting for transform initialization: {status['message']}"
-                    )
-                    
-                    # Try to restart initialization if it's in error state
-                    if status['status'] == TransformStatus.ERROR:
-                        self.get_logger().warn("Attempting to restart transform initialization")
-                        self.transform_system.start_initialization()
-                
-                # Still increment cycle count
-                self.state_mgr.robot.cycle_count += 1
-                return
-                    
-            # Apply adaptive rate control if enabled
-            if (self.parameter_manager.adaptive_control_rate and 
-                hasattr(self.resource_monitor, 'current_cpu_usage') and 
-                hasattr(self.parameter_manager, 'update_rate')):
-                
-                # Calculate adaptive rate
-                adaptive_rate = self.calculate_adaptive_rate(
-                    self.parameter_manager.update_rate, 
-                    self.resource_monitor.current_cpu_usage
-                )
-                
-                # Ensure adaptive_rate is never zero or negative
-                if not isinstance(adaptive_rate, (int, float)) or adaptive_rate <= 0.0:
-                    self.get_logger().warning(f"Invalid adaptive_rate={adaptive_rate}, using minimum value 0.01Hz")
-                    adaptive_rate = 0.01
-                
-                # Check if we should skip this cycle based on adaptive rate
-                current_time = time.time()
-                time_since_last = current_time - self.state_mgr.last_control_time
-                
-                # Skip if the time since last execution is too short
-                if (time_since_last < (1.0 / adaptive_rate)):
-                    return
-            
-                # Skip this cycle if requested for CPU relief
-                if hasattr(self.resource_monitor, 'should_skip_cycle') and self.resource_monitor.should_skip_cycle():
-                    # Increment skipped cycle count
-                    self.state_mgr.perf.skipped_cycle_count += 1
-                    return
-                
-                # Execute the control cycle
-                self.execute_control_cycle(event_triggered=False)
-                    
-        except Exception as e:
-            
-            stack_trace = traceback.format_exc()
-        
-            # Log the error with stack trace
-            self.get_logger().error(f"Unexpected error in control_loop_callback: {str(e)}\nStack trace:\n{stack_trace}")
-
-            self.get_logger().error(f"Unexpected error in control_loop_callback: {str(e)}")
-            # Try to safely stop the robot
-            try:
-                self.recovery_module.stop_robot()
-            except Exception as stop_error:
-                self.get_logger().error(f"Failed to stop robot after error: {str(stop_error)}")
-
-    
-    def _evaluate_stop_conditions(self, distance, lateral, angular_degrees, is_stopped):
-        """
-        Evaluate if the robot should stop based on current errors.
-        
-        Args:
-            distance: Current distance to target
-            lateral: Current lateral offset
-            angular_degrees: Current angular error in degrees
-            is_stopped: Whether the robot is currently stopped
-            
-        Returns:
-            tuple: (should_stop, reason) - True if robot should stop, False if it should move
-        """
-        # Calculate error values
-        distance_error = abs(distance - self.parameter_manager.desired_distance)
-        lateral_error = abs(lateral)
-        angular_error = abs(angular_degrees)
-        
-        # Start with base thresholds
-        distance_threshold = self.parameter_manager.distance_threshold
-        lateral_threshold = self.parameter_manager.lateral_threshold
-        angular_threshold = self.parameter_manager.angular_threshold
-        
-        # Increase angular threshold when at target distance
-        if distance_error < self.parameter_manager.distance_threshold * 1.5:
-            angular_threshold *= self.parameter_manager.angular_at_target_factor
-            
-            if self.parameter_manager.debug_level >= 2:
-                threshold_msg = f"At target distance: increased angular threshold to {angular_threshold:.2f}°"
-                self.get_logger().debug(threshold_msg, throttle_duration_sec=1.0)
-        
-        # Apply state-dependent hysteresis
-        if is_stopped:
-            # Higher thresholds to start moving (requires larger errors)
-            hysteresis = 1.5 + self.state_mgr.movement.movement_hysteresis
-            distance_threshold *= hysteresis
-            lateral_threshold *= hysteresis
-            angular_threshold *= hysteresis
-            
-            # Cap maximum thresholds
-            distance_threshold = min(distance_threshold, 0.2)
-            lateral_threshold = min(lateral_threshold, 0.15)
-            angular_threshold = min(angular_threshold, 15.0)
-        else:
-            # Lower thresholds to stop (more precision when near target)
-            hysteresis = 0.8
-            distance_threshold *= hysteresis
-            lateral_threshold *= hysteresis
-            angular_threshold *= hysteresis
-        
-        # Log thresholds for debugging
-        if self.parameter_manager.debug_level >= 2:
-            debug_msg = (
-                f"Stop thresholds: d={distance_error:.3f}/{distance_threshold:.3f}, "
-                f"l={lateral_error:.3f}/{lateral_threshold:.3f}, "
-                f"a={angular_error:.2f}/{angular_threshold:.2f}"
-            )
-            self.get_logger().debug(debug_msg, throttle_duration_sec=1.0)
-        
-        # Check if any error exceeds thresholds
-        if (distance_error > distance_threshold or
-            lateral_error > lateral_threshold or
-            angular_error > angular_threshold):
-            
-            reason = (
-                f"Movement needed: distance_error={distance_error:.3f}m, "
-                f"lateral_error={lateral_error:.3f}m, "
-                f"angular_error={angular_error:.2f}°"
-            )
-            return False, reason  # Return False to indicate robot should NOT stop
-        
-        # All errors within thresholds - robot should stop
-        reason = (
-            f"Target reached: distance_error={distance_error:.3f}m, "
-            f"lateral_error={lateral_error:.3f}m, "
-            f"angular_error={angular_error:.2f}°"
-        )
-        
-        # Accumulate hysteresis for sustained stops
-        if not is_stopped:
-            self.state_mgr.movement.movement_hysteresis += 0.05
-            self.state_mgr.movement.movement_hysteresis = min(0.3, self.state_mgr.movement.movement_hysteresis)  # Cap at 0.3
-        
-        return True, reason  # Return True to indicate robot SHOULD stop
-
-    def _reset_stopped_state_if_needed(self, distance_error, lateral_error, angular_error):
-        """
-        Reset stopped state if significant movement is required.
-        
-        Args:
-            distance_error: Error in distance (meters)
-            lateral_error: Error in lateral position (meters)
-            angular_error: Error in angular position (degrees)
-            
-        Returns:
-            bool: True if stopped state was reset, False otherwise
-        """
-        # If already moving, no need to reset
-        if not self.state_mgr.movement.robot_stopped:
-            return False
-        
-        # Handle initialization for first movement after startup
-        if self.state_mgr.movement.initial_movement_boost:
-            hysteresis = 0.5  # Much lower hysteresis for first movement
-            self.state_mgr.movement.initial_movement_boost = False
-        else:
-            # Regular hysteresis calculation
-            stop_duration = time.time() - self.state_mgr.movement.stop_time
-            hysteresis = min(1.1, 1.0 + stop_duration * 0.1)
-        
-        # Calculate movement thresholds with hysteresis
-        distance_threshold = self.parameter_manager.distance_threshold * hysteresis * 0.7
-        lateral_threshold = self.parameter_manager.lateral_threshold * hysteresis * 0.7
-        
-        # Adjust angular threshold based on distance to target
-        if abs(distance_error) < self.parameter_manager.distance_threshold * 1.2:
-            # More lenient when at target distance
-            angular_threshold = self.parameter_manager.angular_threshold * self.parameter_manager.angular_at_target_factor * hysteresis
-        else:
-            # Standard threshold otherwise
-            angular_threshold = self.parameter_manager.angular_threshold * hysteresis
-        
-        # Check if any error exceeds thresholds
-        if (abs(distance_error) > distance_threshold or
-            abs(lateral_error) > lateral_threshold or
-            abs(angular_error) > angular_threshold):
-            
-            # Log the decision to exit stopped state
-            log_msg = (
-                f"Exiting stopped state - Movement required: "
-                f"distance_error={distance_error:.3f}m(threshold={distance_threshold:.3f}), "
-                f"lateral_error={lateral_error:.3f}m(threshold={lateral_threshold:.3f}), "
-                f"angular_error={angular_error:.2f}°(threshold={angular_threshold:.2f})"
-            )
-            self.get_logger().info(log_msg)
-            
-            # Reset stopped state
-            self.state_mgr.movement.robot_stopped = False
-            
-            # Reset movement hysteresis
-            self.state_mgr.movement.movement_hysteresis = 0.0
-            
-            return True
-        
-        return False
-    
-    def _complete_controller_reset(self):
-        """Complete reset of all controllers and error states."""
-        # Reset all PID controllers
-        self.pid_linear_x.reset()
-        self.pid_linear_y.reset()
-        self.pid_angular.reset()
-        # Reset coordinated controller
-        self.coordinated_controller.reset()
-        # Reset all error trackers
-        self.distance_error_tracker.reset()
-        self.lateral_error_tracker.reset()
-        self.angular_error_tracker.reset()
-        # Reset strategy module
-        self.strategy_module.reset()
-        # Reset velocity control module (centralized state)
-        self.velocity_control.reset()
-        # Reset target tracker if needed
-        if hasattr(self, 'target_tracker'):
-            if hasattr(self.target_tracker, 'reset'):
-                self.target_tracker.reset()
-        # Reset movement hysteresis
-        self.state_mgr.movement.movement_hysteresis = 0.0
-        # Set stopped state
-        self.state_mgr.movement.robot_stopped = True
-        self.state_mgr.movement.stop_time = time.time()
-        # Reset computation tracking
-        self.state_mgr.movement.using_simplified_control = False
-        self.state_mgr.movement.last_full_computation_time = time.time()
-        # Reset data freshness tracking
-        self.state_mgr.freshness.level = "unknown"
-        self.get_logger().info("Complete controller reset performed")
-    
-    def _log_periodic_status(self):
-        """Log periodic status updates."""
-        if self.parameter_manager.debug_level < 1:
-            return
-        perf_stats = self.resource_monitor.get_performance_stats()
-        if not perf_stats or not all(k in perf_stats for k in ['cpu_avg', 'cycle_time_ms', 'update_rate']):
-            perf_stats = {
-                'cpu_avg': 0.0,
-                'cycle_time_ms': 0.0,
-                'update_rate': getattr(self.parameter_manager, 'update_rate', 3.0),
-                'skips': 0
-            }
-        strategy_name = getattr(self.strategy_module, 'current_strategy', 'unknown')
-        total_cycles = max(1, self.state_mgr.perf.event_control_count + self.state_mgr.perf.timer_control_count)
-        event_ratio = self.state_mgr.perf.event_control_count / total_cycles * 100.0
-        status_msg = (
-            f"Status: Robot state={self.state_mgr.robot.state}, "
-            f"Strategy={strategy_name}, "
-            f"CPU={perf_stats['cpu_avg']:.1f}%, "
-            f"Cycle time={perf_stats['cycle_time_ms']:.2f}ms, "
-            f"Rate={perf_stats['update_rate']:.1f}Hz, "
-            f"Simplified={self.state_mgr.movement.using_simplified_control}, "
-            f"Freshness={self.state_mgr.freshness.level}, "
-            f"Event-driven={event_ratio:.1f}%, "
-            f"Skips={self.state_mgr.perf.skipped_cycle_count}"
-        )
-        throttled_logger.info(status_msg, throttle_duration_sec=LOG_THROTTLE_CONTROL, log_id='periodic_status')
-    
-    def calculate_adaptive_rate(self, base_rate, cpu_usage):
-        """
-        Calculate adaptive control rate based on CPU usage and fusion rate.
-        
-        Args:
-            base_rate: The base update rate
-            cpu_usage: Current CPU usage percentage
-            
-        Returns:
-            float: Adjusted update rate
-        Notes:
-            - Full control rate is now allowed up to 85% CPU usage.
-            - Scaling down only starts above 85% CPU.
-        """
-        try:
-            # Store current time
-            current_time = time.time()
-            
-            # Validate input parameters to prevent errors
-            if not isinstance(base_rate, (int, float)) or base_rate <= 0:
-                self.get_logger().warning(f"Invalid base_rate: {base_rate}, using default 3.0Hz")
-                base_rate = 3.0
-                
-            if not isinstance(cpu_usage, (int, float)) or cpu_usage < 0:
-                self.get_logger().warning(f"Invalid cpu_usage: {cpu_usage}, using 50%")
-                cpu_usage = 50.0
-            
-            # Only adjust rate periodically to avoid oscillation
-            if current_time - self.state_mgr.perf.last_rate_adjustment_time < 1.0:  # At most once per second
-                return self.state_mgr.perf.current_rate or base_rate
-                
-            self.state_mgr.perf.last_rate_adjustment_time = current_time
-            
-            # Apply fusion rate consideration if detected
-            if self.state_mgr.perf.fusion_rate_updated and self.parameter_manager.enable_fusion_rate_detection:
-                # Use fusion rate as a baseline if it's reliable
-                fusion_rate = self.state_mgr.perf.detected_fusion_rate
-                
-                # Ensure fusion rate is positive and reasonable
-                if (fusion_rate > 0 and fusion_rate < 100):  # Sanity check
-                    # Cap to reasonable limits
-                    adjusted_base_rate = min(max(fusion_rate * 1.2, self.parameter_manager.min_control_rate), self.parameter_manager.max_control_rate)
-                    
-                    # Log if significant change
-                    if abs(adjusted_base_rate - base_rate) > 0.3:
-                        self.get_logger().info(
-                            f"Adjusted base rate using fusion detection: {base_rate:.1f}Hz -> {adjusted_base_rate:.1f}Hz "
-                            f"(fusion_rate: {fusion_rate:.1f}Hz)"
-                        )
-                        
-                    base_rate = adjusted_base_rate
-            
-            # Calculate new rate based on CPU usage with progressive scaling
-            if cpu_usage > 95.0:
-                # Severe CPU load - drastic reduction
-                new_rate = self.parameter_manager.min_control_rate
-            elif cpu_usage > 90.0:
-                # Heavy CPU load
-                new_rate = base_rate * 0.5
-            elif cpu_usage > 85.0:
-                # Moderate CPU load
-                new_rate = base_rate * 0.7
-            elif cpu_usage > 80.0:
-                # Light CPU load
-                new_rate = base_rate * 0.85
-            elif cpu_usage < 30.0:
-                # Very light CPU load - can increase slightly
-                new_rate = base_rate * 1.1
-            else:
-                # Normal CPU load
-                new_rate = base_rate
-                
-            # Constrain rate to reasonable bounds
-            new_rate = max(self.parameter_manager.min_control_rate, min(self.parameter_manager.max_control_rate, new_rate))
-            
-            # Store current rate for reference
-            self.state_mgr.perf.current_rate = new_rate
-            
-            # Add to history
-            self.state_mgr.perf.adaptive_rate_history.append((current_time, new_rate))
-            
-            # Log significant rate changes
-            if abs(new_rate - self.state_mgr.perf.last_logged_rate) > 0.5:
-                self.get_logger().info(
-                    f"Adaptive rate adjusted: {self.state_mgr.perf.last_logged_rate:.1f}Hz -> {new_rate:.1f}Hz "
-                    f"(CPU: {cpu_usage:.1f}%)"
-                )
-                self.state_mgr.perf.last_logged_rate = new_rate
-            
-            return new_rate
-            
-        except Exception as e:
-            self.get_logger().error(f"Error in calculate_adaptive_rate: {str(e)}")
-            # Fall back to base rate or minimum rate in case of error
-            return max(base_rate, self.parameter_manager.min_control_rate)
-    
-    def _update_resource_monitoring(self):
-        """Wrapper method to update resource monitoring."""
-        try:
-            # Update CPU stats if the method exists
-            if hasattr(self.resource_monitor, 'update_cpu_stats'):
-                self.resource_monitor.update_cpu_stats()
-                
-                # Check for high CPU - trigger cycle skipping if needed
-                if (self.parameter_manager.enable_cycle_skipping and 
-                    hasattr(self.resource_monitor, 'current_cpu_usage') and
-                    self.resource_monitor.current_cpu_usage > self.parameter_manager.max_cpu_skip_threshold):
-                    
-                    self.state_mgr.skip_next_cycle = True
-                    
-                    current_time = time.time()
-                    if current_time - self.state_mgr.perf.last_cpu_warning_time >= 2.0:
-                        self.get_logger().warning(
-                            f"HIGH CPU LOAD: {self.resource_monitor.current_cpu_usage:.1f}% - skipping next cycle"
-                        )
-                        self.state_mgr.perf.last_cpu_warning_time = current_time
-                else:
-                    self.state_mgr.skip_next_cycle = False
-                
-            # Log pool statistics periodically if in debug mode
-            if self.parameter_manager.debug_level >= 2 and hasattr(self, 'object_pool'):
-                pool_stats = self.object_pool.get_stats()
-                current_time = time.time()
-                if current_time - self.state_mgr.perf.last_pool_log_time >= 10.0:
-                    pool_msg = (
-                        f"Object pool stats: "
-                        f"Twist={pool_stats['Twist']['pool_size']}/{pool_stats['Twist']['max_usage']} "
-                        f"(misses={pool_stats['Twist']['misses']}), "
-                        f"Vector3={pool_stats['Vector3']['pool_size']}/{pool_stats['Vector3']['max_usage']} "
-                        f"(misses={pool_stats['Vector3']['misses']}), "
-                        f"Float32MultiArray={pool_stats['Float32MultiArray']['pool_size']}/{pool_stats['Float32MultiArray']['max_usage']} "
-                        f"(misses={pool_stats['Float32MultiArray']['misses']})"
-                    )
-                    self.get_logger().debug(pool_msg)
-                    self.state_mgr.perf.last_pool_log_time = current_time
-        except Exception as e:
-            self.get_logger().error(f"Error in resource monitoring: {str(e)}")
-        
-    def update_performance_stats(self, cycle_duration):
-        """Update performance statistics for monitoring."""
-        try:
-            if hasattr(self.resource_monitor, '_update_cycle_stats'):
-                self.resource_monitor._update_cycle_stats(cycle_duration)
-                
-                # Update adaptive rate if needed
-                if self.parameter_manager.adaptive_control_rate and hasattr(self.parameter_manager, 'update_rate'):
-                    adaptive_rate = self.calculate_adaptive_rate(
-                        self.parameter_manager.update_rate, 
-                        self.resource_monitor.current_cpu_usage
-                    )
-                    # Store current rate
-                    self.state_mgr.perf.adaptive_rate = adaptive_rate
-        except Exception as e:
-            self.get_logger().warning(f"Error updating performance stats: {str(e)}")
-    
-    def publish_diagnostics(self):
-        """Publish detailed diagnostic information at a slower rate."""
-        try:
-            if self.state_mgr.shutting_down:
-                return
-                
-            # Calculate velocity statistics
-            vel_data = self.velocity_control.get_velocity_history()
-            if not vel_data:
-                return
-                
-            # Use NumPy for vectorized calculations when possible
-            if len(vel_data) > 0:
-                # Convert to NumPy array for efficient calculation
-                vel_array = np.array(vel_data)
-                
-                # Extract velocities by column (more efficient than list comprehensions)
-                if vel_array.size > 0:  # Check that array has elements
-                    lin_x_velocities = vel_array[:, 0]
-                    lin_y_velocities = vel_array[:, 1]
-                    ang_velocities = vel_array[:, 2]
-                    
-                    # Calculate statistics using NumPy
-                    avg_lin_x_vel = np.mean(lin_x_velocities) if lin_x_velocities.size > 0 else 0.0
-                    avg_lin_y_vel = np.mean(lin_y_velocities) if lin_y_velocities.size > 0 else 0.0
-                    avg_ang_vel = np.mean(ang_velocities) if ang_velocities.size > 0 else 0.0
-                else:
-                    avg_lin_x_vel = avg_lin_y_vel = avg_ang_vel = 0.0
-            else:
-                avg_lin_x_vel = avg_lin_y_vel = avg_ang_vel = 0.0
-            
-            # Log detailed information with built-in throttling
-            if hasattr(self.parameter_manager, 'debug_level') and self.parameter_manager.debug_level >= 1:
-                # Get PID components
-                p_x, i_x, d_x = self.pid_linear_x.get_components()
-                p_y, i_y, d_y = self.pid_linear_y.get_components()
-                p_a, i_a, d_a = self.pid_angular.get_components()
-                
-                # Get stats on simplified control usage
-                simplified_pct = self.state_mgr.perf.simplified_control_count / max(1, self.state_mgr.robot.cycle_count) * 100.0
-                
-                diag_msg = (
-                    f"DIAGNOSTICS: "
-                    f"Avg Vel=[{avg_lin_x_vel:.2f}, {avg_lin_y_vel:.2f}, {avg_ang_vel:.2f}], "
-                    f"PID X=[{p_x:.2f}, {i_x:.2f}, {d_x:.2f}], "
-                    f"PID Y=[{p_y:.2f}, {i_y:.2f}, {d_y:.2f}], "
-                    f"PID A=[{p_a:.2f}, {i_a:.2f}, {d_a:.2f}], "
-                    f"Strategy={self.strategy_module.current_strategy}, "
-                    f"Simp={simplified_pct:.1f}%, "
-                    f"Freshness={self.state_mgr.freshness.level}"
-                )
-                throttled_logger.info(diag_msg, throttle_duration_sec=LOG_THROTTLE_DIAG, log_id='diagnostics')
-            
-            # Publish PID diagnostic data
-            self._publish_pid_diagnostics()
-            
-            # Publish performance metrics
-            self._publish_performance_metrics()
-        except Exception as e:
-            self.get_logger().error(f"Error in publish_diagnostics: {str(e)}")
-    
-    def _publish_pid_diagnostics(self):
-        """Publish detailed PID diagnostics for analysis."""
-        try:
-            # Get PID components
-            p_x, i_x, d_x = self.pid_linear_x.get_components()
-            p_y, i_y, d_y = self.pid_linear_y.get_components()
-            p_a, i_a, d_a = self.pid_angular.get_components()
-            
-            # Get current gains
-            kp_x, ki_x, kd_x = self.pid_linear_x.get_current_gains()
-            kp_y, ki_y, kd_y = self.pid_linear_y.get_current_gains()
-            kp_a, ki_a, kd_a = self.pid_angular.get_current_gains()
-            
-            # Get current errors
-            e_x = self.distance_error_tracker.current_error
-            e_y = self.lateral_error_tracker.current_error
-            e_a = self.angular_error_tracker.current_error
-            
-            # Pack all data into the array - no unnecessary float() conversions
-            # Direct array access is more efficient
-            self._diag_data[0] = p_x
-            self._diag_data[1] = i_x
-            self._diag_data[2] = d_x
-            self._diag_data[3] = p_y
-            self._diag_data[4] = i_y
-            self._diag_data[5] = d_y
-            self._diag_data[6] = p_a
-            self._diag_data[7] = i_a
-            self._diag_data[8] = d_a
-            self._diag_data[9] = e_x
-            self._diag_data[10] = e_y
-            self._diag_data[11] = e_a
-            self._diag_data[12] = kp_a  # Track angular P gain
-            self._diag_data[13] = kd_a  # Track angular D gain
-            
-            # Update Float32MultiArray data
-            self._diag_msg.data = self._diag_data.tolist()
-            
-            # Publish diagnostics
-            self.pid_diag_pub.publish(self._diag_msg)
-        except Exception as e:
-            self.get_logger().error(f"Error in _publish_pid_diagnostics: {str(e)}")
-    
-    def _publish_performance_metrics(self):
-        """Publish performance metrics for monitoring."""
-        try:
-            # Get performance stats
-            perf_stats = self.resource_monitor.get_performance_stats()
-            
-            # Check if we have valid stats
-            if not perf_stats or not all(k in perf_stats for k in ['cpu_avg', 'cycle_time_ms', 'update_rate']):
-                # Create default stats if missing
-                perf_stats = {
-                    'cpu_avg': 0.0,
-                    'cycle_time_ms': 0.0,
-                    'skips': 0,
-                    'update_rate': getattr(self.parameter_manager, 'update_rate', 3.0)
-                }
-            
-            # Get current strategy
-            strategy_name = "unknown"
-            if hasattr(self.strategy_module, 'current_strategy'):
-                strategy_name = self.strategy_module.current_strategy
-            
-            # Add optimization stats
-            adaptive_rate = getattr(self.state_mgr.perf, 'adaptive_rate', perf_stats['update_rate'])
-            using_simplified = 1 if self.state_mgr.movement.using_simplified_control else 0
-            
-            # Add freshness and event stats
-            freshness_level = self.state_mgr.freshness.level
-            event_ratio = 0.0
-            total_cycles = max(1, self.state_mgr.perf.event_control_count + self.state_mgr.perf.timer_control_count)
-            event_ratio = self.state_mgr.perf.event_control_count / total_cycles * 100.0
-            
-            # Create performance message - use string formatting for better performance
-            # in tight loops
-            performance_msg = String()
-            performance_msg.data = (
-                '{{"cpu": {0:.1f}, '
-                '"cycle_time_ms": {1:.2f}, '
-                '"strategy": "{2}", '
-                '"skips": {3}, '
-                '"update_rate": {4:.1f}, '
-                '"adaptive_rate": {5:.1f}, '
-                '"simplified": {6}, '
-                '"freshness": "{7}", '
-                '"event_ratio": {8:.1f}}}'
-            ).format(
-                perf_stats["cpu_avg"],
-                perf_stats["cycle_time_ms"],
-                strategy_name,
-                perf_stats.get("skips", self.state_mgr.perf.skipped_cycle_count),
-                perf_stats["update_rate"],
-                adaptive_rate,
-                using_simplified,
-                self.state_mgr.freshness.level,
-                event_ratio
-            )
-            
-            # Publish
-            self.performance_pub.publish(performance_msg)
-        except Exception as e:
-            self.get_logger().error(f"Error publishing performance metrics: {str(e)}")
     
     def prepare_shutdown(self):
         """Prepare for node shutdown."""
-        if self.state_mgr.shutting_down:
+        if self.state_manager.shutting_down:
             return  # Already shutting down
             
         print("Preparing for shutdown")  # Use print instead of ROS logger
-        self.state_mgr.shutting_down = True
+        self.state_manager.shutting_down = True
         
         # Cancel all timers to prevent them from continuing to fire
         for timer in [self.timer, self.diagnostic_timer, self.resource_timer]:
@@ -2182,6 +2172,7 @@ class OptimizedPIDControllerNode(Node):
         except Exception as e:
             print(f"Error stopping robot during shutdown: {str(e)}")
 
+
 # Main function
 def main(args=None):
     """Main function to initialize and run the PID Controller node."""
@@ -2199,7 +2190,7 @@ def main(args=None):
         print("Optimized PID Controller for Basketball Tracking Robot")
         print("=================================================")
         try:
-            node = OptimizedPIDControllerNode()
+            node = PIDControllerNode()
         except InitializationError as e:
             print(f"\nINITIALIZATION ERROR: {str(e)}")
             print("\nThe system cannot start due to critical initialization errors.")
@@ -2227,7 +2218,7 @@ def main(args=None):
                     time.sleep(0.1)
                 except Exception as e:
                     print(f"Error during emergency stop: {str(e)}")
-                node.state_mgr.shutting_down = True
+                node.state_manager.shutting_down = True
                 
             # Important: Raise KeyboardInterrupt to break out of rclpy.spin()
             raise KeyboardInterrupt

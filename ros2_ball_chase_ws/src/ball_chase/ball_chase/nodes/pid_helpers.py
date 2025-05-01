@@ -438,53 +438,6 @@ class FastTrigonometry:
         # This could be further optimized with a 2D lookup table if needed
         return math.atan2(y, x)
 
-class StateController:
-    """Centralized state controller for robot and controller state."""
-    def __init__(self):
-        # Robot state
-        self.robot_state = "initializing"
-        self.previous_state = None
-        self.last_control_time = 0.0
-        self.robot_orientation = 0.0
-        self.last_orientation_time = None
-        self._last_state_change_time = 0.0
-        self.last_cmd_vel = (0.0, 0.0, 0.0)
-        self.last_logged_cmd = (0.0, 0.0, 0.0)
-        self.cycle_count = 0
-        self.last_pool_log_time = 0.0
-        self._robot_stopped = True
-        self._stop_time = 0.0
-        self._last_stop_position = (0.0, 0.0, 0.0)
-        self._movement_hysteresis = 0.0
-        self.in_recovery = False
-        self.recovery_start_time = 0.0
-        self.recovery_phase = "none"
-        self.force_target_reacquisition = False
-        self._shutting_down = False
-        self._using_simplified_control = False
-        self._computation_level = 3
-        self._last_full_computation_time = 0.0
-        self._simplified_control_count = 0
-        self._data_freshness_level = "unknown"
-        self._last_timer_execution = 0.0
-        self._last_event_execution = 0.0
-        self._event_control_count = 0
-        self._timer_control_count = 0
-        self._last_cpu_check_time = 0.0
-        self.last_cpu_warning_time = 0.0
-        self._skipped_cycle_count = 0
-        self._freshness_state_change_time = 0.0
-        self._last_logged_rate = 0.0
-        self._current_rate = 0.0
-        self._adaptive_rate_history = []
-        self._initial_movement_boost = False
-        self._prev_velocities = None
-        self._target_velocities = None
-        self._vel_diffs = None
-        self._velocity_tuple = None
-        self._velocity_change_check = None
-        # Add more shared state as needed
-
 class GenericObjectPool:
     """Generic object pool for any message type, with TTL-based cleanup and max size."""
     def __init__(self, cls, max_size=10, reset_fn=None, ttl=60.0):
