@@ -159,6 +159,133 @@ def handle_initialization_error(logger, message, original_exception=None):
     logger.error(error_message)
     raise InitializationError(error_message) from original_exception
 
+class ParameterManager:
+    """Handles parameter declaration and retrieval for the PID Controller Node."""
+    def __init__(self, node):
+        self.node = node
+        self._declare_parameters()
+        self._get_parameters()
+
+    def _declare_parameters(self):
+        self.node.declare_parameters(
+            namespace='',
+            parameters=[
+                ('linear_x_kp', 1.2),
+                ('linear_x_ki', 0.05),
+                ('linear_x_kd', 0.25),
+                ('linear_x_min', 0.0),
+                ('linear_x_max', 0.1),
+                ('linear_y_kp', 0.08),
+                ('linear_y_ki', 0.06),
+                ('linear_y_kd', 0.4),
+                ('linear_y_min', -0.2),
+                ('linear_y_max', 0.3),
+                ('angular_kp', 0.9),
+                ('angular_ki', 0.1),
+                ('angular_kd', 0.8),
+                ('angular_min', -0.5),
+                ('angular_max', 0.7),
+                ('min_distance', 0.9),
+                ('max_distance', 2.0),
+                ('target_offset_x', 0.0),
+                ('target_offset_y', 0.0),
+                ('target_update_rate', 3.0),
+                ('diagnostics_rate', 0.5),
+                ('debug_level', 1),
+                ('adaptive_gains', True),
+                ('use_lateral_control', True),
+                ('distance_threshold', 0.08),
+                ('lateral_threshold', 0.06),
+                ('angular_threshold', 2.5),
+                ('angular_at_target_factor', 2.5),
+                ('adaptive_control_rate', True),
+                ('enable_resource_monitoring', True),
+                ('cpu_high_threshold', 60.0),
+                ('cpu_low_threshold', 30.0),
+                ('enable_transform_caching', True),
+                ('transform_cache_ttl', 1.0),
+                ('angular_first_control', True),
+                ('strategy_blend_duration', 0.2),
+                ('coordinated_movement', True),
+                ('filter_buffer_size', 8),
+                ('prediction_horizon', 0.3),
+                ('approach_distance', 0.3),
+                ('min_approach_factor', 0.2),
+                ('use_simplified_control_when_possible', True),
+                ('cpu_optimization_threshold', 70.0),
+                ('use_fast_trigonometry', True),
+                ('min_control_rate', 2.0),
+                ('max_control_rate', 5.0),
+                ('enable_fusion_rate_detection', True),
+                ('fresh_data_timeout', 0.5),
+                ('stale_data_timeout', 1.0),
+                ('cpu_throttle_interval', 0.5),
+                ('enable_cycle_skipping', True),
+                ('max_cpu_skip_threshold', 80.0),
+            ]
+        )
+
+    def _get_parameters(self):
+        # PID gains
+        self.linear_x_kp = self.node.get_parameter('linear_x_kp').value
+        self.linear_x_ki = self.node.get_parameter('linear_x_ki').value
+        self.linear_x_kd = self.node.get_parameter('linear_x_kd').value
+        self.linear_x_min = self.node.get_parameter('linear_x_min').value
+        self.linear_x_max = self.node.get_parameter('linear_x_max').value
+        self.linear_y_kp = self.node.get_parameter('linear_y_kp').value
+        self.linear_y_ki = self.node.get_parameter('linear_y_ki').value
+        self.linear_y_kd = self.node.get_parameter('linear_y_kd').value
+        self.linear_y_min = self.node.get_parameter('linear_y_min').value
+        self.linear_y_max = self.node.get_parameter('linear_y_max').value
+        self.angular_kp = self.node.get_parameter('angular_kp').value
+        self.angular_ki = self.node.get_parameter('angular_ki').value
+        self.angular_kd = self.node.get_parameter('angular_kd').value
+        self.angular_min = self.node.get_parameter('angular_min').value
+        self.angular_max = self.node.get_parameter('angular_max').value
+        # Thresholds
+        self.distance_threshold = self.node.get_parameter('distance_threshold').value
+        self.lateral_threshold = self.node.get_parameter('lateral_threshold').value
+        self.angular_threshold = self.node.get_parameter('angular_threshold').value
+        self.angular_at_target_factor = self.node.get_parameter('angular_at_target_factor').value
+        # Approach
+        self.approach_distance = self.node.get_parameter('approach_distance').value
+        self.min_approach_factor = self.node.get_parameter('min_approach_factor').value
+        # Resource monitoring
+        self.adaptive_control_rate = self.node.get_parameter('adaptive_control_rate').value
+        self.enable_resource_monitoring = self.node.get_parameter('enable_resource_monitoring').value
+        self.cpu_high_threshold = self.node.get_parameter('cpu_high_threshold').value
+        self.cpu_low_threshold = self.node.get_parameter('cpu_low_threshold').value
+        # Transform
+        self.enable_transform_caching = self.node.get_parameter('enable_transform_caching').value
+        self.transform_cache_ttl = self.node.get_parameter('transform_cache_ttl').value
+        # Strategy
+        self.angular_first_control = self.node.get_parameter('angular_first_control').value
+        self.strategy_blend_duration = self.node.get_parameter('strategy_blend_duration').value
+        self.coordinated_movement = self.node.get_parameter('coordinated_movement').value
+        # Target filter
+        self.filter_buffer_size = self.node.get_parameter('filter_buffer_size').value
+        self.prediction_horizon = self.node.get_parameter('prediction_horizon').value
+        # Target update rate
+        self.update_rate = self.node.get_parameter('target_update_rate').value
+        self.diagnostics_rate = self.node.get_parameter('diagnostics_rate').value
+        self.debug_level = self.node.get_parameter('debug_level').value
+        # Optimization
+        self.use_simplified_control_when_possible = self.node.get_parameter('use_simplified_control_when_possible').value
+        self.cpu_optimization_threshold = self.node.get_parameter('cpu_optimization_threshold').value
+        self.use_fast_trigonometry = self.node.get_parameter('use_fast_trigonometry').value
+        # Rate control
+        self.min_control_rate = self.node.get_parameter('min_control_rate').value
+        self.max_control_rate = self.node.get_parameter('max_control_rate').value
+        self.enable_fusion_rate_detection = self.node.get_parameter('enable_fusion_rate_detection').value
+        self.fresh_data_timeout = self.node.get_parameter('fresh_data_timeout').value
+        self.stale_data_timeout = self.node.get_parameter('stale_data_timeout').value
+        # CPU throttling
+        self.cpu_throttle_interval = self.node.get_parameter('cpu_throttle_interval').value
+        self.enable_cycle_skipping = self.node.get_parameter('enable_cycle_skipping').value
+        self.max_cpu_skip_threshold = self.node.get_parameter('max_cpu_skip_threshold').value
+        # Misc
+        self.desired_distance = 1.0  # Default value
+
 class OptimizedPIDControllerNode(Node):
     """Enhanced PID Controller node with improved movement strategy and error handling."""
     def __init__(self):
@@ -199,7 +326,56 @@ class OptimizedPIDControllerNode(Node):
 
     def _initialize_parameters(self):
         """Initialize and validate all parameters."""
-        self._declare_parameters()
+        self.parameter_manager = ParameterManager(self)
+        # Reference parameters from the manager for convenience
+        pm = self.parameter_manager
+        self.linear_x_kp = pm.linear_x_kp
+        self.linear_x_ki = pm.linear_x_ki
+        self.linear_x_kd = pm.linear_x_kd
+        self.linear_x_min = pm.linear_x_min
+        self.linear_x_max = pm.linear_x_max
+        self.linear_y_kp = pm.linear_y_kp
+        self.linear_y_ki = pm.linear_y_ki
+        self.linear_y_kd = pm.linear_y_kd
+        self.linear_y_min = pm.linear_y_min
+        self.linear_y_max = pm.linear_y_max
+        self.angular_kp = pm.angular_kp
+        self.angular_ki = pm.angular_ki
+        self.angular_kd = pm.angular_kd
+        self.angular_min = pm.angular_min
+        self.angular_max = pm.angular_max
+        self.distance_threshold = pm.distance_threshold
+        self.lateral_threshold = pm.lateral_threshold
+        self.angular_threshold = pm.angular_threshold
+        self.angular_at_target_factor = pm.angular_at_target_factor
+        self.approach_distance = pm.approach_distance
+        self.min_approach_factor = pm.min_approach_factor
+        self.adaptive_control_rate = pm.adaptive_control_rate
+        self.enable_resource_monitoring = pm.enable_resource_monitoring
+        self.cpu_high_threshold = pm.cpu_high_threshold
+        self.cpu_low_threshold = pm.cpu_low_threshold
+        self.enable_transform_caching = pm.enable_transform_caching
+        self.transform_cache_ttl = pm.transform_cache_ttl
+        self.angular_first_control = pm.angular_first_control
+        self.strategy_blend_duration = pm.strategy_blend_duration
+        self.coordinated_movement = pm.coordinated_movement
+        self.filter_buffer_size = pm.filter_buffer_size
+        self.prediction_horizon = pm.prediction_horizon
+        self.update_rate = pm.update_rate
+        self.diagnostics_rate = pm.diagnostics_rate
+        self.debug_level = pm.debug_level
+        self.use_simplified_control_when_possible = pm.use_simplified_control_when_possible
+        self.cpu_optimization_threshold = pm.cpu_optimization_threshold
+        self.use_fast_trigonometry = pm.use_fast_trigonometry
+        self.min_control_rate = pm.min_control_rate
+        self.max_control_rate = pm.max_control_rate
+        self.enable_fusion_rate_detection = pm.enable_fusion_rate_detection
+        self.fresh_data_timeout = pm.fresh_data_timeout
+        self.stale_data_timeout = pm.stale_data_timeout
+        self.cpu_throttle_interval = pm.cpu_throttle_interval
+        self.enable_cycle_skipping = pm.enable_cycle_skipping
+        self.max_cpu_skip_threshold = pm.max_cpu_skip_threshold
+        self.desired_distance = pm.desired_distance
         self._validate_parameters()
 
     def _initialize_utility_components(self):
@@ -272,208 +448,6 @@ class OptimizedPIDControllerNode(Node):
             if not hasattr(self, component) or getattr(self, component) is None:
                 raise RuntimeError(f"Required component '{component}' is not initialized")
        
-    def _declare_parameters(self):
-        """Declare and get all node parameters with improved defaults for Raspberry Pi 5."""
-        # Declare parameters with improved defaults
-        self.declare_parameters(
-            namespace='',
-            parameters=[
-                # Linear X velocity PID parameters - adjusted for moderate velocity increase
-                ('linear_x_kp', 1.2),  # controls overshoot
-                ('linear_x_ki', 0.05), # handle steady state errors
-                ('linear_x_kd', 0.25), # controls dampening during approach
-                ('linear_x_min', 0.0),
-                ('linear_x_max', 0.1),  
-                
-                # Linear Y velocity PID parameters - improved lateral damping
-                ('linear_y_kp', 0.08),
-                ('linear_y_ki', 0.06),  # Reduced from 0.08
-                ('linear_y_kd', 0.4),   # Increased from 0.12
-                ('linear_y_min', -0.2),
-                ('linear_y_max', 0.3),
-                
-                # Angular velocity PID parameters - improved to prevent overshoot
-                ('angular_kp', 0.9),   # Reduced from 1.5
-                ('angular_ki', 0.1),   # Reduced from 0.05
-                ('angular_kd', 0.8),   # Reduced from 0.8
-                ('angular_min', -0.5),
-                ('angular_max', 0.7),
-                
-                # Control parameters
-                ('min_distance', 0.9),
-                ('max_distance', 2.0),
-                ('target_offset_x', 0.0),
-                ('target_offset_y', 0.0),
-                ('target_update_rate', 3.0),   # CHANGED: Default rate from 20Hz to 3Hz for Pi
-                ('diagnostics_rate', 0.5),
-                ('debug_level', 1),
-                ('adaptive_gains', True),
-                ('use_lateral_control', True),
-                
-                # Balanced error thresholds - increased angular threshold
-                ('distance_threshold', 0.08),
-                ('lateral_threshold', 0.06),  # Increased from 0.05
-                ('angular_threshold', 2.5),   # Increased from 1.5 to 2.5 degrees
-                
-                # New parameter for scaling angular threshold when at target distance
-                ('angular_at_target_factor', 2.5),  # Multiply threshold by this when at target distance
-                
-                # Resource monitoring parameters
-                ('adaptive_control_rate', True),      # CHANGED: Enable by default
-                ('enable_resource_monitoring', True), # CHANGED: Enable by default
-                ('cpu_high_threshold', 60.0),         # CHANGED: Lower threshold for Pi
-                ('cpu_low_threshold', 30.0),          # CHANGED: Lower threshold for Pi
-                
-                # Performance optimization
-                ('enable_transform_caching', True),
-                ('transform_cache_ttl', 1.0),
-                
-                # Strategy configuration
-                ('angular_first_control', True),
-                ('strategy_blend_duration', 0.2),  # Faster blending
-                ('coordinated_movement', True),
-                
-                # Target filter parameters
-                ('filter_buffer_size', 8),
-                ('prediction_horizon', 0.3),
-                
-                # Approach configuration
-                ('approach_distance', 0.3),    # Distance at which to start slowing down
-                ('min_approach_factor', 0.2),  # Minimum velocity factor when very close
-                
-                # New optimized control parameters
-                ('use_simplified_control_when_possible', True),
-                ('cpu_optimization_threshold', 70.0),      # CHANGED: Lower threshold for Pi
-                ('use_fast_trigonometry', True),
-                
-                # ADDED: New rate control parameters for fusion rate adaptation
-                ('min_control_rate', 2.0),       # Minimum control rate (Hz)
-                ('max_control_rate', 5.0),       # Maximum control rate (Hz)
-                ('enable_fusion_rate_detection', True), # Enable fusion rate detection
-                ('fresh_data_timeout', 0.5),     # Maximum age for fresh data (seconds)
-                ('stale_data_timeout', 1.0),     # Maximum age for stale data (seconds)
-                
-                # ADDED: New CPU throttling parameters
-                ('cpu_throttle_interval', 0.5),   # Check CPU every 0.5 seconds
-                ('enable_cycle_skipping', True),  # Enable cycle skipping for CPU relief
-                ('max_cpu_skip_threshold', 80.0), # Skip cycles when CPU exceeds this
-            ]
-        )
-        
-        # Get key parameters
-        self.linear_x_kp = self.get_parameter('linear_x_kp').value
-        self.linear_x_ki = self.get_parameter('linear_x_ki').value
-        self.linear_x_kd = self.get_parameter('linear_x_kd').value
-        self.linear_x_min = self.get_parameter('linear_x_min').value
-        self.linear_x_max = self.get_parameter('linear_x_max').value
-        
-        self.linear_y_kp = self.get_parameter('linear_y_kp').value
-        self.linear_y_ki = self.get_parameter('linear_y_ki').value
-        self.linear_y_kd = self.get_parameter('linear_y_kd').value
-        self.linear_y_min = self.get_parameter('linear_y_min').value
-        self.linear_y_max = self.get_parameter('linear_y_max').value
-        
-        self.angular_kp = self.get_parameter('angular_kp').value
-        self.angular_ki = self.get_parameter('angular_ki').value
-        self.angular_kd = self.get_parameter('angular_kd').value
-        self.angular_min = self.get_parameter('angular_min').value
-        self.angular_max = self.get_parameter('angular_max').value
-        
-        # Get error thresholds
-        self.distance_threshold = self.get_parameter('distance_threshold').value
-        self.lateral_threshold = self.get_parameter('lateral_threshold').value
-        self.angular_threshold = self.get_parameter('angular_threshold').value
-        self.angular_at_target_factor = self.get_parameter('angular_at_target_factor').value
-        
-        # Get approach parameters
-        self.approach_distance = self.get_parameter('approach_distance').value
-        self.min_approach_factor = self.get_parameter('min_approach_factor').value
-        
-        # Get resource monitoring parameters
-        self.adaptive_control_rate = self.get_parameter('adaptive_control_rate').value
-        self.enable_resource_monitoring = self.get_parameter('enable_resource_monitoring').value
-        self.cpu_high_threshold = self.get_parameter('cpu_high_threshold').value
-        self.cpu_low_threshold = self.get_parameter('cpu_low_threshold').value
-        
-        # Get transform parameters
-        self.enable_transform_caching = self.get_parameter('enable_transform_caching').value
-        self.transform_cache_ttl = self.get_parameter('transform_cache_ttl').value
-        
-        # Get movement strategy parameters
-        self.angular_first_control = self.get_parameter('angular_first_control').value
-        self.strategy_blend_duration = self.get_parameter('strategy_blend_duration').value
-        self.coordinated_movement = self.get_parameter('coordinated_movement').value
-        
-        # Target filter parameters
-        self.filter_buffer_size = self.get_parameter('filter_buffer_size').value
-        self.prediction_horizon = self.get_parameter('prediction_horizon').value
-        
-        # Target update rate from parameters
-        # CHANGED: Using a lower default rate (3Hz) instead of 20Hz
-        self.update_rate = self.get_parameter('target_update_rate').value
-        
-        # All other parameter assignments would be here
-        self.diagnostics_rate = self.get_parameter('diagnostics_rate').value
-        self.debug_level = self.get_parameter('debug_level').value
-        
-        # Get optimization parameters
-        self.use_simplified_control_when_possible = self.get_parameter('use_simplified_control_when_possible').value
-        self.cpu_optimization_threshold = self.get_parameter('cpu_optimization_threshold').value
-        self.use_fast_trigonometry = self.get_parameter('use_fast_trigonometry').value
-        
-        # ADDED: Get new rate control parameters
-        self.min_control_rate = self.get_parameter('min_control_rate').value
-        self.max_control_rate = self.get_parameter('max_control_rate').value
-        self.enable_fusion_rate_detection = self.get_parameter('enable_fusion_rate_detection').value
-        self.fresh_data_timeout = self.get_parameter('fresh_data_timeout').value
-        self.stale_data_timeout = self.get_parameter('stale_data_timeout').value
-        
-        # ADDED: Get new CPU throttling parameters
-        self.cpu_throttle_interval = self.get_parameter('cpu_throttle_interval').value
-        self.enable_cycle_skipping = self.get_parameter('enable_cycle_skipping').value
-        self.max_cpu_skip_threshold = self.get_parameter('max_cpu_skip_threshold').value
-        
-        # Desired distance (cached calculation)
-        self.desired_distance = 1.0  # Default value
-        
-        # Log important parameters
-        self.get_logger().info(
-            f"Control rate settings: base={self.update_rate:.1f}Hz, "
-            f"min={self.min_control_rate:.1f}Hz, max={self.max_control_rate:.1f}Hz, "
-            f"adaptive={self.adaptive_control_rate}"
-        )
-        
-        self.get_logger().info(
-            f"Controller parameters: linear_x=[{self.linear_x_kp}, {self.linear_x_ki}, {self.linear_x_kd}], "
-            f"linear_y=[{self.linear_y_kp}, {self.linear_y_ki}, {self.linear_y_kd}], "
-            f"angular=[{self.angular_kp}, {self.angular_ki}, {self.angular_kd}]"
-        )
-        
-        self.get_logger().info(
-            f"Error thresholds: distance={self.distance_threshold}, "
-            f"lateral={self.lateral_threshold}, angular={self.angular_threshold} "
-            f"(at_target_factor={self.angular_at_target_factor})"
-        )
-        
-        self.get_logger().info(
-            f"Approach configuration: approach_distance={self.approach_distance}m, "
-            f"min_approach_factor={self.min_approach_factor}"
-        )
-        
-        # Log optimization parameters
-        self.get_logger().info(
-            f"Optimization settings: simplified_control={self.use_simplified_control_when_possible}, "
-            f"cpu_threshold={self.cpu_optimization_threshold}, "
-            f"fast_trig={self.use_fast_trigonometry}"
-        )
-        
-        # Log freshness parameters
-        self.get_logger().info(
-            f"Data freshness: fresh_timeout={self.fresh_data_timeout:.1f}s, "
-            f"stale_timeout={self.stale_data_timeout:.1f}s, "
-            f"fusion_detection={self.enable_fusion_rate_detection}"
-        )
-               
     def _init_controllers(self):
         """Initialize the controllers with improved tuning for controlled velocity."""
         try:
