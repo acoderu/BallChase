@@ -72,79 +72,79 @@ LOG_THROTTLE_DIAG = 1.0        # Seconds between diagnostic logs
 # Centralized object pool manager
 class ObjectPoolManager:
     """Manages pools of reusable objects to reduce memory allocations."""
-    
-    def __init__(self, max_twist=10, max_vector3=15):
-        """Initialize object pools."""
-        self.twist_pool = [Twist() for _ in range(max_twist)]
-        self.vector3_pool = [Vector3() for _ in range(max_vector3)]
-        
-        # Pool statistics for monitoring
-        self.twist_misses = 0
-        self.vector3_misses = 0
-        self.twist_max_usage = 0
-        self.vector3_max_usage = 0
-        
-    def get_twist(self):
-        """Get a Twist message from the pool, or create a new one if pool is empty."""
-        if not self.twist_pool:
-            self.twist_misses += 1
-            return Twist()
-        
-        # Track max usage
-        self.twist_max_usage = max(self.twist_max_usage, len(self.twist_pool))
-        
-        # Get from pool
-        twist = self.twist_pool.pop()
-        
-        # Reset all fields
-        twist.linear.x = 0.0
-        twist.linear.y = 0.0
-        twist.linear.z = 0.0
-        twist.angular.x = 0.0
-        twist.angular.y = 0.0
-        twist.angular.z = 0.0
-        
-        return twist
-    
-    def return_twist(self, twist):
-        """Return a Twist to the pool if below capacity."""
-        if len(self.twist_pool) < 10:
-            self.twist_pool.append(twist)
-    
-    def get_vector3(self):
-        """Get a Vector3 from the pool, or create a new one if pool is empty."""
-        if not self.vector3_pool:
-            self.vector3_misses += 1
-            return Vector3()
-        
-        # Track max usage
-        self.vector3_max_usage = max(self.vector3_max_usage, len(self.vector3_pool))
-        
-        # Get from pool
-        vector = self.vector3_pool.pop()
-        
-        # Reset all fields
-        vector.x = 0.0
-        vector.y = 0.0
-        vector.z = 0.0
-        
-        return vector
-    
-    def return_vector3(self, vector):
-        """Return a Vector3 to the pool if below capacity."""
-        if len(self.vector3_pool) < 15:
-            self.vector3_pool.append(vector)
-    
-    def get_stats(self):
-        """Return pool usage statistics."""
-        return {
-            'twist_pool_size': len(self.twist_pool),
-            'vector3_pool_size': len(self.vector3_pool),
-            'twist_misses': self.twist_misses,
-            'vector3_misses': self.vector3_misses,
-            'twist_max_usage': self.twist_max_usage,
-            'vector3_max_usage': self.vector3_max_usage
+    def __init__(self, max_twist=10, max_vector3=15, max_float32multiarray=5, ttl=60.0):
+        from geometry_msgs.msg import Twist, Vector3, PointStamped, Vector3Stamped, TransformStamped
+        from nav_msgs.msg import Odometry
+        from std_msgs.msg import Float32MultiArray, String
+        from pid_helpers import GenericObjectPool
+
+        def reset_twist(twist):
+            twist.linear.x = twist.linear.y = twist.linear.z = 0.0
+            twist.angular.x = twist.angular.y = twist.angular.z = 0.0
+
+        def reset_vector3(vec):
+            vec.x = vec.y = vec.z = 0.0
+
+        def reset_float32multiarray(arr):
+            arr.data.clear()
+
+        def reset_pointstamped(msg):
+            msg.point.x = msg.point.y = msg.point.z = 0.0
+            msg.header.stamp.sec = 0
+            msg.header.stamp.nanosec = 0
+            msg.header.frame_id = ""
+
+        def reset_vector3stamped(msg):
+            msg.vector.x = msg.vector.y = msg.vector.z = 0.0
+            msg.header.stamp.sec = 0
+            msg.header.stamp.nanosec = 0
+            msg.header.frame_id = ""
+
+        def reset_transformstamped(msg):
+            msg.header.stamp.sec = 0
+            msg.header.stamp.nanosec = 0
+            msg.header.frame_id = ""
+            msg.child_frame_id = ""
+            msg.transform.translation.x = 0.0
+            msg.transform.translation.y = 0.0
+            msg.transform.translation.z = 0.0
+            msg.transform.rotation.x = 0.0
+            msg.transform.rotation.y = 0.0
+            msg.transform.rotation.z = 0.0
+            msg.transform.rotation.w = 1.0
+
+        def reset_odometry(msg):
+            msg.pose.pose.position.x = 0.0
+            msg.pose.pose.position.y = 0.0
+            msg.pose.pose.position.z = 0.0
+            msg.twist.twist.linear.x = 0.0
+            msg.twist.twist.linear.y = 0.0
+            msg.twist.twist.linear.z = 0.0
+            # ...reset other fields as needed...
+
+        def reset_string(msg):
+            msg.data = ""
+
+        self.pools = {
+            'Twist': GenericObjectPool(Twist, max_twist, reset_twist, ttl),
+            'Vector3': GenericObjectPool(Vector3, max_vector3, reset_vector3, ttl),
+            'Float32MultiArray': GenericObjectPool(Float32MultiArray, max_float32multiarray, reset_float32multiarray, ttl),
+            'PointStamped': GenericObjectPool(PointStamped, 10, reset_pointstamped, ttl),
+            'Vector3Stamped': GenericObjectPool(Vector3Stamped, 10, reset_vector3stamped, ttl),
+            'TransformStamped': GenericObjectPool(TransformStamped, 5, reset_transformstamped, ttl),
+            'Odometry': GenericObjectPool(Odometry, 5, reset_odometry, ttl),
+            'String': GenericObjectPool(String, 10, reset_string, ttl),
         }
+
+    def get(self, msg_type):
+        return self.pools[msg_type].get() if msg_type in self.pools else None
+
+    def put(self, msg_type, obj):
+        if msg_type in self.pools:
+            self.pools[msg_type].put(obj)
+
+    def get_stats(self):
+        return {k: v.stats() for k, v in self.pools.items()}
 
 
 class InitializationError(Exception):
@@ -1985,10 +1985,12 @@ class OptimizedPIDControllerNode(Node):
                 if current_time - self.state_controller.last_pool_log_time >= 10.0:
                     pool_msg = (
                         f"Object pool stats: "
-                        f"twist={pool_stats['twist_pool_size']}/{pool_stats['twist_max_usage']} "
-                        f"(misses={pool_stats['twist_misses']}), "
-                        f"vector3={pool_stats['vector3_pool_size']}/{pool_stats['vector3_max_usage']} "
-                        f"(misses={pool_stats['vector3_misses']})"
+                        f"Twist={pool_stats['Twist']['pool_size']}/{pool_stats['Twist']['max_usage']} "
+                        f"(misses={pool_stats['Twist']['misses']}), "
+                        f"Vector3={pool_stats['Vector3']['pool_size']}/{pool_stats['Vector3']['max_usage']} "
+                        f"(misses={pool_stats['Vector3']['misses']}), "
+                        f"Float32MultiArray={pool_stats['Float32MultiArray']['pool_size']}/{pool_stats['Float32MultiArray']['max_usage']} "
+                        f"(misses={pool_stats['Float32MultiArray']['misses']})"
                     )
                     self.get_logger().debug(pool_msg)
                     self.state_controller.last_pool_log_time = current_time

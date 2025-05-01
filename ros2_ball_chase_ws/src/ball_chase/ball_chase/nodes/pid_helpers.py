@@ -484,3 +484,48 @@ class StateController:
         self._velocity_tuple = None
         self._velocity_change_check = None
         # Add more shared state as needed
+
+class GenericObjectPool:
+    """Generic object pool for any message type, with TTL-based cleanup and max size."""
+    def __init__(self, cls, max_size=10, reset_fn=None, ttl=60.0):
+        self.cls = cls
+        self.max_size = max_size
+        self.reset_fn = reset_fn
+        self.ttl = ttl  # seconds
+        self.pool = []  # List of (obj, timestamp)
+        self.misses = 0
+        self.max_usage = 0
+        now = time.time()
+        for _ in range(max_size):
+            self.pool.append((cls(), now))
+
+    def get(self):
+        now = time.time()
+        self._cleanup(now)
+        if not self.pool:
+            self.misses += 1
+            return self.cls()
+        self.max_usage = max(self.max_usage, self.max_size - len(self.pool))
+        obj, _ = self.pool.pop()
+        if self.reset_fn:
+            self.reset_fn(obj)
+        return obj
+
+    def put(self, obj):
+        now = time.time()
+        self._cleanup(now)
+        if len(self.pool) < self.max_size:
+            self.pool.append((obj, now))
+        # If full, discard the object
+
+    def _cleanup(self, now=None):
+        if now is None:
+            now = time.time()
+        self.pool = [(obj, ts) for (obj, ts) in self.pool if now - ts < self.ttl]
+
+    def stats(self):
+        return {
+            'pool_size': len(self.pool),
+            'misses': self.misses,
+            'max_usage': self.max_usage
+        }
