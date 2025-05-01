@@ -452,7 +452,7 @@ class StateController:
         self.last_logged_cmd = (0.0, 0.0, 0.0)
         self.cycle_count = 0
         self.last_pool_log_time = 0.0
-        self._robot_stopped = False
+        self._robot_stopped = True
         self._stop_time = 0.0
         self._last_stop_position = (0.0, 0.0, 0.0)
         self._movement_hysteresis = 0.0
@@ -472,4 +472,15 @@ class StateController:
         self._timer_control_count = 0
         self._last_cpu_check_time = 0.0
         self.last_cpu_warning_time = 0.0
+        self._skipped_cycle_count = 0
+        self._freshness_state_change_time = 0.0
+        self._last_logged_rate = 0.0
+        self._current_rate = 0.0
+        self._adaptive_rate_history = []
+        self._initial_movement_boost = False
+        self._prev_velocities = None
+        self._target_velocities = None
+        self._vel_diffs = None
+        self._velocity_tuple = None
+        self._velocity_change_check = None
         # Add more shared state as needed

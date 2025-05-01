@@ -526,10 +526,10 @@ class OptimizedPIDControllerNode(Node):
         self.object_pool = ObjectPoolManager(max_twist=10, max_vector3=15)
         
         # Pre-allocate commonly used arrays
-        self._limited_velocities = np.zeros(3, dtype=np.float32)
-        self._prev_velocities = np.zeros(3, dtype=np.float32)
-        self._target_velocities = np.zeros(3, dtype=np.float32)
-        self._vel_diffs = np.zeros(3, dtype=np.float32)
+        self.state_controller._limited_velocities = np.zeros(3, dtype=np.float32)
+        self.state_controller._prev_velocities = np.zeros(3, dtype=np.float32)
+        self.state_controller._target_velocities = np.zeros(3, dtype=np.float32)
+        self.state_controller._vel_diffs = np.zeros(3, dtype=np.float32)
         
         # Pre-allocate reusable message objects
         self._cmd_vel_msg = Twist()
@@ -540,26 +540,26 @@ class OptimizedPIDControllerNode(Node):
         self._key_tuple = ["none", "none", "none"]  # Use list instead of tuple for mutability
         
         # Pre-allocated velocity tuple
-        self._velocity_tuple = [0.0, 0.0, 0.0]
+        self.state_controller._velocity_tuple = [0.0, 0.0, 0.0]
         
         # Pre-allocated velocity change check
-        self._velocity_change_check = [False, False, False]
+        self.state_controller._velocity_change_check = [False, False, False]
         
         # Pre-allocated error container
         self._current_errors = [0.0, 0.0, 0.0]  # distance, lateral, angular
         
         # Adaptive control rate calculation variables
-        self._adaptive_rate_history = deque(maxlen=10)
-        self._last_rate_adjustment_time = time.time()
+        self.state_controller._adaptive_rate_history = deque(maxlen=10)
+        self.state_controller._last_rate_adjustment_time = time.time()
         
         # ADDED: Fusion rate tracking variables
-        self._detected_fusion_rate = 1.0  # Default assumption (1Hz)
-        self._fusion_rate_updated = False
-        self._last_fusion_check_time = time.time()
+        self.state_controller._detected_fusion_rate = 1.0  # Default assumption (1Hz)
+        self.state_controller._fusion_rate_updated = False
+        self.state_controller._last_fusion_check_time = time.time()
         
         # ADDED: Skip cycle flag
-        self._skip_next_cycle = False
-        self._skipped_cycle_count = 0
+        self.state_controller._skip_next_cycle = False
+        self.state_controller._skipped_cycle_count = 0
     
     def _init_state_variables(self):
         """Initialize all state tracking variables (now handled by StateController)."""
@@ -639,13 +639,13 @@ class OptimizedPIDControllerNode(Node):
         raw_orientation = msg.vector.z
         
         # Store timestamp for freshness checking
-        self.last_orientation_time = time.time()
+        self.state_controller.last_orientation_time = time.time()
         
         # Check if transform system is ready before attempting transforms
         if (not hasattr(self, 'transform_utils') or 
             not self.transform_utils.is_transform_system_ready()):
             # If transforms aren't ready, use raw orientation
-            self.robot_orientation = raw_orientation
+            self.state_controller.robot_orientation = raw_orientation
             return
         
         # If we need to transform the orientation to another frame
@@ -701,39 +701,39 @@ class OptimizedPIDControllerNode(Node):
                     # Calculate new orientation angle
                     # Use optimized atan2 if enabled
                     if self.use_fast_trigonometry:
-                        self.robot_orientation = self.fast_trig.atan2(ty, tx)
+                        self.state_controller.robot_orientation = self.fast_trig.atan2(ty, tx)
                     else:
-                        self.robot_orientation = math.atan2(ty, tx)
+                        self.state_controller.robot_orientation = math.atan2(ty, tx)
                 else:
                     # If transform not available, use raw orientation
-                    self.robot_orientation = raw_orientation
+                    self.state_controller.robot_orientation = raw_orientation
                     
             except Exception as e:
                 # In case of error, fall back to raw orientation
                 if self.debug_level >= 2:
                     self.get_logger().warning(f"Orientation transform error: {str(e)}")
-                self.robot_orientation = raw_orientation
+                self.state_controller.robot_orientation = raw_orientation
         else:
             # No transform needed
-            self.robot_orientation = raw_orientation
+            self.state_controller.robot_orientation = raw_orientation
         
         # Log orientation updates at high debug level
         if self.debug_level >= 3:
             # Use pre-computed table for degrees conversion if fast trig is enabled
             if self.use_fast_trigonometry:
-                orientation_degrees = self.robot_orientation * 57.29578  # 180/pi
+                orientation_degrees = self.state_controller.robot_orientation * 57.29578  # 180/pi
             else:
-                orientation_degrees = math.degrees(self.robot_orientation)
+                orientation_degrees = math.degrees(self.state_controller.robot_orientation)
                 
             self.get_logger().debug(f"Orientation update: yaw={orientation_degrees:.2f}°")
     
     def _is_orientation_fresh(self):
         """Check if orientation data is fresh enough to use."""
-        if self.last_orientation_time is None:
+        if self.state_controller.last_orientation_time is None:
             return False
             
         current_time = time.time()
-        age = current_time - self.last_orientation_time
+        age = current_time - self.state_controller.last_orientation_time
         
         # Consider orientation data older than 0.5 seconds as stale
         return age < 0.5
@@ -767,8 +767,8 @@ class OptimizedPIDControllerNode(Node):
                     
                     if was_updated and fusion_rate > 0:  # Ensure rate is positive
                         # Update our stored fusion rate
-                        self._detected_fusion_rate = fusion_rate
-                        self._fusion_rate_updated = True
+                        self.state_controller._detected_fusion_rate = fusion_rate
+                        self.state_controller._fusion_rate_updated = True
                         
                         # Update the resource monitor with the new fusion rate
                         if hasattr(self.resource_monitor, 'set_fusion_rate'):
@@ -783,21 +783,21 @@ class OptimizedPIDControllerNode(Node):
         # This prevents excessive CPU usage while ensuring responsiveness
         try:
             # Initialize time tracking attributes if they don't exist
-            if not hasattr(self, '_last_event_execution'):
-                self._last_event_execution = 0.0
-            if not hasattr(self, '_last_timer_execution'):
-                self._last_timer_execution = 0.0
-            if not hasattr(self, '_event_control_count'):
-                self._event_control_count = 0
+            if not hasattr(self.state_controller, '_last_event_execution'):
+                self.state_controller._last_event_execution = 0.0
+            if not hasattr(self.state_controller, '_last_timer_execution'):
+                self.state_controller._last_timer_execution = 0.0
+            if not hasattr(self.state_controller, '_event_control_count'):
+                self.state_controller._event_control_count = 0
                 
             if (self.state_controller.robot_state == "tracking" and 
-                (event_time - self._last_event_execution) > (1.0 / self.max_control_rate) and
-                (event_time - self._last_timer_execution) > 0.05):  # Minimum 50ms between executions
+                (event_time - self.state_controller._last_event_execution) > (1.0 / self.max_control_rate) and
+                (event_time - self.state_controller._last_timer_execution) > 0.05):  # Minimum 50ms between executions
                 
                 # Execute control loop directly in response to new data
                 self.execute_control_cycle(event_triggered=True)
-                self._last_event_execution = event_time
-                self._event_control_count += 1
+                self.state_controller._last_event_execution = event_time
+                self.state_controller._event_control_count += 1
         except Exception as e:
             self.get_logger().error(f"Error in event-based control: {str(e)}")
     
@@ -906,14 +906,14 @@ class OptimizedPIDControllerNode(Node):
         if not state_reset:
             # Check stop conditions
             should_stop, stop_reason = self._evaluate_stop_conditions(
-                distance, lateral, angular_degrees, self._robot_stopped
+                distance, lateral, angular_degrees, self.state_controller._robot_stopped
             )
             
             if should_stop:
-                if not self._robot_stopped:
+                if not self.state_controller._robot_stopped:
                     self.get_logger().info(stop_reason)
-                    self._robot_stopped = True
-                    self._stop_time = time.time()
+                    self.state_controller._robot_stopped = True
+                    self.state_controller._stop_time = time.time()
                     # Generate stop command
                     stop_cmd = self.recovery_module.stop_robot()
                     # Publish stop command to actually stop the robot
@@ -934,7 +934,7 @@ class OptimizedPIDControllerNode(Node):
             self._current_errors[0], 
             self._current_errors[1], 
             math.degrees(self._current_errors[2]),
-            self._robot_stopped
+            self.state_controller._robot_stopped
         )
         
         # Apply strategy to movement decisions (use object attributes)
@@ -971,7 +971,7 @@ class OptimizedPIDControllerNode(Node):
                 self._current_errors[1],   # lateral error
                 self._current_errors[2],   # angular error
                 current_time,              # current time
-                self.robot_orientation     # current orientation from IMU
+                self.state_controller.robot_orientation     # current orientation from IMU
             )
             
             # Disable individual components if strategy requires
@@ -1101,7 +1101,7 @@ class OptimizedPIDControllerNode(Node):
                         f"(age: {data_age:.3f}s)"
                     )
                 # Record the time of state change
-                self._freshness_state_change_time = time.time()
+                self.state_controller._freshness_state_change_time = time.time()
                 # Update the freshness level
                 self.state_controller._data_freshness_level = freshness_level
             
@@ -1132,7 +1132,7 @@ class OptimizedPIDControllerNode(Node):
         elif cpu_usage > 85.0:
             computation_level = min(computation_level, 2)
         # Always perform full computation periodically to ensure accuracy
-        time_since_full = time.time() - self._last_full_computation_time
+        time_since_full = time.time() - self.state_controller._last_full_computation_time
         if time_since_full > 0.5:
             return 3
         position_data = self.target_tracker.get_position_data()
@@ -1189,14 +1189,14 @@ class OptimizedPIDControllerNode(Node):
             if not isinstance(cpu_usage, (int, float)) or cpu_usage < 0:
                 self.get_logger().warning(f"Invalid cpu_usage: {cpu_usage}, using 50%")
                 cpu_usage = 50.0
-            if not hasattr(self, '_last_rate_adjustment_time'):
-                self._last_rate_adjustment_time = 0.0
-            if current_time - self._last_rate_adjustment_time < 1.0:
-                return getattr(self, '_current_rate', base_rate)
-            self._last_rate_adjustment_time = current_time
-            if hasattr(self, '_fusion_rate_updated') and hasattr(self, '_detected_fusion_rate') and \
-               self._fusion_rate_updated and self.enable_fusion_rate_detection:
-                fusion_rate = self._detected_fusion_rate
+            if not hasattr(self.state_controller, '_last_rate_adjustment_time'):
+                self.state_controller._last_rate_adjustment_time = 0.0
+            if current_time - self.state_controller._last_rate_adjustment_time < 1.0:
+                return getattr(self.state_controller, '_current_rate', base_rate)
+            self.state_controller._last_rate_adjustment_time = current_time
+            if hasattr(self.state_controller, '_fusion_rate_updated') and hasattr(self.state_controller, '_detected_fusion_rate') and \
+               self.state_controller._fusion_rate_updated and self.enable_fusion_rate_detection:
+                fusion_rate = self.state_controller._detected_fusion_rate
                 if fusion_rate > 0 and fusion_rate < 100:
                     adjusted_base_rate = min(max(fusion_rate * 1.2, self.min_control_rate), self.max_control_rate)
                     if abs(adjusted_base_rate - base_rate) > 0.3:
@@ -1219,18 +1219,18 @@ class OptimizedPIDControllerNode(Node):
             else:
                 new_rate = base_rate
             new_rate = max(self.min_control_rate, min(self.max_control_rate, new_rate))
-            self._current_rate = new_rate
-            if not hasattr(self, '_adaptive_rate_history'):
-                self._adaptive_rate_history = deque(maxlen=10)
-            self._adaptive_rate_history.append((current_time, new_rate))
-            if hasattr(self, '_last_logged_rate') and abs(new_rate - self._last_logged_rate) > 0.5:
+            self.state_controller._current_rate = new_rate
+            if not hasattr(self.state_controller, '_adaptive_rate_history'):
+                self.state_controller._adaptive_rate_history = deque(maxlen=10)
+            self.state_controller._adaptive_rate_history.append((current_time, new_rate))
+            if hasattr(self.state_controller, '_last_logged_rate') and abs(new_rate - self.state_controller._last_logged_rate) > 0.5:
                 self.get_logger().info(
-                    f"Adaptive rate adjusted: {self._last_logged_rate:.1f}Hz -> {new_rate:.1f}Hz "
+                    f"Adaptive rate adjusted: {self.state_controller._last_logged_rate:.1f}Hz -> {new_rate:.1f}Hz "
                     f"(CPU: {cpu_usage:.1f}%)"
                 )
-                self._last_logged_rate = new_rate
-            elif not hasattr(self, '_last_logged_rate'):
-                self._last_logged_rate = new_rate
+                self.state_controller._last_logged_rate = new_rate
+            elif not hasattr(self.state_controller, '_last_logged_rate'):
+                self.state_controller._last_logged_rate = new_rate
             return new_rate
         except Exception as e:
             self.get_logger().error(f"Error in calculate_adaptive_rate: {str(e)}")
@@ -1250,13 +1250,13 @@ class OptimizedPIDControllerNode(Node):
             
             # Track execution time source for metrics
             if event_triggered:
-                self._last_event_execution = time.time()
+                self.state_controller._last_event_execution = time.time()
             else:
                 # Initialize timer control count if it doesn't exist
-                if not hasattr(self, '_timer_control_count'):
-                    self._timer_control_count = 0
-                self._last_timer_execution = time.time()
-                self._timer_control_count += 1
+                if not hasattr(self.state_controller, '_timer_control_count'):
+                    self.state_controller._timer_control_count = 0
+                self.state_controller._last_timer_execution = time.time()
+                self.state_controller._timer_control_count += 1
             
             # Mark cycle start for performance tracking
             self.cycle_start_time = time.time()
@@ -1285,19 +1285,19 @@ class OptimizedPIDControllerNode(Node):
             
             # Handle critical data freshness (prioritized over other state handling)
             if freshness_level == "critical":
-                if not self._robot_stopped:
+                if not self.state_controller._robot_stopped:
                     self.get_logger().warning(f"CRITICAL DATA AGE: {data_age:.3f}s - Safety stop triggered")
                     stop_cmd = self.recovery_module.stop_robot()
                     self.cmd_vel_pub.publish(stop_cmd)  # Ensure command is published
-                    self._robot_stopped = True
-                    self._stop_time = time.time()
+                    self.state_controller._robot_stopped = True
+                    self.state_controller._stop_time = time.time()
                 return  # Exit early when data is critically stale
                 
             # Special handling for recovery mode (higher priority than other states)
             if self.state_controller.in_recovery:
                 # Get position data for recovery
                 position_data = self.target_tracker.get_position_data()
-                orientation_data = {'yaw': self.robot_orientation}
+                orientation_data = {'yaw': self.state_controller.robot_orientation}
                 
                 # Delegate to recovery module
                 cmd_vel, is_complete = self.recovery_module.handle_recovery(
@@ -1336,10 +1336,10 @@ class OptimizedPIDControllerNode(Node):
                     return
                 else:
                     # Record that we did full computation
-                    self._last_full_computation_time = time.time()
+                    self.state_controller._last_full_computation_time = time.time()
             else:
                 # Standard control path
-                self._using_simplified_control = False
+                self.state_controller._using_simplified_control = False
                 
             # Perform expensive transform operations at reduced frequency
             #self._optimize_transforms_and_filtering()
@@ -1351,7 +1351,7 @@ class OptimizedPIDControllerNode(Node):
                 debug_msg = (
                     f"PRE-STOP CHECK: distance={distance:.3f}m (target={self.desired_distance:.3f}m), "
                     f"lateral={lateral:.3f}m, angular={angular_degrees:.2f}°, "
-                    f"is_stopped={self._robot_stopped}"
+                    f"is_stopped={self.state_controller._robot_stopped}"
                 )
                 self.get_logger().info(debug_msg, throttle_duration_sec=2.0)
             
@@ -1428,13 +1428,13 @@ class OptimizedPIDControllerNode(Node):
             return False
             
         # Track that we're using simplified control
-        self._using_simplified_control = True
+        self.state_controller._using_simplified_control = True
         
         # Ensure _simplified_control_count is initialized
-        if not hasattr(self, '_simplified_control_count'):
-            self._simplified_control_count = 0
+        if not hasattr(self.state_controller, '_simplified_control_count'):
+            self.state_controller._simplified_control_count = 0
             
-        self._simplified_control_count += 1
+        self.state_controller._simplified_control_count += 1
         
         # Get current time for performance tracking
         start_time = time.time()
@@ -1446,16 +1446,16 @@ class OptimizedPIDControllerNode(Node):
             
             # Use pre-allocated message
             cmd_vel_msg = self._cmd_vel_msg
-            cmd_vel_msg.linear.x = float(self.last_cmd_vel[0] * damping)
-            cmd_vel_msg.linear.y = float(self.last_cmd_vel[1] * damping)
-            cmd_vel_msg.angular.z = float(self.last_cmd_vel[2] * damping)
+            cmd_vel_msg.linear.x = float(self.state_controller.last_cmd_vel[0] * damping)
+            cmd_vel_msg.linear.y = float(self.state_controller.last_cmd_vel[1] * damping)
+            cmd_vel_msg.angular.z = float(self.state_controller.last_cmd_vel[2] * damping)
             
             # Publish command
             self.cmd_vel_pub.publish(cmd_vel_msg)
             
             # Update history without expensive diagnostics
             new_velocity = (cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z)
-            self.last_cmd_vel = new_velocity
+            self.state_controller.last_cmd_vel = new_velocity
             
         # For basic computation (level 1), apply simple proportional control
         elif computation_level == 1:
@@ -1476,9 +1476,9 @@ class OptimizedPIDControllerNode(Node):
                 
                 # Apply damping from previous velocities for smoothness
                 damping = 0.3  # 30% of previous velocity
-                linear_x = linear_x * (1.0 - damping) + self.last_cmd_vel[0] * damping
-                lateral_y = lateral_y * (1.0 - damping) + self.last_cmd_vel[1] * damping
-                angular_z = angular_z * (1.0 - damping) + self.last_cmd_vel[2] * damping
+                linear_x = linear_x * (1.0 - damping) + self.state_controller.last_cmd_vel[0] * damping
+                lateral_y = lateral_y * (1.0 - damping) + self.state_controller.last_cmd_vel[1] * damping
+                angular_z = angular_z * (1.0 - damping) + self.state_controller.last_cmd_vel[2] * damping
                 
                 # Publish
                 cmd_vel_msg = self._cmd_vel_msg
@@ -1490,21 +1490,21 @@ class OptimizedPIDControllerNode(Node):
                 
                 # Update history
                 new_velocity = (linear_x, lateral_y, angular_z)
-                self.last_cmd_vel = new_velocity
+                self.state_controller.last_cmd_vel = new_velocity
             else:
                 # No valid position data, apply strong damping
                 damping = 0.7
                 cmd_vel_msg = self._cmd_vel_msg
-                cmd_vel_msg.linear.x = float(self.last_cmd_vel[0] * damping)
-                cmd_vel_msg.linear.y = float(self.last_cmd_vel[1] * damping)
-                cmd_vel_msg.angular.z = float(self.last_cmd_vel[2] * damping)
+                cmd_vel_msg.linear.x = float(self.state_controller.last_cmd_vel[0] * damping)
+                cmd_vel_msg.linear.y = float(self.state_controller.last_cmd_vel[1] * damping)
+                cmd_vel_msg.angular.z = float(self.state_controller.last_cmd_vel[2] * damping)
                 
                 # Publish command
                 self.cmd_vel_pub.publish(cmd_vel_msg)
                 
                 # Update history
                 new_velocity = (cmd_vel_msg.linear.x, cmd_vel_msg.linear.y, cmd_vel_msg.angular.z)
-                self.last_cmd_vel = new_velocity
+                self.state_controller.last_cmd_vel = new_velocity
                 
         # For medium computation (level 2), use PID but skip coordinated control
         elif computation_level == 2:
@@ -1558,7 +1558,7 @@ class OptimizedPIDControllerNode(Node):
             
             # Update history
             new_velocity = (linear_x_velocity, lateral_velocity, angular_velocity)
-            self.last_cmd_vel = new_velocity
+            self.state_controller.last_cmd_vel = new_velocity
         
         # Calculate cycle duration for performance monitoring
         cycle_duration = time.time() - start_time
@@ -1607,7 +1607,7 @@ class OptimizedPIDControllerNode(Node):
                 
                 # Check if we should skip this cycle based on adaptive rate
                 current_time = time.time()
-                time_since_last = current_time - getattr(self, 'last_control_time', current_time)
+                time_since_last = current_time - getattr(self.state_controller, 'last_control_time', current_time)
                 
                 # Skip if the time since last execution is too short
                 if (time_since_last < (1.0 / adaptive_rate)):
@@ -1616,9 +1616,9 @@ class OptimizedPIDControllerNode(Node):
                 # Skip this cycle if requested for CPU relief
                 if hasattr(self.resource_monitor, 'should_skip_cycle') and self.resource_monitor.should_skip_cycle():
                     # Ensure counter exists before incrementing
-                    if not hasattr(self, '_skipped_cycle_count'):
-                        self._skipped_cycle_count = 0
-                    self._skipped_cycle_count += 1
+                    if not hasattr(self.state_controller, '_skipped_cycle_count'):
+                        self.state_controller._skipped_cycle_count = 0
+                    self.state_controller._skipped_cycle_count += 1
                     return
                 
                 # Execute the control cycle
@@ -1673,7 +1673,7 @@ class OptimizedPIDControllerNode(Node):
         # Apply state-dependent hysteresis
         if is_stopped:
             # Higher thresholds to start moving (requires larger errors)
-            hysteresis = 1.5 + self._movement_hysteresis
+            hysteresis = 1.5 + self.state_controller._movement_hysteresis
             distance_threshold *= hysteresis
             lateral_threshold *= hysteresis
             angular_threshold *= hysteresis
@@ -1719,8 +1719,8 @@ class OptimizedPIDControllerNode(Node):
         
         # Accumulate hysteresis for sustained stops
         if not is_stopped:
-            self._movement_hysteresis += 0.05
-            self._movement_hysteresis = min(0.3, self._movement_hysteresis)  # Cap at 0.3
+            self.state_controller._movement_hysteresis += 0.05
+            self.state_controller._movement_hysteresis = min(0.3, self.state_controller._movement_hysteresis)  # Cap at 0.3
         
         return True, reason  # Return True to indicate robot SHOULD stop
 
@@ -1737,20 +1737,20 @@ class OptimizedPIDControllerNode(Node):
             bool: True if stopped state was reset, False otherwise
         """
         # If already moving, no need to reset
-        if not self._robot_stopped:
+        if not self.state_controller._robot_stopped:
             return False
         
         # Handle initialization for first movement after startup
-        if not hasattr(self, '_initial_movement_boost'):
-            self._initial_movement_boost = True
+        if not hasattr(self.state_controller, '_initial_movement_boost'):
+            self.state_controller._initial_movement_boost = True
         
         # Calculate hysteresis factor based on stop duration
-        stop_duration = time.time() - self._stop_time
+        stop_duration = time.time() - self.state_controller._stop_time
         
         # Apply reduced hysteresis for first movement after startup
-        if self._initial_movement_boost:
+        if self.state_controller._initial_movement_boost:
             hysteresis = 0.5  # Much lower hysteresis for first movement
-            self._initial_movement_boost = False
+            self.state_controller._initial_movement_boost = False
         else:
             # Regular hysteresis calculation
             hysteresis = min(1.1, 1.0 + stop_duration * 0.1)
@@ -1782,10 +1782,10 @@ class OptimizedPIDControllerNode(Node):
             self.get_logger().info(log_msg)
             
             # Reset stopped state
-            self._robot_stopped = False
+            self.state_controller._robot_stopped = False
             
             # Reset movement hysteresis
-            self._movement_hysteresis = 0.0
+            self.state_controller._movement_hysteresis = 0.0
             
             return True
         
@@ -1812,13 +1812,13 @@ class OptimizedPIDControllerNode(Node):
             if hasattr(self.target_tracker, 'reset'):
                 self.target_tracker.reset()
         # Reset movement hysteresis
-        self._movement_hysteresis = 0.0
+        self.state_controller._movement_hysteresis = 0.0
         # Set stopped state
-        self._robot_stopped = True
-        self._stop_time = time.time()
+        self.state_controller._robot_stopped = True
+        self.state_controller._stop_time = time.time()
         # Reset computation tracking
-        self._using_simplified_control = False
-        self._last_full_computation_time = time.time()
+        self.state_controller._using_simplified_control = False
+        self.state_controller._last_full_computation_time = time.time()
         # Reset data freshness tracking
         self.state_controller._data_freshness_level = "unknown"
         self.get_logger().info("Complete controller reset performed")
@@ -1836,18 +1836,18 @@ class OptimizedPIDControllerNode(Node):
                 'skips': 0
             }
         strategy_name = getattr(self.strategy_module, 'current_strategy', 'unknown')
-        total_cycles = max(1, self._event_control_count + self._timer_control_count)
-        event_ratio = self._event_control_count / total_cycles * 100.0
+        total_cycles = max(1, self.state_controller._event_control_count + self.state_controller._timer_control_count)
+        event_ratio = self.state_controller._event_control_count / total_cycles * 100.0
         status_msg = (
             f"Status: Robot state={self.state_controller.robot_state}, "
             f"Strategy={strategy_name}, "
             f"CPU={perf_stats['cpu_avg']:.1f}%, "
             f"Cycle time={perf_stats['cycle_time_ms']:.2f}ms, "
             f"Rate={perf_stats['update_rate']:.1f}Hz, "
-            f"Simplified={self._using_simplified_control}, "
+            f"Simplified={self.state_controller._using_simplified_control}, "
             f"Freshness={self.state_controller._data_freshness_level}, "
             f"Event-driven={event_ratio:.1f}%, "
-            f"Skips={self._skipped_cycle_count}"
+            f"Skips={self.state_controller._skipped_cycle_count}"
         )
         throttled_logger.info(status_msg, throttle_duration_sec=LOG_THROTTLE_CONTROL, log_id='periodic_status')
     
@@ -1879,19 +1879,19 @@ class OptimizedPIDControllerNode(Node):
                 cpu_usage = 50.0
             
             # Only adjust rate periodically to avoid oscillation
-            if not hasattr(self, '_last_rate_adjustment_time'):
-                self._last_rate_adjustment_time = 0.0
+            if not hasattr(self.state_controller, '_last_rate_adjustment_time'):
+                self.state_controller._last_rate_adjustment_time = 0.0
                 
-            if current_time - self._last_rate_adjustment_time < 1.0:  # At most once per second
-                return getattr(self, '_current_rate', base_rate)
+            if current_time - self.state_controller._last_rate_adjustment_time < 1.0:  # At most once per second
+                return getattr(self.state_controller, '_current_rate', base_rate)
                 
-            self._last_rate_adjustment_time = current_time
+            self.state_controller._last_rate_adjustment_time = current_time
             
             # Apply fusion rate consideration if detected
-            if hasattr(self, '_fusion_rate_updated') and hasattr(self, '_detected_fusion_rate') and \
-               self._fusion_rate_updated and self.enable_fusion_rate_detection:
+            if hasattr(self.state_controller, '_fusion_rate_updated') and hasattr(self.state_controller, '_detected_fusion_rate') and \
+               self.state_controller._fusion_rate_updated and self.enable_fusion_rate_detection:
                 # Use fusion rate as a baseline if it's reliable
-                fusion_rate = self._detected_fusion_rate
+                fusion_rate = self.state_controller._detected_fusion_rate
                 
                 # Ensure fusion rate is positive and reasonable
                 if (fusion_rate > 0 and fusion_rate < 100):  # Sanity check
@@ -1931,22 +1931,22 @@ class OptimizedPIDControllerNode(Node):
             new_rate = max(self.min_control_rate, min(self.max_control_rate, new_rate))
             
             # Store current rate for reference
-            self._current_rate = new_rate
+            self.state_controller._current_rate = new_rate
             
             # Add to history (ensure history exists)
-            if not hasattr(self, '_adaptive_rate_history'):
-                self._adaptive_rate_history = deque(maxlen=10)
-            self._adaptive_rate_history.append((current_time, new_rate))
+            if not hasattr(self.state_controller, '_adaptive_rate_history'):
+                self.state_controller._adaptive_rate_history = deque(maxlen=10)
+            self.state_controller._adaptive_rate_history.append((current_time, new_rate))
             
             # Log significant rate changes
-            if hasattr(self, '_last_logged_rate') and abs(new_rate - self._last_logged_rate) > 0.5:
+            if hasattr(self.state_controller, '_last_logged_rate') and abs(new_rate - self.state_controller._last_logged_rate) > 0.5:
                 self.get_logger().info(
-                    f"Adaptive rate adjusted: {self._last_logged_rate:.1f}Hz -> {new_rate:.1f}Hz "
+                    f"Adaptive rate adjusted: {self.state_controller._last_logged_rate:.1f}Hz -> {new_rate:.1f}Hz "
                     f"(CPU: {cpu_usage:.1f}%)"
                 )
-                self._last_logged_rate = new_rate
-            elif not hasattr(self, '_last_logged_rate'):
-                self._last_logged_rate = new_rate
+                self.state_controller._last_logged_rate = new_rate
+            elif not hasattr(self.state_controller, '_last_logged_rate'):
+                self.state_controller._last_logged_rate = new_rate
             
             return new_rate
             
@@ -1967,7 +1967,7 @@ class OptimizedPIDControllerNode(Node):
                     hasattr(self.resource_monitor, 'current_cpu_usage') and
                     self.resource_monitor.current_cpu_usage > self.max_cpu_skip_threshold):
                     
-                    self._skip_next_cycle = True
+                    self.state_controller._skip_next_cycle = True
                     
                     current_time = time.time()
                     if current_time - self.state_controller.last_cpu_warning_time >= 2.0:
@@ -1976,7 +1976,7 @@ class OptimizedPIDControllerNode(Node):
                         )
                         self.state_controller.last_cpu_warning_time = current_time
                 else:
-                    self._skip_next_cycle = False
+                    self.state_controller._skip_next_cycle = False
                 
             # Log pool statistics periodically if in debug mode
             if self.debug_level >= 2 and hasattr(self, 'object_pool'):
@@ -2008,7 +2008,7 @@ class OptimizedPIDControllerNode(Node):
                         self.resource_monitor.current_cpu_usage
                     )
                     # Store current rate
-                    self._adaptive_rate = adaptive_rate
+                    self.state_controller._adaptive_rate = adaptive_rate
         except Exception as e:
             self.get_logger().warning(f"Error updating performance stats: {str(e)}")
     
@@ -2051,7 +2051,7 @@ class OptimizedPIDControllerNode(Node):
                 p_a, i_a, d_a = self.pid_angular.get_components()
                 
                 # Get stats on simplified control usage
-                simplified_pct = getattr(self, '_simplified_control_count', 0) / max(1, self.state_controller.cycle_count) * 100.0
+                simplified_pct = getattr(self.state_controller, '_simplified_control_count', 0) / max(1, self.state_controller.cycle_count) * 100.0
                 
                 diag_msg = (
                     f"DIAGNOSTICS: "
@@ -2138,15 +2138,15 @@ class OptimizedPIDControllerNode(Node):
                 strategy_name = self.strategy_module.current_strategy
             
             # Add optimization stats
-            adaptive_rate = getattr(self, '_adaptive_rate', perf_stats['update_rate'])
-            using_simplified = 1 if getattr(self, '_using_simplified_control', False) else 0
+            adaptive_rate = getattr(self.state_controller, '_adaptive_rate', perf_stats['update_rate'])
+            using_simplified = 1 if getattr(self.state_controller, '_using_simplified_control', False) else 0
             
             # Add freshness and event stats
             freshness_level = self.state_controller._data_freshness_level
             event_ratio = 0.0
-            if hasattr(self, '_event_control_count') and hasattr(self, '_timer_control_count'):
-                total_cycles = max(1, self._event_control_count + self._timer_control_count)
-                event_ratio = self._event_control_count / total_cycles * 100.0
+            if hasattr(self.state_controller, '_event_control_count') and hasattr(self.state_controller, '_timer_control_count'):
+                total_cycles = max(1, self.state_controller._event_control_count + self.state_controller._timer_control_count)
+                event_ratio = self.state_controller._event_control_count / total_cycles * 100.0
             
             # Create performance message - use string formatting for better performance
             # in tight loops
@@ -2165,7 +2165,7 @@ class OptimizedPIDControllerNode(Node):
                 perf_stats["cpu_avg"],
                 perf_stats["cycle_time_ms"],
                 strategy_name,
-                perf_stats.get("skips", self._skipped_cycle_count),
+                perf_stats.get("skips", self.state_controller._skipped_cycle_count),
                 perf_stats["update_rate"],
                 adaptive_rate,
                 using_simplified,
