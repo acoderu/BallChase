@@ -804,58 +804,35 @@ class OptimizedPIDControllerNode(Node):
     def state_callback(self, msg):
         """Handle robot state updates with improved recovery behavior."""
         new_state = msg.data
-        
         # If state changed, handle the transition
         if new_state != self.state_controller.robot_state:
-            # Log state transition with built-in throttling
             self.get_logger().info(
-                f"STATE TRANSITION: {self.state_controller.robot_state} → {new_state}",
+                f"STATE TRANSITION: {self.state_controller.robot_state}  {new_state}",
                 throttle_duration_sec=LOG_THROTTLE_STATE
             )
-
-            # Additional logging with explicit time tracking
             current_time = time.time()
-            
-            # Additional logging
             if self.debug_level >= 2:
-                # Calculate time in previous state
                 time_in_state = current_time - self.state_controller._last_state_change_time
-                # Log the duration
                 self.get_logger().info(f"Time in state '{self.state_controller.robot_state}': {time_in_state:.2f}s")
-                # Update last change time
                 self.state_controller._last_state_change_time = current_time
-            
             self.state_controller.previous_state = self.state_controller.robot_state
             self.state_controller.robot_state = new_state
-            
-            # Handle recovery state transitions
+            # Handle recovery state transitions using RecoveryBehaviorModule only
             if new_state == "recovery":
-                self.state_controller.in_recovery = True
-                self.state_controller.recovery_start_time = time.time()
-                self.state_controller.recovery_phase = "stop"
-                # Stop robot immediately when entering recovery
-                stop_cmd = self.recovery_module.stop_robot()
+                stop_cmd = self.recovery_module.start_recovery()
                 self.cmd_vel_pub.publish(stop_cmd)
-                self.get_logger().info("Entering recovery mode - stopping robot")
             elif self.state_controller.previous_state == "recovery" and new_state != "recovery":
-                self.state_controller.in_recovery = False
-                self.state_controller.recovery_phase = "none"
+                self.recovery_module.reset()
                 self.get_logger().info("Exiting recovery mode")
-            
             # Complete controller reset when transitioning between tracking and other states
             if new_state == "tracking" or self.state_controller.previous_state == "tracking":
                 self._complete_controller_reset()
-                
-                # Force target reacquisition when re-entering tracking mode
                 if new_state == "tracking":
                     self.state_controller.force_target_reacquisition = True
-                
-            # If we're not in tracking mode, ensure the robot is stopped
-            # (unless it's in searching or lost_ball mode, where the state manager controls motion)
             if new_state != "tracking" and new_state != "searching" and new_state != "lost_ball":
                 stop_cmd = self.recovery_module.stop_robot()
                 self.cmd_vel_pub.publish(stop_cmd)
-    
+
     def _handle_non_tracking_state(self):
         """Handle robot behavior when not in tracking mode."""
         # When not tracking, ensure robot is stopped (unless controlled by another node)
@@ -1294,25 +1271,17 @@ class OptimizedPIDControllerNode(Node):
                 return  # Exit early when data is critically stale
                 
             # Special handling for recovery mode (higher priority than other states)
-            if self.state_controller.in_recovery:
-                # Get position data for recovery
+            if self.state_controller.robot_state == "recovery":
                 position_data = self.target_tracker.get_position_data()
                 orientation_data = {'yaw': self.state_controller.robot_orientation}
-                
-                # Delegate to recovery module
                 cmd_vel, is_complete = self.recovery_module.handle_recovery(
-                    current_time, position_data, orientation_data
+                    time.time(), position_data, orientation_data
                 )
-                
-                # Always publish the command if in recovery mode
                 self.cmd_vel_pub.publish(cmd_vel)
-                
-                # If recovery is complete, transition back to normal mode
                 if is_complete:
-                    self.state_controller.in_recovery = False
+                    self.recovery_module.reset()
                     self.get_logger().info("Recovery sequence completed")
-                
-                return  # Exit after handling recovery
+                return
             
             # Handle non-tracking states (searching/lost_ball have their own handling)
             if self.state_controller.robot_state != "tracking":
@@ -1604,6 +1573,11 @@ class OptimizedPIDControllerNode(Node):
                     self.update_rate, 
                     self.resource_monitor.current_cpu_usage
                 )
+                
+                # Ensure adaptive_rate is never zero or negative
+                if not isinstance(adaptive_rate, (int, float)) or adaptive_rate <= 0.0:
+                    self.get_logger().warning(f"Invalid adaptive_rate={adaptive_rate}, using minimum value 0.01Hz")
+                    adaptive_rate = 0.01
                 
                 # Check if we should skip this cycle based on adaptive rate
                 current_time = time.time()
