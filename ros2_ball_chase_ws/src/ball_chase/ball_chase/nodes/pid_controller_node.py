@@ -34,7 +34,7 @@ import logging
 import traceback  
 
 # Import modules from refactored files
-from pid_helpers import LightweightBuffer, CircularBuffer, ThrottledLogger, FastTrigonometry, ResourceMonitor
+from pid_helpers import LightweightBuffer, CircularBuffer, ThrottledLogger, FastTrigonometry, ResourceMonitor, StateController
 from pid_target_filter import EnhancedTargetFilter, ErrorTracker
 from pid_computation import PIDControllers
 from pid_target_tracking import TargetTrackingModule, MovementStrategyModule, VelocityControlModule, TransformSystem
@@ -165,8 +165,9 @@ class OptimizedPIDControllerNode(Node):
         """Initialize the enhanced PID controller node with phased, dependency-driven initialization."""
         super().__init__('pid_controller')
         # Set ROS2 logger level based on debug_level
-        
-        
+        self.state_controller = StateController()  # Centralized state
+        self.state_controller.last_cpu_warning_time = 0.0
+        self.state_controller._shutting_down = False
         try:
             # Phase 1: Parameter initialization (must come first)
             self._initialize_parameters()
@@ -561,67 +562,16 @@ class OptimizedPIDControllerNode(Node):
         self._skipped_cycle_count = 0
     
     def _init_state_variables(self):
-        """Initialize all state tracking variables."""
-        # Robot state
-        self.robot_state = "initializing"
-        self.previous_state = None
-        self.last_control_time = time.time()
-        
-        # Robot orientation
-        self.robot_orientation = 0.0  # Current yaw in radians
-        self.last_orientation_time = None  # Time of last orientation update
-        
-        # For tracking when state changed (for duration calculations)
-        self._last_state_change_time = time.time()
-        
-        # For tracking time between events
-        self.last_velocity_log_time = 0.0
-        self.last_cpu_warning_time = 0.0
-        self.last_pool_log_time = 0.0
-        
-        # Motion smoothing
-        self.last_cmd_vel = (0.0, 0.0, 0.0)
-        self.last_logged_cmd = (0.0, 0.0, 0.0)
-        
-        # Diagnostic information
-        self.cycle_count = 0
-        
-        # Stopped state tracking with hysteresis
-        self._robot_stopped = False
-        self._stop_time = 0.0
-        self._last_stop_position = (0.0, 0.0, 0.0)
-        self._movement_hysteresis = 0.0  # Used to prevent oscillating between movement/stopped states
-        
-        # Recovery state tracking
-        self.in_recovery = False
-        self.recovery_start_time = 0.0
-        self.recovery_phase = "none"  # none, stop, orient, approach
-        self.force_target_reacquisition = False
-        
-        # Flag to track if we're shutting down
-        self._shutting_down = False
-        
-        # Optimization tracking
-        self._using_simplified_control = False
-        self._computation_level = 3  # Full computation
-        self._last_full_computation_time = 0.0
-        self._simplified_control_count = 0
-        
-        # ADDED: Data freshness tracking
-        self._data_freshness_level = "unknown"  # unknown, fresh, stale, critical
-        
-        # ADDED: Event-based control tracking
-        self._last_timer_execution = 0.0
-        self._last_event_execution = 0.0
-        self._event_control_count = 0
-        self._timer_control_count = 0
-        
-        # ADDED: CPU throttling tracking
-        self._last_cpu_check_time = 0.0
-
+        """Initialize all state tracking variables (now handled by StateController)."""
+        # All state is now managed by self.state_controller
+        self.state_controller.last_control_time = time.time()
+        self.state_controller._last_state_change_time = time.time()
+        self.state_controller._stop_time = time.time()
+        self.state_controller._last_full_computation_time = time.time()
+        self.state_controller._data_freshness_level = "unknown"
         self.get_logger().info(
             f"Initialized state: desired_distance={self.desired_distance:.3f}m, "
-            f"robot_state={self.robot_state}"
+            f"robot_state={self.state_controller.robot_state}"
         )
     
     def _setup_subscriptions(self):
@@ -796,7 +746,7 @@ class OptimizedPIDControllerNode(Node):
         can trigger immediate control cycle for improved responsiveness.
         """
         # Early exit if shutting down
-        if self._shutting_down:
+        if self.state_controller._shutting_down:
             return
         
         # ADDED: Record time for event tracking
@@ -840,7 +790,7 @@ class OptimizedPIDControllerNode(Node):
             if not hasattr(self, '_event_control_count'):
                 self._event_control_count = 0
                 
-            if (self.robot_state == "tracking" and 
+            if (self.state_controller.robot_state == "tracking" and 
                 (event_time - self._last_event_execution) > (1.0 / self.max_control_rate) and
                 (event_time - self._last_timer_execution) > 0.05):  # Minimum 50ms between executions
                 
@@ -856,10 +806,10 @@ class OptimizedPIDControllerNode(Node):
         new_state = msg.data
         
         # If state changed, handle the transition
-        if new_state != self.robot_state:
+        if new_state != self.state_controller.robot_state:
             # Log state transition with built-in throttling
             self.get_logger().info(
-                f"STATE TRANSITION: {self.robot_state} → {new_state}",
+                f"STATE TRANSITION: {self.state_controller.robot_state} → {new_state}",
                 throttle_duration_sec=LOG_THROTTLE_STATE
             )
 
@@ -869,36 +819,36 @@ class OptimizedPIDControllerNode(Node):
             # Additional logging
             if self.debug_level >= 2:
                 # Calculate time in previous state
-                time_in_state = current_time - self._last_state_change_time
+                time_in_state = current_time - self.state_controller._last_state_change_time
                 # Log the duration
-                self.get_logger().info(f"Time in state '{self.robot_state}': {time_in_state:.2f}s")
+                self.get_logger().info(f"Time in state '{self.state_controller.robot_state}': {time_in_state:.2f}s")
                 # Update last change time
-                self._last_state_change_time = current_time
+                self.state_controller._last_state_change_time = current_time
             
-            self.previous_state = self.robot_state
-            self.robot_state = new_state
+            self.state_controller.previous_state = self.state_controller.robot_state
+            self.state_controller.robot_state = new_state
             
             # Handle recovery state transitions
             if new_state == "recovery":
-                self.in_recovery = True
-                self.recovery_start_time = time.time()
-                self.recovery_phase = "stop"
+                self.state_controller.in_recovery = True
+                self.state_controller.recovery_start_time = time.time()
+                self.state_controller.recovery_phase = "stop"
                 # Stop robot immediately when entering recovery
                 stop_cmd = self.recovery_module.stop_robot()
                 self.cmd_vel_pub.publish(stop_cmd)
                 self.get_logger().info("Entering recovery mode - stopping robot")
-            elif self.previous_state == "recovery" and new_state != "recovery":
-                self.in_recovery = False
-                self.recovery_phase = "none"
+            elif self.state_controller.previous_state == "recovery" and new_state != "recovery":
+                self.state_controller.in_recovery = False
+                self.state_controller.recovery_phase = "none"
                 self.get_logger().info("Exiting recovery mode")
             
             # Complete controller reset when transitioning between tracking and other states
-            if new_state == "tracking" or self.previous_state == "tracking":
+            if new_state == "tracking" or self.state_controller.previous_state == "tracking":
                 self._complete_controller_reset()
                 
                 # Force target reacquisition when re-entering tracking mode
                 if new_state == "tracking":
-                    self.force_target_reacquisition = True
+                    self.state_controller.force_target_reacquisition = True
                 
             # If we're not in tracking mode, ensure the robot is stopped
             # (unless it's in searching or lost_ball mode, where the state manager controls motion)
@@ -909,7 +859,7 @@ class OptimizedPIDControllerNode(Node):
     def _handle_non_tracking_state(self):
         """Handle robot behavior when not in tracking mode."""
         # When not tracking, ensure robot is stopped (unless controlled by another node)
-        if self.robot_state not in ["searching", "lost_ball"]:
+        if self.state_controller.robot_state not in ["searching", "lost_ball"]:
             stop_cmd = self.recovery_module.stop_robot()
             self.cmd_vel_pub.publish(stop_cmd)
         return True  # Indicate that the method handled the situation
@@ -1058,7 +1008,7 @@ class OptimizedPIDControllerNode(Node):
         angular_velocity *= angular_scale
         
         # ADDED: Apply freshness-based velocity scaling
-        if self._data_freshness_level == "stale":
+        if self.state_controller._data_freshness_level == "stale":
             # Reduced speed (50%) for stale data
             stale_scale = 0.5
             linear_x_velocity *= stale_scale
@@ -1070,7 +1020,7 @@ class OptimizedPIDControllerNode(Node):
                     f"Using stale sensor data - scaling velocities to {stale_scale*100:.0f}%",
                     throttle_duration_sec=2.0
                 )
-        elif self._data_freshness_level == "critical" or self._data_freshness_level == "invalid":
+        elif self.state_controller._data_freshness_level == "critical" or self.state_controller._data_freshness_level == "invalid":
             # Stop for critical or invalid data
             linear_x_velocity = 0.0
             lateral_velocity = 0.0
@@ -1097,7 +1047,7 @@ class OptimizedPIDControllerNode(Node):
             angular_velocity, 
             target_distance, 
             self.desired_distance,
-            freshness_level=self._data_freshness_level
+            freshness_level=self.state_controller._data_freshness_level
         )
         linear_x_velocity = limited_velocities[0]
         lateral_velocity = limited_velocities[1]
@@ -1143,17 +1093,17 @@ class OptimizedPIDControllerNode(Node):
                 data_age = 999.0  # Default to high age for safety
             
             # Check if the freshness level has changed
-            if freshness_level != self._data_freshness_level:
+            if freshness_level != self.state_controller._data_freshness_level:
                 # Log the transition
-                if self._data_freshness_level != "unknown":  # Skip initial setting
+                if self.state_controller._data_freshness_level != "unknown":  # Skip initial setting
                     self.get_logger().info(
-                        f"Data freshness changed: {self._data_freshness_level} → {freshness_level} "
+                        f"Data freshness changed: {self.state_controller._data_freshness_level} → {freshness_level} "
                         f"(age: {data_age:.3f}s)"
                     )
                 # Record the time of state change
                 self._freshness_state_change_time = time.time()
                 # Update the freshness level
-                self._data_freshness_level = freshness_level
+                self.state_controller._data_freshness_level = freshness_level
             
             #caller handles the stop when data is not fresh
             return is_fresh, freshness_level, data_age            
@@ -1290,7 +1240,7 @@ class OptimizedPIDControllerNode(Node):
         """Execute one complete control cycle with improved error handling and state management."""
         try:
             # Skip if shutting down
-            if hasattr(self, '_shutting_down') and self._shutting_down:
+            if hasattr(self.state_controller, '_shutting_down') and self.state_controller._shutting_down:
                 return
             
             # Skip if transform system is not initialized and required for this operation
@@ -1313,7 +1263,7 @@ class OptimizedPIDControllerNode(Node):
             
             # Calculate dt since last control
             current_time = time.time()
-            dt = current_time - self.last_control_time
+            dt = current_time - self.state_controller.last_control_time
             # Ensure dt is reasonable (protect against time jumps)
             if dt > 1.0:
                 self.get_logger().warning(f"Large time step detected: {dt:.3f}s - capping at 0.1s")
@@ -1321,16 +1271,16 @@ class OptimizedPIDControllerNode(Node):
             elif dt <= 0.0:
                 dt = 0.001  # Ensure positive dt to prevent division by zero
             
-            self.last_control_time = current_time
+            self.state_controller.last_control_time = current_time
             
             # Increment cycle counter
-            self.cycle_count += 1
+            self.state_controller.cycle_count += 1
             
             # Check data freshness - critical for safety
             is_fresh, freshness_level, data_age = self._check_data_freshness()
             
             # Log periodic status updates (once every 50 cycles)
-            if self.cycle_count % 50 == 0:
+            if self.state_controller.cycle_count % 50 == 0:
                 self._log_periodic_status()
             
             # Handle critical data freshness (prioritized over other state handling)
@@ -1344,7 +1294,7 @@ class OptimizedPIDControllerNode(Node):
                 return  # Exit early when data is critically stale
                 
             # Special handling for recovery mode (higher priority than other states)
-            if self.in_recovery:
+            if self.state_controller.in_recovery:
                 # Get position data for recovery
                 position_data = self.target_tracker.get_position_data()
                 orientation_data = {'yaw': self.robot_orientation}
@@ -1359,13 +1309,13 @@ class OptimizedPIDControllerNode(Node):
                 
                 # If recovery is complete, transition back to normal mode
                 if is_complete:
-                    self.in_recovery = False
+                    self.state_controller.in_recovery = False
                     self.get_logger().info("Recovery sequence completed")
                 
                 return  # Exit after handling recovery
             
             # Handle non-tracking states (searching/lost_ball have their own handling)
-            if self.robot_state != "tracking":
+            if self.state_controller.robot_state != "tracking":
                 if self._handle_non_tracking_state():
                     return  # Exit after handling non-tracking state
             
@@ -1563,8 +1513,8 @@ class OptimizedPIDControllerNode(Node):
             
             # Calculate current time and dt
             current_time = time.time()
-            dt = current_time - self.last_control_time
-            self.last_control_time = current_time
+            dt = current_time - self.state_controller.last_control_time
+            self.state_controller.last_control_time = current_time
             
             # Update error trackers
             self.distance_error_tracker.update(self._current_errors[0], dt)
@@ -1621,7 +1571,7 @@ class OptimizedPIDControllerNode(Node):
         """Regular control loop to calculate and publish velocity commands with CPU optimization."""
         try:
             # Skip if shutting down
-            if hasattr(self, '_shutting_down') and self._shutting_down:
+            if hasattr(self.state_controller, '_shutting_down') and self.state_controller._shutting_down:
                 return
             
             # Skip if transform system is not initialized and required
@@ -1629,7 +1579,7 @@ class OptimizedPIDControllerNode(Node):
                 not self.transform_system.is_transform_system_ready()):
                 
                 # Log at most once per 20 cycles to avoid spamming
-                if self.cycle_count % 20 == 0:
+                if self.state_controller.cycle_count % 20 == 0:
                     status = self.transform_system.get_status()
                     self.get_logger().warn(
                         f"Control loop waiting for transform initialization: {status['message']}"
@@ -1641,7 +1591,7 @@ class OptimizedPIDControllerNode(Node):
                         self.transform_system.start_initialization()
                 
                 # Still increment cycle count
-                self.cycle_count += 1
+                self.state_controller.cycle_count += 1
                 return
                     
             # Apply adaptive rate control if enabled
@@ -1870,7 +1820,7 @@ class OptimizedPIDControllerNode(Node):
         self._using_simplified_control = False
         self._last_full_computation_time = time.time()
         # Reset data freshness tracking
-        self._data_freshness_level = "unknown"
+        self.state_controller._data_freshness_level = "unknown"
         self.get_logger().info("Complete controller reset performed")
     
     def _log_periodic_status(self):
@@ -1889,13 +1839,13 @@ class OptimizedPIDControllerNode(Node):
         total_cycles = max(1, self._event_control_count + self._timer_control_count)
         event_ratio = self._event_control_count / total_cycles * 100.0
         status_msg = (
-            f"Status: Robot state={self.robot_state}, "
+            f"Status: Robot state={self.state_controller.robot_state}, "
             f"Strategy={strategy_name}, "
             f"CPU={perf_stats['cpu_avg']:.1f}%, "
             f"Cycle time={perf_stats['cycle_time_ms']:.2f}ms, "
             f"Rate={perf_stats['update_rate']:.1f}Hz, "
             f"Simplified={self._using_simplified_control}, "
-            f"Freshness={self._data_freshness_level}, "
+            f"Freshness={self.state_controller._data_freshness_level}, "
             f"Event-driven={event_ratio:.1f}%, "
             f"Skips={self._skipped_cycle_count}"
         )
@@ -2020,11 +1970,11 @@ class OptimizedPIDControllerNode(Node):
                     self._skip_next_cycle = True
                     
                     current_time = time.time()
-                    if current_time - self.last_cpu_warning_time >= 2.0:
+                    if current_time - self.state_controller.last_cpu_warning_time >= 2.0:
                         self.get_logger().warning(
                             f"HIGH CPU LOAD: {self.resource_monitor.current_cpu_usage:.1f}% - skipping next cycle"
                         )
-                        self.last_cpu_warning_time = current_time
+                        self.state_controller.last_cpu_warning_time = current_time
                 else:
                     self._skip_next_cycle = False
                 
@@ -2032,7 +1982,7 @@ class OptimizedPIDControllerNode(Node):
             if self.debug_level >= 2 and hasattr(self, 'object_pool'):
                 pool_stats = self.object_pool.get_stats()
                 current_time = time.time()
-                if current_time - self.last_pool_log_time >= 10.0:
+                if current_time - self.state_controller.last_pool_log_time >= 10.0:
                     pool_msg = (
                         f"Object pool stats: "
                         f"twist={pool_stats['twist_pool_size']}/{pool_stats['twist_max_usage']} "
@@ -2041,7 +1991,7 @@ class OptimizedPIDControllerNode(Node):
                         f"(misses={pool_stats['vector3_misses']})"
                     )
                     self.get_logger().debug(pool_msg)
-                    self.last_pool_log_time = current_time
+                    self.state_controller.last_pool_log_time = current_time
         except Exception as e:
             self.get_logger().error(f"Error in resource monitoring: {str(e)}")
         
@@ -2065,7 +2015,7 @@ class OptimizedPIDControllerNode(Node):
     def publish_diagnostics(self):
         """Publish detailed diagnostic information at a slower rate."""
         try:
-            if hasattr(self, '_shutting_down') and self._shutting_down:
+            if hasattr(self.state_controller, '_shutting_down') and self.state_controller._shutting_down:
                 return
                 
             # Calculate velocity statistics
@@ -2101,7 +2051,7 @@ class OptimizedPIDControllerNode(Node):
                 p_a, i_a, d_a = self.pid_angular.get_components()
                 
                 # Get stats on simplified control usage
-                simplified_pct = getattr(self, '_simplified_control_count', 0) / max(1, self.cycle_count) * 100.0
+                simplified_pct = getattr(self, '_simplified_control_count', 0) / max(1, self.state_controller.cycle_count) * 100.0
                 
                 diag_msg = (
                     f"DIAGNOSTICS: "
@@ -2111,7 +2061,7 @@ class OptimizedPIDControllerNode(Node):
                     f"PID A=[{p_a:.2f}, {i_a:.2f}, {d_a:.2f}], "
                     f"Strategy={self.strategy_module.current_strategy}, "
                     f"Simp={simplified_pct:.1f}%, "
-                    f"Freshness={self._data_freshness_level}"
+                    f"Freshness={self.state_controller._data_freshness_level}"
                 )
                 throttled_logger.info(diag_msg, throttle_duration_sec=LOG_THROTTLE_DIAG, log_id='diagnostics')
             
@@ -2192,7 +2142,7 @@ class OptimizedPIDControllerNode(Node):
             using_simplified = 1 if getattr(self, '_using_simplified_control', False) else 0
             
             # Add freshness and event stats
-            freshness_level = self._data_freshness_level
+            freshness_level = self.state_controller._data_freshness_level
             event_ratio = 0.0
             if hasattr(self, '_event_control_count') and hasattr(self, '_timer_control_count'):
                 total_cycles = max(1, self._event_control_count + self._timer_control_count)
@@ -2219,7 +2169,7 @@ class OptimizedPIDControllerNode(Node):
                 perf_stats["update_rate"],
                 adaptive_rate,
                 using_simplified,
-                freshness_level,
+                self.state_controller._data_freshness_level,
                 event_ratio
             )
             
@@ -2230,11 +2180,11 @@ class OptimizedPIDControllerNode(Node):
     
     def prepare_shutdown(self):
         """Prepare for node shutdown."""
-        if hasattr(self, '_shutting_down') and self._shutting_down:
+        if hasattr(self.state_controller, '_shutting_down') and self.state_controller._shutting_down:
             return  # Already shutting down
             
         print("Preparing for shutdown")  # Use print instead of ROS logger
-        self._shutting_down = True
+        self.state_controller._shutting_down = True
         
         # Cancel all timers to prevent them from continuing to fire
         for timer in [self.timer, self.diagnostic_timer, self.resource_timer, self.transform_check_timer]:
@@ -2269,6 +2219,9 @@ def main(args=None):
     # Flag to track shutdown state
     shutdown_initiated = False
     
+    # Set up signal handler for graceful shutdown
+    original_sigint_handler = signal.getsignal(signal.SIGINT)
+    
     try:
         print("=================================================")
         print("Optimized PID Controller for Basketball Tracking Robot")
@@ -2302,13 +2255,12 @@ def main(args=None):
                     time.sleep(0.1)
                 except Exception as e:
                     print(f"Error during emergency stop: {str(e)}")
-                node._shutting_down = True
+                node.state_controller._shutting_down = True
                 
             # Important: Raise KeyboardInterrupt to break out of rclpy.spin()
             raise KeyboardInterrupt
             
         # Register the signal handler
-        original_sigint_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, signal_handler)
         
         try:
