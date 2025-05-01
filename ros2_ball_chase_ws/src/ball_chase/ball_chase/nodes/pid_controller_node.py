@@ -223,6 +223,13 @@ class ParameterManager:
                 ('cpu_throttle_interval', 0.5),
                 ('enable_cycle_skipping', True),
                 ('max_cpu_skip_threshold', 80.0),
+                ('coordinated_coupling_factor', 0.3),
+                ('coordinated_smoothing_factor', 0.7),
+                ('coordinated_min_angle_for_reduction', 0.06),
+                ('coordinated_zero_angle_threshold', 0.02),
+                ('coordinated_max_angle_factor', 0.2),
+                ('coordinated_same_sign_scale', 0.7),
+                ('coordinated_opposite_sign_scale', 1.1),
             ]
         )
 
@@ -286,6 +293,14 @@ class ParameterManager:
         self.max_cpu_skip_threshold = self.node.get_parameter('max_cpu_skip_threshold').value
         # Misc
         self.desired_distance = 1.0  # Default value
+        # Coordinated controller parameters
+        self.coordinated_coupling_factor = self.node.get_parameter('coordinated_coupling_factor').value
+        self.coordinated_smoothing_factor = self.node.get_parameter('coordinated_smoothing_factor').value
+        self.coordinated_min_angle_for_reduction = self.node.get_parameter('coordinated_min_angle_for_reduction').value
+        self.coordinated_zero_angle_threshold = self.node.get_parameter('coordinated_zero_angle_threshold').value
+        self.coordinated_max_angle_factor = self.node.get_parameter('coordinated_max_angle_factor').value
+        self.coordinated_same_sign_scale = self.node.get_parameter('coordinated_same_sign_scale').value
+        self.coordinated_opposite_sign_scale = self.node.get_parameter('coordinated_opposite_sign_scale').value
 
 
 # Phase 3: Extract State Manager - Define component interfaces
@@ -1190,13 +1205,13 @@ class PIDControllerNode(Node, StateObserver):
                 self.pid_angular,
                 throttled_logger,
                 {
-                    'coupling_factor': 0.3,
-                    'smoothing_factor': 0.7,
-                    'min_angle_for_reduction': 0.06,
-                    'zero_angle_threshold': 0.02,
-                    'max_angle_factor': 0.2,
-                    'same_sign_scale': 0.7,
-                    'opposite_sign_scale': 1.1,
+                    'coupling_factor': pm.coordinated_coupling_factor,
+                    'smoothing_factor': pm.coordinated_smoothing_factor,
+                    'min_angle_for_reduction': pm.coordinated_min_angle_for_reduction,
+                    'zero_angle_threshold': pm.coordinated_zero_angle_threshold,
+                    'max_angle_factor': pm.coordinated_max_angle_factor,
+                    'same_sign_scale': pm.coordinated_same_sign_scale,
+                    'opposite_sign_scale': pm.coordinated_opposite_sign_scale,
                 }
             )
             
