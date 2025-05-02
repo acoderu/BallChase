@@ -26,27 +26,9 @@ from collections import deque
 from enum import Enum, auto
 
 # Import modules from refactored files
-from ball_chase.pid.pid_helpers import Matrix4x4, TTLDict, LightweightBuffer, ResourceMonitor
-from ball_chase.pid.pid_target_filter import EnhancedTargetFilter, ErrorTracker
-from ball_chase.pid.pid_computation import PIDControllers
-
-# =========================================
-# PID Target Tracking and Integration - Detailed Comments
-# =========================================
-#
-# This file integrates all the PID modules, filtering, movement strategies, and resource management into a complete robot control system.
-#
-# Key concepts:
-#   - Target tracking: Receives sensor data about the target, filters it, and predicts future positions.
-#   - Movement strategy: Uses a table-driven approach to select the best way to move (forward, lateral, rotate) based on the type and size of errors.
-#   - Velocity control: Limits and smooths velocity commands to ensure safe, natural robot motion.
-#   - Resource monitoring: Adjusts control rate based on CPU/memory usage to avoid overloading the robot's computer.
-#   - Transform system: Handles coordinate transformations between different reference frames (robot, camera, world).
-#   - Recovery behaviors: Handles special cases when the robot loses the target or needs to recover.
-#
-# The comments throughout the file will explain the mathematical reasoning, intuition, and code logic for each module, making the system understandable for high school students interested in robotics and control theory.
-#
-# ...existing code...
+from pid_helpers import Matrix4x4, TTLDict, LightweightBuffer, ResourceMonitor
+from pid_target_filter import EnhancedTargetFilter, ErrorTracker
+from pid_computation import PIDControllers
 
 #############################################
 # Target Tracking Module
@@ -59,17 +41,17 @@ class TargetTrackingModule:
         """Initialize the target tracking module."""
         self.logger = throttled_logger
         self.debug_level = debug_level
-        self.current_target = None  # Stores the most recent target message
-        self.last_target_time = None  # Timestamp of the last received target
-        self.target_frame = "unknown_frame"  # Frame in which the target is reported
+        self.current_target = None
+        self.last_target_time = None
+        self.target_frame = "unknown_frame"
         
         # Pre-allocate arrays for metrics to reduce memory allocations
-        # current_metrics: [distance, lateral, bearing] - raw, unfiltered values
+        # Current raw metrics
         self.current_metrics = np.zeros(3, dtype=np.float32)  # [distance, lateral, bearing]
-        # filtered_metrics: [distance, lateral, bearing] - after filtering/prediction
+        # Filtered metrics
         self.filtered_metrics = np.zeros(3, dtype=np.float32)  # [distance, lateral, bearing]
         
-        # Initialize target filter for smoothing and prediction
+        # Initialize target filter
         try:
             self.target_filter = EnhancedTargetFilter(
                 self.logger,
@@ -83,9 +65,9 @@ class TargetTrackingModule:
             self.filter_initialized = False
         
         # Recovery flags
-        self.force_target_reacquisition = False  # Used to reset filter after recovery
+        self.force_target_reacquisition = False
         
-        # Store timestamps of recent updates to estimate fusion (sensor) rate
+        # Add timestamp tracking for fusion rate calculation
         self.update_timestamps = deque(maxlen=10)  # Store last 10 update times
         self.last_fusion_rate = 1.0  # Default assumption (1Hz)
         self.fusion_rate_updated = False
@@ -94,8 +76,7 @@ class TargetTrackingModule:
     def update_target(self, target_msg, debug_level=None):
         """
         Process a new target message and update position data.
-        This function is called whenever new sensor data about the target arrives.
-        It updates the internal state, applies filtering, and logs as needed.
+        
         Returns:
             bool: True if data was updated, False otherwise
         """
@@ -128,7 +109,7 @@ class TargetTrackingModule:
             # Store target frame for debugging
             self.target_frame = target_msg.header.frame_id if hasattr(target_msg.header, 'frame_id') else "base_link"
             
-            # Calculate raw target metrics (distance, lateral, bearing)
+            # Calculate raw target metrics
             self._calculate_raw_target_metrics(target_msg.point, self.target_frame)
             
             # Apply target filtering and prediction
@@ -149,10 +130,7 @@ class TargetTrackingModule:
             return False
     
     def _calculate_fusion_rate(self, debug_level=None):
-        """
-        Calculate the actual fusion data rate based on timestamps.
-        This helps the controller adapt its update rate to match the sensor data rate.
-        """
+        """Calculate the actual fusion data rate based on timestamps."""
         if debug_level is None:
             debug_level = self.debug_level
         try:
@@ -187,39 +165,30 @@ class TargetTrackingModule:
             self.logger.error(f"Error calculating fusion rate: {str(e)}")
     
     def _calculate_raw_target_metrics(self, target_point, frame_id):
-        """
-        Calculate raw distance, bearing, and lateral offset to target.
-        This transforms the 3D point into control-relevant 2D metrics.
-        """
+        """Calculate raw distance, bearing, and lateral offset to target."""
         if target_point is None:
             return
             
         try:
             # Calculate full 2D distance to target (index 0)
-            # Math: sqrt(x^2 + y^2) gives the straight-line distance in the plane
             self.current_metrics[0] = math.sqrt(target_point.x**2 + target_point.y**2)
             
             # Calculate bearing and lateral position based on frame
             if frame_id in ["camera_frame", "camera_optical_frame"]:
                 # Camera optical frame: Z forward, X right, Y down
-                # Bearing is angle in X-Z plane
                 self.current_metrics[2] = math.atan2(target_point.x, target_point.z)  # Bearing (index 2)
                 self.current_metrics[1] = target_point.x  # Lateral (index 1)
             else:
                 # Standard robot frame: X forward, Y left
-                # Bearing is angle in X-Y plane
                 self.current_metrics[2] = math.atan2(target_point.y, target_point.x)  # Bearing (index 2)
                 self.current_metrics[1] = target_point.y  # Lateral (index 1)
         except Exception as e:
             self.logger.error(f"Error calculating target metrics: {str(e)}")
     
     def _apply_target_filtering(self):
-        """
-        Apply filtering and prediction to target position.
-        This smooths out noise and predicts future position for better control.
-        """
+        """Apply filtering and prediction to target position."""
         if not self.filter_initialized:
-            # Copy current values directly to filtered values if filter is not available
+            # Copy current values directly to filtered values
             np.copyto(self.filtered_metrics, self.current_metrics)
             return
             
@@ -249,10 +218,7 @@ class TargetTrackingModule:
             np.copyto(self.filtered_metrics, self.current_metrics)
     
     def _handle_target_reacquisition(self):
-        """
-        Handle forced target reacquisition after recovery.
-        This resets the filter and ensures the robot doesn't use stale predictions.
-        """
+        """Handle forced target reacquisition after recovery."""
         try:
             self.target_filter.reset()
             # Convert NumPy array to tuple for filter update
@@ -276,10 +242,7 @@ class TargetTrackingModule:
             np.copyto(self.filtered_metrics, self.current_metrics)
     
     def _select_position_values(self, filtered_position):
-        """
-        Select whether to use raw, filtered, or predicted position values.
-        This logic chooses the best estimate for control based on movement consistency.
-        """
+        """Select whether to use raw, filtered, or predicted position values."""
         if not filtered_position:
             # Fall back to raw values if filtering unavailable
             np.copyto(self.filtered_metrics, self.current_metrics)
@@ -326,10 +289,7 @@ class TargetTrackingModule:
             self.filtered_metrics[2] = filtered_position[2] if len(filtered_position) > 2 else self.current_metrics[2]
     
     def _log_target_update(self, msg):
-        """
-        Log target update information for debugging and teaching.
-        Shows how the raw data is transformed into control-relevant values.
-        """
+        """Log target update information."""
         if msg is None or not hasattr(msg, 'point'):
             return
             
@@ -346,10 +306,7 @@ class TargetTrackingModule:
                 self._last_logged_target_update = now
         
     def get_position_data(self):
-        """
-        Get the current filtered position data.
-        Returns a dictionary with both filtered and raw values for teaching/diagnostics.
-        """
+        """Get the current filtered position data."""
         return {
             'distance': self.filtered_metrics[0],
             'lateral': self.filtered_metrics[1],
@@ -362,7 +319,7 @@ class TargetTrackingModule:
     def is_target_fresh(self, max_age=None):
         """
         Check if the target data is fresh enough to use with graduated freshness levels.
-        This is important for safety: stale data can cause the robot to act on old information.
+        
         Args:
             max_age: Maximum age in seconds, if None calculated based on fusion rate
                   
@@ -404,6 +361,7 @@ class TargetTrackingModule:
     def get_fusion_rate(self):
         """
         Get the detected fusion data rate.
+        
         Returns:
             tuple: (rate, was_updated) - Current rate and whether it was just updated
         """
@@ -1365,7 +1323,7 @@ class TransformSystem:
                 self.transform_cache[frame_key] = (transform, current_time)
                 if self.use_matrix_transforms:
                     try:
-                        from ball_chase.pid.pid_helpers import Matrix4x4
+                        from pid_helpers import Matrix4x4
                         matrix = Matrix4x4.from_tf_transform(transform)
                         self.matrix_cache[frame_key] = (matrix, current_time)
                     except ImportError:

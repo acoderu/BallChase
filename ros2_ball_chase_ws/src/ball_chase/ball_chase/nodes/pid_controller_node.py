@@ -74,34 +74,43 @@ LOG_THROTTLE_DIAG = 2.0        # Seconds between diagnostic logs
 class ObjectPoolManager:
     """Manages pools of reusable objects to reduce memory allocations."""
     def __init__(self, max_twist=10, max_vector3=15, max_float32multiarray=5, ttl=60.0):
+        # Import message types and the generic object pool utility
         from geometry_msgs.msg import Twist, Vector3, PointStamped, Vector3Stamped, TransformStamped
         from nav_msgs.msg import Odometry
         from std_msgs.msg import Float32MultiArray, String
-        from pid_helpers import GenericObjectPool
+        from ball_chase.pid.pid_helpers import GenericObjectPool
 
+        # Define reset functions for each message type to clear their fields
+        # This is crucial for object pooling: we want to reuse objects without stale data
         def reset_twist(twist):
+            # Set all linear and angular velocity components to zero
             twist.linear.x = twist.linear.y = twist.linear.z = 0.0
             twist.angular.x = twist.angular.y = twist.angular.z = 0.0
 
         def reset_vector3(vec):
+            # Set all vector components to zero
             vec.x = vec.y = vec.z = 0.0
 
         def reset_float32multiarray(arr):
+            # Clear the data array (removes all elements)
             arr.data.clear()
 
         def reset_pointstamped(msg):
+            # Reset point coordinates and header fields
             msg.point.x = msg.point.y = msg.point.z = 0.0
             msg.header.stamp.sec = 0
             msg.header.stamp.nanosec = 0
             msg.header.frame_id = ""
 
         def reset_vector3stamped(msg):
+            # Reset vector and header fields
             msg.vector.x = msg.vector.y = msg.vector.z = 0.0
             msg.header.stamp.sec = 0
             msg.header.stamp.nanosec = 0
             msg.header.frame_id = ""
 
         def reset_transformstamped(msg):
+            # Reset header, child frame, translation, and rotation
             msg.header.stamp.sec = 0
             msg.header.stamp.nanosec = 0
             msg.header.frame_id = ""
@@ -115,6 +124,7 @@ class ObjectPoolManager:
             msg.transform.rotation.w = 1.0
 
         def reset_odometry(msg):
+            # Reset pose and twist fields
             msg.pose.pose.position.x = 0.0
             msg.pose.pose.position.y = 0.0
             msg.pose.pose.position.z = 0.0
@@ -124,8 +134,10 @@ class ObjectPoolManager:
             # ...reset other fields as needed...
 
         def reset_string(msg):
+            # Clear string data
             msg.data = ""
 
+        # Create a pool for each message type, specifying the reset function
         self.pools = {
             'Twist': GenericObjectPool(Twist, max_twist, reset_twist, ttl),
             'Vector3': GenericObjectPool(Vector3, max_vector3, reset_vector3, ttl),
@@ -138,13 +150,16 @@ class ObjectPoolManager:
         }
 
     def get(self, msg_type):
+        # Retrieve an object from the pool, or None if type not found
         return self.pools[msg_type].get() if msg_type in self.pools else None
 
     def put(self, msg_type, obj):
+        # Return an object to the pool for reuse
         if msg_type in self.pools:
             self.pools[msg_type].put(obj)
 
     def get_stats(self):
+        # Get statistics for all pools (e.g., usage, misses)
         return {k: v.stats() for k, v in self.pools.items()}
 
 
@@ -1343,13 +1358,15 @@ class PIDControllerNode(Node, StateObserver):
     
     def on_freshness_change(self, freshness_level, data_age):
         """Called when data freshness level changes."""
-        if freshness_level != "unknown" and self.parameter_manager.debug_level >= 1:
-            self.throttled_logger.info(
-                f"Data freshness changed: {freshness_level} "
-                f"(age: {data_age:.3f}s)",
-                throttle_duration_sec=1.0,
-                log_id='freshness_change'
-            )
+
+        #gets also logged in control loop
+        # if freshness_level != "unknown" and self.parameter_manager.debug_level >= 1:
+        #     self.throttled_logger.info(
+        #         f"Data freshness changed: {freshness_level} "
+        #         f"(age: {data_age:.3f}s)",
+        #         throttle_duration_sec=1.0,
+        #         log_id='freshness_change'
+        #     )
             
         # Handle critical freshness
         if freshness_level == "critical" and not self.state_manager.movement.robot_stopped:
@@ -1845,7 +1862,7 @@ class PIDControllerNode(Node, StateObserver):
             
             return is_fresh, freshness_level, data_age            
         except Exception as e:
-            self.get_logger().error(f"Error checking data freshness: {str(e)}")
+            self.get_logger()..error(f"Error checking data freshness: {str(e)}")
             # Default to critical for safety in case of errors
             return False, "critical", 999.0
     
@@ -1886,7 +1903,7 @@ class PIDControllerNode(Node, StateObserver):
             self.cmd_vel_pub.publish(stop_cmd)
         return True  # Indicate that the method handled the situation
     
-    def _handle_stop_conditions(self, distance, lateral, angular_degrees, dt):
+    def _handle_stop_conditions(self, distance, lateral, angular_degrees, is_stopped):
         """Check and handle stop conditions if needed."""
         # Check if we need to reset stopped state based on errors with enhanced hysteresis
         state_reset = self._reset_stopped_state_if_needed(
@@ -1907,21 +1924,6 @@ class PIDControllerNode(Node, StateObserver):
                     self.get_logger().info(stop_reason)
                     self.state_manager.movement.robot_stopped = True
                     self.state_manager.movement.stop_time = time.time()
-                    # Generate stop command
-                    stop_cmd = self.recovery_module.stop_robot()
-                    # Publish stop command to actually stop the robot
-                    self.cmd_vel_pub.publish(stop_cmd)
-                return True  # Handled by stopping the robot
-        
-        # Update error trackers
-        self.distance_error_tracker.update(self._current_errors[0], dt)
-        self.lateral_error_tracker.update(self._current_errors[1], dt)
-        self.angular_error_tracker.update(self._current_errors[2], dt)
-        
-        return False  # Not handled, continue with normal control
-    
-    def _evaluate_stop_conditions(self, distance, lateral, angular_degrees, is_stopped):
-        """
         Evaluate if the robot should stop based on current errors.
         
         Args:

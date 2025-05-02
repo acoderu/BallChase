@@ -1,39 +1,3 @@
-# =========================================
-# PID Controller Module - Detailed Comments
-# =========================================
-#
-# This file implements a sophisticated PID (Proportional-Integral-Derivative) controller system for robotics.
-# The PID controller is a fundamental feedback control algorithm used in engineering and robotics to achieve precise control of a system.
-#
-# -----------------------------
-# PID Mathematical Background:
-# -----------------------------
-#
-# The PID controller computes a control signal (output) based on the error between a desired setpoint and the current state.
-# The control signal is a sum of three terms:
-#
-#   output(t) = Kp * e(t) + Ki * ∫e(t)dt + Kd * de(t)/dt
-#
-# Where:
-#   - e(t): Error at time t (difference between desired and actual value)
-#   - Kp: Proportional gain (reacts to current error)
-#   - Ki: Integral gain (reacts to accumulated error over time)
-#   - Kd: Derivative gain (reacts to rate of change of error)
-#
-# Intuition:
-#   - Proportional: Pushes harder the further you are from the target.
-#   - Integral: Corrects for small, persistent errors (offsets/biases).
-#   - Derivative: Anticipates future error by looking at how fast error is changing (damping, reduces overshoot).
-#
-# This file also implements advanced features:
-#   - Adaptive gains: PID gains change based on error trends (e.g., if error is decreasing, reduce Kp to avoid overshoot).
-#   - Anti-windup: Prevents the integral term from growing too large when the output is saturated.
-#   - Zero-crossing handling: Detects when error crosses zero and resets integral/derivative to avoid oscillations.
-#   - Movement strategies: Table-driven logic to select how the robot should move based on the type and size of errors.
-#   - Coordinated control: Blends lateral and angular corrections for smooth, natural movement.
-#
-# The comments below will explain the math, intuition, and code logic in detail, step by step.
-#
 """
 PID Controller Module
 
@@ -53,7 +17,7 @@ import logging
 import numpy as np
 from enum import Enum, auto
 
-from ball_chase.pid.pid_target_filter import ErrorTracker
+from pid_target_filter import ErrorTracker
 
 class PIDControllers:
     """Namespace for PID controller classes and related functionality."""
@@ -61,16 +25,12 @@ class PIDControllers:
     @staticmethod
     def create_controller_with_tracker(controller_type, kp, ki, kd, output_min, output_max, tracker_name, throttled_logger, max_history=8):
         """Factory method to create a controller with its error tracker properly initialized."""
-        # Create an ErrorTracker instance for monitoring error trends
         error_tracker = ErrorTracker(tracker_name, throttled_logger, max_history=max_history)
-        # Create the actual PID controller (ImprovedPID or other)
         controller = PIDControllers.create_controller(
             controller_type, kp, ki, kd, output_min, output_max
         )
-        # Attach the error tracker and logger to the controller for diagnostics and adaptation
         controller.error_tracker = error_tracker
         controller.logger = throttled_logger  
-        # Ensure error tracker is properly attached
         if not hasattr(controller, 'error_tracker') or controller.error_tracker is None:
             raise RuntimeError(f"Failed to initialize error tracker for {controller_type.name} controller")
         return controller, error_tracker

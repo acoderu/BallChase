@@ -4,3 +4,5 @@ ros2_ball_chase_ws/install/
 ros2_ball_chase_ws/log/
 ros2_ball_chase_ws/diagnostic_logs/
 *.pyc
+
+**/.claude/settings.local.json
