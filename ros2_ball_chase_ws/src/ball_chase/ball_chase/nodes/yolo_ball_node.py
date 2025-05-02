@@ -605,81 +605,56 @@ class OptimizedBasketballDetector(Node):
         """
         Preprocess the camera image for YOLO inference.
         This function prepares the image so the neural network can understand it.
-        
-        Args:
-            cv_image (numpy.ndarray): Raw OpenCV image in BGR format
-            
-        Returns:
-            MNN.expr.Var: Preprocessed image tensor ready for model inference
         """
-        # Resize the image to what our model expects
+        # Resize the image to what our model expects (320x320)
         if (cv_image.shape[0] != MODEL_CONFIG["input_height"] or 
             cv_image.shape[1] != MODEL_CONFIG["input_width"]):
             cv_image = std_cv2.resize(
                 cv_image, 
                 (MODEL_CONFIG["input_width"], MODEL_CONFIG["input_height"])
             )
-        
         # Convert from BGR (OpenCV format) to RGB (what our model expects)
-        rgb_image = cv_image[..., ::-1]
-        
-        # Normalize pixel values to [0,1] range
+        rgb_image = cv_image[..., ::-1]  # Swaps color channels
+        # Normalize pixel values to [0,1] range for neural network input
         rgb_image = rgb_image.astype(np.float32) * (1.0/255.0)
-        
-        # Change image format from HWC to CHW
-        # HWC = Height, Width, Channels
-        # CHW = Channels, Height, Width (what neural networks typically expect)
+        # Change image format from HWC (height, width, channels) to CHW (channels, height, width)
         chw_image = np.transpose(rgb_image, (2, 0, 1))
-        
-        # Create an MNN tensor from our image
+        # Create an MNN tensor from our image (for inference)
         input_tensor = MNN.expr.const(
             chw_image, 
             [3, MODEL_CONFIG["input_height"], MODEL_CONFIG["input_width"]], 
             MNN.expr.NCHW
         )
+        # Convert to NC4HW4 format for MNN backend (optimized for speed)
         input_tensor = MNN.expr.convert(input_tensor, MNN.expr.NC4HW4)
+        # Add batch dimension (1 image per batch)
         input_tensor = MNN.expr.reshape(
             input_tensor, 
             [1, 3, MODEL_CONFIG["input_height"], MODEL_CONFIG["input_width"]]
         )
-        
         return input_tensor
 
     def process_detections(self, output_var):
         """
         Process YOLO output to extract basketball detections.
         This function takes the output from the neural network and figures out where the basketball is.
-        
-        Args:
-            output_var (MNN.expr.Var): Raw output from YOLO model
-            
-        Returns:
-            tuple: (best_box, confidence) if basketball found, else (None, 0)
-                - best_box: [x0, y0, x1, y1] coordinates of the detection box
-                - confidence: final confidence score (0-1)
         """
         # Convert model output to NCHW format and remove batch dimension
         output_var = MNN.expr.convert(output_var, MNN.expr.NCHW).squeeze()
-        
-        # Extract detection data
+        # Extract detection data: center x/y, width, height, and class probabilities
         cx, cy = output_var[0], output_var[1]  # Center coordinates
         w, h = output_var[2], output_var[3]    # Width and height
         probs = output_var[4:]                 # Class probabilities
-        
-        # Convert from center format to corner format
-        # (x0,y0) is top-left corner, (x1,y1) is bottom-right corner
-        x0 = cx - w * 0.5  # Left side of box
-        y0 = cy - h * 0.5  # Top of box
-        x1 = cx + w * 0.5  # Right side of box
-        y1 = cy + h * 0.5  # Bottom of box
-        
+        # Convert from center format to corner format (x0, y0, x1, y1)
+        x0 = cx - w * 0.5  # Top-left x
+        y0 = cy - h * 0.5  # Top-left y
+        x1 = cx + w * 0.5  # Bottom-right x
+        y1 = cy + h * 0.5  # Bottom-right y
         # Combine into boxes array
         boxes = mnn_np.stack([x0, y0, x1, y1], axis=1)
-        
         # Get confidence scores and class IDs for each detection
         scores = mnn_np.max(probs, axis=0)         # Highest probability for any class
         class_ids = mnn_np.argmax(probs, axis=0)   # Which class has highest probability
-        
         # Find all basketball detections with confidence above threshold
         basketball_indices = []
         for i in range(len(class_ids)):
@@ -688,33 +663,26 @@ class OptimizedBasketballDetector(Node):
             if (class_ids[i] == BASKETBALL_CLASS_ID and 
                 scores[i] > MODEL_CONFIG["confidence_threshold"]):
                 basketball_indices.append(i)
-        
         # If no basketballs found, return None
         if not basketball_indices:
             return None, 0.0
-            
         # If multiple basketballs detected, take the one with highest confidence
         best_idx = basketball_indices[0]
         for idx in basketball_indices:
             if scores[idx] > scores[best_idx]:
                 best_idx = idx
-        
         # Get the box coordinates for our best detection
         box = boxes[best_idx]
         x0_val, y0_val, x1_val, y1_val = box.read_as_tuple()
-        
         # Calculate confidence adjustments
         base_confidence = scores[best_idx]
-        
         # Adjust confidence based on aspect ratio (basketballs should be round)
         width = x1_val - x0_val
         height = y1_val - y0_val
         aspect_ratio = width / height if height > 0 else 1.0
         size_confidence = 1.0 - abs(1.0 - aspect_ratio) * 0.5
-        
         # Final confidence combines model confidence and size confidence
         final_confidence = base_confidence * size_confidence
-        
         best_box = [x0_val, y0_val, x1_val, y1_val]
         return best_box, final_confidence
 
@@ -723,18 +691,12 @@ class OptimizedBasketballDetector(Node):
         Process each incoming camera image to detect tennis balls.
         This function is called every time a new image arrives from the camera.
         It runs the neural network, finds the basketball, and publishes the result.
-        
-        Args:
-            msg (sensor_msgs.msg.Image): The incoming camera image from ROS
         """
         self._trace_start('overall')
-        
         # Skip frames based on low power mode
-        # If we're in low power mode, we don't process every frame to save CPU.
         self.frame_counter += 1
         if self.frame_skip_count > 0 and (self.frame_counter % (self.frame_skip_count + 1)) != 0:
             return
-
         # Check if model failed to load or is not available
         if not hasattr(self, 'net') or self.net is None:
             now = TimeUtils.now_as_float()
@@ -743,89 +705,68 @@ class OptimizedBasketballDetector(Node):
                 self._log('error', 'MODEL', "Cannot process image - model not available", throttle=10)
                 self.last_error_time = now
             return
-
         # Update statistics
         inference_start = TimeUtils.now_as_float()
         self.last_callback_time = inference_start  # Track last callback time
         self.image_count += 1
         self.diagnostic_metrics['total_frames'] = self.image_count
-        
         try:
-            # Convert ROS image to OpenCV format
-            # This makes it easy to work with the image using standard computer vision tools.
+            # Convert ROS image to OpenCV format (BGR)
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            
-            # Preprocess the image for model input
+            # Preprocess the image for model input (resize, normalize, format)
             self._trace_start('preprocess')
             input_tensor = self.preprocess_image(cv_image)
             preprocess_time = self._trace_end('preprocess')
-            
             # Run the neural network to detect objects
             self._trace_start('inference')
             output_var = self.net.forward(input_tensor)
             inference_time = self._trace_end('inference')
-            
             # Track inference time for diagnostics
             self._add_to_metric_history('inference_time', inference_time)
-            
             # Process the model output to find tennis balls
             self._trace_start('postprocess')
             best_box, confidence = self.process_detections(output_var)
             postprocess_time = self._trace_end('postprocess')
-            
             # If a tennis ball was detected, publish its position
             if best_box is not None:
                 x0, y0, x1, y1 = best_box
-                
                 # Calculate center point of the tennis ball
                 center_x = (x0 + x1) / 2
                 center_y = (y0 + y1) / 2
                 width = x1 - x0
                 height = y1 - y0
-                
                 # Update diagnostic metrics for detection
                 self.diagnostic_metrics['detected_frames'] += 1
-                    
                 self.diagnostic_metrics['last_detection_position'] = (center_x, center_y)
                 self.diagnostic_metrics['last_detection_time'] = TimeUtils.now_as_float()
-                
                 # Update metrics
                 self._add_to_metric_history('confidence', confidence)
-                
                 # Calculate detection rate
                 detection_rate = self.diagnostic_metrics['detected_frames'] / self.image_count
                 self._add_to_metric_history('detection_rate', detection_rate)
-                
                 # Log detection with improved formatting similar to fusion node
                 # Only log if confidence is above threshold or periodically
                 should_log = (confidence > 0.3 or 
                              (self.image_count % self.log_config.get('detection_log_rate', 10) == 0))
-                
                 if should_log:
                     self._log('info', 'DETECT', 
                              f"Ball at ({center_x:.1f}, {center_y:.1f}), Size: {width:.1f}x{height:.1f}, Conf: {confidence:.2f}", 
                              throttle=0)  # No throttling for actual detections
-                
                 # Create and publish the position message with timestamp
                 # Use pre-allocated message object
-                
                 # Validate the timestamp
                 if TimeUtils.is_timestamp_valid(msg.header.stamp):
                     self._position_msg.header.stamp = msg.header.stamp
                 else:
                     self._position_msg.header.stamp = TimeUtils.now_as_ros_time()
-                
                 # Increment sequence counter
                 self.seq_counter += 1
-                
-                # Set position data
+                # Set position data (x, y = center, z = confidence)
                 self._position_msg.point.x = float(center_x)
                 self._position_msg.point.y = float(center_y)
                 self._position_msg.point.z = float(confidence)  # Using z for confidence
-                
                 # Publish position
                 self.ball_publisher.publish(self._position_msg)
-
                 # Use pre-allocated bbox message
                 # Format: [center_x, center_y, width, height, confidence]
                 self._bbox_msg.data[0] = float(center_x)
@@ -833,10 +774,8 @@ class OptimizedBasketballDetector(Node):
                 self._bbox_msg.data[2] = float(width)
                 self._bbox_msg.data[3] = float(height)
                 self._bbox_msg.data[4] = float(confidence)
-                
                 # Publish the bounding box
                 self.bbox_publisher.publish(self._bbox_msg)
-
                 # Store detailed data for high-confidence detections
                 if confidence > 0.5:
                     # Use lightweight buffer instead of deque
@@ -851,24 +790,19 @@ class OptimizedBasketballDetector(Node):
                 # Only log "no detection" occasionally to avoid flooding logs
                 if self.image_count % 30 == 0:
                     self._log('debug', 'DETECT', "No basketball detected in recent frames", throttle=5)
-
             # Calculate and display performance metrics
             total_time = (TimeUtils.now_as_float() - inference_start) * 1000  # milliseconds
             elapsed_time = TimeUtils.now_as_float() - self.start_time
             fps = self.image_count / elapsed_time if elapsed_time > 0 else 0
-            
             # Update metrics for diagnostics
             self._add_to_metric_history('fps', fps)
             self._add_to_metric_history('processing_time', total_time)
-
             # Log performance periodically (throttled)
             if self.image_count % DIAG_CONFIG["performance_log_interval"] == 0:
                 self._log('info', 'PERF', 
                          f"FPS: {fps:.1f}, Processing: {total_time:.1f}ms, Inference: {inference_time:.1f}ms", 
                          throttle=DIAG_CONFIG["performance_log_interval"])
-
             overall_time = self._trace_end('overall')
-            
             # Log detailed timing occasionally (highly throttled)
             if self.image_count % self.log_config.get('trace_log_interval', 100) == 0:
                 detail = {
@@ -878,7 +812,6 @@ class OptimizedBasketballDetector(Node):
                     "overhead_ms": overall_time - (preprocess_time + inference_time + postprocess_time)
                 }
                 self._log('debug', 'TRACE', "YOLO timing breakdown", data=detail, throttle=30)
-
         except Exception as e:
             self._log('error', 'ERROR', f"Error processing image: {str(e)}")
 
@@ -1033,7 +966,18 @@ class OptimizedBasketballDetector(Node):
 
 
     def _handle_resource_alert(self, resource_type, value):
-        """Handle high resource usage by adjusting detector behavior."""
+        """
+        Handle high resource usage by adjusting detector behavior.
+        
+        Textbook Explanation:
+        ---------------------
+        In robotics and AI, running neural networks can use a lot of CPU and memory. If the system is overloaded, performance drops and detections may be missed. This function monitors system resources (like CPU and memory usage) and adapts the node's behavior to avoid overload.
+        
+        Mathematical/Intuitive Link:
+        - If CPU usage is above a critical threshold (e.g., 95%), the node enters 'low power mode' and skips frames to reduce load.
+        - Warnings are logged and tracked for diagnostics, helping us understand when and why performance drops.
+        - This is an example of feedback control: the system monitors itself and adapts to maintain reliable operation.
+        """
         self._log('warn', 'SYSTEM', 
                  f"Resource alert: {resource_type} at {value:.1f}% - may affect performance",
                  throttle=30)
@@ -1059,7 +1003,17 @@ class OptimizedBasketballDetector(Node):
             self.frame_skip_count = 1  # Skip every other frame
 
     def destroy_node(self):
-        """Clean up YOLO model resources."""
+        """
+        Clean up YOLO model resources.
+        
+        Textbook Explanation:
+        ---------------------
+        When shutting down a robotics node, it's important to release all resources (memory, model objects, background processes) to avoid memory leaks and ensure a clean shutdown. This function deletes the neural network, releases memory, stops resource monitoring, and triggers garbage collection.
+        
+        Mathematical/Intuitive Link:
+        - Resource management is like cleaning up after an experiment: you want to leave the system in a good state for the next run.
+        - Proper cleanup prevents memory leaks, which can slow down or crash the robot over time.
+        """
         self._log('info', 'SHUTDOWN', "Cleaning up resources...")
         
         # Release model resources
@@ -1083,7 +1037,17 @@ class OptimizedBasketballDetector(Node):
 
 # The main function is the entry point of the program. It sets up ROS, creates the node, and keeps it running.
 def main(args=None):
-    """Main function to initialize and run the basketball detector."""
+    """
+    Main function to initialize and run the basketball detector.
+    
+    Textbook Explanation:
+    ---------------------
+    This is the entry point of the program. It sets up the ROS system, creates the detector node, and keeps it running until interrupted. This is a standard pattern in robotics: initialize, run, and clean up on exit.
+    
+    Mathematical/Intuitive Link:
+    - The main loop (rclpy.spin) keeps the node alive, processing messages and running callbacks.
+    - Clean shutdown ensures all resources are released and the robot is ready for the next session.
+    """
     # Initialize ROS
     rclpy.init(args=args)
     

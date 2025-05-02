@@ -703,18 +703,18 @@ class BasketballLidarDetector(Node):
         This is a fundamental concept in robotics and computer vision, and mastering it will help you work with any multi-sensor robot.
         """
         try:
-            # Extract translation
+            # Extract translation (shift between frames)
             tx = transform.transform.translation.x
             ty = transform.transform.translation.y
             tz = transform.transform.translation.z
 
-            # Extract rotation quaternion
+            # Extract rotation quaternion (orientation between frames)
             qx = transform.transform.rotation.x
             qy = transform.transform.rotation.y
             qz = transform.transform.rotation.z
             qw = transform.transform.rotation.w
 
-            # Normalize quaternion
+            # Normalize quaternion to avoid scaling errors
             norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
             if norm > 0.001:
                 qw /= norm
@@ -722,7 +722,7 @@ class BasketballLidarDetector(Node):
                 qy /= norm
                 qz /= norm
 
-            # Calculate rotation matrix elements
+            # Calculate rotation matrix elements from quaternion
             xx = qx * qx
             xy = qx * qy
             xz = qx * qz
@@ -736,7 +736,7 @@ class BasketballLidarDetector(Node):
             # Create transformation matrix (4x4)
             matrix = np.eye(4, dtype=np.float32)
             
-            # Rotation part (top-left 3x3)
+            # Fill in rotation part (top-left 3x3)
             matrix[0, 0] = 1 - 2 * (yy + zz)
             matrix[0, 1] = 2 * (xy - zw)
             matrix[0, 2] = 2 * (xz + yw)
@@ -747,15 +747,15 @@ class BasketballLidarDetector(Node):
             matrix[2, 1] = 2 * (yz + xw)
             matrix[2, 2] = 1 - 2 * (xx + yy)
             
-            # Translation part (top-right 3x1)
+            # Fill in translation part (top-right 3x1)
             matrix[0, 3] = tx
             matrix[1, 3] = ty
             matrix[2, 3] = tz
             
-            # Store in cache
+            # Store in cache for fast reuse
             self.cached_transforms[cache_key] = matrix
             
-            # Also cache the inverse matrix
+            # Also cache the inverse matrix for reverse transforms
             inv_matrix = np.linalg.inv(matrix)
             self.cached_transforms[f"{cache_key}_inv"] = inv_matrix
             

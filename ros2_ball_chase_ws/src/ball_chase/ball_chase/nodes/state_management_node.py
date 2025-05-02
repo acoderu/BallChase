@@ -36,6 +36,15 @@ class OptimizedBuffer:
     """
     Memory-efficient fixed-size buffer with pre-allocated array.
     Eliminates memory fragmentation from growing lists.
+    
+    ---
+    Concept: Circular Buffer (Ring Buffer)
+    -------------------------------------
+    A circular buffer is a fixed-size data structure that stores the most recent N items. When the buffer is full, new items overwrite the oldest ones. This is very efficient for streaming data, like sensor readings, because it avoids memory allocation and keeps only the most relevant data.
+    
+    Mathematical intuition:
+    - Think of the buffer as a circle with N slots. When you reach the end, you wrap around to the beginning.
+    - This is like a queue that never grows, so it is very fast and memory-efficient.
     """
     
     def __init__(self, max_size=10):
@@ -47,20 +56,42 @@ class OptimizedBuffer:
         self.size = 0
     
     def add(self, value):
-        """Add value to buffer with optimized memory management."""
+        """
+        Add value to buffer with optimized memory management.
+        
+        Mathematical idea:
+        - We use modular arithmetic to wrap the index around when it reaches the end.
+        - This is like counting on a clock: after 12 comes 1 again.
+        """
+        # Overwrite the oldest value in the buffer (circular buffer logic)
         self.data[self.next_index] = value
+        # Move the index forward, wrapping around if needed
         self.next_index = (self.next_index + 1) % self.max_size
+        # Increase the size up to the max
         self.size = min(self.size + 1, self.max_size)
     
     def get_all(self):
-        """Get all valid values as a list, optimized for performance."""
+        """
+        Get all valid values as a list, optimized for performance.
+        
+        Mathematical idea:
+        - If the buffer is not full, just return the first 'size' elements.
+        - If the buffer is full, return the elements starting from 'next_index' to the end, then from the beginning to 'next_index'.
+        - This is a classic use of modular arithmetic in data structures.
+        """
         if self.size < self.max_size:
             return self.data[:self.size]
         else:
             return self.data[self.next_index:] + self.data[:self.next_index]
     
     def get_latest(self, count=1):
-        """Get the most recent n values with optimized array handling."""
+        """
+        Get the most recent n values with optimized array handling.
+        
+        Mathematical idea:
+        - To get the latest N items, we calculate the correct start index using modular arithmetic.
+        - This is efficient and avoids copying unnecessary data.
+        """
         if self.size == 0:
             return []
         
@@ -72,18 +103,30 @@ class OptimizedBuffer:
             # Buffer is full - calculate proper indices
             start_idx = (self.next_index - count) % self.max_size
             if start_idx < self.next_index:
+                # No wrap-around needed
                 return self.data[start_idx:self.next_index]
             else:
+                # Wrap-around: concatenate end and start of buffer
                 return self.data[start_idx:] + self.data[:self.next_index]
     
     def clear(self):
-        """Clear the buffer without reallocating memory."""
+        """
+        Clear the buffer without reallocating memory.
+        
+        Concept:
+        - Instead of deleting the data, we just reset the indices. This is much faster and avoids memory fragmentation.
+        """
         # Just reset indices without clearing data array
         self.next_index = 0
         self.size = 0
     
     def __len__(self):
-        """Get current buffer size."""
+        """
+        Get current buffer size.
+        
+        Concept:
+        - Returns how many items are currently stored in the buffer.
+        """
         return self.size
 
 
@@ -91,6 +134,17 @@ class EfficientTrendAnalyzer:
     """
     Analyzes trends in time series data with pre-computed differences
     and optimized memory usage.
+    
+    ---
+    Concept: Trend Analysis in Time Series
+    -------------------------------------
+    - This class helps us understand if a value (like uncertainty or confidence) is increasing, decreasing, or stable over time.
+    - It uses a sliding window (buffer) to keep recent values and calculates the rate of change.
+    - This is like looking at a graph and asking: is the line going up, down, or flat?
+    
+    Mathematical intuition:
+    - The rate of change is the difference between values divided by the time between them (slope).
+    - Stability is measured by how much the values vary (standard deviation).
     """
     
     def __init__(self, window_size=10):
@@ -104,7 +158,14 @@ class EfficientTrendAnalyzer:
         self.stability_score_cache = None
     
     def add(self, value, timestamp=None):
-        """Add a value with optimized caching."""
+        """
+        Add a value with optimized caching.
+        
+        Mathematical idea:
+        - When a new value comes in, we calculate the difference from the previous value and the rate of change.
+        - This is like calculating the slope between two points on a graph.
+        - We store these differences and rates for fast trend analysis.
+        """
         if timestamp is None:
             timestamp = time.time()
         
@@ -134,6 +195,11 @@ class EfficientTrendAnalyzer:
         Returns:
             tuple: (direction, rate) where direction is 1 (rising), -1 (falling), or 0 (stable)
                   and rate is the average change per second
+        
+        Mathematical idea:
+        - The trend is the average rate of change over the window.
+        - If the average rate is close to zero, the trend is stable.
+        - This is like fitting a straight line to the recent data and looking at its slope.
         """
         if len(self.values) < 2:
             return 0, 0.0
@@ -159,7 +225,14 @@ class EfficientTrendAnalyzer:
         return direction, avg_rate
     
     def is_stable(self, threshold=0.05):
-        """Check if values are stable with early exit optimization."""
+        """
+        Check if values are stable with early exit optimization.
+        
+        Mathematical idea:
+        - Stability means the values don't change much relative to their size.
+        - We use the min and max to quickly check if the range is within a threshold.
+        - This is a fast way to check for stability without calculating variance.
+        """
         if len(self.values) < 2:
             return True
         
@@ -185,7 +258,14 @@ class EfficientTrendAnalyzer:
         return (max_val - min_val) / reference < threshold
     
     def get_stability_score(self):
-        """Get stability score with caching for performance."""
+        """
+        Get stability score with caching for performance.
+        
+        Mathematical idea:
+        - The stability score is based on the standard deviation (how much values vary) divided by the mean (average value).
+        - A high score means the values are very stable (low variation).
+        - This is a normalized measure, so it works for different scales.
+        """
         # Return cached value if available
         if self.stability_score_cache is not None:
             return self.stability_score_cache
@@ -227,6 +307,17 @@ class EfficientTrendAnalyzer:
 class OptimizedSystemHealthMonitor:
     """
     Monitors system health with optimized memory usage and computation.
+    
+    ---
+    Concept: System Health Monitoring
+    --------------------------------
+    - This class keeps track of the health of different parts of the robot (tracking, fusion, sensors, etc.).
+    - It uses trend analysis to detect problems early (like rising uncertainty or sensor gaps).
+    - It combines different metrics into a single confidence score.
+    
+    Mathematical intuition:
+    - Confidence is calculated as a weighted product of different factors (tracking, uncertainty, sensors).
+    - Penalties are applied for warnings, reducing the overall confidence.
     """
     
     def __init__(self):
@@ -261,7 +352,13 @@ class OptimizedSystemHealthMonitor:
         self._last_throttled_logs = {}
     
     def update_tracking(self, reliable, confidence):
-        """Update tracking status with minimal memory allocation."""
+        """
+        Update tracking status with minimal memory allocation.
+        
+        Concept:
+        - Updates the tracking status and confidence, and records the time.
+        - Adds the confidence value to the trend analyzer for later analysis.
+        """
         current_time = time.time()
         
         self.components['tracking'][0] = reliable
@@ -272,7 +369,14 @@ class OptimizedSystemHealthMonitor:
         self.trends['tracking_confidence'].add(confidence, current_time)
     
     def update_fusion(self, uncertainty):
-        """Update fusion status with minimal computation."""
+        """
+        Update fusion status with minimal computation.
+        
+        Concept:
+        - Updates the uncertainty value and records the time.
+        - Adds the uncertainty to the trend analyzer to detect if uncertainty is rising or falling.
+        - Sets the fusion status to True if uncertainty is below a threshold.
+        """
         current_time = time.time()
         
         self.components['fusion'][1] = uncertainty
@@ -285,13 +389,25 @@ class OptimizedSystemHealthMonitor:
         self.trends['uncertainty'].add(uncertainty, current_time)
     
     def update_motion(self, state, confidence=0.7):
-        """Update motion state with minimal memory allocation."""
+        """
+        Update motion state with minimal memory allocation.
+        
+        Concept:
+        - Records the current motion state (e.g., stationary, moving) and confidence.
+        - This helps the system adapt its behavior based on how the ball is moving.
+        """
         self.components['motion'][0] = state
         self.components['motion'][1] = confidence
         self.components['motion'][2] = time.time()
     
     def update_sensors(self, active_count, gap_detected=False):
-        """Update sensor status with minimal memory allocation."""
+        """
+        Update sensor status with minimal memory allocation.
+        
+        Concept:
+        - Records the number of active sensors and whether a gap is detected.
+        - Adds the sensor count to the trend analyzer to monitor sensor health over time.
+        """
         self.components['sensors'][0] = active_count
         self.components['sensors'][1] = gap_detected
         self.components['sensors'][2] = time.time()
@@ -300,7 +416,14 @@ class OptimizedSystemHealthMonitor:
         self.trends['sensor_count'].add(active_count)
     
     def evaluate_health(self):
-        """Evaluate overall system health with optimized computation."""
+        """
+        Evaluate overall system health with optimized computation.
+        
+        Concept:
+        - Checks for stale data, degraded tracking, high uncertainty, sensor gaps, and low sensor count.
+        - Uses trend analysis to detect if uncertainty is rising (a sign of trouble).
+        - Returns a list of new warnings for the system.
+        """
         current_time = time.time()
         self.warnings = []
         
@@ -343,7 +466,14 @@ class OptimizedSystemHealthMonitor:
         return new_warnings
     
     def calculate_system_confidence(self):
-        """Calculate overall system confidence with optimized operations."""
+        """
+        Calculate overall system confidence with optimized operations.
+        
+        Mathematical idea:
+        - Combines tracking confidence, fusion uncertainty, and sensor count into a single score.
+        - Uses weighted multiplication and applies penalties for warnings.
+        - This is like a health score for the robot, where each part contributes to the total.
+        """
         # Start with base confidence
         confidence = 1.0
         
@@ -374,7 +504,13 @@ class OptimizedSystemHealthMonitor:
         return confidence
     
     def get_diagnostic_data(self):
-        """Get diagnostic data with minimal object creation."""
+        """
+        Get diagnostic data with minimal object creation.
+        
+        Concept:
+        - Collects the current health, warnings, and trends into a dictionary for diagnostics.
+        - This is used for monitoring and debugging the robot.
+        """
         # Calculate confidence
         system_confidence = self.calculate_system_confidence()
         
@@ -415,14 +551,26 @@ class OptimizedSystemHealthMonitor:
         return data
     
     def increment_message_counter(self, topic):
-        """Track message counts with minimal overhead."""
+        """
+        Track message counts with minimal overhead.
+        
+        Concept:
+        - Keeps track of how many messages have been received for each topic.
+        - Useful for diagnostics and debugging.
+        """
         if topic not in self.message_counters:
             self.message_counters[topic] = 0
         self.message_counters[topic] += 1
         return self.message_counters[topic]
     
     def throttled_log(self, logger, message, key, min_interval=1.0, level="info"):
-        """Log with throttling and cached message evaluation."""
+        """
+        Log with throttling and cached message evaluation.
+        
+        Concept:
+        - Only logs a message if enough time has passed since the last log with the same key.
+        - Prevents flooding the log with repeated messages.
+        """
         current_time = time.time()
         
         # Check if enough time has passed since last log
@@ -501,9 +649,17 @@ class OptimizedBallChaseStateManager(Node):
     """
     Optimized state management node for the basketball chasing robot.
     
-    Determines appropriate robot behavior based on tracking reliability,
-    motion state, and uncertainty metrics with performance optimizations
-    for Raspberry Pi 5.
+    ---
+    Concept: State Machine for Robot Behavior
+    ----------------------------------------
+    - This class manages the robot's high-level behavior using a state machine.
+    - The robot transitions between states like INITIALIZING, TRACKING, LOST_BALL, STOPPED, SEARCHING, and RECOVERY.
+    - Each state has its own logic for when to transition to another state, based on sensor data, tracking reliability, and uncertainty.
+    
+    Mathematical intuition:
+    - A state machine is a mathematical model where the system is always in one of a finite number of states.
+    - Transitions between states are triggered by events or conditions (like losing the ball or detecting high uncertainty).
+    - This is a powerful way to organize complex robot behavior in a way that is easy to reason about and debug.
     """
     
     def __init__(self):
@@ -905,6 +1061,17 @@ class OptimizedBallChaseStateManager(Node):
     def position_callback(self, msg):
         """
         Process ball position updates with optimized vector calculations.
+        
+        Concept:
+        - Converts the incoming ROS PointStamped message to a tuple for fast processing.
+        - Updates the position history buffer for stationary detection.
+        - Calculates the distance the ball has moved since the last update (Euclidean distance).
+        - Uses adaptive thresholds based on the ball's motion state to decide if the detection is valid.
+        - Updates the state machine and health monitor accordingly.
+        
+        Mathematical idea:
+        - The Euclidean distance formula is used to measure how much the ball has moved: sqrt((x2-x1)^2 + (y2-y1)^2 + (z2-z1)^2)
+        - Adaptive thresholds allow the system to be more or less sensitive depending on the context (e.g., more strict when stationary).
         """
         current_time = time.time()
         
@@ -922,7 +1089,7 @@ class OptimizedBallChaseStateManager(Node):
         
         # Calculate position change if we have a previous position
         if self.last_position is not None:
-            # Optimized distance calculation
+            # Optimized distance calculation (Euclidean distance in 3D)
             position_change = 0.0
             for i in range(3):
                 diff = position[i] - self.last_position[i]
@@ -990,7 +1157,18 @@ class OptimizedBallChaseStateManager(Node):
         self.health_monitor.update_sensors(self.active_sensor_count, self.in_sensor_gap)
     
     def update_ball_stationary_status(self):
-        """Check if the ball is stationary with optimized calculations."""
+        """
+        Check if the ball is stationary with optimized calculations.
+        
+        Concept:
+        - Looks at the recent position history to see if the ball has moved more than a threshold.
+        - Uses early exit optimization: if any movement exceeds the threshold, we know the ball is not stationary.
+        - Adapts the threshold based on motion state and distance to the ball.
+        
+        Mathematical idea:
+        - Uses the maximum movement in the buffer to decide if the ball is stationary.
+        - The threshold is scaled based on context (e.g., further balls appear to move less in the camera frame).
+        """
         if len(self.position_history) < 3:  # Need multiple samples to determine
             self.is_ball_stationary = False
             return
@@ -1066,7 +1244,18 @@ class OptimizedBallChaseStateManager(Node):
             self.last_stationary_status = self.is_ball_stationary
     
     def handle_position_based_transitions(self, current_time):
-        """Handle state transitions with early-exit optimizations."""
+        """
+        Handle state transitions with early-exit optimizations.
+        
+        Concept:
+        - Decides when to transition between states based on position updates and time in state.
+        - Uses early exit to avoid unnecessary checks.
+        - Each state has its own handler for transitions.
+        
+        Mathematical idea:
+        - State transitions are triggered by logical conditions (e.g., enough detections, timeouts, or changes in ball movement).
+        - This is a practical application of finite state machines in robotics.
+        """
         # Calculate time in current state for hysteresis
         time_in_state = current_time - self.state_start_time
         
@@ -1225,7 +1414,14 @@ class OptimizedBallChaseStateManager(Node):
     def evaluate_uncertainty_recovery(self):
         """
         Evaluate if we should enter recovery mode based on uncertainty trends.
-        Only triggers during TRACKING state with early exit optimization.
+        
+        Concept:
+        - Monitors the trend of position uncertainty to decide if the robot should enter recovery mode.
+        - Uses both the current value and the rate of change (trend) to make the decision.
+        
+        Mathematical idea:
+        - If uncertainty is high and rising, it's a sign that the robot is losing track of the ball.
+        - This is like watching a graph and noticing when the line starts going up quickly.
         """
         if self.current_state != RobotState.TRACKING:
             return
@@ -1291,7 +1487,17 @@ class OptimizedBallChaseStateManager(Node):
             self.get_logger().info(f"Current motion state: {self.motion_state}")
     
     def adapt_parameters_to_motion_state(self):
-        """Adapt tracking parameters with optimized update frequency."""
+        """
+        Adapt tracking parameters with optimized update frequency.
+        
+        Concept:
+        - Adjusts thresholds and timeouts based on the current motion state of the ball.
+        - This allows the robot to be more responsive to fast-moving balls and more patient with stationary ones.
+        
+        Mathematical idea:
+        - Parameter adaptation is a form of feedback control: the system changes its behavior based on what it observes.
+        - This is a key idea in robotics and control theory.
+        """
         if not self.adaptive_parameters_enabled:
             return
         
@@ -1419,7 +1625,17 @@ class OptimizedBallChaseStateManager(Node):
         self.handle_sensor_gap()
     
     def handle_sensor_gap(self):
-        """Handle sensor gaps with early-exit optimization."""
+        """
+        Handle sensor gaps with early-exit optimization.
+        
+        Concept:
+        - Decides how to handle sensor gaps based on the current state and motion state.
+        - Uses adaptive tolerance times to allow for short gaps without changing state.
+        
+        Mathematical idea:
+        - Adaptive tolerance times are based on the motion state (e.g., longer for stationary balls).
+        - This is a practical application of adaptive control in robotics.
+        """
         if not self.gap_enabled or not self.in_sensor_gap:
             return
         
@@ -1750,8 +1966,14 @@ class OptimizedBallChaseStateManager(Node):
         """
         Handle state transitions with optimized protection logic.
         
-        Args:
-            new_state (RobotState): The state to transition to
+        Concept:
+        - Manages transitions between states, applying protection against rapid oscillations (hysteresis).
+        - Logs transitions and resets state-specific variables.
+        - Publishes the new state for other nodes to use.
+        
+        Mathematical idea:
+        - Hysteresis is used to prevent rapid switching between states, which can cause instability.
+        - The state transition history is used to detect oscillations and block them if needed.
         """
         # Apply state protection to prevent rapid oscillations
         new_state = self.apply_state_protection(new_state)
@@ -1812,11 +2034,14 @@ class OptimizedBallChaseStateManager(Node):
         """
         Apply optimized protection against rapid state oscillations.
         
-        Args:
-            proposed_state (RobotState): The proposed new state
-            
-        Returns:
-            RobotState: The actual state to transition to (may be different from proposed)
+        Concept:
+        - Checks if enough time has passed in the current state before allowing a transition.
+        - Detects oscillating patterns in the state history and blocks them.
+        - Special protection for the STOPPED state during sensor gaps.
+        
+        Mathematical idea:
+        - Uses minimum time thresholds (hysteresis) and pattern detection in the state history.
+        - This is a practical application of state machine protection in robotics.
         """
         current_time = time.time()
         time_in_state = current_time - self.state_start_time
@@ -1886,14 +2111,26 @@ class OptimizedBallChaseStateManager(Node):
         return proposed_state
     
     def stop_robot(self):
-        """Send command to stop all robot motion with reduced overhead."""
+        """
+        Send command to stop all robot motion with reduced overhead.
+        
+        Concept:
+        - Publishes a zero-velocity command to stop the robot.
+        - Uses a pre-allocated message for efficiency.
+        """
         # Reuse the same Twist object to reduce allocations
         if not hasattr(self, '_stop_twist'):
             self._stop_twist = Twist()  # All fields initialize to 0
         self.cmd_vel_publisher.publish(self._stop_twist)
     
     def publish_state(self):
-        """Publish current robot state for other nodes to consume."""
+        """
+        Publish current robot state for other nodes to consume.
+        
+        Concept:
+        - Publishes the current state as a message so other parts of the system can react.
+        - Uses a pre-allocated message for efficiency.
+        """
         # Reuse the same message object to reduce allocations
         if not hasattr(self, '_state_msg'):
             self._state_msg = String()
@@ -1903,6 +2140,15 @@ class OptimizedBallChaseStateManager(Node):
     def health_check_callback(self):
         """
         Perform periodic health checks with reduced computational overhead.
+        
+        Concept:
+        - Evaluates the health of the system and logs warnings if needed.
+        - Adjusts tracking parameters if health is degraded.
+        - Publishes health status for monitoring.
+        
+        Mathematical idea:
+        - Health is a function of confidence, warnings, and system state.
+        - This is a practical example of monitoring and feedback in robotics.
         """
         # Evaluate overall health
         new_warnings = self.health_monitor.evaluate_health()
@@ -1944,7 +2190,13 @@ class OptimizedBallChaseStateManager(Node):
         self.health_publisher.publish(self._health_msg)
     
     def publish_diagnostics(self):
-        """Publish diagnostics with optimized JSON serialization and reduced content."""
+        """
+        Publish diagnostics with optimized JSON serialization and reduced content.
+        
+        Concept:
+        - Publishes a summary of the robot's state, tracking, and health for monitoring and debugging.
+        - Includes trends and resource usage in full diagnostics.
+        """
         current_time = time.time()
         
         # Get basic diagnostic data

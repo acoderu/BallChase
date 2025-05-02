@@ -4,6 +4,27 @@
 Highly Optimized State-Aware Fusion Node for ROS 2
 Designed for resource-constrained systems like Raspberry Pi 5
 Focuses on efficient state management, reduced CPU usage, and robust tracking
+
+This file implements a sensor fusion node for tracking a basketball using multiple sensors (LiDAR, YOLO 3D, YOLO 2D) in a robotics context.
+
+---
+
+# What is Sensor Fusion?
+Sensor fusion is the process of combining data from multiple sensors to get a more accurate, reliable, and robust estimate of the state of an object (like its position and velocity) than any single sensor could provide alone. This is important because each sensor has its own strengths and weaknesses (for example, LiDAR is very accurate but can be blocked, while cameras can see more but are less precise).
+
+# What is a Kalman Filter?
+A Kalman filter is a mathematical algorithm that estimates the state of a system (like the position and velocity of a ball) by combining predictions (from physics) and measurements (from sensors), while keeping track of uncertainty. It works in two steps:
+1. **Prediction:** Use the previous state and physics to predict where the object should be now.
+2. **Update:** Use new sensor measurements to correct the prediction, weighting them by how certain we are about each.
+
+The filter also keeps track of how uncertain it is about its estimate, and this uncertainty changes as new data comes in.
+
+# What is State Management?
+State management here means keeping track of whether the ball is moving, stationary, or in between. This is important because we want to treat measurements differently depending on how the ball is behaving (for example, we can trust our estimate more if the ball is stationary).
+
+---
+
+This code is heavily optimized for performance, but the comments and docstrings below will explain the intuition and math behind each part, so a high school student can follow along.
 """
 import rclpy
 from rclpy.node import Node
@@ -31,7 +52,11 @@ except ImportError:
 
 
 class LightweightBuffer:
-    """Lightweight buffer for sensor measurements with fixed memory allocation."""
+    """
+    LightweightBuffer is a circular buffer (fixed-size queue) for storing recent sensor measurements.
+    This is like a small notebook where you always write the newest value on top, and erase the oldest when you run out of space.
+    This helps us keep memory usage low and access the most recent data quickly.
+    """
     
     def __init__(self, max_size=10):
         """Initialize with fixed buffer size."""
@@ -99,7 +124,11 @@ class LightweightBuffer:
 
 
 class SensorManager:
-    """Efficient sensor data management with fixed memory allocation."""
+    """
+    SensorManager keeps track of all the sensors, their recent data, and their health (are they working?).
+    It uses LightweightBuffer for each sensor to store recent measurements.
+    It also tracks how often each sensor is updating, and whether it's currently active.
+    """
     
     def __init__(self, sensor_names=None):
         """Initialize with specified sensors."""
@@ -224,7 +253,20 @@ class SensorManager:
 
 
 class MotionStateManager:
-    """Efficient state management with hysteresis and confidence tracking."""
+    """
+    MotionStateManager keeps track of the motion state of the ball (is it stationary, moving slowly, or moving fast?).
+    This is important because we want to treat measurements differently depending on how the ball is behaving.
+    
+    ## States:
+    - UNKNOWN: We don't know yet.
+    - STATIONARY: The ball is not moving.
+    - LONG_STATIONARY: The ball has been still for a long time.
+    - SMALL_MOVEMENT: The ball is moving a little.
+    - MEDIUM_FAST: The ball is moving quickly.
+
+    The state is determined by looking at the velocity (speed) of the ball and using thresholds (cutoff values).
+    To avoid switching states too quickly due to noise, we use 'hysteresis' (requiring several measurements before changing state).
+    """
     
     # Define motion states as class constants for better performance 
     # (avoids string comparisons)
@@ -244,7 +286,14 @@ class MotionStateManager:
     }
     
     def __init__(self):
-        """Initialize state manager."""
+        """
+        Initializes the motion state manager.
+        - Sets the current and previous state to UNKNOWN.
+        - Sets up confidence values for each state (how sure are we that we're in that state?).
+        - Sets up counters for how much evidence we have for each state (used for hysteresis).
+        - Sets up thresholds for what counts as stationary or moving.
+        - Precomputes a lookup table for mapping velocities to states for fast decision-making.
+        """
         # Current state
         self.current_state = self.UNKNOWN
         self.previous_state = self.UNKNOWN
@@ -295,22 +344,28 @@ class MotionStateManager:
                 self._velocity_state_map[vel] = self.MEDIUM_FAST
     
     def get_state_name(self, state=None):
-        """Get the name of a state (or current state if not specified)."""
+        """
+        Returns the name of a state (e.g., 'stationary', 'small_movement').
+        """
         if state is None:
             state = self.current_state
         return self.STATE_NAMES.get(state, "unknown")
     
     def update(self, velocity, position=None, force_state=None):
         """
-        Update motion state based on velocity or force a specific state.
+        Updates the motion state based on the current velocity.
         
-        Args:
-            velocity: Current velocity estimate (magnitude in m/s)
-            position: Optional position for continuity checks
-            force_state: Optional state to force (for overrides)
+        **How does it work?**
+        - Looks up what state the current velocity should correspond to (using thresholds).
+        - Uses 'evidence counters' to require several consistent measurements before changing state (hysteresis).
+        - Handles special cases like transitioning to LONG_STATIONARY if the ball has been still for a long time.
+        - If a state change happens, updates confidence values and logs the change.
         
-        Returns:
-            bool: True if state changed
+        **Why do we need this?**
+        - Sensors are noisy, so we don't want to switch states just because of a single odd measurement.
+        - By requiring several consistent measurements, we make the system more robust.
+        
+        Returns True if the state changed, False otherwise.
         """
         current_time = time.time()
         state_changed = False
@@ -415,7 +470,10 @@ class MotionStateManager:
         return state_changed
     
     def get_validation_multiplier(self):
-        """Get validation threshold multiplier based on current state."""
+        """
+        Returns a multiplier for how strict we should be when validating new measurements, depending on the current state.
+        For example, if the ball is moving fast, we allow bigger changes; if it's stationary, we are more strict.
+        """
         # Use direct return based on state for better performance
         if self.current_state == self.STATIONARY:
             return 1.0
@@ -429,11 +487,16 @@ class MotionStateManager:
             return 1.2
     
     def is_in_transition(self, max_transition_time=1.0):
-        """Check if currently in state transition."""
+        """
+        Returns True if we recently changed state (within max_transition_time seconds).
+        This helps us be more forgiving right after a state change.
+        """
         return time.time() - self.last_state_change_time < max_transition_time
     
     def get_state_age(self):
-        """Get the age of the current state."""
+        """
+        Returns how long we've been in the current state (in seconds).
+        """
         if self.last_state_change_time:
             return time.time() - self.last_state_change_time
         return 0.0
@@ -441,7 +504,47 @@ class MotionStateManager:
 
 class OptimizedFusionNode(LifecycleNode):
     """
-    Highly optimized fusion node with reduced CPU usage and improved state management.
+    =============================
+    KALMAN FILTERS: THE MATHEMATICAL HEART OF SENSOR FUSION
+    =============================
+    
+    What is a Kalman Filter?
+    -----------------------
+    A Kalman filter is a mathematical algorithm that estimates the state of a system (like the position and velocity of a ball) by combining:
+      - Predictions (from physics: e.g., if the ball is moving, where should it be next?)
+      - Measurements (from sensors: e.g., where does LiDAR or a camera say the ball is?)
+    It also keeps track of how uncertain it is about its estimate, and updates this uncertainty as new data comes in.
+    
+    Why use a Kalman Filter?
+    -----------------------
+    - Sensors are noisy: Each sensor gives slightly different answers, and sometimes they are wrong.
+    - Physics is not perfect: The ball might bounce, slow down, or be blocked from view.
+    - We want the best possible estimate, using all available information, and we want to know how sure we are about it.
+    
+    How does it work? (Intuitive Explanation)
+    ----------------------------------------
+    1. **Prediction Step:**
+        - Use the current state (position, velocity) and physics (e.g., velocity, friction) to predict where the ball should be after a small time step.
+        - Increase the uncertainty a little, because the future is never perfectly predictable.
+    2. **Update Step:**
+        - When a new sensor measurement arrives, compare it to the prediction.
+        - If the measurement is close to the prediction, trust it more; if it's far, trust it less (maybe it's an outlier).
+        - Combine the prediction and measurement, weighted by their uncertainties, to get a new, improved estimate.
+        - Reduce the uncertainty, because now we have more information.
+    
+    Why is this appropriate for basketball tracking?
+    -----------------------------------------------
+    - The ball moves according to physics, but sensors can lose track or be noisy.
+    - We want to smoothly combine all available data, ignore outliers, and know when we're not sure.
+    - Kalman filters are optimal (best possible) for linear systems with Gaussian noise, which is a good approximation for this problem.
+    
+    How does this code use the Kalman filter?
+    ----------------------------------------
+    - The state is [x, y, vx, vy]: position and velocity in 2D.
+    - The prediction step uses physics (velocity, friction) to predict the next state.
+    - The update step uses new sensor data (LiDAR, YOLO 3D, YOLO 2D) to correct the prediction.
+    - The code adapts the filter based on the ball's motion state (stationary, moving, etc.), and handles uncertainty dynamically.
+    - The code is optimized for speed and robustness, but all the core Kalman math is present and explained below.
     """
     
     def __init__(self, node_name='optimized_fusion_node'):
@@ -493,7 +596,14 @@ class OptimizedFusionNode(LifecycleNode):
         self.get_logger().info("Highly Optimized Fusion Node initialized with resource-efficient design")
     
     def on_configure(self, state):
-        """Configure node with minimized resource usage."""
+        """
+        Called when the node is being configured (set up).
+        - Sets up the transform system (for converting between coordinate frames)
+        - Loads configuration parameters (like noise values, topic names)
+        - Initializes the Kalman filter state and covariance
+        - Sets up the motion state manager and sensor manager
+        - Precomputes matrices for fast filter updates
+        """
         self.get_logger().info("Configuring node...")
         
         try:
@@ -564,7 +674,13 @@ class OptimizedFusionNode(LifecycleNode):
             return TransitionCallbackReturn.ERROR
     
     def on_activate(self, state):
-        """Activate node with staged startup for lower initial CPU spike."""
+        """
+        Called when the node is activated (starts running).
+        - Sets up publishers (for sending out estimated position, velocity, etc.)
+        - Sets up subscriptions to sensor topics
+        - Sets up timers for periodic tasks (filter update, publishing, diagnostics)
+        - Uses staged startup to avoid overloading the CPU at once
+        """
         self.get_logger().info("Activating node...")
         
         try:
@@ -634,7 +750,10 @@ class OptimizedFusionNode(LifecycleNode):
             return TransitionCallbackReturn.ERROR
     
     def on_deactivate(self, state):
-        """Deactivate node and clean up resources."""
+        """
+        Called when the node is deactivated (stops running).
+        - Cleans up publishers, timers, and subscriptions.
+        """
         self.get_logger().info("Deactivating node...")
         
         # Deactivate publishers
@@ -655,7 +774,10 @@ class OptimizedFusionNode(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
     
     def on_cleanup(self, state):
-        """Clean up resources."""
+        """
+        Called when the node is being cleaned up (resources released).
+        - Releases transform resources and clears caches.
+        """
         self.get_logger().info("Cleaning up resources...")
         
         # Release transform resources
@@ -670,12 +792,17 @@ class OptimizedFusionNode(LifecycleNode):
         return TransitionCallbackReturn.SUCCESS
     
     def on_shutdown(self, state):
-        """Perform final shutdown."""
+        """
+        Called when the node is shutting down.
+        """
         self.get_logger().info("Shutting down...")
         return TransitionCallbackReturn.SUCCESS
     
     def load_configuration(self):
-        """Load configuration with resource-efficient defaults."""
+        """
+        Loads configuration parameters for the node.
+        - Sets up noise values, topic names, thresholds, and performance settings.
+        """
         # Process noise
         self.process_noise_pos = 0.1
         self.process_noise_vel = 0.8
@@ -730,7 +857,10 @@ class OptimizedFusionNode(LifecycleNode):
         self.get_logger().info("Configuration loaded with efficient defaults")
     
     def setup_lidar_subscription(self):
-        """Setup LiDAR subscription first (highest priority)."""
+        """
+        Sets up the subscription to the LiDAR sensor topic.
+        LiDAR is prioritized because it is usually the most accurate.
+        """
         # LiDAR subscription
         lidar_sub = self.create_subscription(
             PointStamped,
@@ -743,7 +873,10 @@ class OptimizedFusionNode(LifecycleNode):
         self.get_logger().info(f"Subscribed to LiDAR: {self.topics['lidar']}")
     
     def setup_remaining_subscriptions(self):
-        """Setup remaining subscriptions after a delay."""
+        """
+        Sets up subscriptions to the other sensors (YOLO 3D, YOLO 2D, and bounding box data).
+        This is done after a short delay to avoid overloading the system at startup.
+        """
         # Destroy the timer
         for timer in self._timer_list:
             if timer.callback == self.setup_remaining_subscriptions:
@@ -785,38 +918,46 @@ class OptimizedFusionNode(LifecycleNode):
         self.get_logger().info("Remaining subscriptions set up")
     
     def cache_transforms(self):
-        """Cache transforms for efficient lookup, with hardware-specific optimization."""
-        # Destroy the timer once called
+        """
+        Caches coordinate transforms between different sensor frames and the robot's reference frame.
+        
+        Textbook Explanation:
+        ---------------------
+        In robotics, each sensor (like a camera or LiDAR) may report positions in its own coordinate system (frame).
+        To combine data from multiple sensors, we need to convert all positions to a common frame (the robot's base).
+        This process is called a coordinate transformation.
+        
+        Mathematically, a transformation consists of a rotation (to align axes) and a translation (to shift origins).
+        We use a 3D rotation matrix (for orientation) and a translation vector (for position offset).
+        
+        This function looks up the required transforms using ROS's tf2 system, caches them for fast access, and precomputes rotation matrices for efficient repeated use.
+        """
+        # Destroy the timer once called (so we don't keep retrying)
         for timer in self._timer_list:
-            if timer.callback == self.cache_transforms:
+            if (timer.callback == self.cache_transforms):
                 self.destroy_timer(timer)
                 self._timer_list.remove(timer)
                 break
-        
         try:
-            # Define important transform pairs
+            # Define important transform pairs (sensor frame, robot base frame)
             transform_pairs = [
                 ('ascamera_color_0', self.reference_frame),
                 ('lidar_frame', self.reference_frame),
                 ('ascamera_camera_link_0', self.reference_frame)
             ]
-            
-            # Cache each transform with infinite TTL for static hardware
+            # For each pair, look up and cache the transform
             for source, target in transform_pairs:
+                # Look up the transform using the tf2 buffer (this gives us translation and rotation)
                 transform = self.tf_buffer.lookup_transform(
                     target, source, 
                     rclpy.time.Time()
                 )
-                
-                # Store in cache with infinite TTL
+                # Store in cache with infinite TTL (static hardware, so transforms don't change)
                 cache_key = f"{source}_{target}"
                 self._transform_cache[cache_key] = transform
-                # Use far future timestamp for static transforms
                 self._transform_cache_ttl[cache_key] = float('inf')
-                
-                # Also cache reverse transformation
+                # Also cache reverse transformation if possible
                 rev_key = f"{target}_{source}"
-                # Try to look up reverse direction
                 try:
                     rev_transform = self.tf_buffer.lookup_transform(
                         source, target, 
@@ -827,39 +968,45 @@ class OptimizedFusionNode(LifecycleNode):
                 except Exception:
                     # If reverse lookup fails, don't add to cache
                     pass
-                
-                # Log success
+                # Log success for educational feedback
                 self.get_logger().info(
                     f"Cached transform: {source} → {target}: "
                     f"translation=({transform.transform.translation.x:.3f}, "
                     f"{transform.transform.translation.y:.3f}, "
                     f"{transform.transform.translation.z:.3f})"
                 )
-            
-            # Pre-compute rotation matrices for commonly used transforms
+            # Pre-compute rotation matrices for fast coordinate transformations
             self._precompute_rotation_matrices()
-            
             self.transform_available = True
             self.get_logger().info("Transform caching completed")
-            
         except Exception as e:
             self.get_logger().error(f"Transform caching error: {str(e)}")
             # Schedule another attempt to cache transforms in 1 second
             self._timer_list.append(self.create_timer(
                 1.0, self.cache_transforms, callback_group=self.timer_cb_group))
-    
+
     def _precompute_rotation_matrices(self):
-        """Pre-compute rotation matrices for common transforms to avoid quaternion calculations."""
-        self._rotation_matrices = {}
+        """
+        Precomputes rotation matrices for fast coordinate transformations.
         
+        Textbook Explanation:
+        ---------------------
+        A rotation in 3D can be represented by a 3x3 matrix. ROS uses quaternions (a 4D vector) to represent orientation because they avoid problems like gimbal lock and are efficient for interpolation.
+        However, for fast repeated transformations, we convert quaternions to rotation matrices once and reuse them.
+        
+        The math:
+        - A quaternion (qx, qy, qz, qw) can be converted to a 3x3 rotation matrix using a standard formula.
+        - This matrix can then be used to rotate any 3D vector: new_vec = R * old_vec
+        - This is much faster than recalculating the matrix every time.
+        """
+        self._rotation_matrices = {}
         for cache_key, transform in self._transform_cache.items():
-            # Get quaternion
-            qx = transform.transform.rotation.x
-            qy = transform.transform.rotation.y
-            qz = transform.transform.rotation.z
-            qw = transform.transform.rotation.w
-            
-            # Convert to rotation matrix (optimized calculation)
+            # Extract quaternion components from the transform message
+            qx = transform.transform.rotation.x  # x component of quaternion (rotation)
+            qy = transform.transform.rotation.y  # y component of quaternion
+            qz = transform.transform.rotation.z  # z component of quaternion
+            qw = transform.transform.rotation.w  # w (scalar) component of quaternion
+            # Convert quaternion to rotation matrix (see math explanation above)
             xx = qx * qx
             xy = qx * qy
             xz = qx * qz
@@ -869,20 +1016,75 @@ class OptimizedFusionNode(LifecycleNode):
             yw = qy * qw
             zz = qz * qz
             zw = qz * qw
-            
-            # Rotation matrix
+            # Build the 3x3 rotation matrix using the above terms
             rot_mat = np.array([
-                [1 - 2 * (yy + zz), 2 * (xy - zw), 2 * (xz + yw)],
-                [2 * (xy + zw), 1 - 2 * (xx + zz), 2 * (yz - xw)],
-                [2 * (xz - yw), 2 * (yz + xw), 1 - 2 * (xx + yy)]
+                [1 - 2 * (yy + zz), 2 * (xy - zw),     2 * (xz + yw)],   # First row
+                [2 * (xy + zw),     1 - 2 * (xx + zz), 2 * (yz - xw)],   # Second row
+                [2 * (xz - yw),     2 * (yz + xw),     1 - 2 * (xx + yy)]# Third row
             ], dtype=np.float32)
-            
+            # Store the matrix for later fast use
             self._rotation_matrices[cache_key] = rot_mat
+
+    def transform_point(self, point_msg, target_frame):
+        """
+        Transforms a point from the sensor's coordinate frame to the robot's reference frame.
+        
+        Textbook Explanation:
+        ---------------------
+        This function takes a point measured in one coordinate system (e.g., the camera's) and converts it to another (the robot's base).
+        
+        Mathematically, this is done by applying a rotation (to align axes) and a translation (to shift the origin).
+        - If the point is already in the target frame, we return it as is.
+        - Otherwise, we use the cached transform (rotation + translation) to convert the point.
+        - This is a fundamental operation in robotics and computer vision, allowing us to combine data from multiple sensors.
+        """
+        if not self.transform_available:
+            return None
+        try:
+            # If already in the target frame, no transformation needed
+            if point_msg.header.frame_id == target_frame:
+                return point_msg
+            # Build cache key for this transform
+            cache_key = f"{point_msg.header.frame_id}_{target_frame}"
+            transform = None
+            # Use cached transform if available (fast path)
+            if cache_key in self._transform_cache:
+                transform = self._transform_cache[cache_key]
+            else:
+                # If not cached, look up and cache for future use
+                try:
+                    transform = self.tf_buffer.lookup_transform(
+                        target_frame,
+                        point_msg.header.frame_id,
+                        rclpy.time.Time(),
+                        rclpy.duration.Duration(seconds=0.1)
+                    )
+                    self._transform_cache[cache_key] = transform
+                    self._transform_cache_ttl[cache_key] = float('inf')
+                except Exception as e:
+                    self.throttled_log(
+                        f"Transform lookup failed for {point_msg.header.frame_id}->{target_frame}: {str(e)}",
+                        key=f"transform_lookup_{cache_key}",
+                        min_interval=5.0,
+                        level="error"
+                    )
+                    return None
+            # Actually perform the transformation using tf2 helper
+            # This will apply both translation and rotation to the point
+            return do_transform_point(point_msg, transform)
+        except Exception as e:
+            self.throttled_log(
+                f"Transform error: {str(e)}",
+                key="transform_error",
+                min_interval=5.0,
+                level="error"
+            )
+            return None
     
     def bbox_callback(self, msg, source):
         """
-        Optimized bbox callback for Float32MultiArray format.
-        Used primarily by YOLO detection.
+        Receives bounding box data from YOLO 2D detections.
+        Stores the width and height of the detected object for later use in 3D estimation.
         """
         if not self.is_activated:
             return
@@ -908,7 +1110,10 @@ class OptimizedFusionNode(LifecycleNode):
             self.get_logger().error(f"Error in bbox callback: {str(e)}")
     
     def bbox_callback_standard(self, msg, source):
-        """Bbox callback for standard BoundingBox2D format."""
+        """
+        Receives bounding box data in a different format (BoundingBox2D).
+        Stores the width and height for later use.
+        """
         if not self.is_activated:
             return
             
@@ -933,9 +1138,10 @@ class OptimizedFusionNode(LifecycleNode):
     
     def sensor_callback(self, msg, source):
         """
-        Optimized sensor callback with minimal processing.
-        Defers expensive operations to filter update.
-        Logs one in every 5 sensor updates for key sensors.
+        Receives new sensor data (position measurements) from LiDAR, YOLO 3D, or YOLO 2D.
+        - Adds the measurement to the sensor manager.
+        - If this is the first LiDAR measurement, uses it to initialize the filter.
+        - Logs the measurement occasionally for debugging.
         """
         if not self.is_activated:
             return
@@ -1009,7 +1215,12 @@ class OptimizedFusionNode(LifecycleNode):
             self.get_logger().error(f"Error in sensor callback: {str(e)}")
     
     def initialize_with_measurement(self, measurement, source):
-        """Initialize filter state with first measurement."""
+        """
+        Initializes the Kalman filter state with the first measurement.
+        - Sets the position to the measured value.
+        - Sets the velocity to zero (since we don't know it yet).
+        - Sets the initial uncertainty based on the sensor type.
+        """
         # Skip if already initialized
         if self.initialized:
             return False
@@ -1052,60 +1263,19 @@ class OptimizedFusionNode(LifecycleNode):
             self.get_logger().error(f"Initialization error: {str(e)}")
             return False
     
-    def transform_point(self, point_msg, target_frame):
-        """Transform point with cached transform lookup."""
-        if not self.transform_available:
-            return None
-            
-        try:
-            # Return original if already in target frame
-            if point_msg.header.frame_id == target_frame:
-                return point_msg
-                
-            # Check cache first
-            cache_key = f"{point_msg.header.frame_id}_{target_frame}"
-            transform = None
-            
-            if cache_key in self._transform_cache:
-                # Use cached transform for static hardware
-                transform = self._transform_cache[cache_key]
-            else:
-                # Lookup and cache with infinite TTL
-                try:
-                    transform = self.tf_buffer.lookup_transform(
-                        target_frame,
-                        point_msg.header.frame_id,
-                        rclpy.time.Time(),
-                        rclpy.duration.Duration(seconds=0.1)
-                    )
-                    # For static hardware, cache with infinite TTL
-                    self._transform_cache[cache_key] = transform
-                    self._transform_cache_ttl[cache_key] = float('inf')
-                except Exception as e:
-                    self.throttled_log(
-                        f"Transform lookup failed for {point_msg.header.frame_id}->{target_frame}: {str(e)}",
-                        key=f"transform_lookup_{cache_key}",
-                        min_interval=5.0,
-                        level="error"
-                    )
-                    return None
-            
-            # Apply transform
-            return do_transform_point(point_msg, transform)
-            
-        except Exception as e:
-            self.throttled_log(
-                f"Transform error: {str(e)}",
-                key="transform_error",
-                min_interval=5.0,
-                level="error"
-            )
-            return None
-    
     def estimate_3d_from_2d(self, detection_msg, bbox_data):
         """
-        Optimized 3D position estimation from 2D detection.
-        Only called when needed during filter update.
+        Estimates the 3D position of the ball from a 2D camera detection and its bounding box size.
+        
+        Textbook Explanation:
+        ---------------------
+        Cameras see the world in 2D, but we want to know where the ball is in 3D space. We can estimate the distance to the ball using the size of its image (bounding box) and the camera's focal length, using the concept of similar triangles.
+        
+        Math:
+        - The real diameter of the ball and its size in the image form similar triangles with the camera's focal length.
+        - distance = (real_diameter * focal_length) / image_diameter
+        - We then compute the direction from the camera to the ball in 3D, rotate it into the robot's frame, and scale it by the estimated distance.
+        - This gives us the 3D position of the ball in the robot's reference frame.
         """
         try:
             current_time = time.time()
@@ -1208,12 +1378,12 @@ class OptimizedFusionNode(LifecycleNode):
                 rotated_dir = np.dot(self._rotation_matrices[cache_key], dir_vec)
             else:
                 # Fallback to quaternion calculation
-                qx = transform.transform.rotation.x
-                qy = transform.transform.rotation.y
-                qz = transform.transform.rotation.z
-                qw = transform.transform.rotation.w
-                
-                # Convert to rotation matrix (optimized calculation)
+                # Extract quaternion components from the transform message
+                qx = transform.transform.rotation.x  # x component of quaternion (rotation)
+                qy = transform.transform.rotation.y  # y component of quaternion
+                qz = transform.transform.rotation.z  # z component of quaternion
+                qw = transform.transform.rotation.w  # w (scalar) component of quaternion
+                # Convert quaternion to rotation matrix (see math explanation above)
                 xx = qx * qx
                 xy = qx * qy
                 xz = qx * qz
@@ -1223,15 +1393,13 @@ class OptimizedFusionNode(LifecycleNode):
                 yw = qy * qw
                 zz = qz * qz
                 zw = qz * qw
-                
-                # Rotation matrix
+                # Build the 3x3 rotation matrix using the above terms
                 rot_mat = np.array([
-                    [1 - 2 * (yy + zz), 2 * (xy - zw), 2 * (xz + yw)],
-                    [2 * (xy + zw), 1 - 2 * (xx + zz), 2 * (yz - xw)],
-                    [2 * (xz - yw), 2 * (yz + xw), 1 - 2 * (xx + yy)]
+                    [1 - 2 * (yy + zz), 2 * (xy - zw),     2 * (xz + yw)],
+                    [2 * (xy + zw),     1 - 2 * (xx + zz), 2 * (yz - xw)],
+                    [2 * (xz - yw),     2 * (yz + xw),     1 - 2 * (xx + yy)]
                 ], dtype=np.float32)
-                
-                # Apply rotation
+                # Apply the rotation matrix to the direction vector
                 rotated_dir = np.dot(rot_mat, dir_vec)
             
             # Calculate 3D position
@@ -1269,7 +1437,12 @@ class OptimizedFusionNode(LifecycleNode):
             return None
     
     def process_sensor_data(self):
-        """Process sensor data by priority order with adaptive processing based on motion state."""
+        """
+        Processes sensor data in order of priority (LiDAR first, then YOLO 3D, then YOLO 2D).
+        - For each sensor, checks if the data is fresh and valid.
+        - Updates the filter state if a good measurement is found.
+        - If no good data is found, increases uncertainty (because we're less sure about the ball's position).
+        """
         # Update sensor health status
         self.sensor_manager.update_sensor_health(time.time())
         
@@ -1316,7 +1489,15 @@ class OptimizedFusionNode(LifecycleNode):
             self.covariance[2:4, 2:4] *= growth_rate  # Velocity uncertainty
     
     def process_sensor(self, sensor):
-        """Process a single 3D sensor measurement."""
+        """
+        Processes a single 3D sensor measurement.
+        - Gets the latest measurement.
+        - Checks if it's fresh enough.
+        - Transforms it to the reference frame.
+        - Validates it (checks if it makes sense given our current estimate).
+        - Updates the filter state if valid.
+        Returns True if the measurement was used, False otherwise.
+        """
         # Get latest measurement
         msg = self.sensor_manager.get_latest(sensor)
         if not msg:
@@ -1347,7 +1528,13 @@ class OptimizedFusionNode(LifecycleNode):
         return True
     
     def process_2d_sensor(self, sensor):
-        """Process 2D sensor with 3D estimation."""
+        """
+        Processes a 2D sensor measurement by estimating its 3D position.
+        - Gets the latest 2D measurement and bounding box.
+        - Estimates the 3D position.
+        - Validates and updates the filter state if valid.
+        Returns True if the measurement was used, False otherwise.
+        """
         # Get latest measurement
         msg = self.sensor_manager.get_latest(sensor)
         if not msg:
@@ -1383,10 +1570,18 @@ class OptimizedFusionNode(LifecycleNode):
     
     def validate_measurement(self, measurement, source):
         """
-        Validate measurement with motion-aware thresholds.
+        Checks if a new measurement is reasonable given our current estimate.
         
-        Returns:
-            tuple: (valid, innovation)
+        Textbook Explanation:
+        ---------------------
+        In sensor fusion, not all measurements are trustworthy. We use the Mahalanobis distance to check if a new measurement is consistent with our current estimate, considering both our uncertainty and the sensor's noise.
+        
+        Math:
+        - Innovation y = measurement - prediction
+        - Innovation covariance S = prediction_uncertainty + measurement_noise
+        - Mahalanobis distance = sqrt(y^T S^-1 y)
+        - If the distance is too large, the measurement is likely an outlier and is rejected.
+        - The threshold for acceptance is adapted based on how fast the ball is moving (stricter for stationary, looser for fast movement).
         """
         # Prepare measurement vector
         z = np.array([measurement.point.x, measurement.point.y], dtype=np.float32)
@@ -1470,8 +1665,18 @@ class OptimizedFusionNode(LifecycleNode):
     
     def update_state_with_measurement(self, measurement, source):
         """
-        Update state with validated measurement.
-        Optimized implementation with fewer matrix operations for 2D measurements.
+        Updates the filter state with a new, validated measurement.
+        
+        Textbook Explanation:
+        ---------------------
+        This is the core of the Kalman filter's update step. We combine our prediction and the new measurement, weighted by their uncertainties, to get a new, improved estimate.
+        
+        Math:
+        - Kalman gain K = P S^-1 (how much to trust the measurement vs. prediction)
+        - New state = old state + K * (measurement - prediction)
+        - New uncertainty = (I - K H) * old uncertainty
+        - For stationary states and small changes, we use a simple weighted average (blending) for efficiency and stability.
+        - For moving states or large changes, we use the full Kalman update equations.
         """
         # Prepare measurement
         z = np.array([measurement.point.x, measurement.point.y], dtype=np.float32)
@@ -1703,7 +1908,13 @@ class OptimizedFusionNode(LifecycleNode):
             return False
     
     def update_motion_state(self):
-        """Update motion state based on velocity with optimized state determination."""
+        """
+        Updates the motion state (stationary, moving, etc.) based on the current velocity.
+        
+        Textbook Explanation:
+        ---------------------
+        The ball's behavior changes how we should treat measurements. This function uses the current velocity to update the motion state (stationary, moving, etc.), which in turn affects how the filter processes new data and applies constraints.
+        """
         if not hasattr(self, 'motion_manager'):
             return
         
@@ -1728,7 +1939,13 @@ class OptimizedFusionNode(LifecycleNode):
             )
     
     def apply_physics_constraints(self):
-        """Apply physics constraints based on ground movement with optimized calculations."""
+        """
+        Applies physical constraints to the estimated state.
+        
+        Textbook Explanation:
+        ---------------------
+        The real world has limits: the ball can't move infinitely fast, and friction slows it down. This function applies speed limits and friction to keep the estimate realistic. This is a key part of making the filter robust to sensor dropouts and noise.
+        """
         # Get motion state
         motion_state = self.motion_manager.current_state if hasattr(self, 'motion_manager') else MotionStateManager.UNKNOWN
         
@@ -1778,7 +1995,13 @@ class OptimizedFusionNode(LifecycleNode):
                 self.state[3] *= factor
     
     def update_tracking_status(self):
-        """Update tracking reliability status with optimized sensor counting."""
+        """
+        Updates the tracking status (are we tracking the ball reliably?).
+        
+        Textbook Explanation:
+        ---------------------
+        We want to know if our estimate is reliable enough to use. We require a minimum number of active sensors and low enough uncertainty. Hysteresis means we are more strict about losing tracking than gaining it, to avoid rapid flipping. We publish the status and log changes for monitoring.
+        """
         # Get active sensor counts - already calculated in sensor_manager
         active_3d = self.sensor_manager.get_active_high_quality_sensors()
         active_2d = self.sensor_manager._active_sensor_count - active_3d
@@ -1835,7 +2058,10 @@ class OptimizedFusionNode(LifecycleNode):
         self.uncertainty_pub.publish(uncertainty_msg)
     
     def publish_state(self):
-        """Publish the current state estimate with optimized frequency."""
+        """
+        Publishes the current estimated position and velocity of the ball.
+        - Also logs the state occasionally for debugging.
+        """
         if not self.is_activated or not self.initialized:
             return
             
@@ -1904,7 +2130,10 @@ class OptimizedFusionNode(LifecycleNode):
             self.get_logger().error(f"Error publishing state: {str(e)}")
     
     def publish_status(self):
-        """Publish status information with reduced data volume."""
+        """
+        Publishes a summary of the current tracking status (active sensors, uncertainty, etc.).
+        - Uses throttled logging to avoid spamming the log.
+        """
         if not self.is_activated:
             return
             
@@ -1940,7 +2169,10 @@ class OptimizedFusionNode(LifecycleNode):
             self.get_logger().error(f"Error publishing status: {str(e)}")
     
     def publish_diagnostics(self):
-        """Publish detailed diagnostics with optimized JSON generation."""
+        """
+        Publishes detailed diagnostics, including system resource usage and sensor health.
+        - Useful for debugging and monitoring the system.
+        """
         if not self.is_activated:
             return
             
@@ -2021,7 +2253,10 @@ class OptimizedFusionNode(LifecycleNode):
             self.get_logger().error(f"Error publishing diagnostics: {str(e)}")
     
     def get_time_prefix(self):
-        """Create a standardized time prefix with both elapsed and ROS times."""
+        """
+        Returns a string with the elapsed time since startup and the current ROS time.
+        - Used to prefix log messages for easier debugging.
+        """
         # Get elapsed time since startup
         current_time = time.time()
         elapsed_time = current_time - self.start_time
@@ -2035,7 +2270,11 @@ class OptimizedFusionNode(LifecycleNode):
         return f"[T+{elapsed_time:.1f}s][ROS:{ros_time_str}]"
     
     def adjust_processing_rates(self):
-        """Dynamically adjust processing rates based on system load."""
+        """
+        Dynamically adjusts how often the node processes data, based on CPU usage.
+        - If the CPU is busy, slows down processing to avoid overloading the system.
+        - If the CPU is idle, speeds up processing for better performance.
+        """
         # Skip if psutil not available
         if not HAS_PSUTIL:
             return
@@ -2073,12 +2312,14 @@ class OptimizedFusionNode(LifecycleNode):
             self.get_logger().error(f"Error adjusting processing rates: {str(e)}")
     
     def _adjust_rates(self, direction):
-        """Adjust timer rates based on direction."""
+        """
+        Helper function to adjust timer rates up or down.
+        This is used for adaptive processing: if the CPU is busy, we slow down processing;
+        if the CPU is idle, we speed up. This helps keep the system responsive and efficient.
+        """
         needs_update = False
-        
         for timer_name, rate_info in self._adaptive_rates.items():
             old_rate = rate_info['current']
-            
             if direction == 'increase':
                 # Increase period (reduce frequency)
                 new_rate = min(rate_info['current'] * 1.2, rate_info['max'])
@@ -2088,21 +2329,22 @@ class OptimizedFusionNode(LifecycleNode):
             else:  # 'normal'
                 # Restore base rate
                 new_rate = rate_info['base']
-            
             # Only update if rate changed significantly
             if abs(new_rate - old_rate) > 0.01:
                 rate_info['current'] = new_rate
                 needs_update = True
-        
-        # Update timers if needed
+        # If any rates changed, update the timers
         if needs_update:
             self._update_timers()
-    
+
     def _update_timers(self):
-        """Update timer periods based on current rates."""
-        # Destroy old timers
+        """
+        Updates the timers to use the new rates after an adjustment.
+        This function destroys the old timers and creates new ones with the updated frequencies.
+        This is important for adaptive processing, so the node can respond to CPU load or other conditions.
+        """
+        # Destroy old timers for the main periodic tasks
         old_timers = []
-        
         for timer in self._timer_list:
             if timer.callback == self.filter_update:
                 old_timers.append(timer)
@@ -2112,39 +2354,33 @@ class OptimizedFusionNode(LifecycleNode):
                 old_timers.append(timer)
             elif timer.callback == self.publish_diagnostics:
                 old_timers.append(timer)
-        
-        # Remove old timers from list and destroy
+        # Remove and destroy old timers
         for timer in old_timers:
             if timer in self._timer_list:
                 self._timer_list.remove(timer)
                 self.destroy_timer(timer)
-        
         # Create new timers with updated rates
         self._timer_list.append(self.create_timer(
             self._adaptive_rates['filter_update']['current'], 
             self.filter_update, 
             callback_group=self.timer_cb_group
         ))
-        
         self._timer_list.append(self.create_timer(
             self._adaptive_rates['publish_state']['current'], 
             self.publish_state, 
             callback_group=self.timer_cb_group
         ))
-        
         self._timer_list.append(self.create_timer(
             self._adaptive_rates['publish_status']['current'], 
             self.publish_status, 
             callback_group=self.timer_cb_group
         ))
-        
         self._timer_list.append(self.create_timer(
             self._adaptive_rates['publish_diagnostics']['current'], 
             self.publish_diagnostics, 
             callback_group=self.timer_cb_group
         ))
-        
-        # Log timer updates
+        # Log timer updates for educational feedback
         self.throttled_log(
             f"Updated timer rates: filter={self._adaptive_rates['filter_update']['current']:.2f}s, "
             f"publish={self._adaptive_rates['publish_state']['current']:.2f}s",
@@ -2153,7 +2389,10 @@ class OptimizedFusionNode(LifecycleNode):
         )
     
     def throttled_log(self, message, key, min_interval=1.0, level="info"):
-        """Log with throttling to reduce overhead."""
+        """
+        Logs a message, but only if enough time has passed since the last log with the same key.
+        - Used to avoid spamming the log with repeated messages.
+        """
         current_time = time.time()
         
         # Initialize tracking dict if needed
@@ -2184,7 +2423,14 @@ class OptimizedFusionNode(LifecycleNode):
             self.get_logger().info(message)
 
     def dynamic_uncertainty_recovery(self):
-        """Implement adaptive uncertainty recovery to improve tracking stability during sensor gaps."""
+        """
+        Tries to reduce uncertainty when sensors are missing or unreliable.
+        
+        Textbook Explanation:
+        ---------------------
+        If we lose all sensors, we don't want our uncertainty to grow forever. This function gently reduces uncertainty and slows down the ball, assuming it probably stopped or is not moving much. This prevents the filter from becoming useless during sensor outages.
+        - If a few sensors are active, we recover uncertainty more slowly.
+        """
         # Only apply when uncertainty exceeds normal thresholds
         if self.position_uncertainty < 0.3:  # Lowered from 0.4 to be closer to normal operation
             return False
@@ -2278,7 +2524,20 @@ class OptimizedFusionNode(LifecycleNode):
         return False
 
     def update_uncertainty_metrics(self):
-        """Update uncertainty metrics from covariance matrix with improved heuristics."""
+        """
+        Updates the uncertainty metrics (how sure are we about position and velocity?)
+        
+        Textbook Explanation:
+        ---------------------
+        The Kalman filter keeps track of how uncertain it is about its estimate. This function calculates the uncertainty from the covariance matrix, smooths it to avoid rapid changes, and caps it based on the ball's motion state.
+        
+        Math:
+        - Position uncertainty = sqrt(average of position variances)
+        - Velocity uncertainty = sqrt(average of velocity variances)
+        - We apply smoothing (weighted average) to avoid rapid jumps.
+        - We cap the uncertainty based on the motion state (stationary objects should not have high uncertainty).
+        - We add a minimum floor to avoid being overconfident.
+        """
         # Original position uncertainty calculation from position covariance
         raw_position_uncertainty = math.sqrt((self.covariance[0, 0] + self.covariance[1, 1]) / 2.0)
         
@@ -2331,8 +2590,15 @@ class OptimizedFusionNode(LifecycleNode):
 
     def filter_update(self):
         """
-        Optimized Kalman filter update with reduced operations and adaptive execution.
-        Core algorithm split into stages for better organization and optimized for Raspberry Pi.
+        The main filter update loop.
+        
+        Textbook Explanation:
+        ---------------------
+        This function runs the Kalman filter's two main steps:
+        1. Prediction: Use physics to predict where the ball should be.
+        2. Update: Use new sensor data to correct the prediction.
+        It also updates the motion state, applies physical constraints, updates uncertainty, and tracking status.
+        This loop is the heart of the sensor fusion process.
         """
         if not self.is_activated:
             return
@@ -2446,8 +2712,17 @@ class OptimizedFusionNode(LifecycleNode):
 
     def predict_state(self, dt, dt_key=None):
         """
-        Optimized state prediction with minimal matrix operations and improved motion-aware processing.
-        Uses pre-computed dt values for common time steps.
+        Predicts the next state of the ball using physics (where should it be, given its velocity?).
+        
+        Textbook Explanation:
+        ---------------------
+        This is the prediction step of the Kalman filter. We use the current state (position, velocity) and physics (velocity, friction) to predict where the ball should be after a small time step.
+        
+        Math:
+        - State prediction: x = F x (where F is the state transition matrix)
+        - Uncertainty prediction: P = F P F^T + Q (where Q is the process noise matrix)
+        - We also apply friction to slow the ball down if it's supposed to be stationary.
+        - This step increases our uncertainty, because the future is never perfectly predictable.
         """
         # Use pre-computed dt values if available
         dt_info = None
@@ -2456,7 +2731,7 @@ class OptimizedFusionNode(LifecycleNode):
             dt = dt_info['dt']  # Use exact dt from pre-computed values
         
         # Update state transition matrix for current dt
-        self._F[0, 2] = dt  # x += vx*dt
+        self._F[0, 2] = dt  # x += vx*dt (position update from velocity)
         self._F[1, 3] = dt  # y += vy*dt
         
         # Get motion state-based scaling with more precise tuning
@@ -2555,8 +2830,8 @@ class OptimizedFusionNode(LifecycleNode):
             self._Q *= max(0.5, uncertainty_factor)
         
         # Direct state update for position - faster than matrix multiplication
-        self.state[0] += dt * self.state[2]
-        self.state[1] += dt * self.state[3]
+        self.state[0] += dt * self.state[2]  # x = x + vx*dt
+        self.state[1] += dt * self.state[3]  # y = y + vy*dt
         
         # Predict covariance using direct matrix operations
         # This is an optimized version of: P = F*P*F^T + Q
@@ -2613,7 +2888,13 @@ class OptimizedFusionNode(LifecycleNode):
 
 
 def main(args=None):
-    """Main function with optimized executor."""
+    """
+    Main function to start the node.
+    - Initializes ROS 2.
+    - Creates the fusion node.
+    - Runs the node using a multi-threaded executor.
+    - Handles clean shutdown on exit.
+    """
     rclpy.init(args=args)
     
     # Use MultiThreadedExecutor with reduced thread count
