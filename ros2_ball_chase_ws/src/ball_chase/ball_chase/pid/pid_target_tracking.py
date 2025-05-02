@@ -26,9 +26,9 @@ from collections import deque
 from enum import Enum, auto
 
 # Import modules from refactored files
-from pid_helpers import Matrix4x4, TTLDict, LightweightBuffer, ResourceMonitor
-from pid_target_filter import EnhancedTargetFilter, ErrorTracker
-from pid_computation import PIDControllers
+from ball_chase.pid.pid_helpers import Matrix4x4, TTLDict, LightweightBuffer, ResourceMonitor
+from ball_chase.pid.pid_target_filter import EnhancedTargetFilter, ErrorTracker
+from ball_chase.pid.pid_computation import PIDControllers
 
 #############################################
 # Target Tracking Module
@@ -1323,7 +1323,7 @@ class TransformSystem:
                 self.transform_cache[frame_key] = (transform, current_time)
                 if self.use_matrix_transforms:
                     try:
-                        from pid_helpers import Matrix4x4
+                        from ball_chase.pid.pid_helpers import Matrix4x4
                         matrix = Matrix4x4.from_tf_transform(transform)
                         self.matrix_cache[frame_key] = (matrix, current_time)
                     except ImportError:

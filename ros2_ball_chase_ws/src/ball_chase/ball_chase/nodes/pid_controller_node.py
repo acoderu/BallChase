@@ -35,11 +35,11 @@ import traceback
 from abc import ABC, abstractmethod
 
 # Import modules from refactored files
-from pid_helpers import LightweightBuffer, CircularBuffer, ThrottledLogger, FastTrigonometry, ResourceMonitor
-from pid_target_filter import EnhancedTargetFilter, ErrorTracker
-from pid_computation import PIDControllers
-from pid_target_tracking import TargetTrackingModule, MovementStrategyModule, VelocityControlModule, TransformSystem
-from pid_target_tracking import RecoveryBehaviorModule, TransformStatus
+from ball_chase.pid.pid_helpers import LightweightBuffer, CircularBuffer, ThrottledLogger, FastTrigonometry, ResourceMonitor
+from ball_chase.pid.pid_target_filter import EnhancedTargetFilter, ErrorTracker
+from ball_chase.pid.pid_computation import PIDControllers
+from ball_chase.pid.pid_target_tracking import TargetTrackingModule, MovementStrategyModule, VelocityControlModule, TransformSystem
+from ball_chase.pid.pid_target_tracking import RecoveryBehaviorModule, TransformStatus
 
 # Configure logging
 logging.basicConfig(

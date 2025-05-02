@@ -17,7 +17,7 @@ import logging
 import numpy as np
 from enum import Enum, auto
 
-from pid_target_filter import ErrorTracker
+from ball_chase.pid.pid_target_filter import ErrorTracker
 
 class PIDControllers:
     """Namespace for PID controller classes and related functionality."""
