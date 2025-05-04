@@ -1,7 +1,7 @@
 <!-- Badges -->
 <p align="center">
   <img src="https://img.shields.io/badge/ROS2-Foxglove-blue?logo=ros&logoColor=white" alt="ROS2 Badge"/>
-  <img src="https://img.shields.io/badge/Raspberry%20Pi-4B-green?logo=raspberrypi&logoColor=white" alt="Raspberry Pi Badge"/>
+  <img src="https://img.shields.io/badge/Raspberry%20Pi%205-Ready-brightgreen" alt="Raspberry Pi Badge"/>
   <img src="https://img.shields.io/badge/Linux-Real%20Time%20Kernel-yellow?logo=linux&logoColor=white" alt="Linux RT Badge"/>
   <img src="https://img.shields.io/badge/C++-17-blue?logo=c%2B%2B&logoColor=white" alt="C++ Badge"/>
   <img src="https://img.shields.io/badge/Python-3.9-blue?logo=python&logoColor=white" alt="Python Badge"/>
@@ -184,7 +184,6 @@ The entire system is designed for real-time operation on resource-constrained ha
 <a name="system-architecture-diagram"></a>
 ### 2.3 System Architecture Diagram
 
-```
 flowchart TD
     subgraph Sensors["Sensor Nodes"]
         YOLO["YOLO 2D Detection Node
@@ -335,9 +334,9 @@ flowchart TD
         - Controls robot movement for basketball tracking"]
     end
     
-    YOLO --> |2D position & bbox| FusionNode
-    LIDAR --> |3D position| FusionNode
-    DEPTH --> |3D position| FusionNode
+    YOLO --> |"2D position & bbox"| FusionNode
+    LIDAR --> |"3D position"| FusionNode
+    DEPTH --> |"3D position"| FusionNode
     
     FusionNode --> POS
     FusionNode --> VEL
@@ -345,23 +344,22 @@ flowchart TD
     FusionNode --> DIAG
     
     %% State Management Connections
-    FusionNode --> |position data, tracking confidence| StateManagement
-    FusionNode --> |motion state| StateManagement
-    FusionNode --> |uncertainty, sensor status| StateManagement
-    StateManagement --> |robot state| Output
+    FusionNode --> |"position data, tracking confidence"| StateManagement
+    FusionNode --> |"motion state"| StateManagement
+    FusionNode --> |"uncertainty, sensor status"| StateManagement
+    StateManagement --> |"robot state"| Output
     
     %% PID Controller Connections
-    StateManagement --> |current state| PIDController
-    FusionNode --> |filtered position| PIDController
+    StateManagement --> |"current state"| PIDController
+    FusionNode --> |"filtered position"| PIDController
     PIDController --> CMD
     
     %% Diagnostics Connections
-    DiagnosticsNode -.-> |monitors| Sensors
-    DiagnosticsNode -.-> |monitors| FusionNode
-    DiagnosticsNode -.-> |monitors| StateManagement
-    DiagnosticsNode -.-> |monitors| PIDController
-    DiagnosticsNode -.-> |monitors| Output
-```
+    DiagnosticsNode -.-> |"monitors"| Sensors
+    DiagnosticsNode -.-> |"monitors"| FusionNode
+    DiagnosticsNode -.-> |"monitors"| StateManagement
+    DiagnosticsNode -.-> |"monitors"| PIDController
+    DiagnosticsNode -.-> |"monitors"| Output
 
 *Figure 1: Complete system architecture diagram showing all major components and their interactions.*
 
