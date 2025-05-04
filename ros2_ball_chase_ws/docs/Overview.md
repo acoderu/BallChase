@@ -63,6 +63,255 @@ No specialized robotics or computer vision experience is required. More advanced
 ---
 
 <a name="introduction"></a>
+
+## System Overview
+Basketball Tracking Robot System Overview
+
+This project covers a basketball tracking robot, which is an autonomous system designed to track and follow a basketball in real-time using multiple sensors and coordinated control mechanisms. It features a comprehensive architecture optimized for the Raspberry Pi 5 platform.
+
+Core Components
+Sensor System
+The robot employs a multi-sensor approach combining:
+
+YOLO-based camera detection for 2D visual tracking
+LiDAR for precise distance and position measurements
+3D depth camera for enhanced spatial awareness
+
+Sensor Fusion
+A sophisticated fusion node integrates data from all sensors using:
+
+Kalman filtering for position estimation and prediction
+Motion state detection to determine if the ball is stationary or moving
+Uncertainty management to assess confidence in position data
+
+State Management
+A state machine governs the robot's behavior through distinct operational states:
+
+Tracking: Active basketball following
+Lost ball: Handling temporary tracking failures
+Searching: Systematic scanning for a missing ball
+Stopped: Stationary mode when ball is close and not moving
+Recovery: Special procedures for regaining tracking after failures
+
+PID Control System
+Sophisticated control algorithms guide the robot's movement using:
+
+Angular-first control strategy for efficient trajectory adjustment
+Coordinated movement with balanced parameters
+Adaptive control rates based on system performance
+Resource-aware processing optimized for CPU constraints
+
+Diagnostics Framework
+A comprehensive monitoring system ensures reliability:
+
+Pipeline health monitoring for sensor-to-actuator data flow
+Performance tracking and optimization
+Event correlation for root cause analysis
+Robust error recovery mechanisms
+
+Operational Features
+
+Adaptive Performance: The system adjusts processing rates and computational complexity based on available resources.
+Resilience: Implements graceful degradation under challenging conditions with sensor gap tolerance.
+Motion Intelligence: Adapts tracking parameters based on ball movement characteristics.
+Resource Optimization: Employs memory-efficient data structures and prioritized processing.
+
+The entire system is designed for real-time operation on resource-constrained hardware while maintaining reliable tracking performance.
+
+System Architecture Diagram
+
+flowchart TD
+    subgraph Sensors["Sensor Nodes"]
+        YOLO["YOLO 2D Detection Node
+        - Processes camera images with optimized ML model
+        - Detects basketball position in 2D image space
+        - Publishes coordinates and bounding box dimensions
+        - Adapts processing based on system load"]
+        
+        LIDAR["LiDAR Sensor Node
+        - Processes 2D LIDAR scans to detect circular objects
+        - Uses RANSAC circle fitting with early termination
+        - Provides accurate 3D position with confidence score
+        - Employs distance-based processing strategies"]
+        
+        DEPTH["3D Depth Camera Node
+        - Converts 2D detections to 3D using depth data
+        - Implements distance-tiered sampling techniques
+        - Uses historical depth data for continuity
+        - Features adaptive processing rates and resource management"]
+    end
+    
+    subgraph FusionNode["Sensor Fusion"]
+        SM["Sensor Manager
+        - Tracks all sensor data with timestamps
+        - Monitors sensor health and activity
+        - Maintains optimized data buffers
+        - Calculates update rates and data quality"]
+        
+        MSM["Motion State Manager
+        - Identifies if ball is stationary or moving
+        - Uses velocity thresholds with hysteresis
+        - Adapts validation parameters based on state
+        - Maintains state confidence and transitions"]
+        
+        KF["Kalman Filter
+        - Predicts ball position using physics model
+        - Updates state with validated measurements
+        - Maintains covariance for uncertainty tracking
+        - Applies constraints based on motion state"]
+        
+        SM --> KF
+        MSM --> KF
+    end
+    
+    subgraph StateManagement["State Management Node"]
+        FSM["Finite State Machine
+        - Manages system operational states (tracking, lost_ball, etc.)
+        - Handles state transitions with hysteresis
+        - Uses motion state for adaptive parameter tuning
+        - Implements sensor gap tolerance mechanism"]
+        
+        HM["Health Monitor
+        - Tracks system-wide confidence metrics
+        - Monitors fusion uncertainty and tracking reliability
+        - Applies trend analysis to detect degradation
+        - Uses optimized data structures for memory efficiency"]
+        
+        RB["Recovery Behavior
+        - Handles recovery from tracking failures
+        - Implements progressive recovery strategies
+        - Monitors recovery success/failure rates
+        - Provides system resilience against transient issues"]
+        
+        FSM <--> HM
+        FSM --> RB
+    end
+    
+    subgraph PIDController["PID Controller Node"]
+        TCM["Target Control Module
+        - Processes position data with filtering
+        - Calculates errors for distance, lateral offset, and bearing
+        - Manages position history with optimized buffers
+        - Implements motion prediction for improved tracking"]
+        
+        PCM["PID Computation Module
+        - Implements Angular-first control strategy
+        - Features coordinated angular-lateral control
+        - Uses enhanced integral term management
+        - Adapts to ball motion characteristics"]
+        
+        VCM["Velocity Control Module
+        - Applies optimized velocity limiting
+        - Controls approach behavior with smooth profiles
+        - Coordinates movement with balanced parameters
+        - Manages movement transitions for smooth tracking"]
+        
+        RM["Resource Monitor
+        - Tracks CPU and memory usage
+        - Implements adaptive control rate adjustment
+        - Enables cycle skipping under high system load
+        - Optimizes computation based on resource constraints"]
+        
+        TCM --> PCM
+        PCM --> VCM
+        RM -.-> PCM
+        RM -.-> VCM
+    end
+    
+    subgraph DiagnosticsNode["Diagnostics Node"]
+        ET["Event Tracker
+        - Records state transitions and system events
+        - Uses ring buffers for memory efficiency
+        - Implements event correlation for root cause analysis
+        - Provides searchable event history"]
+        
+        PHMC["Pipeline Health Monitor
+        - Monitors detection-fusion-control pipeline integrity
+        - Analyzes sensor performance and consistency
+        - Detects processing bottlenecks and delays
+        - Reports system-wide data flow status"]
+        
+        PPM["Performance Profiler
+        - Tracks processing times across all nodes
+        - Monitors communication latency between components
+        - Provides resource usage metrics for optimization
+        - Implements adaptive diagnostics frequency"]
+        
+        LOG["Diagnostic Logger
+        - Maintains structured log files
+        - Implements log rotation and management
+        - Provides configurable verbosity levels
+        - Generates periodic system summaries"]
+        
+        ET --> LOG
+        PHMC --> LOG
+        PPM --> LOG
+    end
+    
+    subgraph Output["System Output"]
+        POS["Position Publisher
+        - Publishes fused 3D position
+        - Uses reference coordinate frame"]
+        
+        VEL["Velocity Publisher 
+        - Publishes velocity vector
+        - Indicates movement direction"]
+        
+        STAT["Status Publisher
+        - Reports tracking reliability
+        - Indicates sensor availability"]
+        
+        DIAG["Diagnostics Publisher
+        - Provides detailed system metrics
+        - Reports uncertainties and processing rates"]
+        
+        CMD["Command Velocity Publisher
+        - Publishes Twist messages with calculated velocities
+        - Controls robot movement for basketball tracking"]
+    end
+    
+    YOLO --> |2D position & bbox| FusionNode
+    LIDAR --> |3D position| FusionNode
+    DEPTH --> |3D position| FusionNode
+    
+    FusionNode --> POS
+    FusionNode --> VEL
+    FusionNode --> STAT
+    FusionNode --> DIAG
+    
+    %% State Management Connections
+    FusionNode --> |position data, tracking confidence| StateManagement
+    FusionNode --> |motion state| StateManagement
+    FusionNode --> |uncertainty, sensor status| StateManagement
+    StateManagement --> |robot state| Output
+    
+    %% PID Controller Connections
+    StateManagement --> |current state| PIDController
+    FusionNode --> |filtered position| PIDController
+    PIDController --> CMD
+    
+    %% Diagnostics Connections
+    DiagnosticsNode -.-> |monitors| Sensors
+    DiagnosticsNode -.-> |monitors| FusionNode
+    DiagnosticsNode -.-> |monitors| StateManagement
+    DiagnosticsNode -.-> |monitors| PIDController
+    DiagnosticsNode -.-> |monitors| Output
+    
+    classDef sensorNodes fill:#d0f0c0,stroke:#333,stroke-width:1px;
+    classDef fusionNodes fill:#c0d0f0,stroke:#333,stroke-width:1px;
+    classDef stateNodes fill:#f0c0d0,stroke:#333,stroke-width:1px;
+    classDef pidNodes fill:#f0d0c0,stroke:#333,stroke-width:1px;
+    classDef diagNodes fill:#d0c0f0,stroke:#333,stroke-width:1px;
+    classDef outputNodes fill:#c0f0d0,stroke:#333,stroke-width:1px;
+    
+    class YOLO,LIDAR,DEPTH sensorNodes;
+    class SM,MSM,KF fusionNodes;
+    class FSM,HM,RB stateNodes;
+    class TCM,PCM,VCM,RM pidNodes;
+    class ET,PHMC,PPM,LOG diagNodes;
+    class POS,VEL,STAT,DIAG,CMD outputNodes;
+
+
 ## Introduction
 
 This document explores the fundamental computer science and engineering principles behind optimizing operating systems for real-time robotics applications. Using a Raspberry Pi running ROS2 as our case study, we'll examine how operating system design choices impact the deterministic behavior required for robotics. By understanding these principles, you'll gain insight into the critical relationship between system-level software architecture and the physical constraints of robotics applications.
@@ -954,32 +1203,20 @@ All modern CPUs, including those in Raspberry Pi, implement multi-stage thermal 
 ┌───── Thermal Throttling Impact on Performance ─────┐
 │                                                    │
 │  Temperature (°C)       Frequency (MHz)            │
-│  85 │                   1800 │                     │
-│     │                        │                     │
-│  80 │               ▼        │█████                │
-│     │              / \       │█████                │
-│  75 │             /   \      │█████                │
-│     │            /     \     │█████ ▼              │
-│  70 │           /       \    │████/ \             │
-│     │          /         \   │███/   \            │
-│  65 │         /           \  │██/     \           │
-│     │        /             \ │█/       \          │
-│  60 │       /               \│/         \         │
-│     │      /                 ▼           \        │
-│  55 │_____/                   \_____________\_     │
-│     │                                        │     │
-│     └────────────────────────────────────────┘     │
-│     Time →                                          │
-│                                                    │
-│  Temperature (—)      Frequency (█)                │
+│  55 │                   ██████████████ 1800         │
+│  60 │                   ████████████   1700         │
+│  65 │                   ██████████     1500         │
+│  70 │                   ████████       1300         │
+│  75 │                   █████          1000         │
+│  80 │                   ██             700          │
+│  85 │                   █              500          │
 │                                                    │
 │  As temperature rises, CPU frequency drops to      │
 │  protect the processor, causing irregular          │
 │  performance.                                      │
-│                                                    │
 └────────────────────────────────────────────────────┘
 ```
-*Figure 17: Graph showing the relationship between CPU temperature, frequency, and performance during thermal throttling events.*
+*Figure 17: Graph showing the relationship between CPU temperature and frequency during thermal throttling events. As temperature increases, frequency decreases.*
 
 **Why This Matters for Real-Time Robotics**
 
@@ -3047,6 +3284,12 @@ For the ball-tracking robot, several specialized implementations can significant
    - **OpenCV DNN**: 
      - Integrated with other vision processing
      - NEON SIMD acceleration for key operations
+   - **MNN (Alibaba Mobile Neural Network)** (In this project we used MNN):
+     - Highly optimized for ARM CPUs, including Raspberry Pi 5
+     - Supports int8 quantization and Winograd convolution for faster inference
+     - Efficient multi-threading and NEON acceleration
+     - Demonstrated to run YOLO models significantly faster than many other frameworks on ARM SBCs
+     - Lightweight and easy to deploy for edge AI scenarios
 
 2. **Task-Specific Model Pruning**:
    - Remove classes not needed for ball detection
@@ -4009,57 +4252,6 @@ A comprehensive latency testing approach includes:
    - Monitor for degradation or intermittent issues
    - Test through thermal cycles and varying loads
 
-**Creating a Latency Testing Jig**
-
-For robotics applications, it's valuable to create a physical testing jig:
-
-```cpp
-// GPIO-based latency testing
-void gpio_latency_test(int iterations) {
-    // Configure GPIO pin for output
-    gpio_set_mode(TEST_PIN, GPIO_MODE_OUTPUT);
-    
-    // Allocate memory for timing measurements
-    uint64_t* latencies = (uint64_t*)malloc(iterations * sizeof(uint64_t));
-    
-    // Lock memory to prevent paging
-    mlockall(MCL_CURRENT | MCL_FUTURE);
-    
-    // Set real-time priority
-    struct sched_param param;
-    param.sched_priority = 99;
-    sched_setscheduler(0, SCHED_FIFO, &param);
-    
-    // Run test iterations
-    for (int i = 0; i < iterations; i++) {
-        // Get start time
-        uint64_t start_time = get_precise_time_ns();
-        
-        // Toggle GPIO pin (measurable with oscilloscope)
-        gpio_set(TEST_PIN, 1);
-        
-        // Get time after GPIO operation
-        uint64_t end_time = get_precise_time_ns();
-        
-        // Store latency
-        latencies[i] = end_time - start_time;
-        
-        // Toggle back
-        gpio_set(TEST_PIN, 0);
-        
-        // Wait for next cycle
-        precise_sleep_us(1000);  // 1kHz test frequency
-    }
-    
-    // Calculate statistics
-    analyze_latency_distribution(latencies, iterations);
-    
-    // Free resources
-    free(latencies);
-}
-```
-
-This creates a measurable signal that can be captured with an oscilloscope or logic analyzer, providing ground truth timing measurements independent of the system's own time reporting.
 
 #### 14.2 Tracing and Performance Analysis
 
@@ -4418,11 +4610,11 @@ Creating an effective real-time robotics system requires deep understanding acro
 │  ││Scheduler      │ │   │┌───────────────┐│  │
 │  ││Behavior       │ │   ││Cache          ││  │
 │  │└───────────────┘ │   ││Hierarchies    ││  │
-│  │┌───────────────┐ │   │└───────────────┘│  │
-│  ││Preemption     │ │   │┌───────────────┐│  │
-│  ││Models         │ │   ││Memory         ││  │
-│  │└───────────────┘ │   ││Systems        ││  │
-│  └──────────────────┘   │└───────────────┘│  │
+│  │┌───────────────┐ │   │┌───────────────┐│  │
+│  ││Preemption     │ │   ││Memory         ││  │
+│  ││Models         │ │   ││Systems        ││  │
+│  │└───────────────┘ │   │└───────────────┘│  │
+│  └──────────────────┘   └─────────────────┘  │
 │           │             └─────────────────┘  │
 │           │                      │           │
 │           ▼                      ▼           │
