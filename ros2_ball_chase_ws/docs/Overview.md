@@ -184,6 +184,7 @@ The entire system is designed for real-time operation on resource-constrained ha
 <a name="system-architecture-diagram"></a>
 ### 2.3 System Architecture Diagram
 
+```mermaid
 flowchart TD
     subgraph Sensors["Sensor Nodes"]
         YOLO["YOLO 2D Detection Node
@@ -360,6 +361,7 @@ flowchart TD
     DiagnosticsNode -.-> |"monitors"| StateManagement
     DiagnosticsNode -.-> |"monitors"| PIDController
     DiagnosticsNode -.-> |"monitors"| Output
+```
 
 *Figure 1: Complete system architecture diagram showing all major components and their interactions.*
 
