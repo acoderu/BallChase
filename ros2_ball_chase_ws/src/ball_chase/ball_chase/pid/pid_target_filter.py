@@ -1,19 +1,3 @@
-# =========================================
-# PID Target Filter - Detailed Mathematical Comments
-# =========================================
-#
-# This file implements advanced filtering and prediction for target tracking in robotics.
-# The goal is to estimate the true position, velocity, and acceleration of a moving target (e.g., a ball) from noisy sensor data.
-#
-# Key concepts:
-#   - Filtering: Smooths out noise in position measurements using weighted averages and buffers.
-#   - Velocity/acceleration estimation: Uses differences between recent positions to estimate how fast and in what direction the target is moving.
-#   - Prediction: Uses physics (x = x0 + v0*t + 0.5*a*t^2) to predict where the target will be in the near future, improving robot response.
-#   - Error tracking: Monitors how the error between target and robot changes over time, to inform PID adaptation.
-#
-# The comments below explain the math, intuition, and code logic for each part, linking theory to practice for high school students.
-#
-
 import time
 import math
 import numpy as np
@@ -24,37 +8,36 @@ class EnhancedTargetFilter:
     """Enhanced filter for target position data with better motion prediction."""
     
     def __init__(self, throttled_logger, buffer_size=8, prediction_horizon=0.3, debug_level=0):
-        # Logger for debug/info output
         self.logger = throttled_logger
         self.debug_level = debug_level
-        # Buffer to store recent positions and their timestamps for smoothing and velocity/acceleration estimation
+        # Use CircularBuffer for position and trajectory history
         self.position_buffer = CircularBuffer(buffer_size, default=(0.0, 0.0, 0.0, 0.0))
-        # Buffer to store recent trajectory (position, time) for movement consistency analysis
         self.trajectory_history = CircularBuffer(10, default=((0.0, 0.0, 0.0), 0.0))
-        # How far ahead to predict (in seconds)
-        self.prediction_horizon = prediction_horizon
-        # State variables for filter
+        
+        # Configuration parameters
+        self.prediction_horizon = prediction_horizon  # seconds
+        
+        # State variables
         self.last_update_time = None
-        self.current_velocity = np.zeros(3)  # [vx, vy, vtheta]
+        self.current_velocity = np.zeros(3)  # x, y, angular as numpy array
         self.filtered_position = None
         self.predicted_position = None
-        self.acceleration = np.zeros(3)  # [ax, ay, atheta]
+        self.acceleration = np.zeros(3)  # x, y, angular acceleration
         self.is_moving = False
         self.direction_change_detected = False
-        self.motion_direction = np.zeros(3)  # Normalized direction vector
-        self.movement_consistency = 0.0  # 0.0-1.0, how straight/consistent is the movement
-        # Constants for thresholds
-        self.DIRECTION_CHANGE_THRESHOLD = 0.866  # cos(30°), for detecting sharp turns
-        self.VELOCITY_THRESHOLD_SQ = 0.0025  # (0.05 m/s)^2, minimum velocity to consider as moving
-        self.MOVEMENT_THRESHOLD = 0.01  # Minimum distance to consider as movement
+        self.motion_direction = np.zeros(3)  # normalized direction vector
+        self.movement_consistency = 0.0  # 0.0-1.0 measure of consistent movement
+        
+        # Constants to avoid recomputation
+        self.DIRECTION_CHANGE_THRESHOLD = 0.866  # cos(30°)
+        self.VELOCITY_THRESHOLD_SQ = 0.0025  # (0.05 m/s)²
+        self.MOVEMENT_THRESHOLD = 0.01  # Minimum distance to consider movement
         
     def _update_buffers(self, position, current_time):
         """Update position and trajectory buffers with new measurement."""
-        # Add new position and time to both buffers
         self.position_buffer.add((position[0], position[1], position[2], current_time))
         self.trajectory_history.add((position, current_time))
         
-        # Log if position changes significantly
         if self.debug_level >= 3:
             if not hasattr(self, '_last_logged_position') or \
                np.linalg.norm(np.array(position) - np.array(getattr(self, '_last_logged_position', (0,0,0)))) > 0.02:
@@ -62,24 +45,23 @@ class EnhancedTargetFilter:
                 self._last_logged_position = position
         
     def _calculate_filtered_position(self):
-        """Calculate filtered position from recent measurements using weighted average."""
+        """Calculate filtered position from recent measurements."""
         pos_data = self.position_buffer.get_all()
         if len(pos_data) >= 3:
-            # Use the three most recent positions for smoothing
+            # Get the three most recent positions
             recent = pos_data[-3:]
             
-            # Assign more weight to the most recent measurement
+            # Weights for weighted average (more weight to recent measurements)
             weights = np.array([0.2, 0.3, 0.5])
             
             # Extract position components and calculate weighted average
             positions = np.array([(p[0], p[1], p[2]) for p in recent])
             self.filtered_position = tuple(np.sum(positions * weights[:, np.newaxis], axis=0))
         else:
-            # Not enough data, just use the latest
+            # Not enough data, use the latest position
             latest = pos_data[-1]
             self.filtered_position = (latest[0], latest[1], latest[2])
         
-        # Log if filtered position changes significantly
         if self.debug_level >= 3:
             if not hasattr(self, '_last_logged_filtered') or \
                np.linalg.norm(np.array(self.filtered_position) - np.array(getattr(self, '_last_logged_filtered', (0,0,0)))) > 0.02:
@@ -87,7 +69,7 @@ class EnhancedTargetFilter:
                 self._last_logged_filtered = self.filtered_position
     
     def _update_velocity(self, current_time):
-        """Update velocity and acceleration estimates using recent positions."""
+        """Update velocity and acceleration estimates."""
         pos_data = self.position_buffer.get_all()
         if len(pos_data) < 2 or self.last_update_time is None:
             return
@@ -96,18 +78,18 @@ class EnhancedTargetFilter:
         if dt <= 0.001:  # Avoid division by zero
             return
             
-        # Get previous and current position
+        # Get the two most recent positions
         prev_pos = pos_data[-2]
         curr_pos = pos_data[-1]
         
-        # Calculate velocity for each axis
+        # Calculate raw velocity
         raw_velocity = np.array([
             (curr_pos[0] - prev_pos[0]) / dt,
             (curr_pos[1] - prev_pos[1]) / dt,
             (curr_pos[2] - prev_pos[2]) / dt
         ])
         
-        # Check for direction change using dot product of previous and new velocity
+        # Check for direction changes
         prev_vel = self.current_velocity[:2]  # Just x, y components
         new_vel = raw_velocity[:2]
         
@@ -131,7 +113,7 @@ class EnhancedTargetFilter:
         if self.direction_change_detected and self.debug_level >= 2:
             self.logger.info(f"Direction change detected in velocity at {current_time:.3f}", throttle_duration_sec=2.0)
         
-        # Calculate acceleration if enough data
+        # Calculate acceleration if we have enough data
         if len(pos_data) >= 3 and dt > 0.001:
             # Acceleration = change in velocity / time
             raw_accel = (raw_velocity - self.current_velocity) / dt
@@ -140,11 +122,10 @@ class EnhancedTargetFilter:
             alpha_a = 0.3  # Lower value means more smoothing
             self.acceleration = alpha_a * raw_accel + (1 - alpha_a) * self.acceleration
         
-        # Smooth velocity with low-pass filter (alpha depends on movement consistency)
+        # Smooth velocity with low-pass filter (adaptive alpha based on consistency)
         alpha = 0.7 + 0.15 * self.movement_consistency  # 0.7-0.85 range
         self.current_velocity = alpha * raw_velocity + (1 - alpha) * self.current_velocity
         
-        # Log velocity if changed
         if self.is_moving and self.debug_level >= 3:
             if not hasattr(self, '_last_logged_velocity') or \
                np.linalg.norm(self.current_velocity - getattr(self, '_last_logged_velocity', np.zeros(3))) > 0.02:
@@ -239,7 +220,7 @@ class EnhancedTargetFilter:
         self.movement_consistency = consistency_sum / count if count > 0 else 0.0
     
     def _predict_future_position(self):
-        """Predict future position based on current state using physics equations."""
+        """Predict future position based on current state."""
         if self.filtered_position is None:
             self.predicted_position = self.position_buffer.get_all()[-1][:3] if self.position_buffer else None
             return

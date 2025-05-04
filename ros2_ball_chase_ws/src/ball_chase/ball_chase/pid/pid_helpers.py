@@ -1,19 +1,3 @@
-# =========================================
-# PID Helpers - Detailed Mathematical Comments
-# =========================================
-#
-# This file provides helper classes and utilities for PID control and robotics.
-# It includes:
-#   - CircularBuffer: Efficient fixed-size buffer for storing recent values (used for moving averages, trends, etc.).
-#   - TTLDict: Dictionary with time-to-live for each entry (useful for caching with expiration).
-#   - Matrix4x4: 4x4 matrix for geometric transformations (used in robotics for coordinate transforms).
-#   - ResourceMonitor: Monitors CPU/memory usage to adapt control rate and avoid overloading the system.
-#   - ThrottledLogger: Logger that avoids spamming logs by throttling repeated messages.
-#   - FastTrigonometry: Fast approximations for sin/cos/atan2 using lookup tables and math tricks.
-#   - GenericObjectPool: Efficiently reuses objects to avoid memory allocation overhead.
-#
-# Each class is commented with the mathematical or algorithmic intuition behind its design, and how it supports robust, real-time PID control in robotics.
-#
 import time
 import math
 import numpy as np  # Still needed for some operations but usage is minimized
@@ -26,35 +10,27 @@ from functools import lru_cache
 class CircularBuffer:
     """Generic fixed-size circular buffer for any data type."""
     def __init__(self, max_size, default=None):
-        # Initialize the buffer with a fixed size and fill with default values
         self.data = [default] * max_size
         self.max_size = max_size
-        self.next_index = 0  # Points to the next slot to write
-        self.count = 0  # Number of valid elements in the buffer
+        self.next_index = 0
+        self.count = 0
 
     def __len__(self):
-        # Return the number of valid elements in the buffer
         return self.count
 
     def add(self, value):
-        # Add a new value to the buffer at the current index
         self.data[self.next_index] = value
-        # Move the index forward, wrapping around if needed
         self.next_index = (self.next_index + 1) % self.max_size
-        # Increase count up to max_size
         self.count = min(self.count + 1, self.max_size)
 
     def get_all(self):
-        # Return all valid elements in the buffer in order (oldest to newest)
         if self.count == 0:
             return []
         if self.count < self.max_size:
             return self.data[:self.count]
-        # If buffer is full, return from next_index to end, then start to next_index
         return self.data[self.next_index:] + self.data[:self.next_index]
 
     def get_latest(self, n=1):
-        # Return the n most recent elements (newest last)
         if self.count == 0:
             return []
         n = min(n, self.count)
@@ -62,10 +38,9 @@ class CircularBuffer:
         for i in range(n):
             idx = (self.next_index - 1 - i) % self.max_size
             result.append(self.data[idx])
-        return result[::-1]  # Return in order from oldest to newest
+        return result[::-1]
 
     def clear(self):
-        # Reset the buffer to its initial state
         self.next_index = 0
         self.count = 0
         self.data = [self.data[0]] * self.max_size
