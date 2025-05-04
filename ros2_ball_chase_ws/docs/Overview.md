@@ -67,7 +67,31 @@ No specialized robotics or computer vision experience is required. More advanced
 
 This document explores the fundamental computer science and engineering principles behind optimizing operating systems for real-time robotics applications. Using a Raspberry Pi running ROS2 as our case study, we'll examine how operating system design choices impact the deterministic behavior required for robotics. By understanding these principles, you'll gain insight into the critical relationship between system-level software architecture and the physical constraints of robotics applications.
 
-![Diagram: Robotics System Architecture Overview](https://placeholder-image.com/robotics_system_architecture.png)
+```
+┌─────────────────────────────────── Robotics System Architecture ───────────────────────────────────┐
+│                                                                                                    │
+│  ┌─────────────────────┐     ┌───────────────────────┐     ┌─────────────────────────────────┐    │
+│  │    Application      │     │                       │     │                                 │    │
+│  │  ┌───────────────┐  │     │     Middleware        │     │      Operating System           │    │
+│  │  │ Task Planning │  │     │  ┌────────────────┐   │     │  ┌───────────┐ ┌────────────┐  │    │
+│  │  └───────────────┘  │     │  │  ROS2 Nodes    │   │     │  │ Scheduler │ │  Memory    │  │    │
+│  │  ┌───────────────┐  │     │  └────────────────┘   │     │  └───────────┘ │  Management │  │    │
+│  │  │ Vision/Sensors│  │◄────┼─►┌────────────────┐   │◄────┼─►┌───────────┐ └────────────┘  │    │
+│  │  └───────────────┘  │     │  │Communication   │   │     │  │ Real-time │ ┌────────────┐  │    │
+│  │  ┌───────────────┐  │     │  │Framework (DDS) │   │     │  │ Extensions│ │ Interrupt  │  │    │
+│  │  │ Controllers   │  │     │  └────────────────┘   │     │  └───────────┘ │ Handling   │  │    │
+│  │  └───────────────┘  │     │                       │     │                └────────────┘  │    │
+│  └─────────────────────┘     └───────────────────────┘     └─────────────────────────────────┘    │
+│                                                                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                                      Hardware                                                │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  ┌────────────────┐  ┌────────────┐  │  │
+│  │  │ Raspberry Pi │  │ CPU/Memory   │  │ I/O Devices   │  │ Sensors        │  │ Actuators  │  │  │
+│  │  └──────────────┘  └──────────────┘  └───────────────┘  └────────────────┘  └────────────┘  │  │
+│  └─────────────────────────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                                    │
+└────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
 *Figure 1: Overview of a real-time robotics system architecture showing the relationships between hardware, operating system, middleware, and application layers.*
 
 <a name="part-i"></a>
@@ -81,7 +105,20 @@ To understand why real-time robotics needs special operating system configuratio
 
 **The Daily Juggling Act: How Regular OS Schedulers Work**
 
-![Diagram: General Purpose vs. Real-Time Scheduler Comparison](https://placeholder-image.com/scheduler_comparison.png)
+```
+┌───── General Purpose Scheduler ─────┐  ┌────── Real-Time Scheduler ──────┐
+│                                     │  │                                  │
+│  Fair Distribution                  │  │  Deadline Adherence              │
+│                                     │  │                                  │
+│  Process A  [|||||||||||]          │  │  HIGH Priority [█████]           │
+│  Process B  [|||||||||||]          │  │  MED Priority   [..........]     │
+│  Process C  [|||||||||||]          │  │  LOW Priority   [waiting...]     │
+│  Process D  [|||||||||||]          │  │                                  │
+│                                     │  │  ↑                              │
+│  Goal: Everyone gets CPU time       │  │  Goal: Critical tasks NEVER miss│
+│                                     │  │        deadlines                │
+└─────────────────────────────────────┘  └──────────────────────────────────┘
+```
 *Figure 2: Comparison between general-purpose scheduler (left) prioritizing fair distribution of resources versus real-time scheduler (right) prioritizing deadline adherence.*
 
 Imagine a busy office manager (the OS scheduler) trying to give fair attention to dozens of employees (processes) who all need time with a single resource (the CPU). This manager uses a system called the Completely Fair Scheduler (CFS) in Linux.
@@ -141,7 +178,25 @@ Consider this real-world scenario:
 
 From a general computing perspective, the OS made a reasonable decision—all processes deserve some CPU time. But from a robotics perspective, it's like an air traffic controller deciding to take a coffee break during a critical landing.
 
-![Diagram: Missing Control Deadlines](https://placeholder-image.com/missed_deadlines.png)
+```
+   Missed Deadlines in Control System
+   
+   PID Controller Execution:
+   Expected: | | | | | | | | | | |  (Every 5ms)
+   Actual:   | |  |   ||    |  |    (Irregular, missing deadlines)
+             
+   System Tasks:
+                [Backup Process]
+                      [Package Update Check]
+                               [Log Compression]
+                               
+   Physical Result:
+   
+   Robot:    _Λ_       _Λ_       _Λ_       _Λ_       _/¯\_
+            (balanced) (balanced) (balanced) (wobbling) (CRASH!)
+             
+   Timeline: 0ms      20ms       40ms       60ms       80ms
+```
 *Figure 3: Visualization of deadline misses in a control system when background tasks interrupt critical processing.*
 
 **The Core Issue: Different Definitions of "Fair"**
@@ -176,7 +231,25 @@ The simplest form of real-time scheduling follows these principles:
 
 4. **Priority Range**: Real-time priorities range from 1 to 99, completely separate from and above the "nice" values used by CFS
 
-![Diagram: SCHED_FIFO vs SCHED_RR Operations](https://placeholder-image.com/scheduler_operations.png)
+```
+┌───── SCHED_FIFO Operation ───────┐  ┌────── SCHED_RR Operation ──────┐
+│                                  │  │                                 │
+│ Priority 90 ┌─────────────────┐  │  │ Priority 90 ┌──────┐ ┌──────┐  │
+│             │ Task A          │  │  │ Task A      │      │ │      │  │
+│             └─────────────────┘  │  │             └──────┘ └──────┘  │
+│                                  │  │                                 │
+│ Priority 80         ┌─────────┐ │  │ Priority 80         ┌──────┐   │
+│                     │ Task B  │ │  │ Task C/D/E  ┌──────┐│Task F │   │
+│                     └─────────┘ │  │             └──────┘└──────┘   │
+│                                  │  │                                 │
+│ Priority 70                ┌───┐│  │ Priority 70                     │
+│                            │Tsk││  │ Task G   ┌───┐ ┌───┐ ┌───┐ ┌───┐│
+│                            └───┘│  │          │   │ │   │ │   │ │   ││
+│                                  │  │          └───┘ └───┘ └───┘ └───┘│
+│ - No time slices                 │  │ - Equal priority tasks take     │
+│ - Run until complete or preempted│  │   turns with time slices        │
+└──────────────────────────────────┘  └─────────────────────────────────┘
+```
 *Figure 4: Comparison of SCHED_FIFO (no time slices) versus SCHED_RR (with time slices for equal priority tasks) operations.*
 
 **SCHED_RR: Round-Robin Real-Time Scheduling**
@@ -237,7 +310,22 @@ Implementing real-time scheduling comes with tradeoffs, particularly in total CP
    - Reserve memory and I/O bandwidth
    - Run critical tasks at predictable intervals even when no work is needed
 
-![Diagram: CPU Utilization Comparison](https://placeholder-image.com/cpu_utilization.png)
+```
+  ┌──── CPU Utilization Comparison ────┐
+  │                                    │
+  │  General-Purpose System:           │
+  │  ████████████████████████████  92% │
+  │                                    │
+  │  Real-Time System:                 │
+  │  █████████████████████         70% │
+  │                                    │
+  │  ▲                                 │
+  │  │                                 │
+  │  └── Unused capacity reserved      │
+  │      to guarantee determinism      │
+  │                                    │
+  └────────────────────────────────────┘
+```
 *Figure 5: Comparison of CPU utilization patterns between general-purpose and real-time systems, showing the utilization penalty paid for deterministic timing.*
 
 **Real-World Utilization Impact:**
@@ -316,7 +404,27 @@ taskset -c 1 chrt -f 99 ./my_control_process
 taskset -c 2 chrt -f 80 ./my_sensor_process
 ```
 
-![Diagram: CPU Core Allocation Strategy](https://placeholder-image.com/cpu_core_allocation.png)
+```
+┌────── CPU Core Allocation Strategy ──────┐
+│                                          │
+│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+│  │ Core 0 │ │ Core 1 │ │ Core 2 │ │ Core 3 │
+│  └────────┘ └────────┘ └────────┘ └────────┘
+│      │          │          │          │    
+│      ▼          ▼          ▼          ▼    
+│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+│  │ System │ │Control │ │ Sensor │ │ Vision │
+│  │  OS    │ │ Tasks  │ │ Tasks  │ │  Tasks │
+│  │ Tasks  │ │ RT-99  │ │ RT-80  │ │ RT-60  │
+│  └────────┘ └────────┘ └────────┘ └────────┘
+│                                          │
+│  - Core 0: General system processes      │
+│  - Core 1: High-priority control tasks   │
+│  - Core 2: Medium-priority sensor tasks  │
+│  - Core 3: Compute-intensive tasks       │
+│                                          │
+└──────────────────────────────────────────┘
+```
 *Figure 6: Visual representation of CPU core allocation strategy for a real-time robotics system on Raspberry Pi.*
 
 With this complete configuration, we've created an environment where:
@@ -339,7 +447,30 @@ To understand why context switching hurts performance so much, let's look at how
 
 Imagine your computer's memory as a pyramid with several levels:
 
-![Diagram: Memory Hierarchy Pyramid](https://placeholder-image.com/memory_hierarchy.png)
+```
+                    ┌─────────┐
+                    │ CPU     │
+                    │Registers│ ~0.5ns
+                    └─────────┘
+                   ┌───────────┐
+                   │  L1 Cache │ ~2ns
+                   └───────────┘
+                 ┌───────────────┐
+                 │   L2 Cache    │ ~6ns
+                 └───────────────┘
+               ┌─────────────────────┐
+               │      L3 Cache       │ ~20ns
+               └─────────────────────┘
+           ┌───────────────────────────────┐
+           │         Main Memory (RAM)     │ ~100ns
+           └───────────────────────────────┘
+      ┌───────────────────────────────────────────┐
+      │           Storage (SSD/HDD)               │ ~10,000-100,000ns
+      └───────────────────────────────────────────┘
+
+        Speed ──────────────────────▶ Capacity
+       Fastest                        Largest
+```
 *Figure 7: The memory hierarchy pyramid showing access times and sizes for different memory levels, from CPU registers to storage.*
 
 1. **CPU Registers** - Tiny but incredibly fast storage directly inside the CPU
@@ -361,7 +492,34 @@ When your program needs data:
 3. If not there either, it checks L3 cache
 4. If still not found, it must fetch from main memory (very slow!)
 
-![Diagram: Cache Line Operation](https://placeholder-image.com/cache_line_operation.png)
+```
+┌───── Cache Line Operation ──────┐
+│                                 │
+│  CPU requests data at address X │
+│  ┌─────────────────┐            │
+│  │Check L1 Cache   │─────┐      │
+│  └─────────────────┘     │      │
+│           │              │      │
+│           │ Miss         │      │
+│           ▼              │      │
+│  ┌─────────────────┐     │      │
+│  │Check L2 Cache   │─────┐      │
+│  └─────────────────┘     │      │
+│           │              │ Hit! │
+│           │ Miss         │      │
+│           ▼              │      │
+│  ┌─────────────────┐     │      │
+│  │Check L3 Cache   │─────┘      │
+│  └─────────────────┘            │
+│           │                     │
+│           │ Miss                │
+│           ▼                     │
+│  ┌─────────────────┐            │
+│  │Fetch from RAM   │            │
+│  └─────────────────┘            │
+│                                 │
+└─────────────────────────────────┘
+```
 *Figure 8: Visualization of cache line operations showing how data moves between different cache levels during memory access.*
 
 **Context Switching: The Great Cache Disruption**
@@ -391,7 +549,27 @@ For real-world perspective: If your robot is tracking a ball at 30fps, you have 
 
 **Visualizing the Cache Impact**
 
-![Diagram: Context Switch Cache Impact](https://placeholder-image.com/context_switch_impact.png)
+```
+┌──── Context Switch Cache Impact ────┐
+│                                     │
+│  Before Context Switch:             │
+│  L1 Cache: ███████████████████  90% │
+│            [Control Process Data]   │
+│                                     │
+│  After Context Switch:              │
+│  L1 Cache: ██                  10%  │
+│            [Control Process Data]   │
+│                                     │
+│  Performance Impact:                │
+│                                     │
+│  Same computation:                  │
+│  - With "hot" cache:  ~1ms          │
+│  - With "cold" cache: ~3-4ms        │
+│                                     │
+│  Result: 3-4x slower execution      │
+│                                     │
+└─────────────────────────────────────┘
+```
 *Figure 9: Visualization of cache state before and after a context switch, showing how much of the data needs to be reloaded.*
 
 Imagine running a control loop that needs to update 100 times per second (every 10ms):
@@ -411,8 +589,37 @@ Consider a practical example from robotics control:
 3. After a context switch with cold caches, the same computation might take 1.5ms
 4. This 1ms additional latency can make the difference between stable control and oscillation
 
-![Graph: PID Control Performance with Cache Effects](https://placeholder-image.com/pid_cache_effects.png)
-*Figure 10: Graph showing the impact of cache state on PID controller performance, comparing ideal performance (blue) with disrupted cache performance (red).*
+```
+┌──── PID Control Performance with Cache Effects ────┐
+│                                                    │
+│  Ball Position                                     │
+│  ^                                                 │
+│  |                                                 │
+│  |    /\      Ideal Performance                    │
+│  |   /  \     (Clean Cache)                        │
+│  |  /    \    ~~~~~~~~~~~~~~~                      │
+│  | /      \                                        │
+│  |/        \                                       │
+│  |          \                                      │
+│  |           \                                     │
+│  |            \                                    │
+│  |             \__________                         │
+│  |                                                 │
+│  |           /\       /\    Disrupted Performance  │
+│  |          /  \     /  \   (Context Switches)     │
+│  |         /    \   /    \  ~~~~~~~~~~~~~~~~~      │
+│  |        /      \ /      \                        │
+│  |       /        X        \                       │
+│  |      /                   \                      │
+│  |     /                     \                     │
+│  |    /                       \                    │
+│  |___/                         \________________   │
+│  |                                                 │
+│  +---------------------------------------→ Time    │
+│                                                    │
+└────────────────────────────────────────────────────┘
+```
+*Figure 10: Graph showing the impact of cache state on PID controller performance, comparing ideal performance (smooth line) with disrupted cache performance (oscillating line).*
 
 By isolating cores and preventing unnecessary context switches, we effectively give our real-time processes private L1/L2 caches, dramatically improving deterministic performance.
 
@@ -429,7 +636,27 @@ Modern SoCs (including Raspberry Pi) have heterogeneous multi-core architectures
 - Core 0: Often handles interrupts, scheduler decisions, and general system tasks
 - Other cores: Can be isolated for dedicated, deterministic processing
 
-![Diagram: Core Specialization Architecture](https://placeholder-image.com/core_specialization.png)
+```
+┌───── Core Specialization Architecture ─────┐
+│                                            │
+│  ┌────────┐    ┌────────┐    ┌────────┐    │
+│  │ Core 0 │    │ Core 1 │    │ Core 2 │    │
+│  └────────┘    └────────┘    └────────┘    │
+│       │             │             │        │
+│       ▼             ▼             ▼        │
+│  ┌─────────┐   ┌─────────┐   ┌─────────┐   │
+│  │ System  │   │Real-time│   │Real-time│   │
+│  │ Services│   │Control  │   │Sensor   │   │
+│  └─────────┘   └─────────┘   └─────────┘   │
+│  Interrupts    Dedicated     Dedicated     │
+│  Scheduling    Processing    Processing    │
+│  I/O Handling  No Interrupts No Interrupts │
+│                                            │
+│  OS Kernel     Motion        Perception    │
+│  Services      Control       Processing    │
+│                                            │
+└────────────────────────────────────────────┘
+```
 *Figure 11: Visualization of core specialization architecture showing different roles for each CPU core in a real-time robotics system.*
 
 **Memory and Cache Hierarchy Implications:**
@@ -457,7 +684,41 @@ These create a clear separation in function:
 - Core 0: Handles interrupts, system tasks, non-critical processes
 - Cores 1-3: Clean, deterministic execution environments for real-time processes
 
-![Diagram: Interrupt Handling Comparison](https://placeholder-image.com/interrupt_handling.png)
+```
+┌───── Interrupt Handling Comparison ─────┐
+│                                         │
+│  Standard Configuration:                │
+│  ┌────────┐   ┌────────┐   ┌────────┐   │
+│  │ Core 0 │   │ Core 1 │   │ Core 2 │   │
+│  └────────┘   └────────┘   └────────┘   │
+│       │            │            │       │
+│       │            │            │       │
+│  ┌────▼─────┐ ┌────▼─────┐ ┌────▼─────┐ │
+│  │ Process A│ │ Process B│ │ Process C│ │
+│  └──────────┘ └──────────┘ └──────────┘ │
+│       ▲            ▲            ▲       │
+│       │            │            │       │
+│  └────┴─────┐ └────┴─────┐ └────┴─────┐ │
+│  │Interrupts│ │Interrupts│ │Interrupts│ │
+│  └──────────┘ └──────────┘ └──────────┘ │
+│                                         │
+│  With Core Isolation:                   │
+│  ┌────────┐   ┌────────┐   ┌────────┐   │
+│  │ Core 0 │   │ Core 1 │   │ Core 2 │   │
+│  └────────┘   └────────┘   └────────┘   │
+│       │            │            │       │
+│       │            │            │       │
+│  ┌────▼─────┐ ┌────▼─────┐ ┌────▼─────┐ │
+│  │ Process A│ │ Process B│ │ Process C│ │
+│  └──────────┘ └──────────┘ └──────────┘ │
+│       ▲            │            │       │
+│       │            │            │       │
+│  └────┴─────┐      │            │       │
+│  │Interrupts│      │            │       │
+│  └──────────┘      │            │       │
+│                                         │
+└─────────────────────────────────────────┘
+```
 *Figure 12: Comparison of interrupt handling with and without core isolation, showing how isolation protects real-time processes from interrupt disruption.*
 
 <a name="part-ii"></a>
@@ -490,7 +751,28 @@ The Linux kernel offers different preemption models, progressively increasing re
 - Replaces spinlocks with mutexes that respect priority inheritance
 - Achieves sub-millisecond latency (typically 50-200μs)
 
-![Diagram: Kernel Preemption Models Comparison](https://placeholder-image.com/kernel_preemption_models.png)
+```
+┌───── Kernel Preemption Models Comparison ─────┐
+│                                               │
+│                         Increasing Determinism│
+│                                 ───────────► │
+│  ┌───────────┐ ┌──────────┐ ┌─────┐ ┌──────┐ │
+│  │PREEMPT_   │ │PREEMPT_  │ │     │ │      │ │
+│  │NONE       │ │VOLUNTARY │ │PREEP│ │PREEPT│ │
+│  └───────────┘ └──────────┘ └─────┘ └──────┘ │
+│                                               │
+│  Latency:      Latency:    Latency: Latency: │
+│  100-500ms     10-100ms    1-10ms   50-200µs │
+│                                               │
+│  Non-          Voluntary   Limited  Full     │
+│  Preemptible   Preemption  Kernel  Kernel    │
+│  Kernel                    Preempt Preempt   │
+│                                               │
+│  Throughput    Balanced    Desktop Real-time │
+│  Optimized     Approach    Systems Systems   │
+│                                               │
+└───────────────────────────────────────────────┘
+```
 *Figure 13: Comparison of different Linux kernel preemption models showing latency characteristics and design tradeoffs.*
 
 From a computer engineering perspective, PREEMPT_RT achieves this by transforming asynchronous interrupts into schedulable threads, bringing nearly all sources of non-determinism under scheduler control.
@@ -506,7 +788,24 @@ A classic computer science problem in real-time systems is priority inversion:
 
 This isn't just theoretical—it caused the Mars Pathfinder mission to fail repeatedly until detected and fixed remotely.
 
-![Diagram: Priority Inversion Problem](https://placeholder-image.com/priority_inversion.png)
+```
+┌───── Priority Inversion Problem ─────┐
+│                                      │
+│  Priority  │   Task   │   Status     │
+│  High (99) │     A    │   BLOCKED!   │
+│            │           waiting for C  │
+│                                      │
+│  Medium(50)│     B    │   RUNNING    │
+│            │          │              │
+│  Low (10)  │     C    │   PREEMPTED  │
+│            │holds lock│   by B       │
+│            │needed by A│             │
+│                                      │
+│  Result: Medium priority task runs   │
+│  while high priority task waits!     │
+│                                      │
+└──────────────────────────────────────┘
+```
 *Figure 14: Visualization of the priority inversion problem showing how a medium-priority task can indirectly block a high-priority task.*
 
 **Solutions Implemented in PREEMPT_RT:**
@@ -530,7 +829,33 @@ Modern computer memory systems present several challenges to deterministic execu
 - Memory fragmentation changes performance over time
 - Garbage collection (in languages like Python) introduces large pauses
 
-![Graph: Memory Allocation Timing Variance](https://placeholder-image.com/memory_allocation_variance.png)
+```
+┌───── Memory Allocation Timing Variance ─────┐
+│                                             │
+│  Time (µs)                                  │
+│  ^                                          │
+│  |                                          │
+│  |     ▲                                    │
+│  |     │                                    │
+│  |     │        ▲                          │
+│  |     │        │      ▲                   │
+│  |     │        │      │        ▲          │
+│  |     │        │      │        │     ▲    │
+│  |  ▲  │     ▲  │   ▲  │     ▲  │  ▲  │    │
+│  | _│__│_____|__|___|__|_____|__|__|__|___ │
+│  |  1  2  3  4  5  6  7  8  9  10 11 12    │
+│  |                                          │
+│  |              Allocation #                │
+│  |                                          │
+│  | Same size allocations have highly        │
+│  | variable execution times due to:         │
+│  | - Memory fragmentation                   │
+│  | - Page faults                            │
+│  | - Cache misses                           │
+│  | - TLB misses                             │
+│  |                                          │
+└─────────────────────────────────────────────┘
+```
 *Figure 15: Graph showing variation in memory allocation timing over multiple allocations, highlighting the non-deterministic nature of standard memory management.*
 
 **Solutions from Systems Engineering:**
@@ -579,7 +904,32 @@ Modern CPUs dynamically adjust frequency and voltage to save power:
 - Wake-up latency increases with deeper states (up to several ms)
 - Portions of the CPU are powered down, requiring wake-up time
 
-![Diagram: CPU P-states and C-states](https://placeholder-image.com/cpu_states.png)
+```
+┌───── CPU P-states and C-states ─────┐
+│                                     │
+│  P-States (Performance States):     │
+│  P0 ■■■■■■■■■■ 100% freq/voltage    │
+│  P1 ■■■■■■■■   80%  freq/voltage    │
+│  P2 ■■■■■■     60%  freq/voltage    │
+│  P3 ■■■■       40%  freq/voltage    │
+│                                     │
+│  Transition time: 10-500µs          │
+│                                     │
+│  C-States (Idle States):            │
+│  C0 [Active]    0µs wake latency    │
+│  C1 [Halt]      1-5µs wake latency  │
+│  C2 [Stop Clock] 10-100µs latency   │
+│  C3 [Sleep]     100-500µs latency   │
+│  C6 [Deep Sleep] 1-10ms latency     │
+│                                     │
+│  Components Powered Down:           │
+│  C1: Stop CPU execution             │
+│  C2: Stop CPU clocks                │
+│  C3: Flush caches, sleep core       │
+│  C6: Save state, cut core voltage   │
+│                                     │
+└─────────────────────────────────────┘
+```
 *Figure 16: Visualization of CPU P-states (performance states) and C-states (idle states) showing transitions and latency impacts.*
 
 For real-time systems, these energy-saving features introduce unacceptable non-determinism. By setting the CPU governor to `performance` mode, we force the CPU to remain in its highest P-state (P0) and avoid deeper C-states, enabling consistent instruction execution timing.
@@ -600,7 +950,35 @@ All modern CPUs, including those in Raspberry Pi, implement multi-stage thermal 
 4. **Emergency Throttling**: Drastic performance reduction to prevent damage
 5. **Thermal Shutdown**: Complete system shutdown as a last resort
 
-![Graph: Thermal Throttling Impact on Performance](https://placeholder-image.com/thermal_throttling.png)
+```
+┌───── Thermal Throttling Impact on Performance ─────┐
+│                                                    │
+│  Temperature (°C)       Frequency (MHz)            │
+│  85 │                   1800 │                     │
+│     │                        │                     │
+│  80 │               ▼        │█████                │
+│     │              / \       │█████                │
+│  75 │             /   \      │█████                │
+│     │            /     \     │█████ ▼              │
+│  70 │           /       \    │████/ \             │
+│     │          /         \   │███/   \            │
+│  65 │         /           \  │██/     \           │
+│     │        /             \ │█/       \          │
+│  60 │       /               \│/         \         │
+│     │      /                 ▼           \        │
+│  55 │_____/                   \_____________\_     │
+│     │                                        │     │
+│     └────────────────────────────────────────┘     │
+│     Time →                                          │
+│                                                    │
+│  Temperature (—)      Frequency (█)                │
+│                                                    │
+│  As temperature rises, CPU frequency drops to      │
+│  protect the processor, causing irregular          │
+│  performance.                                      │
+│                                                    │
+└────────────────────────────────────────────────────┘
+```
 *Figure 17: Graph showing the relationship between CPU temperature, frequency, and performance during thermal throttling events.*
 
 **Why This Matters for Real-Time Robotics**
@@ -696,7 +1074,40 @@ Several strategies can mitigate thermal throttling issues:
    - Gracefully degrade performance when approaching thermal limits
    - Prioritize critical real-time tasks when thermal throttling occurs
 
-![Diagram: Thermal Management Strategy](https://placeholder-image.com/thermal_management.png)
+```
+┌───── Thermal Management Strategy ─────┐
+│                                       │
+│  ┌────────────────────────────────┐   │
+│  │     Hardware Solutions          │   │
+│  │ ┌──────────┐  ┌──────────────┐ │   │
+│  │ │Heatsinks │  │Active Cooling│ │   │
+│  │ └──────────┘  └──────────────┘ │   │
+│  │ ┌──────────┐  ┌──────────────┐ │   │
+│  │ │Thermal   │  │Case Design   │ │   │
+│  │ │Interface │  │with Airflow  │ │   │
+│  │ └──────────┘  └──────────────┘ │   │
+│  └────────────────────────────────┘   │
+│                 ▲                      │
+│                 │                      │
+│  ┌─────────────┴────────────────┐     │
+│  │    Temperature Management    │     │
+│  └─────────────┬────────────────┘     │
+│                 │                      │
+│                 ▼                      │
+│  ┌────────────────────────────────┐   │
+│  │     Software Solutions         │   │
+│  │ ┌──────────┐  ┌──────────────┐ │   │
+│  │ │Frequency │  │Dynamic Load  │ │   │
+│  │ │Capping   │  │Balancing     │ │   │
+│  │ └──────────┘  └──────────────┘ │   │
+│  │ ┌──────────┐  ┌──────────────┐ │   │
+│  │ │Real-time │  │Task          │ │   │
+│  │ │Monitoring│  │Prioritization│ │   │
+│  │ └──────────┘  └──────────────┘ │   │
+│  └────────────────────────────────┘   │
+│                                       │
+└───────────────────────────────────────┘
+```
 *Figure 18: Comprehensive thermal management strategy diagram showing hardware, software, and environmental approaches to mitigating thermal throttling.*
 
 **CPU Frequency Configuration for Thermal Stability**
@@ -783,7 +1194,41 @@ ROS2 (Robot Operating System 2) represents a complete redesign from its predeces
    - **DDS Layer**: Data Distribution Service middleware
    - **Operating System Layer**: Linux, Windows, macOS
 
-![Diagram: ROS2 Architectural Layers](https://placeholder-image.com/ros2_layers.png)
+```
+┌───── ROS2 Architectural Layers ─────┐
+│                                     │
+│  ┌─────────────────────────────────┐│
+│  │        Application Layer        ││
+│  │  User Nodes, Applications       ││
+│  └───────────────┬─────────────────┘│
+│                  │                  │
+│  ┌───────────────▼─────────────────┐│
+│  │  ROS Client Library Layer (RCL) ││
+│  │  rclcpp (C++), rclpy (Python)   ││
+│  └───────────────┬─────────────────┘│
+│                  │                  │
+│  ┌───────────────▼─────────────────┐│
+│  │        RCL Common Layer         ││
+│  │  Language-independent API       ││
+│  └───────────────┬─────────────────┘│
+│                  │                  │
+│  ┌───────────────▼─────────────────┐│
+│  │   ROS Middleware Interface      ││
+│  │   Abstract DDS API              ││
+│  └───────────────┬─────────────────┘│
+│                  │                  │
+│  ┌───────────────▼─────────────────┐│
+│  │       DDS Implementation        ││
+│  │  FastDDS, CycloneDDS, Connext   ││
+│  └───────────────┬─────────────────┘│
+│                  │                  │
+│  ┌───────────────▼─────────────────┐│
+│  │      Operating System Layer     ││
+│  │  Linux, Windows, macOS          ││
+│  └─────────────────────────────────┘│
+│                                     │
+└─────────────────────────────────────┘
+```
 *Figure 19: The ROS2 architectural layers showing the complete stack from operating system to application code.*
 
 2. **Execution Models**:
@@ -819,7 +1264,35 @@ One of the most significant advances in ROS2 is the flexibility in how nodes can
    - Zero-copy data transfer
    - Significantly reduced latency
 
-![Diagram: Inter-Process vs Intra-Process Communication](https://placeholder-image.com/ros2_communication_models.png)
+```
+┌───── Inter-Process vs Intra-Process Communication ─────┐
+│                                                        │
+│  Traditional Inter-Process:                            │
+│                                                        │
+│  ┌──────────┐     ┌─────────┐     ┌───────────┐       │
+│  │ Camera   │     │ Image   │     │ Control   │       │
+│  │ Node     │────►│ Process │────►│ Node      │       │
+│  └──────────┘     └─────────┘     └───────────┘       │
+│      │                │               │                │
+│  ┌───▼────────────────▼───────────────▼────────────┐  │
+│  │  DDS Middleware (serialization/deserialization) │  │
+│  └──────────────────────────────────────────────┬──┘  │
+│                                                 │      │
+│  Intra-Process:                                 │      │
+│                                                 │      │
+│  ┌──────────────────────────────────────────────┴──┐  │
+│  │                 Single Process                   │  │
+│  │                                                  │  │
+│  │  ┌──────────┐    ┌─────────┐    ┌───────────┐   │  │
+│  │  │ Camera   │    │ Image   │    │ Control   │   │  │
+│  │  │ Component│───►│ Process │───►│ Component │   │  │
+│  │  └──────────┘    └─────────┘    └───────────┘   │  │
+│  │                                                  │  │
+│  │       Direct Memory References (Zero-Copy)       │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+```
 *Figure 20: Comparison of traditional inter-process communication versus intra-process communication in ROS2, highlighting the performance benefits of the latter.*
 
 **Example: Traditional vs Intra-Process Communication**
@@ -904,7 +1377,49 @@ ROS2 comes with numerous tools that accelerate development:
 - **Rosbag2**: Data recording and playback for testing and debugging
 - **Simulation Integration**: Seamless connections to Gazebo and other simulators
 
-![Diagram: ROS2 Ecosystem Components](https://placeholder-image.com/ros2_ecosystem.png)
+```
+┌───── ROS2 Ecosystem Components ─────┐
+│                                     │
+│   Core Framework                    │
+│  ┌─────────────────────────────────┐│
+│  │ ┌───────────┐  ┌──────────────┐ ││
+│  │ │ Messaging │  │ Node         │ ││
+│  │ │ & Comms   │  │ Lifecycle    │ ││
+│  │ └───────────┘  └──────────────┘ ││
+│  │ ┌───────────┐  ┌──────────────┐ ││
+│  │ │ Parameter │  │ Launch       │ ││
+│  │ │ System    │  │ System       │ ││
+│  │ └───────────┘  └──────────────┘ ││
+│  └─────────────────────────────────┘│
+│                                     │
+│   Tools & Utilities                 │
+│  ┌─────────────────────────────────┐│
+│  │ ┌───────────┐  ┌──────────────┐ ││
+│  │ │ RViz2     │  │ rosbag2      │ ││
+│  │ │ Visual    │  │ Data         │ ││
+│  │ │ Debug     │  │ Recording    │ ││
+│  │ └───────────┘  └──────────────┘ ││
+│  │ ┌───────────┐  ┌──────────────┐ ││
+│  │ │ rqt Tools │  │ Testing      │ ││
+│  │ │ & Plugins │  │ Framework    │ ││
+│  │ └───────────┘  └──────────────┘ ││
+│  └─────────────────────────────────┘│
+│                                     │
+│   High-Level Capabilities           │
+│  ┌─────────────────────────────────┐│
+│  │ ┌───────────┐  ┌──────────────┐ ││
+│  │ │Navigation2│  │ MoveIt2      │ ││
+│  │ │ Path      │  │ Manipulation │ ││
+│  │ │ Planning  │  │ Framework    │ ││
+│  │ └───────────┘  └──────────────┘ ││
+│  │ ┌───────────┐  ┌──────────────┐ ││
+│  │ │SLAM       │  │ Diagnostics  │ ││
+│  │ │Toolbox    │  │ Framework    │ ││
+│  │ └───────────┘  └──────────────┘ ││
+│  └─────────────────────────────────┘│
+│                                     │
+└─────────────────────────────────────┘
+```
 *Figure 21: The ROS2 ecosystem showing key components, tools, and utilities that support robotics development.*
 
 **3. High-Level Capabilities**
@@ -1005,7 +1520,42 @@ To understand ROS2's value, consider what you'd need to build without it:
 5. Employ camera_calibration package
 6. Use rosbag2 for data recording
 
-![Diagram: ROS2 vs Custom Implementation](https://placeholder-image.com/ros2_vs_custom.png)
+```
+┌───── ROS2 vs Custom Implementation ─────┐
+│                                         │
+│  Example Task: Ball Tracking Robot      │
+│                                         │
+│  ┌─────────────────┐  ┌────────────────┐│
+│  │  With ROS2      │  │Without ROS2    ││
+│  │                 │  │                ││
+│  │  Camera Driver  │  │  USB           ││
+│  │  Package        │  │  Protocol      ││
+│  │  │              │  │  │             ││
+│  │  ▼              │  │  ▼             ││
+│  │  Image Topic    │  │  Custom        ││
+│  │  │              │  │  Comms         ││
+│  │  ▼              │  │  │             ││
+│  │  Vision Node    │  │  Threading     ││
+│  │  │              │  │  Model         ││
+│  │  ▼              │  │  │             ││
+│  │  Pose Topic     │  │  Custom IPC    ││
+│  │  │              │  │  │             ││
+│  │  ▼              │  │  ▼             ││
+│  │  tf2 Transform  │  │  Custom        ││
+│  │  │              │  │  Coord System  ││
+│  │  ▼              │  │  │             ││
+│  │  Control Node   │  │  Comms Layer   ││
+│  │  │              │  │  │             ││
+│  │  ▼              │  │  ▼             ││
+│  │  Motor Driver   │  │  Device        ││
+│  │  Package        │  │  Protocol      ││
+│  │                 │  │                ││
+│  │~100 lines of    │  │~2000+ lines of ││
+│  │application code │  │custom code     ││
+│  └─────────────────┘  └────────────────┘│
+│                                         │
+└─────────────────────────────────────────┘
+```
 *Figure 22: Comparison of implementation effort required with and without ROS2 for typical robotics subsystems.*
 
 #### 7.4 Key Challenges in Learning and Using ROS2
@@ -1093,7 +1643,35 @@ As mentioned earlier, ROS2's communication is built on the Data Distribution Ser
    - Encryption
    - Logging
 
-![Diagram: DDS Quality of Service Policies](https://placeholder-image.com/dds_qos_policies.png)
+```
+┌───── DDS Quality of Service Policies ─────┐
+│                                           │
+│  ┌───────────────┐  ┌───────────────────┐ │
+│  │ Reliability   │  │ Durability        │ │
+│  ├───────────────┤  ├───────────────────┤ │
+│  │ RELIABLE      │  │ VOLATILE          │ │
+│  │ Guarantees    │  │ No history for    │ │
+│  │ delivery      │  │ late joiners      │ │
+│  │               │  │                   │ │
+│  │ BEST_EFFORT   │  │ TRANSIENT_LOCAL   │ │
+│  │ No guarantees │  │ Keep history for  │ │
+│  │ faster        │  │ late joiners      │ │
+│  └───────────────┘  └───────────────────┘ │
+│                                           │
+│  ┌───────────────┐  ┌───────────────────┐ │
+│  │ History       │  │ Deadline          │ │
+│  ├───────────────┤  ├───────────────────┤ │
+│  │ KEEP_LAST     │  │ Duration          │ │
+│  │ Store N most  │  │ Maximum time      │ │
+│  │ recent samples│  │ between updates   │ │
+│  │               │  │                   │ │
+│  │ KEEP_ALL      │  │ Missed deadlines │ │
+│  │ Store all     │  │ trigger callbacks│ │
+│  │ samples       │  │                  │ │
+│  └───────────────┘  └───────────────────┘ │
+│                                           │
+└───────────────────────────────────────────┘
+```
 *Figure 23: Overview of DDS Quality of Service policies and their effects on communication behavior.*
 
 **Optimizing DDS for Real-Time Robotics**
@@ -1173,7 +1751,52 @@ Docker offers multiple networking models, each with different performance charac
 - Direct access to network interfaces
 - Preferred for real-time applications
 
-![Diagram: Docker Networking Models](https://placeholder-image.com/docker_networking_models.png)
+```
+┌───── Docker Networking Models ─────┐
+│                                    │
+│  Bridge Networking:                │
+│  ┌────────────────────────────────┐│
+│  │ Container                      ││
+│  │ ┌─────────┐   ┌─────────┐     ││
+│  │ │Process A│   │Process B│     ││
+│  │ └────┬────┘   └────┬────┘     ││
+│  │      │             │          ││
+│  │ ┌────▼─────────────▼────┐     ││
+│  │ │ Container Network Stack│     ││
+│  │ └────────────┬───────────┘     ││
+│  └──────────────│────────────────┘│
+│                 │                  │
+│     ┌───────────▼──────────┐      │
+│     │Docker Virtual Bridge │      │
+│     └───────────┬──────────┘      │
+│                 │                  │
+│     ┌───────────▼──────────┐      │
+│     │   Host Network Stack  │      │
+│     └────────────┬─────────┘      │
+│                  │                 │
+│                  ▼                 │
+│              Physical NIC          │
+│                                    │
+│  Host Networking:                  │
+│  ┌────────────────────────────────┐│
+│  │ Container                      ││
+│  │ ┌─────────┐   ┌─────────┐     ││
+│  │ │Process A│   │Process B│     ││
+│  │ └────┬────┘   └────┬────┘     ││
+│  │      │             │          ││
+│  │      └─────────────┘          ││
+│  │            │                  ││
+│  └────────────│──────────────────┘│
+│                │                   │
+│     ┌──────────▼───────────┐      │
+│     │   Host Network Stack  │      │
+│     └────────────┬─────────┘      │
+│                  │                 │
+│                  ▼                 │
+│              Physical NIC          │
+│                                    │
+└────────────────────────────────────┘
+```
 *Figure 24: Comparison of Docker networking models showing the performance impact of different approaches.*
 
 **Engineering tradeoff analysis:**
@@ -1224,7 +1847,43 @@ Think of process prioritization like the security screening at an airport:
 
 Just as an airport would ensure passengers with imminent departures get through security first to avoid missing their flights, a real-time OS ensures critical processes get CPU time immediately to avoid missing their deadlines.
 
-![Diagram: Process Priority Analogy](https://placeholder-image.com/priority_analogy.png)
+```
+┌───── Process Priority Analogy ─────┐
+│                                    │
+│  ┌────────────────────────────────┐│
+│  │Priority 99: EXPEDITED          ││
+│  │┌──────────┐                    ││
+│  ││Emergency │=====================││
+│  ││Processes │       │            ││
+│  │└──────────┘       ▼            ││
+│  └────────────────────────────────┘│
+│  ┌────────────────────────────────┐│
+│  │Priority 80-90: FIRST CLASS     ││
+│  │┌──────────┐ ┌──────────┐      ││
+│  ││Control   │ │Critical  │======││
+│  ││Loops     │ │Sensing   │  │   ││
+│  │└──────────┘ └──────────┘  ▼   ││
+│  └────────────────────────────────┘│
+│  ┌────────────────────────────────┐│
+│  │Priority 60-70: STANDARD        ││
+│  │┌──────────┐ ┌──────────┐      ││
+│  ││Vision    │ │Planning  │======││
+│  ││Processing│ │Algorithms│  │   ││
+│  │└──────────┘ └──────────┘  ▼   ││
+│  └────────────────────────────────┘│
+│  ┌────────────────────────────────┐│
+│  │Priority 0-50: STANDBY          ││
+│  │┌──────────┐ ┌──────────┐      ││
+│  ││Logging   │ │System    │      ││
+│  ││Data      │ │Updates   │======││
+│  │└──────────┘ └──────────┘   │  ││
+│  │                             ▼  ││
+│  └────────────────────────────────┘│
+│                                    │
+│       CPU Resources (Time)         │
+│                                    │
+└────────────────────────────────────┘
+```
 *Figure 25: Visual analogy comparing process prioritization to airport security lanes, showing how different priority levels ensure timely processing.*
 
 **The Cost of Incorrect Prioritization**
@@ -1258,7 +1917,33 @@ Here's the fundamental tension:
 - If we let low-priority processes interrupt high-priority ones, we violate real-time guarantees
 - If we never let low-priority processes run, essential background tasks (like logging, diagnostics, or garbage collection) can't function
 
-![Diagram: Process Starvation Problem](https://placeholder-image.com/process_starvation.png)
+```
+┌───── Process Starvation Problem ─────┐
+│                                      │
+│  Time →                              │
+│  ┌────────────────────────────────┐  │
+│  │High Priority Task              │  │
+│  │████████████████████████████████│  │
+│  └────────────────────────────────┘  │
+│                                      │
+│  ┌────────────────────────────────┐  │
+│  │Medium Priority Task            │  │
+│  │░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│  │
+│  └────────────────────────────────┘  │
+│                                      │
+│  ┌────────────────────────────────┐  │
+│  │Low Priority Task               │  │
+│  │░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│  │
+│  └────────────────────────────────┘  │
+│                                      │
+│  █ = Running   ░ = Blocked/Waiting   │
+│                                      │
+│  Problem: If high-priority task never│
+│  yields, lower tasks are "starved"   │
+│  of CPU time and cannot make progress│
+│                                      │
+└──────────────────────────────────────┘
+```
 *Figure 26: Visualization of the process starvation problem showing how high-priority tasks can completely block lower-priority tasks from execution.*
 
 **Engineering Solutions to Starvation**
@@ -1346,7 +2031,41 @@ Priority assignment isn't arbitrary—it follows established principles from rea
    - Safety-critical tasks get highest priority regardless of rate
    - Example: Emergency stop function always gets top priority
 
-![Diagram: Priority Assignment Methodologies](https://placeholder-image.com/priority_assignment.png)
+```
+┌───── Priority Assignment Methodologies ─────┐
+│                                             │
+│  Rate Monotonic:                            │
+│  ┌─────────────────┬──────────┬───────────┐ │
+│  │ Task            │ Frequency│ Priority  │ │
+│  ├─────────────────┼──────────┼───────────┤ │
+│  │ Motion Control  │ 1000 Hz  │ 95        │ │
+│  │ Sensor Fusion   │  200 Hz  │ 80        │ │
+│  │ Path Planning   │   50 Hz  │ 70        │ │
+│  │ Vision          │   30 Hz  │ 60        │ │
+│  └─────────────────┴──────────┴───────────┘ │
+│                                             │
+│  Deadline Monotonic:                        │
+│  ┌─────────────────┬──────────┬───────────┐ │
+│  │ Task            │ Deadline │ Priority  │ │
+│  ├─────────────────┼──────────┼───────────┤ │
+│  │ Emergency Stop  │   1 ms   │ 99        │ │
+│  │ Balance Control │   5 ms   │ 90        │ │
+│  │ Obstacle Avoid  │  20 ms   │ 75        │ │
+│  │ Navigation      │ 100 ms   │ 65        │ │
+│  └─────────────────┴──────────┴───────────┘ │
+│                                             │
+│  Criticality-Based:                         │
+│  ┌─────────────────┬──────────┬───────────┐ │
+│  │ Task            │Criticality│ Priority  │ │
+│  ├─────────────────┼──────────┼───────────┤ │
+│  │ Safety Monitor  │ Safety   │ 99        │ │
+│  │ Motion Control  │ Critical │ 90        │ │
+│  │ Perception      │ Important│ 70        │ │
+│  │ User Interface  │ Normal   │ 50        │ │
+│  └─────────────────┴──────────┴───────────┘ │
+│                                             │
+└─────────────────────────────────────────────┘
+```
 *Figure 27: Comparison of different priority assignment methodologies showing their mathematical basis and application scenarios.*
 
 **Concrete Priority Assignment for Your Ball-Tracking Robot**
@@ -1426,18 +2145,100 @@ Different robot modes may require different priority assignments:
    - Path planning elevated (80)
    - Control loops at standard priority (90)
 
-![Diagram: Dynamic Priority Adjustment](https://placeholder-image.com/dynamic_priority.png)
+```
+┌───── Dynamic Priority Adjustment ─────┐
+│                                       │
+│  Task            │ Normal │ Precision │
+│  ────────────────┼────────┼──────────┤
+│                  │        │           │
+│  Control         │   90   │    99     │
+│  ────────────────┼────────┼──────────┤
+│  Sensor          │   80   │    90     │
+│  Acquisition     │        │           │
+│  ────────────────┼────────┼──────────┤
+│  Vision          │   60   │    40     │
+│  ────────────────┼────────┼──────────┤
+│  Path Planning   │   65   │    50     │
+│  ────────────────┼────────┼──────────┤
+│                  │        │           │
+│  Mode            │ Search │Emergency  │
+│  ────────────────┼────────┼──────────┤
+│                  │        │           │
+│  Control         │   90   │    80     │
+│  ────────────────┼────────┼──────────┤
+│  Sensor          │   85   │    70     │
+│  Acquisition     │        │           │
+│  ────────────────┼────────┼──────────┤
+│  Vision          │   80   │    60     │
+│  ────────────────┼────────┼──────────┤
+│  Path Planning   │   80   │    99     │
+│  ────────────────┼────────┼──────────┤
+│                                       │
+└───────────────────────────────────────┘
+```
 *Figure 28: Dynamic priority adjustment based on robot operational mode, showing how priorities shift to optimize for different tasks.*
 
 **Implementing Mode-Based Priority Shifts**:
 
 ```cpp
-// Example C++ code for dynamic priority management
-void set_robot_mode(RobotMode mode) {
-  pid_task->set_priority(priorities_table[mode][TASK_PID]);
-  vision_task->set_priority(priorities_table[mode][TASK_VISION]);
-  planning_task->set_priority(priorities_table[mode][TASK_PLANNING]);
-  // etc.
+/**
+ * Dynamic priority management based on robot operational mode
+ * 
+ * Different robot modes (normal, precision, search) require different
+ * priority configurations to optimize performance for the current task.
+ */
+bool set_robot_mode(RobotMode mode) {
+    // Validate input mode
+    if (!is_valid_mode(mode)) {
+        log_error("Invalid robot mode requested");
+        return false;  // Indicate failure
+    }
+    
+    // Get current mode to detect changes
+    RobotMode previous_mode = current_robot_mode;
+    
+    // Skip if no actual mode change
+    if (mode == previous_mode) {
+        return true;  // Nothing to do
+    }
+    
+    try {
+        // Log mode transition for diagnostics
+        log_info("Changing robot mode: " + 
+                 mode_to_string(previous_mode) + " -> " + 
+                 mode_to_string(mode));
+        
+        // Apply priority changes for each task based on the mode
+        // The priorities_table contains the appropriate RT priority
+        // for each task in each mode
+        
+        // Update control task priorities
+        pid_task->set_priority(priorities_table[mode][TASK_PID]);
+        motion_control_task->set_priority(priorities_table[mode][TASK_MOTION]);
+        
+        // Update perception task priorities
+        vision_task->set_priority(priorities_table[mode][TASK_VISION]);
+        lidar_task->set_priority(priorities_table[mode][TASK_LIDAR]);
+        
+        // Update planning task priorities
+        planning_task->set_priority(priorities_table[mode][TASK_PLANNING]);
+        path_planning_task->set_priority(priorities_table[mode][TASK_PATH]);
+        
+        // Update mode state after all changes succeed
+        current_robot_mode = mode;
+        
+        log_info("Mode change complete");
+        return true;  // Indicate success
+        
+    } catch (const std::exception& e) {
+        // Handle priority change failures
+        log_error("Failed to change mode: " + std::string(e.what()));
+        
+        // Attempt to restore previous priorities
+        // (not shown for brevity)
+        
+        return false;  // Indicate failure
+    }
 }
 ```
 
@@ -1446,26 +2247,77 @@ void set_robot_mode(RobotMode mode) {
 Advanced robotics systems can even adjust priorities automatically based on performance metrics:
 
 ```cpp
-// Example of a self-tuning priority adjustor
+/**
+ * Self-tuning priority adjustment system for real-time robotics
+ * 
+ * This system dynamically balances priorities based on runtime performance,
+ * ensuring critical tasks meet deadlines while preventing starvation.
+ */
 void monitor_and_adjust_priorities() {
-  while (running) {
-    // Check for timing violations
-    if (pid_controller->deadline_misses > threshold) {
-      // Increase priority of PID controller
-      pid_controller->increase_priority();
-      
-      // Potentially decrease priority of less critical tasks
-      vision_system->decrease_priority();
-    }
+    // Configuration constants (would typically be parameterized)
+    const int DEADLINE_MISS_THRESHOLD = 5;     // Max acceptable missed deadlines
+    const int MAX_STARVATION_MS = 1000;        // Max time without execution
+    const int ADJUSTMENT_INTERVAL_MS = 100;    // How often to check and adjust
+    const int MAX_PRIORITY_CHANGES = 5;        // Limit changes per minute
     
-    // Check for starvation
-    if (vision_system->last_execution_time > max_starvation_time) {
-      // Temporarily boost priority to ensure progress
-      vision_system->temporary_priority_boost();
-    }
+    // Track rate of adjustments to prevent oscillation
+    int recent_adjustments = 0;
+    int64_t last_adjustment_time = get_current_time_ms();
     
-    sleep(adjustment_interval);
-  }
+    // Main monitoring loop
+    while (running) {
+        try {
+            // Reset adjustment counter every minute
+            if (get_current_time_ms() - last_adjustment_time > 60000) {
+                recent_adjustments = 0;
+                last_adjustment_time = get_current_time_ms();
+            }
+            
+            // Only make adjustments if we haven't reached the limit
+            if (recent_adjustments < MAX_PRIORITY_CHANGES) {
+                // ---- Critical Task Management ----
+                // Check for timing violations in high-priority tasks
+                if (pid_controller->deadline_misses > DEADLINE_MISS_THRESHOLD) {
+                    log_warning("PID controller missing deadlines, adjusting priorities");
+                    
+                    // Increase priority of critical control task
+                    pid_controller->increase_priority();
+                    
+                    // Decrease priority of less critical tasks to compensate
+                    // This maintains overall system balance
+                    vision_system->decrease_priority();
+                    
+                    recent_adjustments++;
+                }
+                
+                // ---- Starvation Prevention ----
+                // Ensure lower-priority tasks eventually get CPU time
+                int64_t vision_idle_time = get_current_time_ms() - 
+                                        vision_system->last_execution_time;
+                                        
+                if (vision_idle_time > MAX_STARVATION_MS) {
+                    log_info("Vision system experiencing starvation, temporary boost");
+                    
+                    // Apply temporary priority boost
+                    // This will automatically expire after execution
+                    vision_system->temporary_priority_boost();
+                    
+                    recent_adjustments++;
+                }
+            }
+            
+            // Sleep until next check interval
+            // Using adaptive interval based on system load could be even better
+            sleep_ms(ADJUSTMENT_INTERVAL_MS);
+            
+        } catch (const std::exception& e) {
+            // Defensive exception handling to prevent monitor failure
+            log_error("Priority monitor exception: " + std::string(e.what()));
+            
+            // Continue operation despite errors
+            sleep_ms(ADJUSTMENT_INTERVAL_MS * 2); // Sleep longer after error
+        }
+    }
 }
 ```
 
@@ -1504,7 +2356,36 @@ After implementing priority assignments, it's crucial to verify they're working 
    - Missed deadlines
    - Starvation of lower-priority tasks
 
-![Diagram: Schedule Visualization with Kernelshark](https://placeholder-image.com/kernelshark_visualization.png)
+```
+┌───── Schedule Visualization with Kernelshark ─────┐
+│                                                   │
+│  Time →                                           │
+│  ┌───────────────────────────────────────────────┐│
+│  │CPU 0 │████│    │████████│    │████│    │█████ ││
+│  │      │Sys │    │ System │    │Sys │    │System││
+│  │      │Task│    │ Task   │    │Task│    │Task  ││
+│  └───────────────────────────────────────────────┘│
+│  ┌───────────────────────────────────────────────┐│
+│  │CPU 1 │███████████████████████████████████████ ││
+│  │      │          PID Controller                ││
+│  │      │          (Priority 99)                 ││
+│  └───────────────────────────────────────────────┘│
+│  ┌───────────────────────────────────────────────┐│
+│  │CPU 2 │██████████│      │██████████│     │████ ││
+│  │      │ Sensor   │      │ Sensor   │     │Sensr││
+│  │      │Processing│      │Processing│     │Proc ││
+│  └───────────────────────────────────────────────┘│
+│  ┌───────────────────────────────────────────────┐│
+│  │CPU 3 │██████████████│         │███████████████││
+│  │      │ Vision Processing      │ Vision Proc   ││
+│  │      │ (Priority 60)          │ (Priority 60) ││
+│  └───────────────────────────────────────────────┘│
+│                                                   │
+│  Events:                                          │
+│  ▼ = Preemption   × = Wakeup   ✱ = Priority Change│
+│                                                   │
+└───────────────────────────────────────────────────┘
+```
 *Figure 29: Example visualization of process scheduling using Kernelshark, showing scheduling events, preemptions, and execution timelines.*
 
 By properly configuring process priorities and verifying their effectiveness, you create a robotics system that maintains both deterministic real-time behavior for critical tasks and appropriate progress for all necessary functions—achieving the balance needed for reliable operation.
@@ -1540,7 +2421,71 @@ These effects translate to significant performance benefits:
 - **Branch prediction**: The CPU builds up history-based prediction of your code's execution paths
 - **Pre-fetching**: The CPU learns which data to pre-load based on access patterns
 
-![Diagram: CPU Affinity Cache Effects](https://placeholder-image.com/cpu_affinity_cache.png)
+```
+┌───── CPU Affinity Cache Effects ─────┐
+│                                      │
+│  Without CPU Affinity:               │
+│  ┌─────────────────────────────────┐ │
+│  │                                 │ │
+│  │  Core 0       Core 1           │ │
+│  │  ┌─────┐      ┌─────┐          │ │
+│  │  │L1 $ │      │L1 $ │          │ │
+│  │  └─────┘      └─────┘          │ │
+│  │     │            │             │ │
+│  │  Process A       │             │ │
+│  │  Initial Run     │             │ │
+│  │                  │             │ │
+│  │  Cache Hit Rate: 0%            │ │
+│  │                                 │ │
+│  └─────────────────────────────────┘ │
+│                                      │
+│  Process A moved to core 1 by OS:    │
+│  ┌─────────────────────────────────┐ │
+│  │                                 │ │
+│  │  Core 0       Core 1           │ │
+│  │  ┌─────┐      ┌─────┐          │ │
+│  │  │L1 $ │      │L1 $ │          │ │
+│  │  └─────┘      └─────┘          │ │
+│  │                  │             │ │
+│  │                Process A       │ │
+│  │                Second Run      │ │
+│  │                                 │ │
+│  │  Cache Hit Rate: 0% (cold start)│ │
+│  │                                 │ │
+│  └─────────────────────────────────┘ │
+│                                      │
+│  With CPU Affinity:                  │
+│  ┌─────────────────────────────────┐ │
+│  │                                 │ │
+│  │  Core 0       Core 1           │ │
+│  │  ┌─────┐      ┌─────┐          │ │
+│  │  │L1 $ │      │L1 $ │          │ │
+│  │  └─────┘      └─────┘          │ │
+│  │     │                          │ │
+│  │  Process A                     │ │
+│  │  Initial Run                   │ │
+│  │                                 │ │
+│  │  Cache Hit Rate: 0%            │ │
+│  │                                 │ │
+│  └─────────────────────────────────┘ │
+│                                      │
+│  Process A stays on core 0:          │
+│  ┌─────────────────────────────────┐ │
+│  │                                 │ │
+│  │  Core 0       Core 1           │ │
+│  │  ┌─────┐      ┌─────┐          │ │
+│  │  │L1 $ │      │L1 $ │          │ │
+│  │  └─────┘      └─────┘          │ │
+│  │     │                          │ │
+│  │  Process A                     │ │
+│  │  Second Run                    │ │
+│  │                                 │ │
+│  │  Cache Hit Rate: 90%           │ │
+│  │                                 │ │
+│  └─────────────────────────────────┘ │
+│                                      │
+└──────────────────────────────────────┘
+```
 *Figure 30: Visualization of cache hit rates with and without CPU affinity, showing the dramatic performance improvement with consistent core assignment.*
 
 Imagine a robot's PID controller that needs to run every 5ms. With consistent CPU affinity:
@@ -1576,7 +2521,35 @@ Imagine a library where each researcher (CPU core) has their own collection of b
 - Borrowing from a colleague across the room takes longer
 - Getting a book from the central repository (main memory) takes longest
 
-![Diagram: NUMA Memory Access](https://placeholder-image.com/numa_memory_access.png)
+```
+┌───── NUMA Memory Access ─────┐
+│                              │
+│  Core 0       Core 1         │
+│  ┌────┐       ┌────┐         │
+│  │    │       │    │         │
+│  └────┘       └────┘         │
+│    │            │            │
+│    │            │            │
+│    ▼            ▼            │
+│  ┌────┐       ┌────┐         │
+│  │Loc │       │Loc │         │
+│  │Mem │◄──┐   │Mem │         │
+│  └────┘   │   └────┘         │
+│    ▲      │     ▲            │
+│    │      │     │            │
+│    │      └─────┘            │
+│    │      Remote             │
+│    │      Access             │
+│    │      Slower             │
+│    │                         │
+│    │                         │
+│  ┌─────────────────────────┐ │
+│  │    Main Memory (RAM)    │ │
+│  │       Slowest           │ │
+│  └─────────────────────────┘ │
+│                              │
+└──────────────────────────────┘
+```
 *Figure 31: NUMA memory access model showing how memory access times vary depending on which core is accessing which memory region.*
 
 In real numbers:
@@ -1606,7 +2579,57 @@ While invisible to your code, this protocol creates significant overhead:
    
    What should be a 100ns operation becomes 200-300ns due to coherency overhead!
 
-![Diagram: Cache Line Ping-Pong](https://placeholder-image.com/cache_line_pingpong.png)
+```
+┌───── Cache Line Ping-Pong ─────┐
+│                                │
+│  Time →                        │
+│                                │
+│  Core 0    │ Core 1            │
+│  ┌─────────┴─────────┐         │
+│  │ ┌───────────────┐ │         │
+│  │ │ Shared Data:  │ │         │
+│  │ │ Cache Line X  │ │         │
+│  │ └───────────────┘ │         │
+│  │ Process A writes  │         │
+│  │ to shared data    │         │
+│  └───────────────────┘         │
+│            │                   │
+│            ▼                   │
+│  ┌───────────────────┐         │
+│  │ Coherency Protocol│         │
+│  │ Invalidates Line X│         │
+│  │ on Core 1         │         │
+│  └───────────────────┘         │
+│            │                   │
+│            ▼                   │
+│  Core 0    │ Core 1            │
+│            │ ┌───────────────┐ │
+│            │ │ Process B     │ │
+│            │ │ reads shared  │ │
+│            │ │ data - MISS!  │ │
+│            │ └───────────────┘ │
+│            │         │         │
+│            │         ▼         │
+│            │ ┌───────────────┐ │
+│            │ │Cache line X   │ │
+│            │ │transferred    │ │
+│            │ │from Core 0    │ │
+│            │ └───────────────┘ │
+│            │                   │
+│           ...                  │
+│            │                   │
+│            ▼                   │
+│  Core 0    │ Core 1            │
+│  ┌─────────┴─────────┐         │
+│  │ ┌───────────────┐ │         │
+│  │ │ Process A     │ │         │
+│  │ │ writes again  │ │         │
+│  │ │ - PING PONG!  │ │         │
+│  │ └───────────────┘ │         │
+│  └───────────────────┘         │
+│                                │
+└────────────────────────────────┘
+```
 *Figure 32: Visualization of the cache line ping-pong effect showing how shared data causes costly cache coherency traffic between cores.*
 
 **Practical Solutions for Real-Time Systems**
@@ -1687,7 +2710,58 @@ Let's examine the entire vision pipeline to understand where bottlenecks occur a
    - Coordinate transformation
    - Control input generation
 
-![Diagram: Computer Vision Pipeline](https://placeholder-image.com/vision_pipeline.png)
+```
+┌───── Computer Vision Pipeline ─────┐
+│                                    │
+│  ┌────────────────────┐            │
+│  │ Image Acquisition  │            │
+│  │ ┌─────────────────┐│            │
+│  │ │ Raw pixel data  ││            │
+│  │ └─────────────────┘│            │
+│  └────────┬───────────┘            │
+│           │                        │
+│           ▼                        │
+│  ┌────────────────────┐            │
+│  │   Pre-processing   │            │
+│  │ ┌─────────────────┐│            │
+│  │ │Normalized image ││            │
+│  │ └─────────────────┘│            │
+│  └────────┬───────────┘            │
+│           │                        │
+│           ▼                        │
+│  ┌────────────────────┐            │
+│  │ Feature Extraction │            │
+│  │ ┌─────────────────┐│            │
+│  │ │  Image features ││            │
+│  │ └─────────────────┘│            │
+│  └────────┬───────────┘            │
+│           │                        │
+│           ▼                        │
+│  ┌────────────────────┐            │
+│  │  Object Detection  │            │
+│  │ ┌─────────────────┐│            │
+│  │ │ Detected objects││            │
+│  │ └─────────────────┘│            │
+│  └────────┬───────────┘            │
+│           │                        │
+│           ▼                        │
+│  ┌────────────────────┐            │
+│  │      Tracking      │            │
+│  │ ┌─────────────────┐│            │
+│  │ │Object trajectories│           │
+│  │ └─────────────────┘│            │
+│  └────────┬───────────┘            │
+│           │                        │
+│           ▼                        │
+│  ┌────────────────────┐            │
+│  │Decision Integration│            │
+│  │ ┌─────────────────┐│            │
+│  │ │Control commands ││            │
+│  │ └─────────────────┘│            │
+│  └────────────────────┘            │
+│                                    │
+└────────────────────────────────────┘
+```
 *Figure 33: Complete computer vision pipeline showing data flow from image acquisition through processing to decision integration.*
 
 **Visualizing the Pipeline's Computational Profile**
@@ -1728,71 +2802,326 @@ YOLO (You Only Look Once) revolutionized object detection by using a single neur
 - **Speed advantage**: Typically faster than previous approaches (though still computationally intensive)
 - **Global context**: The network "sees" the entire image, improving accuracy
 
-![Diagram: YOLO Architecture](https://placeholder-image.com/yolo_architecture.png)
+```
+┌───── YOLO Architecture ─────┐
+│                             │
+│  Input Image                │
+│  ┌───────────────┐          │
+│  │               │          │
+│  │     416x416   │          │
+│  │               │          │
+│  └───────┬───────┘          │
+│          │                  │
+│          ▼                  │
+│  ┌───────────────┐          │
+│  │  Convolutional│          │
+│  │    Backbone   │          │
+│  │  (DarkNet-53) │          │
+│  └┬──────┬──────┬┘          │
+│   │      │      │           │
+│   ▼      ▼      ▼           │
+│  Small  Medium  Large       │
+│  Scale  Scale   Scale       │
+│  Detect Detect  Detect      │
+│   │      │      │           │
+│   └──────┴──────┘           │
+│          │                  │
+│          ▼                  │
+│  ┌───────────────┐          │
+│  │Non-Max        │          │
+│  │Suppression    │          │
+│  └───────┬───────┘          │
+│          │                  │
+│          ▼                  │
+│  ┌───────────────┐          │
+│  │  Detections   │          │
+│  │ ┌─────┐┌─────┐│          │
+│  │ │Ball ││Person││         │
+│  │ └─────┘└─────┘│          │
+│  │ ┌─────┐       │          │
+│  │ │Chair │       │          │
+│  │ └─────┘       │          │
+│  └───────────────┘          │
+│                             │
+└─────────────────────────────┘
+```
 *Figure 34: Simplified YOLO architecture showing the single-pass design that processes the entire image to directly predict object locations and classes.*
 
-**The Inner Workings of YOLO: A Simplified Explanation**
+**The Inner Workings of YOLO: A Detailed Architecture Explanation**
 
-To understand YOLO's computational demands, let's look at its core architecture:
+To fully understand YOLO's computational demands and optimization opportunities, we need to examine its architecture in detail:
 
-1. **Input Processing**: 
+1. **Input Processing Stage**: 
    - Image is resized to a fixed dimension (typically 416×416 or 608×608 pixels)
    - Pixel values normalized to range [0,1]
-   - Can consume significant memory bandwidth
+   - Data organization optimized for GPU processing (NCHW format)
+   - Memory requirements: ~1-2MB for input tensor
+   - Operations: ~500K (primarily memory transfers and basic arithmetic)
 
 2. **Feature Extraction Backbone**:
-   - Deep convolutional neural network (often DarkNet)
-   - Many convolutional layers, each performing millions of operations
-   - Creates "feature maps" at different scales
-   - Most computationally intensive part of the pipeline
+   - **Architecture Evolution**:
+     - YOLOv1: Custom architecture with 24 convolutional layers
+     - YOLOv2: Darknet-19 (19 convolutional layers)
+     - YOLOv3: Darknet-53 (53 convolutional layers with residual connections)
+     - YOLOv4: CSPDarknet-53 (modified Darknet with Cross-Stage Partial connections)
+     - YOLOv5: Custom CSP-based architecture with focus on efficiency
+     - YOLOv8: Advanced backbone with improved parameter efficiency
+   
+   - **Residual Connections**: Allow deeper networks by providing gradient shortcuts
+   
+   - **Feature Pyramid Network (FPN)**:
+     - Creates multi-scale feature maps at different resolutions
+     - Enables detection of objects at different sizes
+     - Output features at 3 scales:
+       - Large scale features (small stride): Detect small objects
+       - Medium scale features (medium stride): Detect medium objects
+       - Small scale features (large stride): Detect large objects
+   
+   - **Computational Profile**:
+     - Parameters: 
+       - YOLOv3-tiny: ~8.7 million parameters
+       - YOLOv3: ~61.5 million parameters
+     - Operations: ~5-40 billion multiply-accumulate operations (MACs)
+     - Memory footprint: ~20-250MB depending on variant
+     - Dominant computation: 3x3 convolutions with hundreds of channels
 
 3. **Detection Heads**:
-   - Multiple detector heads for different object scales
-   - Each predicts bounding boxes and class probabilities
-   - Complex post-processing to filter and refine predictions
+   - Separate detector heads for different object scales
+   - Each prediction includes:
+     - Bounding box coordinates (x, y, width, height)
+     - Objectness score (confidence that box contains an object)
+     - Class probabilities (for multiple class detection)
+   
+   - **Anchor Boxes**:
+     - Predefined box shapes that predictions are made relative to
+     - Improves detection of objects with consistent aspect ratios
+     - Typically 3 anchors per scale, 9 total anchors
+   
+   - **Grid-Based Prediction**:
+     - Image divided into grid cells (e.g., 13x13, 26x26, 52x52)
+     - Each grid cell predicts multiple bounding boxes
+     - Total predictions: anchors × grid size² (e.g., 3×13²+3×26²+3×52² = 10,647 boxes)
+   
+   - **Output Encoding**:
+     - Box center coordinates (tx, ty): Relative to grid cell
+     - Box dimensions (tw, th): Log-scale offsets from anchor dimensions
+     - Objectness score (to): Confidence in object presence
+     - Class probabilities (c1...cn): Softmax or sigmoid across classes
 
-4. **Non-Maximum Suppression**:
-   - Removes duplicate detections
-   - Requires comparing all detections with each other
-   - CPU-bound operation that scales poorly with object count
+4. **Non-Maximum Suppression (NMS)**:
+   - Purpose: Remove duplicate detections of the same object
+   - Algorithm:
+     1. Sort all detections by confidence score
+     2. Take highest-scoring detection and add to final detections
+     3. Remove all other detections with high IoU (Intersection over Union) with this detection
+     4. Repeat until no detections remain
+   
+   - **Computational Characteristics**:
+     - CPU-bound operation (not easily parallelizable)
+     - Time complexity: O(n²) where n is number of preliminary detections
+     - Memory requirements: Relatively small (~100KB)
+     - Performance impact increases with number of detected objects
 
-**Understanding the Computational Profile of YOLO**
+**Detailed Computational Profile**
 
-On a Raspberry Pi 4, the computational breakdown for YOLOv3-tiny (a lighter variant) might look like:
+On a Raspberry Pi 4, the computational breakdown for different YOLO variants reveals why optimization is critical:
 
 ```
-YOLO Stage               | Operations | Memory Access | Typical Time
--------------------------|------------|---------------|-------------
-Input Processing         | ~500K      | ~1MB          | ~2ms
-Convolutional Backbone   | ~5 billion | ~20MB         | ~80ms
-Detection Heads          | ~100M      | ~2MB          | ~10ms
-Non-Maximum Suppression  | ~10K       | ~100KB        | ~3ms
+┌─────────────────────────────────────────────────────────────────────┐
+│              Computational Profile on Raspberry Pi                  │
+├────────────────┬───────────┬────────────┬───────────┬───────────────┤
+│ YOLO Variant   │ Parameters│ Operations │ Memory    │ Inference Time│
+├────────────────┼───────────┼────────────┼───────────┼───────────────┤
+│ YOLOv3-tiny    │   8.7M    │   5.6G     │   23MB    │  300-500ms    │
+├────────────────┼───────────┼────────────┼───────────┼───────────────┤
+│ YOLOv3         │  61.5M    │  65.9G     │  236MB    │ 1500-2500ms   │
+├────────────────┼───────────┼────────────┼───────────┼───────────────┤
+│ YOLOv4-tiny    │  6.06M    │   6.9G     │   24MB    │  250-450ms    │
+├────────────────┼───────────┼────────────┼───────────┼───────────────┤
+│ YOLOv5s        │   7.2M    │  16.5G     │   29MB    │  400-700ms    │
+├────────────────┼───────────┼────────────┼───────────┼───────────────┤
+│ YOLOv8n        │   3.2M    │   8.7G     │   13MB    │  300-500ms    │
+├────────────────┼───────────┼────────────┼───────────┼───────────────┤
+│ YOLOv12s       │   ~5M     │   ~4G      │   ~10MB   │  200ms*       │
+│ (320x320)      │           │            │           │               │
+└────────────────┴───────────┴────────────┴───────────┴───────────────┘
+* On Raspberry Pi 5 with medium precision level
 ```
 
-The convolutional backbone dominates computation time, performing billions of multiply-accumulate operations to extract features from the image.
+For our ball-tracking robot on Raspberry Pi, the computational breakdown for different YOLO variants shows where the time is spent:
 
-**Memory Access Patterns: Why They Matter**
+```
+YOLO Stage               | Operations | Memory Access | Typical Time (YOLOv3-tiny) | Typical Time (YOLOv12s)
+-------------------------|------------|---------------|----------------------------|------------------------
+Input Processing         | ~500K      | ~1-2MB        | ~2-5ms                     | ~1-3ms
+Convolutional Backbone   | ~2-5.6G    | ~10-30MB      | ~300-400ms                 | ~150-180ms
+Detection Heads          | ~50-100M   | ~2-3MB        | ~30-50ms                   | ~15-20ms
+Non-Maximum Suppression  | ~10-50K    | ~100-500KB    | ~5-20ms                    | ~3-10ms
+```
 
-An often-overlooked aspect of vision processing is memory access patterns:
+The newer YOLOv12s with a 320x320 input resolution demonstrates significant performance improvements, particularly on the Raspberry Pi 5. This makes it a more suitable option for real-time applications on resource-constrained devices.
 
-1. **Strided Convolutions**: Access non-contiguous memory locations
-2. **Layer Transitions**: Move large amounts of data between memory levels
-3. **Activation Functions**: Create additional memory traffic
+The convolutional backbone dominates computation time, performing billions of multiply-accumulate operations to extract features from the image. This is why hardware acceleration (like OpenCL, NEON SIMD, or external accelerators) can dramatically improve performance.
 
-These patterns often lead to poor cache utilization, causing the CPU to stall waiting for data. On a Raspberry Pi, this can reduce effective compute throughput by 30-50%.
+**Memory Access Patterns and Optimization Opportunities**
 
-![Diagram: Memory Access Patterns in YOLO](https://placeholder-image.com/yolo_memory_access.png)
+The memory access patterns in YOLO are particularly important for optimization:
+
+1. **Convolutional Layer Memory Patterns**:
+   - **Filter Weights**: Reused across spatial dimensions
+   - **Input Activations**: Sliding window access pattern
+   - **Output Activations**: Written once, read multiple times in subsequent layers
+
+2. **Optimization Approaches**:
+   - **Memory Tiling**: Process data in cache-sized blocks
+   - **Weight Quantization**: Reduce precision (float32 → int8)
+   - **Winograd Convolution**: Reduce multiplication count
+   - **Channel Pruning**: Remove unnecessary channels
+   - **Layer Fusion**: Combine operations to reduce memory traffic
+
+```
+┌───── Memory Access Patterns in YOLO ─────┐
+│                                          │
+│  Ideal Memory Access (Contiguous):       │
+│  Data:    [0][1][2][3][4][5][6][7]...    │
+│  Access:   ↓  ↓  ↓  ↓  ↓  ↓  ↓  ↓        │
+│  Timeline: ───────────────────►          │
+│                                          │
+│  Convolutional Access (Strided):         │
+│  Data:    [0][1][2][3][4][5][6][7]...    │
+│  Access:   ↓     ↓     ↓     ↓           │
+│           [0]   [3]   [6]   [9]...       │
+│  Timeline: ───────────────────►          │
+│                                          │
+│  Channel-wise Access (Non-local):        │
+│  Data:    [R0][G0][B0][R1][G1][B1]...    │
+│  Access:   ↓           ↓                 │
+│           [R0]        [R1]...            │
+│  Timeline: ─────────────────────►        │
+│                                          │
+│  Result: Cache misses & stalled pipeline │
+│                                          │
+└──────────────────────────────────────────┘
+```
 *Figure 35: Memory access patterns in YOLO showing how convolutional operations access non-contiguous memory, leading to cache inefficiency.*
+
+**Architecture Variants and Performance/Accuracy Tradeoffs**
+
+YOLO offers several architectural variants optimized for different performance targets:
+
+1. **Full-Scale Models** (YOLOv3, YOLOv4, YOLOv5m/l/x):
+   - High parameter count (30M-140M)
+   - Excellent detection accuracy (mAP 40-55%)
+   - Suitable for GPU acceleration
+   - Too slow for real-time on Raspberry Pi (1-3 seconds per frame)
+
+2. **Medium-Scale Models** (YOLOv5s, YOLOv8s):
+   - Moderate parameter count (7-14M)
+   - Good detection accuracy (mAP 35-45%)
+   - Real-time capable on desktop GPUs
+   - Borderline real-time on Raspberry Pi (400-700ms per frame)
+
+3. **Tiny Models** (YOLOv3-tiny, YOLOv4-tiny, YOLOv5n, YOLOv8n):
+   - Low parameter count (3-9M)
+   - Reduced accuracy (mAP 25-35%)
+   - Real-time capable on embedded GPUs
+   - Near real-time on Raspberry Pi (250-500ms per frame)
+
+4. **Specialized Models** (YOLO-Fastest, YOLOX-Nano):
+   - Ultra-low parameter count (0.5-2M)
+   - Further reduced accuracy (mAP 20-25%)
+   - Designed specifically for edge devices
+   - Real-time on Raspberry Pi (100-200ms per frame)
+
+**Implementation on Raspberry Pi: Practical Considerations**
+
+For the ball-tracking robot, several specialized implementations can significantly improve performance:
+
+1. **Framework-Specific Optimizations**:
+   - **TensorFlow Lite**: 
+     - 8-bit quantization for 3-4x speedup
+     - GPU delegate for 2x additional speedup
+   - **ONNX Runtime**: 
+     - Accelerated kernels for ARM CPUs
+     - Graph optimizations for 1.5-2x speedup
+   - **OpenCV DNN**: 
+     - Integrated with other vision processing
+     - NEON SIMD acceleration for key operations
+
+2. **Task-Specific Model Pruning**:
+   - Remove classes not needed for ball detection
+   - Prune channels with minimal contribution to accuracy
+   - Specialize the model for specific ball appearances
+   - Expected improvement: 30-50% speedup with minimal accuracy loss
+
+3. **Resolution and Precision Adaptation**:
+   - Dynamic input resolution based on estimated ball distance
+   - Mixed precision (fp16 for convolutional layers, int8 for others)
+   - Single-class confidence threshold optimization
+   - Expected improvement: 40-60% speedup with minimal detection loss
 
 **The "Cold Start" Problem in Vision Systems**
 
 For real-time robotics, the first frame processed by YOLO is particularly problematic:
 
-- **Cold Cache State**: No data is preloaded in caches
-- **Initialization Overhead**: Various buffers and acceleration structures need setup
-- **First-Frame Jitter**: Can be 2-3x slower than subsequent frames
+1. **Cache Initialization Overhead**:
+   - Initial cache state is empty ("cold")
+   - Loading weights and tensor data causes cache misses
+   - Subsequent frames benefit from warmed caches
+   - First frame typically 2-3x slower than steady state
 
-This "first-frame problem" is particularly troublesome for intermittent vision processing.
+2. **Memory Management Overhead**:
+   - Memory allocation for tensors and intermediate buffers
+   - GPU/accelerator initialization and buffer setup
+   - Graph optimization and compilation (for some frameworks)
+   - JIT (Just-In-Time) compilation for specialized kernels
+
+3. **Scheduling and Prediction Limitations**:
+   - Initial performance difficult to predict precisely
+   - Can cause deadline misses or system instability
+   - Particularly problematic for intermittent processing
+
+**Mitigating Cold Start Effects**:
+
+1. **Prewarming Strategy**:
+   - Run inference on dummy frame during initialization
+   - Preload weights into CPU cache and GPU memory
+   - Pre-allocate and touch all required memory pages
+   - Expected improvement: 70-90% reduction in first-frame latency
+
+2. **Persistent Processes**:
+   - Keep inference engine active rather than restarting
+   - Maintain warmed caches across detection requests
+   - Use thread pooling for worker threads
+   - Expected improvement: Near-elimination of cold start overhead
+
+3. **Progressive Refinement**:
+   - Start with very low resolution for first frame
+   - Progressively increase resolution as system stabilizes
+   - Expected improvement: More consistent initial response time
+
+**Architectural Integration with Control and Sensor Fusion**
+
+Integrating YOLO detection with the broader robotics system requires careful architectural design:
+
+1. **Multi-Threaded Pipeline**:
+   ```
+   Thread 1: Image Acquisition → Pre-processing → Queue
+   Thread 2: Dequeue → YOLO Inference → Detection Post-processing
+   Thread 3: Tracking → Sensor Fusion Integration
+   ```
+
+2. **Temporal Integration**:
+   - Detection timestamps synchronized with control system
+   - Prediction-based tracking between detections
+   - Late detection handling through retroactive state correction
+
+3. **Failure Resilience**:
+   - Graceful degradation if detection fails or slows
+   - Fall back to simpler algorithms if thermal throttling occurs
+   - Detection confidence thresholds adapted to current needs
+
+By understanding these detailed architectural aspects of YOLO, you can make informed decisions about model selection, optimization approaches, and system integration for your ball-tracking robot.
 
 > **Looking Ahead to Module 2: YOLO Computer Vision**  
 > We'll explore these YOLO architectural concepts in much greater depth in Module 2, including techniques for model optimization, quantization, and hardware acceleration. You'll have the opportunity to modify the YOLO configuration and observe how different architectural choices affect detection accuracy and speed.
@@ -1853,7 +3182,34 @@ Several strategies can reduce the computational load:
        return get_current_tracking_results()
    ```
 
-![Diagram: ROI and Frame Decimation](https://placeholder-image.com/roi_frame_decimation.png)
+```
+┌───── ROI and Frame Decimation ─────┐
+│                                    │
+│  Region of Interest:               │
+│  ┌────────────────────────────────┐│
+│  │                                ││
+│  │                                ││
+│  │         ┌──────────┐          ││
+│  │         │   ROI    │          ││
+│  │         │  around  │          ││
+│  │         │   ball   │          ││
+│  │         └──────────┘          ││
+│  │                                ││
+│  │                                ││
+│  └────────────────────────────────┘│
+│                                    │
+│  Frame Decimation:                 │
+│                                    │
+│  Frame: 0    1    2    3    4      │
+│         │    │    │    │    │      │
+│         ▼    ▼    ▼    ▼    ▼      │
+│  Proc:  FULL │    │    │    FULL   │
+│              │    │    │           │
+│      Low-cost tracking between     │
+│      full YOLO detections          │
+│                                    │
+└────────────────────────────────────┘
+```
 *Figure 36: Visualization of ROI processing and frame decimation techniques, showing how they reduce computational requirements while maintaining tracking performance.*
 
 3. **Resolution Scaling**:
@@ -1921,7 +3277,39 @@ Several strategies can reduce the computational load:
    - Organize computations to maximize spatial and temporal locality
    - Can improve performance by 20-40% on cache-limited systems
 
-![Diagram: Memory Optimization Techniques](https://placeholder-image.com/memory_optimization.png)
+```
+┌───── Memory Optimization Techniques ─────┐
+│                                          │
+│  Standard Memory Layout:                 │
+│  ┌────────────────────────────────────┐  │
+│  │Row 0: [R][G][B][R][G][B][R][G][B]...│  │
+│  │Row 1: [R][G][B][R][G][B][R][G][B]...│  │
+│  │Row 2: [R][G][B][R][G][B][R][G][B]...│  │
+│  └────────────────────────────────────┘  │
+│                                          │
+│  Cache-Aligned Memory Layout:            │
+│  ┌────────────────────────────────────┐  │
+│  │Cache Line 0                         │  │
+│  │[Row0 RGB...][Padding]              │  │
+│  │Cache Line 1                         │  │
+│  │[Row1 RGB...][Padding]              │  │
+│  └────────────────────────────────────┘  │
+│                                          │
+│  Tile-Based Processing:                  │
+│  ┌───────────────────────────────────┐   │
+│  │┌───┐┌───┐┌───┐┌───┐               │   │
+│  ││Tile││Tile││Tile││Tile│           │   │
+│  │└───┘└───┘└───┘└───┘               │   │
+│  │┌───┐┌───┐┌───┐┌───┐               │   │
+│  ││Tile││Tile││Tile││Tile│           │   │
+│  │└───┘└───┘└───┘└───┘               │   │
+│  │                                   │   │
+│  │Process one cache-sized tile       │   │
+│  │at a time for better cache usage   │   │
+│  └───────────────────────────────────┘   │
+│                                          │
+└──────────────────────────────────────────┘
+```
 *Figure 37: Memory optimization techniques showing the impact of alignment, zero-copy processing, and cache-conscious algorithm design.*
 
 #### 11.4 Balancing Vision Processing with Control Loops: The Integration Challenge
@@ -1977,7 +3365,38 @@ Control Thread (high priority real-time):
   5. Repeat
 ```
 
-![Diagram: Asynchronous Vision-Control Architecture](https://placeholder-image.com/async_architecture.png)
+```
+┌───── Asynchronous Vision-Control Architecture ─────┐
+│                                                    │
+│  ┌─────────────────┐         ┌──────────────────┐  │
+│  │ Vision Thread   │         │ Control Thread   │  │
+│  │ (Core 3, PT-60) │         │ (Core 1, RT-95)  │  │
+│  │                 │         │                  │  │
+│  │ ┌─────────────┐ │         │ ┌──────────────┐ │  │
+│  │ │ Capture     │ │         │ │Read Shared   │ │  │
+│  │ │ Image       │ │         │ │State         │ │  │
+│  │ └──────┬──────┘ │         │ └───────┬──────┘ │  │
+│  │        │        │         │         │        │  │
+│  │ ┌──────▼──────┐ │         │ ┌───────▼──────┐ │  │
+│  │ │Process with │ │         │ │Apply Control │ │  │
+│  │ │YOLO         │ │         │ │Algorithms    │ │  │
+│  │ └──────┬──────┘ │         │ └───────┬──────┘ │  │
+│  │        │        │         │         │        │  │
+│  │ ┌──────▼──────┐ │         │ ┌───────▼──────┐ │  │
+│  │ │Update       │ │         │ │Send Commands │ │  │
+│  │ │Shared State │ │◄───────►│ │to Motors     │ │  │
+│  │ └─────────────┘ │         │ └───────┬──────┘ │  │
+│  │                 │         │         │        │  │
+│  │ 10-20 Hz        │         │ ┌───────▼──────┐ │  │
+│  │                 │         │ │Wait for Next │ │  │
+│  │                 │         │ │Control Cycle │ │  │
+│  │                 │         │ └──────────────┘ │  │
+│  │                 │         │                  │  │
+│  │                 │         │ 100-200 Hz       │  │
+│  └─────────────────┘         └──────────────────┘  │
+│                                                    │
+└────────────────────────────────────────────────────┘
+```
 *Figure 38: Asynchronous vision-control architecture showing separate processing paths with different priorities and timing requirements.*
 
 This architecture provides several key benefits:
@@ -2083,7 +3502,33 @@ Core 2: Sensor fusion, LiDAR processing, and tracking
 Core 3: YOLO vision processing
 ```
 
-![Diagram: Resource Allocation for Ball Tracking](https://placeholder-image.com/resource_allocation.png)
+```
+┌───── Resource Allocation for Ball Tracking ─────┐
+│                                                 │
+│   ┌─────────┐    ┌─────────┐    ┌─────────┐    │
+│   │ Core 0  │    │ Core 1  │    │ Core 2  │    │
+│   └─────────┘    └─────────┘    └─────────┘    │
+│        │              │              │         │
+│        ▼              ▼              ▼         │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐   │
+│  │ OS Tasks │   │ Control  │   │ Sensor   │   │
+│  │ Standard │   │ RT-95    │   │ Fusion   │   │
+│  │ Priority │   │          │   │ RT-80    │   │
+│  └──────────┘   └──────────┘   └──────────┘   │
+│                                                │
+│       ┌─────────┐          ┌─────────┐        │
+│       │ Core 3  │          │ Memory  │        │
+│       └─────────┘          └─────────┘        │
+│            │                    │             │
+│            ▼                    ▼             │
+│       ┌──────────┐         ┌──────────┐      │
+│       │ Vision   │         │ Shared   │      │
+│       │ RT-60    │◄───────►│ State    │      │
+│       │          │         │ Data     │      │
+│       └──────────┘         └──────────┘      │
+│                                               │
+└───────────────────────────────────────────────┘
+```
 *Figure 39: Hardware resource allocation for the ball-tracking robot showing core assignment and priority levels for different subsystems.*
 
 **Software Architecture**:
@@ -2155,7 +3600,43 @@ In robotics, no single sensor can provide all the information needed for reliabl
 | **IMU** | High update rate (1000Hz+)<br>Measures orientation<br>Detects motion directly | Position drift over time<br>Affected by vibration<br>Requires calibration |
 | **Wheel Encoders** | Very precise local motion<br>High update rate<br>Low computational cost | Wheel slip causes errors<br>No environmental awareness<br>Accumulates errors over distance |
 
-![Diagram: Sensor Characteristics Comparison](https://placeholder-image.com/sensor_comparison.png)
+```
+┌───── Sensor Characteristics Comparison ─────┐
+│                                             │
+│  ┌────────────┐   ┌────────────┐            │
+│  │   Camera   │   │   LIDAR    │            │
+│  │ ┌─────────┐│   │ ┌─────────┐│            │
+│  │ │Resolution││   │ │Precision││            │
+│  │ │███████  ││   │ │█████    ││            │
+│  │ └─────────┘│   │ └─────────┘│            │
+│  │ ┌─────────┐│   │ ┌─────────┐│            │
+│  │ │Color    ││   │ │Color    ││            │
+│  │ │████████ ││   │ │         ││            │
+│  │ └─────────┘│   │ └─────────┘│            │
+│  │ ┌─────────┐│   │ ┌─────────┐│            │
+│  │ │Depth    ││   │ │Depth    ││            │
+│  │ │         ││   │ │████████ ││            │
+│  │ └─────────┘│   │ └─────────┘│            │
+│  └────────────┘   └────────────┘            │
+│                                             │
+│  ┌────────────┐   ┌────────────┐            │
+│  │    IMU     │   │  Encoders  │            │
+│  │ ┌─────────┐│   │ ┌─────────┐│            │
+│  │ │Update   ││   │ │Precision││            │
+│  │ │Rate     ││   │ │Local    ││            │
+│  │ │████████ ││   │ │███████  ││            │
+│  │ └─────────┘│   │ └─────────┘│            │
+│  │ ┌─────────┐│   │ ┌─────────┐│            │
+│  │ │Drift    ││   │ │Long-term││            │
+│  │ │████     ││   │ │Accuracy ││            │
+│  │ └─────────┘│   │ │█        ││            │
+│  └────────────┘   └────────────┘            │
+│                                             │
+│  Complementary strengths and weaknesses     │
+│  make sensor fusion necessary               │
+│                                             │
+└─────────────────────────────────────────────┘
+```
 *Figure 40: Comparison of different sensor types showing their strengths, limitations, and complementary nature for robotics applications.*
 
 **Building Intuition: The Multi-Witness Analogy**
@@ -2187,7 +3668,45 @@ State estimation is the process of inferring these variables from sensor measure
 - **Asynchronous**: Different sensors update at different rates
 - **Occasionally wrong**: Sensors can sometimes fail completely
 
-![Diagram: State Estimation Problem](https://placeholder-image.com/state_estimation.png)
+```
+┌───── State Estimation Problem ─────┐
+│                                    │
+│  True World State                  │
+│  ┌───────────────────────┐         │
+│  │ Robot Position: (x,y,θ)│         │
+│  │ Ball Position: (bx,by,bz)│       │
+│  │ Ball Velocity: (vx,vy,vz)│       │
+│  └───────────────────────┘         │
+│            │                       │
+│            │  Only partially       │
+│            │  observable           │
+│            ▼                       │
+│  ┌───────────────────────┐         │
+│  │     Sensor Readings    │         │
+│  │ ┌─────────┐ ┌─────────┐│        │
+│  │ │Camera:  │ │LIDAR:   ││        │
+│  │ │Ball pixel│ │Distance ││        │
+│  │ │coordinates│ │readings ││        │
+│  │ └─────────┘ └─────────┘│        │
+│  │ ┌─────────┐ ┌─────────┐│        │
+│  │ │IMU:     │ │Encoders:││        │
+│  │ │Acceler- │ │Wheel    ││        │
+│  │ │ation    │ │rotations││        │
+│  │ └─────────┘ └─────────┘│        │
+│  └───────────────────────┘         │
+│            │                       │
+│            │  State                │
+│            │  Estimation           │
+│            ▼                       │
+│  ┌───────────────────────┐         │
+│  │     Estimated State    │         │
+│  │ Robot Position: (x̂,ŷ,θ̂)│         │
+│  │ Ball Position: (b̂x,b̂y,b̂z)│       │
+│  │ Ball Velocity: (v̂x,v̂y,v̂z)│       │
+│  └───────────────────────┘         │
+│                                    │
+└────────────────────────────────────┘
+```
 *Figure 41: The state estimation problem visualized, showing how incomplete and imperfect sensor data must be combined to infer the true state of the system.*
 
 #### 12.2 Multi-Rate Sensor Fusion: Handling Different Sensor Timescales
@@ -2225,7 +3744,30 @@ Loop Needs │    │    │    │    │    │    │    │    │    │   
 
 The control system needs consistent state updates (typically at 100-200Hz), but sensors provide fragmented, asynchronous information.
 
-![Diagram: Asynchronous Sensor Update Timeline](https://placeholder-image.com/async_sensor_timeline.png)
+```
+┌───── Asynchronous Sensor Update Timeline ─────┐
+│                                               │
+│  Sensor    │     Updates (Hz)                 │
+│  ──────────┼──────────────────────────────────│
+│  IMU       │ ││││││││││││││││││││││││││││││││ │
+│            │ 1000 Hz                          │
+│  ──────────┼──────────────────────────────────│
+│  Encoders  │ │  │  │  │  │  │  │  │  │  │  │  │
+│            │ 200 Hz                           │
+│  ──────────┼──────────────────────────────────│
+│  LIDAR     │    │         │         │         │
+│            │ 30 Hz                            │
+│  ──────────┼──────────────────────────────────│
+│  Camera    │      │                 │         │
+│            │ 15 Hz                            │
+│  ──────────┼──────────────────────────────────│
+│  Control   │ ││││││││││││││││││││││││││││││││ │
+│  Needs     │ 200 Hz                           │
+│                                               │
+│  Timeline  │────────────────────────────────▶ │
+│                                               │
+└───────────────────────────────────────────────┘
+```
 *Figure 42: Timeline visualization of asynchronous sensor updates showing how different sensors provide information at different rates and with different delays.*
 
 **The Extended Kalman Filter (EKF): The Integration Engine**
@@ -2237,6 +3779,40 @@ The Extended Kalman Filter is the workhorse of sensor fusion, particularly well-
 3. **Weights measurements based on their uncertainty**
 4. **Predicts forward between measurements**
 5. **Handles non-linear relationships between variables**
+
+**Kalman Filter Fundamentals**
+
+The Kalman filter provides an optimal solution for state estimation under certain conditions. It operates on these key principles:
+
+1. **Probabilistic State Representation**: 
+   - State is represented as a probability distribution (typically Gaussian)
+   - Characterized by a mean vector (x̂) and covariance matrix (P)
+   - The mean represents our best estimate
+   - The covariance represents our uncertainty
+
+2. **Linear System Model**:
+   - In the standard Kalman filter:
+     - State transition: xₖ = Fₖ·xₖ₋₁ + Bₖ·uₖ + wₖ
+     - Measurement model: zₖ = Hₖ·xₖ + vₖ
+   - Where:
+     - xₖ is the state at time k
+     - Fₖ is the state transition matrix
+     - Bₖ is the control input matrix
+     - uₖ is the control input
+     - wₖ is the process noise (Gaussian with covariance Q)
+     - zₖ is the measurement
+     - Hₖ is the measurement matrix
+     - vₖ is the measurement noise (Gaussian with covariance R)
+
+3. **Extended Kalman Filter for Nonlinear Systems**:
+   - For robotics, we usually need to handle nonlinearities
+   - EKF uses linearization through Jacobian matrices:
+     - State transition: xₖ = f(xₖ₋₁, uₖ) + wₖ
+     - Measurement model: zₖ = h(xₖ) + vₖ
+   - Jacobians Fₖ and Hₖ are computed as the derivatives of f and h
+
+> **Note: Detailed Kalman Filter Theory**  
+> This is a simplified introduction to the Kalman filter. In Module 5: Sensor Fusion Techniques, we'll dive much deeper into the mathematical foundations, implementation details, and practical tuning of Kalman filters for robotics applications. We'll also cover extensions like the Unscented Kalman Filter (UKF) and particle filters for highly nonlinear systems.
 
 **How EKF Works: An Intuitive Explanation**
 
@@ -2250,497 +3826,22 @@ The filter operates in two alternating steps:
    - Uses a motion model to predict how state evolves over time
    - Grows uncertainty based on time elapsed and model imperfections
    - Can run even when no new measurements arrive
+   - Key equations (in matrix form):
+     - x̂ₖ|ₖ₋₁ = f(x̂ₖ₋₁|ₖ₋₁, uₖ)
+     - Pₖ|ₖ₋₁ = FₖPₖ₋₁|ₖ₋₁Fₖᵀ + Qₖ
 
 2. **Update Step** (runs whenever a measurement arrives):
    - Takes a new measurement from any sensor
    - Compares it to the predicted measurement
    - Updates state based on the difference, weighted by relative uncertainties
    - Reduces uncertainty in the updated variables
-
-![Diagram: Extended Kalman Filter Operation](https://placeholder-image.com/ekf_operation.png)
-*Figure 43: The Extended Kalman Filter operation showing the prediction-update cycle and how measurements from different sensors are incorporated.*
-
-**Visualizing the EKF Process for Ball Tracking**
-
-Let's visualize how an EKF might track a ball's position with multiple sensors:
-
-```
-TRUE TRAJECTORY         CAMERA UPDATES           LIDAR UPDATES
-     Ball →                   ×                        •
-      ↓                          ×
-     →                                                  •
-     ↓                               ×
-     →                                                   •
-                                         ×
-                                                          •
-```
-
-**EKF ESTIMATE (combines both sensors plus prediction)**
-```
-                   ⊕       ⊕         ⊕         ⊕        ⊕
-     Ball →        ⊕     ⊕       ⊕       ⊕       ⊕       ⊕
-                 ⊕     ⊕       ⊕       ⊕       ⊕
-                ⊕     ⊕      ⊕       ⊕       ⊕
-```
-
-The EKF produces a smooth, high-frequency estimate (⊕) that's more accurate than any individual sensor, combining the strengths of each while mitigating their weaknesses.
-
-> **Looking Ahead to Module 5: Sensor Fusion Techniques**  
-> The sensor fusion principles introduced here will be expanded into a comprehensive implementation in Module 5, where you'll work with actual sensor data and implement a complete multi-sensor fusion system for the ball-tracking robot.
-
-#### 12.3 Implementing a Real-Time Sensor Fusion System
-
-**Core Components of a Sensor Fusion Architecture**
-
-A complete sensor fusion system for your ball-tracking robot would include:
-
-1. **Sensor Interface Layer**:
-   - Hardware drivers with accurate timestamping
-   - Calibration modules for each sensor
-   - Pre-processing to extract relevant features
-
-2. **Fusion Engine**:
-   - State vector definition
-   - Motion models for prediction
-   - Measurement models for each sensor
-   - Filter implementation (EKF, UKF, or particle filter)
-
-3. **Outlier Rejection and Integrity Monitoring**:
-   - Sanity checks on sensor data
-   - Mahalanobis distance thresholding for outliers
-   - Health monitoring of sensor performance
-
-4. **State Output Interface**:
-   - High-frequency interpolated state publishing
-   - Uncertainty estimation for control systems
-   - Smooth derivative calculation for velocity/acceleration
-
-![Diagram: Sensor Fusion System Architecture](https://placeholder-image.com/fusion_architecture.png)
-*Figure 44: Complete sensor fusion system architecture showing the components from sensor interfaces through fusion engine to state output.*
-
-**Concrete Implementation: Ball Tracking Fusion Example**
-
-Here's a simplified example of how to implement an EKF for ball tracking with multiple sensors:
-
-```cpp
-// Define our state vector structure for ball tracking
-struct BallState {
-    Vector3 position;     // x, y, z position in world coordinates
-    Vector3 velocity;     // x, y, z velocity components
-    float radius;         // Ball radius (may be estimated from vision)
-};
-
-// Extended Kalman Filter implementation
-class BallTracker {
-private:
-    // State vector and covariance
-    BallState state;
-    Matrix<6,6> covariance;  // 6x6 for position and velocity
+   - Key equations:
+     - ỹₖ = zₖ - h(x̂ₖ|ₖ₋₁)
+     - Sₖ = HₖPₖ|ₖ₋₁Hₖᵀ + Rₖ
+     - Kₖ = Pₖ|ₖ₋₁Hₖᵀ(Sₖ)⁻¹
+     - x̂ₖ|ₖ = x̂ₖ|ₖ₋₁ + Kₖỹₖ
+     - Pₖ|ₖ = (I - KₖHₖ)Pₖ|ₖ₋₁
     
-    // Timestamp of last update
-    double last_update_time;
-    
-    // Process noise parameters (model uncertainty)
-    double process_noise_position;
-    double process_noise_velocity;
-    
-public:
-    // Initialize the filter
-    BallTracker() {
-        // Initial state uncertainty is high
-        covariance = Matrix<6,6>::Identity() * 100.0;
-        last_update_time = getCurrentTime();
-    }
-    
-    // Prediction step - called at high frequency (e.g., 100Hz)
-    void predict(double current_time) {
-        // Time elapsed since last update
-        double dt = current_time - last_update_time;
-        
-        // State transition: position += velocity * dt
-        state.position += state.velocity * dt;
-        
-        // Update state covariance with process noise
-        // (simplified - real implementation would use full matrix operations)
-        covariance.block<3,3>(0,0) += Matrix<3,3>::Identity() * process_noise_position * dt;
-        covariance.block<3,3>(3,3) += Matrix<3,3>::Identity() * process_noise_velocity * dt;
-        
-        last_update_time = current_time;
-    }
-    
-    // Update with camera measurement (position with high uncertainty in depth)
-    void updateFromCamera(const Vector3& measured_position, double timestamp) {
-        // Measurement noise matrix (camera has high uncertainty in depth)
-        Matrix<3,3> R = Matrix<3,3>::Identity();
-        R(2,2) = 10.0;  // Higher uncertainty in z-direction
-        
-        // Prediction at measurement time (handle delayed measurements)
-        if (timestamp < last_update_time) {
-            // Retroactive update needed - more complex in practice
-            // Simplified here for clarity
-            double saved_time = last_update_time;
-            BallState saved_state = state;
-            Matrix<6,6> saved_cov = covariance;
-            
-            predict(timestamp);
-            applyCameraUpdate(measured_position, R);
-            
-            // Restore and re-predict to current time
-            state = saved_state;
-            covariance = saved_cov;
-            predict(saved_time);
-        } else {
-            predict(timestamp);
-            applyCameraUpdate(measured_position, R);
-        }
-    }
-    
-    // Update with LIDAR measurement (accurate position but no color/identification)
-    void updateFromLidar(const Vector3& measured_position, double timestamp) {
-        // Measurement noise matrix (LIDAR has low positional uncertainty)
-        Matrix<3,3> R = Matrix<3,3>::Identity() * 0.01;  // Very accurate position
-        
-        // Similar handling for delayed measurements as in camera update
-        // ...
-        
-        applyLidarUpdate(measured_position, R);
-    }
-    
-private:
-    // Apply vision measurement update
-    void applyCameraUpdate(const Vector3& measured_position, const Matrix<3,3>& R) {
-        // Kalman gain calculation
-        Matrix<3,3> S = covariance.block<3,3>(0,0) + R;
-        Matrix<3,6> K = covariance.block<6,3>(0,0) * S.inverse();
-        
-        // State update
-        Vector3 innovation = measured_position - state.position;
-        Vector6 state_update = K * innovation;
-        
-        state.position += state_update.segment<3>(0);
-        state.velocity += state_update.segment<3>(3);
-        
-        // Covariance update
-        Matrix<6,6> I = Matrix<6,6>::Identity();
-        covariance = (I - K * H) * covariance;
-    }
-    
-    // Apply LIDAR measurement update (similar to camera but with different noise)
-    void applyLidarUpdate(const Vector3& measured_position, const Matrix<3,3>& R) {
-        // Similar to camera update but with different noise characteristics
-        // ...
-    }
-};
-```
-
-This simplified implementation shows the core concepts of multi-sensor fusion:
-- Each sensor has its own update function with appropriate noise modeling
-- The system can handle measurements from any sensor at any time
-- Delayed measurements are handled through retroactive updates
-- The filter predicts forward between sensor updates
-
-#### 12.4 Motion Models and Prediction: The Heart of State Estimation
-
-**Understanding Motion Models**
-
-The prediction step of state estimation relies on a motion model—a mathematical description of how the state evolves over time. For ball tracking, we might use:
-
-1. **Constant Velocity Model**:
-   - Position changes based on velocity
-   - Velocity remains constant
-   - Simple but effective for short-term prediction
-
-2. **Constant Acceleration Model**:
-   - Position changes based on velocity
-   - Velocity changes based on acceleration
-   - Acceleration remains constant
-   - Better for longer predictions
-
-3. **Physics-Based Model**:
-   - Incorporates gravity, air resistance, etc.
-   - Can model bounces and other interactions
-   - More accurate but more complex
-
-![Diagram: Motion Model Comparison](https://placeholder-image.com/motion_models.png)
-*Figure 45: Comparison of different motion models showing their prediction accuracy over time and complexity tradeoffs.*
-
-**Selecting the Right Model: Complexity vs. Accuracy**
-
-The choice of motion model involves important tradeoffs:
-
-```
-                     Computational    Prediction     Parameter
-Model                Complexity       Accuracy       Sensitivity
-─────────────────────────────────────────────────────────────────
-Constant Velocity    Low             Good short-term Low
-Constant Acceleration Medium          Better mid-term Medium
-Physics-Based        High            Best long-term  High
-```
-
-For a ball-tracking robot, a constant acceleration model often provides the best balance, as it can account for gravity while remaining computationally efficient.
-
-**Building Intuition: Prediction Uncertainty Growth**
-
-An important concept in state estimation is how uncertainty grows during prediction. Imagine throwing a ball:
-
-- **Initially**: You know exactly where the ball is
-- **After 0.1 seconds**: You have a good idea where it should be
-- **After 1 second**: There's significant uncertainty
-- **After 5 seconds**: The prediction becomes almost useless
-
-This is represented mathematically by growing the covariance matrix during prediction steps, with longer prediction intervals causing larger uncertainty growth.
-
-**The Importance of Accurate Timestamps**
-
-A critical but often overlooked aspect of sensor fusion is accurate timestamping. Consider:
-
-1. A camera frame captures the ball at position X at time T
-2. Processing takes 80ms to detect the ball
-3. By the time the detection is available, the ball has moved
-
-Without proper timestamping, the system would incorrectly fuse this delayed measurement with current data. Proper fusion requires:
-
-- Timestamps at capture time, not processing completion time
-- Synchronized clocks across all sensors
-- Handling of out-of-sequence measurements
-
-![Diagram: Timestamp Importance in Fusion](https://placeholder-image.com/timestamp_fusion.png)
-*Figure 46: The importance of accurate timestamping in sensor fusion, showing how measurement delays can lead to incorrect state estimation if not properly accounted for.*
-
-#### 12.5 Lock-Free Programming for Sensor Data
-
-**The Concurrency Challenge in Sensor Fusion**
-
-In a multi-sensor system, data arrives asynchronously from multiple sources and must be processed without blocking critical real-time tasks. Traditional synchronization mechanisms like mutexes can cause priority inversion, where a high-priority process waits for a low-priority one.
-
-**The Lock-Free Solution**
-
-Lock-free programming enables thread-safe data sharing without traditional locks:
-
-1. **Atomic Operations**:
-   - Hardware-supported indivisible operations
-   - Fundamental building blocks for lock-free algorithms
-   - Includes atomic load, store, compare-exchange, etc.
-
-2. **Memory Barriers**:
-   - Ensure visibility of memory operations across cores
-   - Prevent compiler and hardware reordering
-   - Critical for correct concurrent behavior
-
-![Diagram: Lock-Free vs Mutex-Based Synchronization](https://placeholder-image.com/lockfree_vs_mutex.png)
-*Figure 47: Comparison of lock-free versus mutex-based synchronization showing how lock-free approaches avoid priority inversion and blocking issues.*
-
-**Example: A Lock-Free Sensor Data Buffer**
-
-Here's an implementation of a lock-free buffer for sharing sensor data:
-
-```cpp
-// Thread-safe, lock-free buffer for sharing latest sensor data
-template<typename T>
-class LockFreeSensorBuffer {
-private:
-    // Atomic pointer to data storage
-    std::atomic<T*> data_ptr;
-    
-    // Version counter for consistency checking
-    std::atomic<uint64_t> version;
-    
-public:
-    LockFreeSensorBuffer() : version(0) {
-        data_ptr.store(new T(), std::memory_order_relaxed);
-    }
-    
-    ~LockFreeSensorBuffer() {
-        delete data_ptr.load(std::memory_order_relaxed);
-    }
-    
-    // Write new data (called by sensor thread)
-    void update(const T& new_data) {
-        // Create a new object with the updated data
-        T* new_obj = new T(new_data);
-        
-        // Get the old pointer
-        T* old_obj = data_ptr.exchange(new_obj, std::memory_order_acq_rel);
-        
-        // Increment version AFTER pointer is updated
-        version.fetch_add(1, std::memory_order_release);
-        
-        // Delete the old object (safe because no one can access it now)
-        delete old_obj;
-    }
-    
-    // Read current data (called by fusion thread)
-    bool tryGet(T& result) {
-        // Get initial version
-        uint64_t initial_version = version.load(std::memory_order_acquire);
-        
-        // If never updated, return false
-        if (initial_version == 0) return false;
-        
-        // Read the data
-        result = *data_ptr.load(std::memory_order_acquire);
-        
-        // Check if version changed during our read
-        uint64_t final_version = version.load(std::memory_order_acquire);
-        
-        // If versions match, read was consistent
-        return final_version == initial_version;
-    }
-};
-```
-
-This buffer ensures:
-- High-priority processes never block waiting for locks
-- Data consistency through version checking
-- Memory safety with proper atomics and ordering
-- Efficient updates with minimal copying
-
-**Using Lock-Free Structures in Fusion Systems**
-
-In your ball-tracking robot, you would use lock-free structures at the interface between sensor processing and fusion:
-
-```
-[Camera Thread] → [Lock-Free Buffer] → [Fusion Thread]
-[LIDAR Thread]  → [Lock-Free Buffer] → [Fusion Thread]
-[IMU Thread]    → [Lock-Free Buffer] → [Fusion Thread]
-```
-
-This architecture allows:
-- Sensor processing to run at its own pace
-- Fusion to access latest data without blocking
-- Control systems to run with deterministic timing
-
-#### 12.6 Practical Sensor Fusion Strategy for Ball-Tracking Robot
-
-Let's design a complete sensor fusion strategy specifically for your ball-tracking robot:
-
-**State Vector Definition**:
-
-```
-X = [robot_x, robot_y, robot_θ,     # Robot position and heading
-     robot_vx, robot_vy, robot_ω,   # Robot velocities
-     ball_x, ball_y, ball_z,        # Ball position
-     ball_vx, ball_vy, ball_vz,     # Ball velocities 
-     ball_radius]                   # Ball size parameter
-```
-
-![Diagram: Ball-Tracking State Vector](https://placeholder-image.com/state_vector.png)
-*Figure 48: The state vector for ball-tracking showing the robot and ball state variables that must be estimated.*
-
-**Sensor Integration Strategy**:
-
-1. **Camera + YOLO**:
-   - Updates: Ball position (all axes but noisy), ball radius
-   - Update rate: 10-15Hz
-   - Delay compensation: ~80ms processing lag
-   - Special handling: Color-based identification, high uncertainty in depth
-
-2. **LIDAR**:
-   - Updates: Ball position (accurate in all axes), robot position relative to environment
-   - Update rate: 10-40Hz
-   - Delay compensation: ~20ms processing lag
-   - Special handling: Data association to match returns with known objects
-
-3. **3D Sensors** (Depth camera or structured light):
-   - Updates: Ball position (accurate depth)
-   - Update rate: 15-30Hz
-   - Delay compensation: ~40ms processing lag
-   - Special handling: Limited range and field of view
-
-4. **IMU**:
-   - Updates: Robot orientation, angular velocity, linear acceleration
-   - Update rate: 200-1000Hz
-   - Delay compensation: Minimal (<1ms)
-   - Special handling: Bias estimation, gravity compensation
-
-5. **Wheel Encoders**:
-   - Updates: Robot velocity, position via odometry
-   - Update rate: 100-200Hz
-   - Delay compensation: Minimal (~1ms)
-   - Special handling: Wheel slip detection
-
-**Fusion Implementation**:
-
-The system would use a multi-stage fusion approach:
-
-1. **Base Layer**: Extended Kalman Filter
-   - Maintains full state vector
-   - Runs prediction at 200Hz
-   - Processes sensor updates as they arrive
-   - Handles out-of-sequence measurements
-
-2. **Integrity Monitoring Layer**:
-   - Validates sensor measurements before fusion
-   - Detects and rejects outliers
-   - Monitors sensor health and adjusts uncertainties
-   - Handles temporary sensor failures gracefully
-
-3. **Output Adaptation Layer**:
-   - Provides consistent 200Hz state updates to control
-   - Includes uncertainty estimates for adaptive control
-   - Generates smooth derivatives for velocity/acceleration control
-   - Interpolates between updates for minimal latency
-
-![Diagram: Multi-Stage Fusion Implementation](https://placeholder-image.com/multistage_fusion.png)
-*Figure 49: Multi-stage fusion implementation showing the data flow from sensors through various processing stages to control outputs.*
-
-This comprehensive sensor fusion architecture provides your ball-tracking robot with:
-- Accurate, high-frequency state estimation
-- Robustness to sensor limitations and failures
-- Efficient use of computational resources
-- Deterministic timing for control systems
-
-By implementing this architecture, your robot can achieve reliable ball tracking even with the resource constraints of a Raspberry Pi, balancing the computational demands of modern sensors with the strict timing requirements of robot control.
-
-> **Looking Ahead to Module 5: Sensor Fusion and Module 4: 3D Depth Cameras**  
-> The sensor fusion strategy outlined here will be implemented in detail in Modules 4 and 5, where you'll work with actual 3D depth camera data and create a complete sensor fusion system. You'll be able to experiment with different fusion algorithms and observe how they affect tracking performance.
-
-### 13. PID Control Implementation Architecture
-
-#### 13.1 Deterministic Control Loop Design
-
-PID control requires consistent timing for stability:
-
-**Theoretical Control Equation:**
-```
-output = Kp*error + Ki*∫error dt + Kd*d(error)/dt
-```
-
-**Implementation Challenges:**
-- Integration requires consistent time steps
-- Derivative is sensitive to timing jitter
-- Control parameters are tuned for specific update rates
-
-![Diagram: PID Control Loop Architecture](https://placeholder-image.com/pid_architecture.png)
-*Figure 50: PID control loop architecture showing how sensor inputs, error calculation, and control outputs flow together with timing requirements.*
-
-**Architectural Approach:**
-- Use highest real-time priority (99)
-- Dedicated CPU core with minimal interference
-- Precise timestamping of measurements and commands
-- Compensate for actuator delays in control design
-
-#### 13.2 Anti-Windup and Safety Architectures
-
-A robust control system must handle exceptional conditions:
-
-**Anti-Windup Implementation:**
-- Integrator term must be limited to prevent excessive buildup
-- Different strategies (conditional integration, back-calculation, etc.) have different real-time behavior
-
-**Safety Monitoring:**
-- Watchdog timer to detect control loop timing violations
-- Fault detection and handling at multiple levels
-- Safe fallback behaviors when timing constraints violated
-
-![Diagram: Anti-Windup and Safety Systems](https://placeholder-image.com/antiwindup_safety.png)
-*Figure 51: Anti-windup and safety systems showing how protective mechanisms are integrated into the control architecture.*
-
-These architectural patterns ensure that the control system remains stable and safe even when the underlying computing system experiences temporary issues.
-
-> **Looking Ahead to Module 7: PID Control Implementation**  
-> The control architecture principles introduced here will be fully developed in Module 7, where you'll implement a complete PID control system for the ball-tracking robot. You'll be able to tune parameters, experiment with different anti-windup strategies, and see how timing affects control performance.
-
 <a name="part-vi"></a>
 ## Part VI: Verification and Performance Analysis
 
@@ -2748,53 +3849,554 @@ These architectural patterns ensure that the control system remains stable and s
 
 #### 14.1 Cyclictest and RT Testing Framework
 
-Real-time systems require specialized testing tools:
+Real-time systems require specialized testing tools to verify their timing properties. Let's explore these tools and their proper usage in depth:
 
-**Cyclictest Operation:**
-- Creates high-priority RT threads
-- Measures difference between expected and actual wakeup times
-- Runs for extended periods to capture worst-case behavior
-- Detects OS-induced jitter and interference
+**Understanding Latency Testing Fundamentals**
 
-**Running Comprehensive Tests:**
+Before diving into specific tools, it's important to understand what we're measuring:
+
+1. **Scheduling Latency**: Time between when a task becomes ready and when it actually runs
+2. **Interrupt Latency**: Time from hardware interrupt to first instruction of handler
+3. **Preemption Latency**: Time from higher-priority task readiness to execution
+4. **Timer Precision**: Accuracy of system timers and sleep mechanisms
+
+These latencies manifest as jitter in control loop timing and can directly impact control performance.
+
+> **Note on Performance Metrics**  
+> While these metrics might seem abstract initially, they directly impact control system performance. For example, 100μs of unexpected latency in a 1kHz control loop can translate to 1-2mm of position error in a high-speed robot arm. Understanding these metrics helps bridge the gap between system performance and application-level outcomes.
+
+**Cyclictest: The Gold Standard for Latency Testing**
+
+Cyclictest is the primary tool for measuring kernel scheduling latency:
+
+**Operating Principle**:
+- Creates high-priority real-time threads with precise timing requirements
+- Measures the difference between expected and actual wakeup times
+- Calculates min/avg/max latency values
+- Collects latency histograms for statistical analysis
+- Can detect even rare latency spikes through extended runs
+
+**Implementation Details**:
+- Uses CLOCK_MONOTONIC for reliable timestamps
+- Sets scheduler to SCHED_FIFO for real-time priority
+- Prevents memory swapping with mlockall()
+- Configurable priority, interval, and duration
+
+**Running Comprehensive Tests**:
+
 ```bash
+# Basic latency test
+sudo cyclictest -p 80 -t 1 -n -i 10000 -l 10000
+
+# Multi-core testing
+sudo cyclictest -p 80 -t 4 -a 0,1,2,3 -n -i 10000 -l 10000
+
+# Stress testing with background load
+sudo stress-ng --cpu 2 --io 1 --vm 1 --vm-bytes 128M --timeout 60s &
 sudo cyclictest -p 80 -t 1 -n -i 10000 -l 10000
 ```
 
-![Graph: Cyclictest Latency Distribution](https://placeholder-image.com/cyclictest_results.png)
+**Interpreting Results**:
+
+```
+T: 0 (22458) P:80 I:10000 C: 100000 Min:      9 Act:   13 Avg:   14 Max:      89
+```
+
+This output shows:
+- Thread ID and core (22458)
+- Priority used (80)
+- Interval in microseconds (10000)
+- Count of measurements (100000)
+- Minimum observed latency (9μs)
+- Latest latency (13μs)
+- Average latency (14μs)
+- Maximum observed latency (89μs)
+
+```
+┌───── Cyclictest Latency Distribution ─────┐
+│                                           │
+│  Frequency                                │
+│  ^                                        │
+│  │                                        │
+│  │  ┌───┐                                 │
+│  │  │   │                                 │
+│  │  │   │                                 │
+│  │  │   │                                 │
+│  │  │   │                                 │
+│  │  │   │                                 │
+│  │  │   │    ┌───┐                        │
+│  │  │   │    │   │                        │
+│  │  │   │    │   │    ┌───┐     ┌───┐     │
+│  │  │   │    │   │    │   │     │   │     │
+│  └──┴───┴────┴───┴────┴───┴─────┴───┴──►  │
+│     10µs   20µs   30µs   40µs    >50µs    │
+│                                           │
+│  Standard Kernel:    Max Latency: 235µs   │
+│  PREEMPT Kernel:     Max Latency: 122µs   │
+│  PREEMPT_RT Kernel:  Max Latency:  42µs   │
+│                                           │
+│  RT Kernel provides significantly         │
+│  lower and more consistent latency        │
+│                                           │
+└───────────────────────────────────────────┘
+```
 *Figure 52: Example cyclictest results showing latency distribution with different kernel configurations, highlighting the benefits of real-time optimizations.*
 
-**Interpreting Results:**
-- Max latency should be < 100-200μs for good RT performance
-- Histogram shows distribution of latency events
-- Spikes indicate interference from other system components
+> **Note on Statistical Analysis**  
+> The distribution of latency values is often more important than simple min/max values. A system with rare but extreme outliers might appear acceptable when looking only at averages, but could cause dangerous control failures in practice. Understanding basic statistical concepts like variance, percentiles, and outlier analysis helps interpret these results effectively.
+
+**Result Analysis and Benchmarks:**
+
+For real-time robotics on Raspberry Pi, these are the expected latency ranges:
+
+| Kernel Type | Typical Max Latency | Acceptable for | Not Suitable for |
+|-------------|---------------------|----------------|------------------|
+| Standard | 200-500μs | Vision processing, Planning | Motor control, High-frequency sensors |
+| PREEMPT | 100-200μs | Medium-rate control (100Hz) | Ultra-precise timing (<1ms jitter) |
+| PREEMPT_RT | 30-80μs | High-rate control (1kHz+) | Hard real-time guarantees (<10μs) |
+
+**Key Metrics for Evaluation:**
+- **Max latency**: Should be <100-200μs for good RT performance
+- **Latency distribution**: Should be tightly clustered (low standard deviation)
+- **Outliers**: Brief, infrequent spikes may be tolerable; sustained high latency is not
+- **Worst-case behavior**: Must be tested under load and over extended periods
+
+**Advanced RT Testing Tools**
+
+Beyond cyclictest, several specialized tools help evaluate real-time performance:
+
+1. **rt-tests Suite**:
+   - **hackbench**: Tests scheduler and IPC performance
+   - **pip_stress**: Tests priority inheritance behavior
+   - **signaltest**: Measures signal delivery latency
+   - **svsematest**: Evaluates semaphore performance
+   - **hwlatdetect**: Identifies hardware-level latency sources
+
+2. **Stress Testing Tools**:
+   - **stress-ng**: Creates configurable CPU, memory, I/O, and filesystem load
+   - **rtctl**: Controls real-time tasks for reproducible testing
+   - **latency-test**: Measures mutex and semaphore performance
+
+3. **Custom Real-Time Test Applications**:
+   - **GPIO Toggling**: Measure actual output timing with oscilloscope
+   - **Deadline Testing**: Create deliberate overload situations
+   - **Control Loop Simulators**: Test timing with simulated physical systems
+
+> **Note on Test Equipment**  
+> While software tools provide valuable insights, hardware measurement tools like oscilloscopes and logic analyzers offer ground truth that isn't subject to software biases. Basic familiarity with these tools is helpful but not required. In Module 8, we'll discuss both software and hardware-based measurement approaches.
+
+**Methodical Testing Strategy:**
+
+A comprehensive latency testing approach includes:
+
+1. **Baseline Testing**:
+   - Measure system with minimal services running
+   - Create reference histograms for future comparison
+   - Identify inherent system limitations
+
+2. **Component Testing**:
+   - Test each subsystem (drivers, frameworks, middleware) individually
+   - Isolate sources of latency or jitter
+   - Measure impact of different configuration options
+
+3. **Integration Testing**:
+   - Test complete system under realistic operational conditions
+   - Include all required services and background processes
+   - Evaluate interactions between components
+
+4. **Longevity Testing**:
+   - Run tests over extended periods (hours or days)
+   - Monitor for degradation or intermittent issues
+   - Test through thermal cycles and varying loads
+
+**Creating a Latency Testing Jig**
+
+For robotics applications, it's valuable to create a physical testing jig:
+
+```cpp
+// GPIO-based latency testing
+void gpio_latency_test(int iterations) {
+    // Configure GPIO pin for output
+    gpio_set_mode(TEST_PIN, GPIO_MODE_OUTPUT);
+    
+    // Allocate memory for timing measurements
+    uint64_t* latencies = (uint64_t*)malloc(iterations * sizeof(uint64_t));
+    
+    // Lock memory to prevent paging
+    mlockall(MCL_CURRENT | MCL_FUTURE);
+    
+    // Set real-time priority
+    struct sched_param param;
+    param.sched_priority = 99;
+    sched_setscheduler(0, SCHED_FIFO, &param);
+    
+    // Run test iterations
+    for (int i = 0; i < iterations; i++) {
+        // Get start time
+        uint64_t start_time = get_precise_time_ns();
+        
+        // Toggle GPIO pin (measurable with oscilloscope)
+        gpio_set(TEST_PIN, 1);
+        
+        // Get time after GPIO operation
+        uint64_t end_time = get_precise_time_ns();
+        
+        // Store latency
+        latencies[i] = end_time - start_time;
+        
+        // Toggle back
+        gpio_set(TEST_PIN, 0);
+        
+        // Wait for next cycle
+        precise_sleep_us(1000);  // 1kHz test frequency
+    }
+    
+    // Calculate statistics
+    analyze_latency_distribution(latencies, iterations);
+    
+    // Free resources
+    free(latencies);
+}
+```
+
+This creates a measurable signal that can be captured with an oscilloscope or logic analyzer, providing ground truth timing measurements independent of the system's own time reporting.
 
 #### 14.2 Tracing and Performance Analysis
 
-In-depth analysis requires kernel tracing tools:
+Beyond simple latency measurements, in-depth analysis requires kernel tracing tools that reveal the complex interactions between OS, hardware, and applications:
 
-**Ftrace/Trace-cmd:**
-- Kernel function tracing with minimal overhead
-- Scheduling events and wakeup latency analysis
-- Interrupt handling monitoring
+**Kernel Tracing Fundamentals**
 
-**Perf:**
-- CPU performance counter analysis
-- Cache miss rates and memory system behavior
-- Branch prediction effectiveness
-- Instruction pipeline efficiency
+Kernel tracing captures detailed information about system events:
 
-![Diagram: Performance Analysis Toolkit](https://placeholder-image.com/perf_analysis_toolkit.png)
-*Figure 53: Performance analysis toolkit showing the various tools available for debugging and analyzing real-time system behavior.*
+1. **Event Types**:
+   - **Scheduler Events**: Task switches, wakeups, migrations
+   - **Interrupt Events**: Hardware and software interrupt handling
+   - **System Calls**: Application requests to the kernel
+   - **Blocking Events**: I/O waits, lock acquisitions
+   - **Memory Events**: Page faults, allocation, swapping
+   - **Custom Tracepoints**: Application-specific events
 
-These tools provide visibility into the otherwise opaque interactions between OS, hardware, and applications that affect real-time performance.
+2. **Collection Methods**:
+   - **Static Tracing**: Permanent tracepoints compiled into kernel
+   - **Dynamic Tracing**: Runtime-inserted probes (kprobes)
+   - **Hardware Tracing**: CPU performance counters and events
+   - **User-Space Tracing**: Application-level event recording
 
-<details>
-<summary><strong>Looking Ahead to Module 8: Diagnostics and Performance Analysis</strong></summary>
+> **Note on Debugging vs. Tracing**  
+> While traditional debugging pauses execution to inspect state, tracing captures execution data in real-time with minimal interference. This distinction is crucial for real-time systems where pausing execution would change the very timing behavior you're trying to analyze. Understanding this fundamental difference helps select appropriate tools for different diagnostic scenarios.
 
-The performance analysis techniques introduced here will be expanded in Module 8, where you'll implement comprehensive diagnostics for the ball-tracking robot and learn to identify and resolve various types of performance issues.
+**Ftrace/Trace-cmd: Kernel Function Tracing**
 
-</details>
+Ftrace is the built-in Linux kernel tracing facility, and trace-cmd provides a user-friendly interface:
+
+1. **Key Capabilities**:
+   - Function call graph generation
+   - Scheduling decision tracking
+   - Interrupt latency measurement
+   - Kernel lock analysis
+   - Context switch recording
+
+2. **Usage Examples**:
+   ```bash
+   # Record scheduler events, interrupts, and GPIO activity
+   sudo trace-cmd record -e sched -e irq -e gpio -e timer
+   
+   # Record with function graph of specific function
+   sudo trace-cmd record -p function_graph -g do_IRQ -e sched_switch
+   
+   # Analyze recorded data
+   sudo trace-cmd report
+   ```
+
+3. **Real-Time Specific Tracing**:
+   ```bash
+   # Trace wakeup latency
+   sudo trace-cmd record -e sched:sched_wakeup -e sched:sched_switch
+   
+   # Trace interrupt handling
+   sudo trace-cmd record -e irq:irq_handler_entry -e irq:irq_handler_exit
+   
+   # Trace priority inheritance
+   sudo trace-cmd record -e pi_lock
+   ```
+
+**Kernelshark: Visual Trace Analysis**
+
+Kernelshark provides a graphical interface for trace data:
+
+1. **Visualization Features**:
+   - Timeline view of CPU activity
+   - Per-process and per-CPU filtering
+   - Event filtering and highlighting
+   - Zoom and pan for detailed analysis
+   - Measurement tools for timing analysis
+
+2. **Usage Workflow**:
+   ```bash
+   # Generate trace data
+   sudo trace-cmd record -e all -o trace.dat
+   
+   # Launch GUI analyzer
+   sudo kernelshark trace.dat
+   ```
+
+3. **Key Analysis Patterns**:
+   - Identify unexpected preemptions
+   - Detect interrupt storms
+   - Measure task wake-up delays
+   - Find priority inversions
+   - Analyze scheduling decisions
+
+```
+┌───── Schedule Visualization with Kernelshark ─────┐
+│                                                   │
+│  Time →                                           │
+│  ┌───────────────────────────────────────────────┐│
+│  │CPU 0 │████│    │████████│    │████│    │█████ ││
+│  │      │Sys │    │ System │    │Sys │    │System││
+│  │      │Task│    │ Task   │    │Task│    │Task  ││
+│  └───────────────────────────────────────────────┘│
+│  ┌───────────────────────────────────────────────┐│
+│  │CPU 1 │███████████████████████████████████████ ││
+│  │      │          PID Controller                ││
+│  │      │          (Priority 99)                 ││
+│  └───────────────────────────────────────────────┘│
+│  ┌───────────────────────────────────────────────┐│
+│  │CPU 2 │██████████│      │██████████│     │████ ││
+│  │      │ Sensor   │      │ Sensor   │     │Sensr││
+│  │      │Processing│      │Processing│     │Proc ││
+│  └───────────────────────────────────────────────┘│
+│  ┌───────────────────────────────────────────────┐│
+│  │CPU 3 │██████████████│         │███████████████││
+│  │      │ Vision Processing      │ Vision Proc   ││
+│  │      │ (Priority 60)          │ (Priority 60) ││
+│  └───────────────────────────────────────────────┘│
+│                                                   │
+│  Events:                                          │
+│  ▼ = Preemption   × = Wakeup   ✱ = Priority Change│
+│                                                   │
+└───────────────────────────────────────────────────┘
+```
+*Figure 53: Example visualization of process scheduling using Kernelshark, showing scheduling events, preemptions, and execution timelines across multiple CPU cores.*
+
+**LTTng: Linux Trace Toolkit Next Generation**
+
+For more complex tracing scenarios, LTTng provides a comprehensive framework:
+
+1. **Advanced Features**:
+   - Extremely low overhead tracing
+   - User-space and kernel-space correlation
+   - Distributed system tracing
+   - Custom application instrumentation
+   - High-throughput trace sessions
+
+2. **Integration with ROS2**:
+   - Tracepoints in ROS2 middleware
+   - Node execution and communication tracing
+   - Message passing analysis
+   - DDS activity monitoring
+
+3. **Usage Example**:
+   ```bash
+   # Create ROS2-specific tracing session
+   lttng create ros2_session
+   
+   # Enable ROS2 tracepoints
+   lttng enable-event -u "ros2:*" -s ros2_session
+   
+   # Start recording
+   lttng start
+   
+   # Run your ROS2 application
+   ros2 run my_package my_node
+   
+   # Stop recording
+   lttng stop
+   
+   # Analyze the trace
+   lttng view
+   ```
+
+> **Note on Middleware Tracing**  
+> The ROS2 integration features of LTTng are particularly valuable for diagnosing communication issues between nodes. While detailed knowledge of DDS internals isn't required, understanding the publish-subscribe communication model and quality of service parameters helps interpret these traces effectively. Module 8 will provide a focused tutorial on ROS2-specific tracing.
+
+**Perf: Performance Counters for Linux**
+
+Perf provides access to CPU performance monitoring units (PMUs) for hardware-level insights:
+
+1. **Hardware Metrics Accessible**:
+   - CPU cycles and instructions
+   - Cache hits and misses
+   - Branch prediction successes/failures
+   - Memory access patterns
+   - Pipeline stalls
+
+2. **Key Analysis Capabilities**:
+   - CPU hotspot identification
+   - Cache behavior analysis
+   - Memory access optimization
+   - Branch prediction improvement
+   - Instruction-level optimization
+
+3. **Usage Examples**:
+   ```bash
+   # Basic performance statistics
+   perf stat ./my_application
+   
+   # Detailed CPU sampling
+   perf record -g -a -F 999 ./my_application
+   
+   # Memory access pattern analysis
+   perf mem record ./my_application
+   
+   # Analyze recorded data
+   perf report
+   ```
+
+> **Note on Computer Architecture Knowledge**  
+> While detailed understanding of CPU microarchitecture isn't required for basic performance analysis, familiarity with concepts like cache hierarchy, branch prediction, and pipelining helps interpret perf data meaningfully. Many optimization opportunities become apparent only when viewed through this architectural lens. We'll review these concepts as needed in Module 8.
+
+**Application-Specific Performance Analysis**
+
+For robotics applications, several specialized approaches are valuable:
+
+1. **ROS2 DDS Middleware Analysis**:
+   - Monitor QoS policy effects
+   - Track discovery and connection phases
+   - Measure serialization/deserialization overhead
+   - Analyze multicast efficiency
+
+2. **Vision Pipeline Profiling**:
+   - Custom timestamps at pipeline stages
+   - Frame-to-frame latency tracking
+   - Algorithm-specific performance metrics
+   - Memory bandwidth utilization
+
+3. **Control Loop Timing Analysis**:
+   - Jitter measurement at microsecond resolution
+   - Control frequency stability analysis
+   - Interrupt impact quantification
+   - Sensor-to-actuator latency mapping
+
+**Comprehensive Performance Analysis Toolkit**
+
+A complete performance analysis approach combines multiple tools:
+
+```
+┌───── Performance Analysis Toolkit ─────┐
+│                                        │
+│  System-Level Tools:                   │
+│  ┌────────────────────────────────┐    │
+│  │ ┌──────────┐  ┌─────────────┐  │    │
+│  │ │cyclictest│  │rt-tests     │  │    │
+│  │ └──────────┘  └─────────────┘  │    │
+│  │ ┌──────────┐  ┌─────────────┐  │    │
+│  │ │ftrace    │  │trace-cmd    │  │    │
+│  │ └──────────┘  └─────────────┘  │    │
+│  │ ┌──────────┐  ┌─────────────┐  │    │
+│  │ │LTTng     │  │kernelshark  │  │    │
+│  │ └──────────┘  └─────────────┘  │    │
+│  └────────────────────────────────┘    │
+│                                        │
+│  CPU/Memory Analysis:                  │
+│  ┌────────────────────────────────┐    │
+│  │ ┌──────────┐  ┌─────────────┐  │    │
+│  │ │perf      │  │htop         │  │    │
+│  │ └──────────┘  └─────────────┘  │    │
+│  │ ┌──────────┐  ┌─────────────┐  │    │
+│  │ │valgrind  │  │cachegrind   │  │    │
+│  │ └──────────┘  └─────────────┘  │    │
+│  │ ┌──────────┐  ┌─────────────┐  │    │
+│  │ │pmu-tools │  │memory-prof  │  │    │
+│  │ └──────────┘  └─────────────┘  │    │
+│  └────────────────────────────────┘    │
+│                                        │
+│  Application-Specific:                 │
+│  ┌────────────────────────────────┐    │
+│  │ ┌──────────┐  ┌─────────────┐  │    │
+│  │ │ROS2 DDS  │  │rqt_graph    │  │    │
+│  │ │Monitor   │  │             │  │    │
+│  │ └──────────┘  └─────────────┘  │    │
+│  │ ┌──────────┐  ┌─────────────┐  │    │
+│  │ │Custom    │  │Tracepoints  │  │    │
+│  │ │Profiling │  │             │  │    │
+│  │ └──────────┘  └─────────────┘  │    │
+│  │ ┌──────────┐  ┌─────────────┐  │    │
+│  │ │GPIO      │  │Logic        │  │    │
+│  │ │Probing   │  │Analyzer     │  │    │
+│  │ └──────────┘  └─────────────┘  │    │
+│  └────────────────────────────────┘    │
+│                                        │
+└────────────────────────────────────────┘
+```
+*Figure 54: Performance analysis toolkit showing the various tools available for debugging and analyzing real-time system behavior at different levels of abstraction.*
+
+> **Note on Diagnostic Strategy**  
+> With so many tools available, a strategic approach to diagnostics becomes important. Rather than using every tool for every problem, experienced engineers select specific tools based on their diagnostic hypothesis. We'll develop this diagnostic strategy in Module 8, teaching you to recognize problem patterns and select appropriate tools efficiently.
+
+**Case Study: Debugging a Deadline Miss**
+
+To illustrate the practical application of these tools, let's walk through diagnosing a timing problem:
+
+1. **Problem Identification**:
+   - Robot control exhibits occasional jerky motion
+   - Logs show PID controller missing deadlines sporadically
+   - Issue occurs more frequently after extended operation
+
+2. **Initial Investigation**:
+   - Run cyclictest to measure baseline latency
+   - Find maximum latency of 250μs (higher than expected)
+   - Create extended recording to capture occurrence pattern
+
+3. **Trace Analysis**:
+   ```bash
+   # Record comprehensive trace during operation
+   sudo trace-cmd record -e sched_switch -e sched_wakeup -e irq -e timer
+   
+   # After capturing issue, analyze the trace
+   sudo kernelshark
+   ```
+
+4. **Root Cause Identification**:
+   - Trace shows a system service running periodic tasks
+   - Service coincides with high latency periods
+   - Resource contention pattern identified
+   - Specific interrupt service routine taking too long
+
+5. **Solution Implementation**:
+   - Configure service to use lower priority
+   - Adjust interrupt affinity to isolate from control core
+   - Implement core isolation for critical control tasks
+   - Verify improvements with follow-up measurements
+
+This methodical troubleshooting process using appropriate tools quickly identifies issues that would be nearly impossible to diagnose through conventional debugging.
+
+**Continuous Performance Monitoring**
+
+Beyond one-time analysis, implementing continuous monitoring ensures system health:
+
+1. **Automated Testing Framework**:
+   - Regular latency testing during development
+   - Regression testing after system changes
+   - Performance baselines for comparison
+
+2. **Runtime Monitoring**:
+   - Lightweight metrics collection during operation
+   - Deadline miss detection and logging
+   - Performance degradation alerting
+   - Self-healing mechanisms for temporary issues
+
+3. **Long-Term Analysis**:
+   - Historical performance trending
+   - Correlation with environmental factors
+   - Predictive maintenance based on timing patterns
+   - Continuous improvement through data-driven optimization
+
+These tools and methodologies provide the visibility needed to build, verify, and maintain deterministic real-time systems for robotics applications.
+
+> **Looking Ahead to Module 8: Diagnostics and Performance Analysis**  
+> The performance analysis techniques introduced here will be expanded in Module 8, where you'll implement comprehensive diagnostics for the ball-tracking robot and learn to identify and resolve various types of performance issues.
 
 <a name="conclusion"></a>
 ## Conclusion: Holistic System Design for Real-Time Robotics
@@ -2807,8 +4409,44 @@ Creating an effective real-time robotics system requires deep understanding acro
 4. **Concurrent Programming:** Lock-free algorithms, priority inheritance, thread synchronization
 5. **Control Theory:** Timing requirements, stability guarantees, safety properties
 
-![Diagram: Holistic System Design Integration](https://placeholder-image.com/holistic_design.png)
-*Figure 54: Holistic system design showing the integration of various disciplines into a complete real-time robotics platform.*
+```
+┌───── Holistic System Design Integration ─────┐
+│                                              │
+│  ┌──────────────────┐   ┌─────────────────┐  │
+│  │Operating Systems │   │Computer         │  │
+│  │┌───────────────┐ │   │Architecture     │  │
+│  ││Scheduler      │ │   │┌───────────────┐│  │
+│  ││Behavior       │ │   ││Cache          ││  │
+│  │└───────────────┘ │   ││Hierarchies    ││  │
+│  │┌───────────────┐ │   │└───────────────┘│  │
+│  ││Preemption     │ │   │┌───────────────┐│  │
+│  ││Models         │ │   ││Memory         ││  │
+│  │└───────────────┘ │   ││Systems        ││  │
+│  └──────────────────┘   │└───────────────┘│  │
+│           │             └─────────────────┘  │
+│           │                      │           │
+│           ▼                      ▼           │
+│  ┌────────────────────────────────────────┐  │
+│  │       Real-Time Robotics Platform      │  │
+│  └────────────────────────────────────────┘  │
+│           ▲                      ▲           │
+│           │                      │           │
+│  ┌──────────────────┐   ┌─────────────────┐  │
+│  │Concurrent        │   │Control Theory   │  │
+│  │Programming       │   │┌───────────────┐│  │
+│  │┌───────────────┐ │   ││Timing         ││  │
+│  ││Lock-Free      │ │   ││Requirements   ││  │
+│  ││Algorithms     │ │   │└───────────────┘│  │
+│  │└───────────────┘ │   │┌───────────────┐│  │
+│  │┌───────────────┐ │   ││Stability      ││  │
+│  ││Thread         │ │   ││Guarantees     ││  │
+│  ││Synchronization│ │   │└───────────────┘│  │
+│  │└───────────────┘ │   └─────────────────┘  │
+│  └──────────────────┘                        │
+│                                              │
+└──────────────────────────────────────────────┘
+```
+*Figure 55: Holistic system design showing the integration of various disciplines into a complete real-time robotics platform.*
 
 The Raspberry Pi setup described in this document applies these principles to create a platform capable of deterministic operation for complex robotics tasks. By optimizing each layer of the system—from kernel to application—we create an integrated environment where the digital control system can reliably interface with the physical world.
 
