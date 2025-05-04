@@ -11,23 +11,81 @@
 
 <a name="table-of-contents"></a>
 ## Table of Contents
-- [Course Overview](#course-overview)
-- [Introduction](#introduction)
-- [Part I: Computer Systems Fundamentals for Robotics](#part-i)
-- [Part II: System-Level Optimizations](#part-ii)
-- [Part III: ROS2 Architecture and Communication Framework](#part-iii)
-- [Part IV: Process Prioritization and Scheduling for Robotics Systems](#part-iv)
-- [Part V: Application-Specific Architecture for Real-Time Robotics](#part-v)
-- [Part VI: Verification and Performance Analysis](#part-vi)
-- [Conclusion: Holistic System Design for Real-Time Robotics](#conclusion)
-- [Next Steps in the Ball-Tracking Robot Curriculum](#next-steps)
+1. [Course Overview](#course-overview)
+   1. [Curriculum Structure](#curriculum-structure)
+   2. [Learning Approach](#learning-approach)
+   3. [Prerequisites](#prerequisites)
+2. [System Overview](#system-overview)
+   1. [Core Components](#core-components)
+   2. [Operational Features](#operational-features)
+   3. [System Architecture Diagram](#system-architecture-diagram)
+3. [Introduction](#introduction)
+4. [Part I: Computer Systems Fundamentals for Robotics](#part-i)
+   1. [OS Scheduler Mechanics: From General-Purpose to Real-Time](#os-scheduler-mechanics)
+      1. [General-Purpose OS Schedulers: The Fairness Problem](#general-purpose-os-schedulers)
+      2. [Real-Time Schedulers: Predictability Over Fairness](#real-time-schedulers)
+      3. [Implementing Real-Time Scheduling for Robotics](#implementing-rt-scheduling)
+   2. [The Hidden Costs of Context Switching](#hidden-costs-context-switching)
+      1. [Memory Hierarchy and Cache Effects: An Intuitive Guide](#memory-hierarchy)
+      2. [Real-World Quantification](#real-world-quantification)
+   3. [Multi-Core Architecture and Core Dedication](#multi-core-architecture)
+      1. [CPU Core Allocation Theory](#cpu-core-allocation)
+      2. [Interrupt Handling Architecture](#interrupt-handling)
+5. [Part II: System-Level Optimizations](#part-ii)
+   1. [Kernel Preemption Models In-Depth](#kernel-preemption)
+      1. [Kernel Preemption Architecture](#kernel-preemption-architecture)
+      2. [Priority Inversion Problem and Solutions](#priority-inversion)
+   2. [Memory Management Architecture for Determinism](#memory-management)
+      1. [Memory Hierarchy and Determinism Challenges](#memory-hierarchy-determinism)
+      2. [Implementing Deterministic Memory Management](#deterministic-memory)
+   3. [CPU Frequency, Thermal Management, and Microarchitectural Considerations](#cpu-thermal)
+      1. [Dynamic Frequency/Voltage Scaling Effects](#dvfs-effects)
+      2. [Thermal Throttling: The Silent Performance Killer](#thermal-throttling)
+6. [Part III: ROS2 Architecture and Communication Framework](#part-iii)
+   1. [ROS2 Framework Architecture: Beyond Just Middleware](#ros2-framework)
+      1. [ROS2 Architectural Overview: A Complete Robotics Platform](#ros2-architectural-overview)
+      2. [ROS2 as a Comprehensive Robotics Framework](#ros2-comprehensive-framework)
+      3. [Real-World Examples: What ROS2 Handles vs. What You Build](#ros2-real-world-examples)
+      4. [Key Challenges in Learning and Using ROS2](#ros2-key-challenges)
+      5. [ROS2 Communication Model: DDS and Alternatives](#ros2-communication-model)
+      6. [Conclusion: ROS2 as an Enabling Framework for Real-Time Robotics](#ros2-conclusion)
+   2. [Container Networking Architecture](#container-networking)
+      1. [Container Network Models and Performance Impact](#container-network-models)
+      2. [Multicast and Discovery Optimization](#multicast-discovery)
+7. [Part IV: Process Prioritization and Scheduling for Robotics Systems](#part-iv)
+   1. [Process Prioritization in Real-Time Systems: Why It Matters](#process-prioritization)
+      1. [The Critical Role of Prioritization in Real-Time Systems](#prioritization-critical-role)
+      2. [Starvation Problems and Solutions](#starvation-problems)
+      3. [Priority Assignment Methodology for Robotics](#priority-assignment)
+      4. [Dynamic Priority Adjustment and Adaptation](#dynamic-priority)
+      5. [Measuring and Validating Priority Effectiveness](#measuring-priority)
+   2. [CPU Affinity and Cache Coherency](#cpu-affinity)
+      1. [Processor Affinity: Keeping Processes at Home](#processor-affinity)
+      2. [NUMA and Multi-Core Memory Architecture: The Distance Penalty](#numa-architecture)
+8. [Part V: Application-Specific Architecture for Real-Time Robotics](#part-v)
+   1. [Computer Vision Pipeline Architecture for Real-Time Robotics](#vision-pipeline)
+      1. [Understanding Modern Computer Vision Pipelines: From Pixels to Decisions](#vision-pipelines)
+      2. [YOLO Architecture and Real-Time Considerations: Deep Dive](#yolo-architecture)
+      3. [Vision Pipeline Optimization Strategies for Real-Time Robotics](#vision-optimization)
+      4. [Balancing Vision Processing with Control Loops: The Integration Challenge](#vision-control-balance)
+      5. [Real-World Vision Architecture for Ball Tracking Robot](#vision-ball-tracking)
+   2. [Sensor Fusion and State Estimation Architecture](#sensor-fusion)
+      1. [Understanding Sensor Fusion: Why No Single Sensor Is Enough](#sensor-fusion-understanding)
+      2. [Multi-Rate Sensor Fusion: Handling Different Sensor Timescales](#multi-rate-sensor-fusion)
+9. [Part VI: Verification and Performance Analysis](#part-vi)
+   1. [Latency Testing and Analysis](#latency-testing)
+      1. [Cyclictest and RT Testing Framework](#cyclictest)
+      2. [Tracing and Performance Analysis](#tracing-performance)
+10. [Conclusion: Holistic System Design for Real-Time Robotics](#conclusion)
+11. [Next Steps in the Ball-Tracking Robot Curriculum](#next-steps)
 
 <a name="course-overview"></a>
-## Course Overview: The Ball-Tracking Robot Curriculum
+## 1. Course Overview: The Ball-Tracking Robot Curriculum
 
 Welcome to the first module in our comprehensive curriculum on real-time robotics using ROS2. This course uses a functional ball-tracking robot as a learning platform to explore various aspects of modern robotics systems. Each module builds upon existing working code, allowing you to focus on understanding concepts and experimenting with algorithmic modifications rather than building systems from scratch.
 
-### Curriculum Structure
+<a name="curriculum-structure"></a>
+### 1.1 Curriculum Structure
 
 This document is the foundational module that explores the computer systems engineering principles necessary for real-time robotics. Subsequent modules will dive deeper into specialized topics:
 
@@ -42,7 +100,8 @@ This document is the foundational module that explores the computer systems engi
 
 Each module provides both theoretical foundations and practical implementation guidance. You'll work with functional code for each component, allowing you to run experiments, modify algorithms, and observe the impact of different approaches.
 
-### Learning Approach
+<a name="learning-approach"></a>
+### 1.2 Learning Approach
 
 This curriculum is designed with a practical, hands-on approach:
 - **Working Code First**: Each module includes functional code you can run immediately
@@ -50,7 +109,8 @@ This curriculum is designed with a practical, hands-on approach:
 - **Comparative Analysis**: Compare different algorithmic approaches to understand performance tradeoffs
 - **System Integration**: Learn how specialized components work together in a complete robotic system
 
-### Prerequisites
+<a name="prerequisites"></a>
+### 1.3 Prerequisites
 
 This curriculum assumes:
 - **Programming Experience**: Familiarity with basic programming concepts; some experience with C++ or Python
@@ -60,66 +120,71 @@ This curriculum assumes:
 
 No specialized robotics or computer vision experience is required. More advanced concepts are explained as they are introduced.
 
+> **Key Takeaway**: This curriculum provides a structured, hands-on approach to learning real-time robotics, starting with fundamental systems engineering principles and progressing through all major subsystems of a complete robotics platform. It's designed to be accessible to those with basic programming and Linux skills, while providing depth for more experienced engineers.
+
 ---
 
-<a name="introduction"></a>
+<a name="system-overview"></a>
+## 2. System Overview
 
-## System Overview
-Basketball Tracking Robot System Overview
+The basketball tracking robot is an autonomous system designed to track and follow a basketball in real-time using multiple sensors and coordinated control mechanisms. It features a comprehensive architecture optimized for the Raspberry Pi 5 platform.
 
-This project covers a basketball tracking robot, which is an autonomous system designed to track and follow a basketball in real-time using multiple sensors and coordinated control mechanisms. It features a comprehensive architecture optimized for the Raspberry Pi 5 platform.
+<a name="core-components"></a>
+### 2.1 Core Components
 
-Core Components
-Sensor System
+#### Sensor System
 The robot employs a multi-sensor approach combining:
 
-YOLO-based camera detection for 2D visual tracking
-LiDAR for precise distance and position measurements
-3D depth camera for enhanced spatial awareness
+- **YOLO-based camera detection** for 2D visual tracking
+- **LiDAR** for precise distance and position measurements
+- **3D depth camera** for enhanced spatial awareness
 
-Sensor Fusion
+#### Sensor Fusion
 A sophisticated fusion node integrates data from all sensors using:
 
-Kalman filtering for position estimation and prediction
-Motion state detection to determine if the ball is stationary or moving
-Uncertainty management to assess confidence in position data
+- **Kalman filtering** for position estimation and prediction
+- **Motion state detection** to determine if the ball is stationary or moving
+- **Uncertainty management** to assess confidence in position data
 
-State Management
+#### State Management
 A state machine governs the robot's behavior through distinct operational states:
 
-Tracking: Active basketball following
-Lost ball: Handling temporary tracking failures
-Searching: Systematic scanning for a missing ball
-Stopped: Stationary mode when ball is close and not moving
-Recovery: Special procedures for regaining tracking after failures
+- **Tracking**: Active basketball following
+- **Lost ball**: Handling temporary tracking failures
+- **Searching**: Systematic scanning for a missing ball
+- **Stopped**: Stationary mode when ball is close and not moving
+- **Recovery**: Special procedures for regaining tracking after failures
 
-PID Control System
+#### PID Control System
 Sophisticated control algorithms guide the robot's movement using:
 
-Angular-first control strategy for efficient trajectory adjustment
-Coordinated movement with balanced parameters
-Adaptive control rates based on system performance
-Resource-aware processing optimized for CPU constraints
+- **Angular-first control strategy** for efficient trajectory adjustment
+- **Coordinated movement** with balanced parameters
+- **Adaptive control rates** based on system performance
+- **Resource-aware processing** optimized for CPU constraints
 
-Diagnostics Framework
+#### Diagnostics Framework
 A comprehensive monitoring system ensures reliability:
 
-Pipeline health monitoring for sensor-to-actuator data flow
-Performance tracking and optimization
-Event correlation for root cause analysis
-Robust error recovery mechanisms
+- **Pipeline health monitoring** for sensor-to-actuator data flow
+- **Performance tracking** and optimization
+- **Event correlation** for root cause analysis
+- **Robust error recovery** mechanisms
 
-Operational Features
+<a name="operational-features"></a>
+### 2.2 Operational Features
 
-Adaptive Performance: The system adjusts processing rates and computational complexity based on available resources.
-Resilience: Implements graceful degradation under challenging conditions with sensor gap tolerance.
-Motion Intelligence: Adapts tracking parameters based on ball movement characteristics.
-Resource Optimization: Employs memory-efficient data structures and prioritized processing.
+- **Adaptive Performance**: The system adjusts processing rates and computational complexity based on available resources.
+- **Resilience**: Implements graceful degradation under challenging conditions with sensor gap tolerance.
+- **Motion Intelligence**: Adapts tracking parameters based on ball movement characteristics.
+- **Resource Optimization**: Employs memory-efficient data structures and prioritized processing.
 
 The entire system is designed for real-time operation on resource-constrained hardware while maintaining reliable tracking performance.
 
-System Architecture Diagram
+<a name="system-architecture-diagram"></a>
+### 2.3 System Architecture Diagram
 
+```
 flowchart TD
     subgraph Sensors["Sensor Nodes"]
         YOLO["YOLO 2D Detection Node
@@ -296,23 +361,14 @@ flowchart TD
     DiagnosticsNode -.-> |monitors| StateManagement
     DiagnosticsNode -.-> |monitors| PIDController
     DiagnosticsNode -.-> |monitors| Output
-    
-    classDef sensorNodes fill:#d0f0c0,stroke:#333,stroke-width:1px;
-    classDef fusionNodes fill:#c0d0f0,stroke:#333,stroke-width:1px;
-    classDef stateNodes fill:#f0c0d0,stroke:#333,stroke-width:1px;
-    classDef pidNodes fill:#f0d0c0,stroke:#333,stroke-width:1px;
-    classDef diagNodes fill:#d0c0f0,stroke:#333,stroke-width:1px;
-    classDef outputNodes fill:#c0f0d0,stroke:#333,stroke-width:1px;
-    
-    class YOLO,LIDAR,DEPTH sensorNodes;
-    class SM,MSM,KF fusionNodes;
-    class FSM,HM,RB stateNodes;
-    class TCM,PCM,VCM,RM pidNodes;
-    class ET,PHMC,PPM,LOG diagNodes;
-    class POS,VEL,STAT,DIAG,CMD outputNodes;
+```
 
+*Figure 1: Complete system architecture diagram showing all major components and their interactions.*
 
-## Introduction
+> **Key Takeaway**: The basketball tracking robot is a complex, multi-layered system that integrates multiple sensors, advanced fusion techniques, and adaptive control algorithms. The architecture emphasizes robustness, efficiency, and real-time performance on resource-constrained hardware.
+
+<a name="introduction"></a>
+## 3. Introduction
 
 This document explores the fundamental computer science and engineering principles behind optimizing operating systems for real-time robotics applications. Using a Raspberry Pi running ROS2 as our case study, we'll examine how operating system design choices impact the deterministic behavior required for robotics. By understanding these principles, you'll gain insight into the critical relationship between system-level software architecture and the physical constraints of robotics applications.
 
@@ -341,14 +397,24 @@ This document explores the fundamental computer science and engineering principl
 │                                                                                                    │
 └────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
-*Figure 1: Overview of a real-time robotics system architecture showing the relationships between hardware, operating system, middleware, and application layers.*
+*Figure 2: Overview of a real-time robotics system architecture showing the relationships between hardware, operating system, middleware, and application layers.*
+
+Real-time robotics represents a unique intersection of digital computing and physical systems, where timing is as crucial as logical correctness. Unlike traditional software systems that prioritize overall throughput or average performance, robotics systems must guarantee consistent timing to interact safely and effectively with the physical world.
+
+This document provides a comprehensive exploration of the systems engineering principles that enable deterministic, real-time performance on resource-constrained platforms like the Raspberry Pi. We'll move systematically from fundamental concepts to advanced optimizations, with a focus on practical implementation.
+
+The principles covered here form the foundation for all subsequent modules in this curriculum. By establishing a solid understanding of real-time systems engineering, you'll be prepared to implement and optimize the specialized components that make up a complete robotics system, from computer vision to motor control.
+
+> **Key Takeaway**: Real-time robotics requires a different approach to system design than general-purpose computing, with an emphasis on deterministic timing over maximum throughput. This document provides the foundational knowledge needed to configure and optimize an operating system for robotics applications, setting the stage for more specialized topics in later modules.
 
 <a name="part-i"></a>
-## Part I: Computer Systems Fundamentals for Robotics
+# 4. Part I: Computer Systems Fundamentals for Robotics
 
-### 1. OS Scheduler Mechanics: From General-Purpose to Real-Time
+<a name="os-scheduler-mechanics"></a>
+## 4.1 OS Scheduler Mechanics: From General-Purpose to Real-Time
 
-#### 1.1 General-Purpose OS Schedulers: The Fairness Problem
+<a name="general-purpose-os-schedulers"></a>
+### 4.1.1 General-Purpose OS Schedulers: The Fairness Problem
 
 To understand why real-time robotics needs special operating system configurations, let's start with how normal computers manage tasks.
 
@@ -368,7 +434,7 @@ To understand why real-time robotics needs special operating system configuratio
 │                                     │  │        deadlines                │
 └─────────────────────────────────────┘  └──────────────────────────────────┘
 ```
-*Figure 2: Comparison between general-purpose scheduler (left) prioritizing fair distribution of resources versus real-time scheduler (right) prioritizing deadline adherence.*
+*Figure 3: Comparison between general-purpose scheduler (left) prioritizing fair distribution of resources versus real-time scheduler (right) prioritizing deadline adherence.*
 
 Imagine a busy office manager (the OS scheduler) trying to give fair attention to dozens of employees (processes) who all need time with a single resource (the CPU). This manager uses a system called the Completely Fair Scheduler (CFS) in Linux.
 
@@ -446,7 +512,7 @@ From a general computing perspective, the OS made a reasonable decision—all pr
              
    Timeline: 0ms      20ms       40ms       60ms       80ms
 ```
-*Figure 3: Visualization of deadline misses in a control system when background tasks interrupt critical processing.*
+*Figure 4: Visualization of deadline misses in a control system when background tasks interrupt critical processing.*
 
 **The Core Issue: Different Definitions of "Fair"**
 
@@ -455,7 +521,8 @@ For real-time systems, "fair" means critical tasks never miss their deadlines, e
 
 This fundamental difference is why we need to reconfigure the operating system for robotics applications—we need to change the definition of "fair" that the system uses.
 
-#### 1.2 Real-Time Schedulers: Predictability Over Fairness
+<a name="real-time-schedulers"></a>
+### 4.1.2 Real-Time Schedulers: Predictability Over Fairness
 
 **Real-Time Scheduling: A Different Philosophy**
 
@@ -499,7 +566,7 @@ The simplest form of real-time scheduling follows these principles:
 │ - Run until complete or preempted│  │   turns with time slices        │
 └──────────────────────────────────┘  └─────────────────────────────────┘
 ```
-*Figure 4: Comparison of SCHED_FIFO (no time slices) versus SCHED_RR (with time slices for equal priority tasks) operations.*
+*Figure 5: Comparison of SCHED_FIFO (no time slices) versus SCHED_RR (with time slices for equal priority tasks) operations.*
 
 **SCHED_RR: Round-Robin Real-Time Scheduling**
 
@@ -575,7 +642,7 @@ Implementing real-time scheduling comes with tradeoffs, particularly in total CP
   │                                    │
   └────────────────────────────────────┘
 ```
-*Figure 5: Comparison of CPU utilization patterns between general-purpose and real-time systems, showing the utilization penalty paid for deterministic timing.*
+*Figure 6: Comparison of CPU utilization patterns between general-purpose and real-time systems, showing the utilization penalty paid for deterministic timing.*
 
 **Real-World Utilization Impact:**
 
@@ -592,7 +659,8 @@ With a real-time scheduler prioritizing the control loops, the system might only
 
 **This utilization penalty is the price we pay for deterministic timing—essentially, we're trading efficiency for reliability.**
 
-#### 1.3 Implementing Real-Time Scheduling for Robotics
+<a name="implementing-rt-scheduling"></a>
+### 4.1.3 Implementing Real-Time Scheduling for Robotics
 
 To implement proper real-time scheduling for our robotics system, we need several components:
 
@@ -674,7 +742,7 @@ taskset -c 2 chrt -f 80 ./my_sensor_process
 │                                          │
 └──────────────────────────────────────────┘
 ```
-*Figure 6: Visual representation of CPU core allocation strategy for a real-time robotics system on Raspberry Pi.*
+*Figure 7: Visual representation of CPU core allocation strategy for a real-time robotics system on Raspberry Pi.*
 
 With this complete configuration, we've created an environment where:
 - Critical processes run at predictable times
@@ -683,12 +751,16 @@ With this complete configuration, we've created an environment where:
 
 This is the foundation for reliable real-time robotics applications, where consistent timing can be the difference between a smoothly operating robot and a disastrous failure. In the ball-tracking robot, this configuration ensures that control algorithms run consistently, regardless of what the vision system or other components are doing.
 
+> **Key Takeaway**: Real-time scheduling fundamentally changes how the operating system allocates CPU time, prioritizing deadline adherence over fair resource distribution. By implementing the PREEMPT_RT kernel patch, configuring process priorities, isolating CPU cores, and setting CPU affinity, we create a robust environment for real-time robotics applications that ensures critical tasks never miss their deadlines.
+
 > **Looking Ahead to Module 6: State Management Systems**  
 > The real-time scheduling principles covered here form the foundation for the comprehensive state management system we'll explore in Module 6, where we'll implement a hierarchical state machine that adapts priorities dynamically based on the robot's operational mode.
 
-### 2. The Hidden Costs of Context Switching
+<a name="hidden-costs-context-switching"></a>
+## 4.2 The Hidden Costs of Context Switching
 
-#### 2.1 Memory Hierarchy and Cache Effects: An Intuitive Guide
+<a name="memory-hierarchy"></a>
+### 4.2.1 Memory Hierarchy and Cache Effects: An Intuitive Guide
 
 To understand why context switching hurts performance so much, let's look at how modern CPUs actually access data—through a carefully designed memory hierarchy that balances speed and capacity.
 
@@ -720,7 +792,7 @@ Imagine your computer's memory as a pyramid with several levels:
         Speed ──────────────────────▶ Capacity
        Fastest                        Largest
 ```
-*Figure 7: The memory hierarchy pyramid showing access times and sizes for different memory levels, from CPU registers to storage.*
+*Figure 8: The memory hierarchy pyramid showing access times and sizes for different memory levels, from CPU registers to storage.*
 
 1. **CPU Registers** - Tiny but incredibly fast storage directly inside the CPU
 2. **L1 Cache** - Small, very fast memory (typically 32-64KB per core)
@@ -769,7 +841,7 @@ When your program needs data:
 │                                 │
 └─────────────────────────────────┘
 ```
-*Figure 8: Visualization of cache line operations showing how data moves between different cache levels during memory access.*
+*Figure 9: Visualization of cache line operations showing how data moves between different cache levels during memory access.*
 
 **Context Switching: The Great Cache Disruption**
 
@@ -819,7 +891,7 @@ For real-world perspective: If your robot is tracking a ball at 30fps, you have 
 │                                     │
 └─────────────────────────────────────┘
 ```
-*Figure 9: Visualization of cache state before and after a context switch, showing how much of the data needs to be reloaded.*
+*Figure 10: Visualization of cache state before and after a context switch, showing how much of the data needs to be reloaded.*
 
 Imagine running a control loop that needs to update 100 times per second (every 10ms):
 1. With "hot" caches (data already in L1), the computation might take 1ms
@@ -829,7 +901,8 @@ This means that a supposedly 10% CPU load (1ms out of 10ms) suddenly spikes to 3
 
 This is why isolating cores and preventing unnecessary context switches is so crucial for real-time robotics: it preserves the precious cache state that makes computations fast and predictable.
 
-#### 2.2 Real-World Quantification
+<a name="real-world-quantification"></a>
+### 4.2.2 Real-World Quantification
 
 Consider a practical example from robotics control:
 
@@ -868,16 +941,20 @@ Consider a practical example from robotics control:
 │                                                    │
 └────────────────────────────────────────────────────┘
 ```
-*Figure 10: Graph showing the impact of cache state on PID controller performance, comparing ideal performance (smooth line) with disrupted cache performance (oscillating line).*
+*Figure 11: Graph showing the impact of cache state on PID controller performance, comparing ideal performance (smooth line) with disrupted cache performance (oscillating line).*
 
 By isolating cores and preventing unnecessary context switches, we effectively give our real-time processes private L1/L2 caches, dramatically improving deterministic performance.
+
+> **Key Takeaway**: Context switching causes far more overhead than most developers realize, primarily due to cache effects. When a process is switched out, its data is evicted from CPU caches, causing significant performance degradation when it runs again. For real-time robotics, these effects can mean the difference between stable control and erratic behavior, highlighting why proper CPU isolation and scheduling are essential.
 
 > **Looking Ahead to Module 7: PID Control Implementation**  
 > The timing consistency principles we're establishing here will be critical when we implement and tune PID controllers in Module 7. You'll see how minor timing variations can significantly impact control stability, and how proper system configuration makes control parameter tuning more reliable and repeatable.
 
-### 3. Multi-Core Architecture and Core Dedication
+<a name="multi-core-architecture"></a>
+## 4.3 Multi-Core Architecture and Core Dedication
 
-#### 3.1 CPU Core Allocation Theory
+<a name="cpu-core-allocation"></a>
+### 4.3.1 CPU Core Allocation Theory
 
 Modern SoCs (including Raspberry Pi) have heterogeneous multi-core architectures that we can exploit:
 
@@ -906,14 +983,15 @@ Modern SoCs (including Raspberry Pi) have heterogeneous multi-core architectures
 │                                            │
 └────────────────────────────────────────────┘
 ```
-*Figure 11: Visualization of core specialization architecture showing different roles for each CPU core in a real-time robotics system.*
+*Figure 12: Visualization of core specialization architecture showing different roles for each CPU core in a real-time robotics system.*
 
 **Memory and Cache Hierarchy Implications:**
 - Shared Last-Level Cache (LLC) means cores still contend for cache space
 - Memory controller access patterns can still cause interference
 - NUMA (Non-Uniform Memory Access) considerations on larger systems
 
-#### 3.2 Interrupt Handling Architecture
+<a name="interrupt-handling"></a>
+### 4.3.2 Interrupt Handling Architecture
 
 From a computer architecture perspective, interrupts are a major source of non-determinism:
 
@@ -968,14 +1046,18 @@ These create a clear separation in function:
 │                                         │
 └─────────────────────────────────────────┘
 ```
-*Figure 12: Comparison of interrupt handling with and without core isolation, showing how isolation protects real-time processes from interrupt disruption.*
+*Figure 13: Comparison of interrupt handling with and without core isolation, showing how isolation protects real-time processes from interrupt disruption.*
+
+> **Key Takeaway**: Multi-core architectures allow us to create specialized execution environments with different characteristics. By dedicating specific cores to real-time tasks and configuring interrupt handling to route all interrupts to a designated system core, we create isolated, deterministic execution environments for critical robotics processes, dramatically improving timing predictability.
 
 <a name="part-ii"></a>
-## Part II: System-Level Optimizations
+# 5. Part II: System-Level Optimizations
 
-### 4. Kernel Preemption Models In-Depth
+<a name="kernel-preemption"></a>
+## 5.1 Kernel Preemption Models In-Depth
 
-#### 4.1 Kernel Preemption Architecture
+<a name="kernel-preemption-architecture"></a>
+### 5.1.1 Kernel Preemption Architecture
 
 The Linux kernel offers different preemption models, progressively increasing real-time capabilities:
 
@@ -1022,11 +1104,12 @@ The Linux kernel offers different preemption models, progressively increasing re
 │                                               │
 └───────────────────────────────────────────────┘
 ```
-*Figure 13: Comparison of different Linux kernel preemption models showing latency characteristics and design tradeoffs.*
+*Figure 14: Comparison of different Linux kernel preemption models showing latency characteristics and design tradeoffs.*
 
 From a computer engineering perspective, PREEMPT_RT achieves this by transforming asynchronous interrupts into schedulable threads, bringing nearly all sources of non-determinism under scheduler control.
 
-#### 4.2 Priority Inversion Problem and Solutions
+<a name="priority-inversion"></a>
+### 5.1.2 Priority Inversion Problem and Solutions
 
 A classic computer science problem in real-time systems is priority inversion:
 
@@ -1055,16 +1138,20 @@ This isn't just theoretical—it caused the Mars Pathfinder mission to fail repe
 │                                      │
 └──────────────────────────────────────┘
 ```
-*Figure 14: Visualization of the priority inversion problem showing how a medium-priority task can indirectly block a high-priority task.*
+*Figure 15: Visualization of the priority inversion problem showing how a medium-priority task can indirectly block a high-priority task.*
 
 **Solutions Implemented in PREEMPT_RT:**
 - Priority Inheritance Protocol: When a high-priority task waits for a resource held by a low-priority task, the low-priority task temporarily inherits the high priority
 - Mutexes with PI (Priority Inheritance) replace spinlocks
 - Makes lock acquisition time bounded and predictable
 
-### 5. Memory Management Architecture for Determinism
+> **Key Takeaway**: The PREEMPT_RT kernel patch transforms Linux into a real-time operating system by making nearly all kernel code preemptible, converting asynchronous interrupts into schedulable threads, and implementing priority inheritance to prevent priority inversion problems. These changes reduce latency from tens of milliseconds to hundreds of microseconds, making it suitable for real-time robotics applications.
 
-#### 5.1 Memory Hierarchy and Determinism Challenges
+<a name="memory-management"></a>
+## 5.2 Memory Management Architecture for Determinism
+
+<a name="memory-hierarchy-determinism"></a>
+### 5.2.1 Memory Hierarchy and Determinism Challenges
 
 Modern computer memory systems present several challenges to deterministic execution:
 
@@ -1105,7 +1192,7 @@ Modern computer memory systems present several challenges to deterministic execu
 │  |                                          │
 └─────────────────────────────────────────────┘
 ```
-*Figure 15: Graph showing variation in memory allocation timing over multiple allocations, highlighting the non-deterministic nature of standard memory management.*
+*Figure 16: Graph showing variation in memory allocation timing over multiple allocations, highlighting the non-deterministic nature of standard memory management.*
 
 **Solutions from Systems Engineering:**
 - Memory locking (mlockall) prevents paging to disk
@@ -1113,7 +1200,8 @@ Modern computer memory systems present several challenges to deterministic execu
 - Pre-allocation patterns: Allocate all needed memory during initialization
 - Memory pool allocators with deterministic allocation times
 
-#### 5.2 Implementing Deterministic Memory Management
+<a name="deterministic-memory"></a>
+### 5.2.2 Implementing Deterministic Memory Management
 
 In our Raspberry Pi configuration, we implement:
 
@@ -1136,9 +1224,13 @@ In our Raspberry Pi configuration, we implement:
 
 From an engineering perspective, these configurations make a profound difference because they eliminate the possibility of page faults causing multi-millisecond pauses during critical operations.
 
-### 6. CPU Frequency, Thermal Management, and Microarchitectural Considerations
+> **Key Takeaway**: Virtual memory and dynamic memory allocation introduce unpredictable timing variations that can disrupt real-time performance. By disabling swap, locking memory pages in RAM, pre-faulting pages, and using careful memory allocation strategies, we can eliminate major sources of timing jitter and ensure more deterministic behavior for robotics applications.
 
-#### 6.1 Dynamic Frequency/Voltage Scaling Effects
+<a name="cpu-thermal"></a>
+## 5.3 CPU Frequency, Thermal Management, and Microarchitectural Considerations
+
+<a name="dvfs-effects"></a>
+### 5.3.1 Dynamic Frequency/Voltage Scaling Effects
 
 Modern CPUs dynamically adjust frequency and voltage to save power:
 
@@ -1179,11 +1271,12 @@ Modern CPUs dynamically adjust frequency and voltage to save power:
 │                                     │
 └─────────────────────────────────────┘
 ```
-*Figure 16: Visualization of CPU P-states (performance states) and C-states (idle states) showing transitions and latency impacts.*
+*Figure 17: Visualization of CPU P-states (performance states) and C-states (idle states) showing transitions and latency impacts.*
 
 For real-time systems, these energy-saving features introduce unacceptable non-determinism. By setting the CPU governor to `performance` mode, we force the CPU to remain in its highest P-state (P0) and avoid deeper C-states, enabling consistent instruction execution timing.
 
-#### 6.2 Thermal Throttling: The Silent Performance Killer
+<a name="thermal-throttling"></a>
+### 5.3.2 Thermal Throttling: The Silent Performance Killer
 
 **What is Thermal Throttling?**
 
@@ -1216,7 +1309,7 @@ All modern CPUs, including those in Raspberry Pi, implement multi-stage thermal 
 │  performance.                                      │
 └────────────────────────────────────────────────────┘
 ```
-*Figure 17: Graph showing the relationship between CPU temperature and frequency during thermal throttling events. As temperature increases, frequency decreases.*
+*Figure 18: Graph showing the relationship between CPU temperature and frequency during thermal throttling events. As temperature increases, frequency decreases.*
 
 **Why This Matters for Real-Time Robotics**
 
@@ -1345,7 +1438,7 @@ Several strategies can mitigate thermal throttling issues:
 │                                       │
 └───────────────────────────────────────┘
 ```
-*Figure 18: Comprehensive thermal management strategy diagram showing hardware, software, and environmental approaches to mitigating thermal throttling.*
+*Figure 19: Comprehensive thermal management strategy diagram showing hardware, software, and environmental approaches to mitigating thermal throttling.*
 
 **CPU Frequency Configuration for Thermal Stability**
 
@@ -1407,15 +1500,19 @@ while True:
 
 By understanding and proactively managing thermal effects, you can ensure your real-time robotics system maintains consistent performance over extended operation, avoiding the unpredictable timing variations that thermal throttling introduces.
 
+> **Key Takeaway**: Dynamic frequency scaling and thermal throttling introduce significant timing variability that can disrupt real-time performance. By forcing the CPU to run at a fixed frequency with the performance governor, implementing proper thermal management solutions, and monitoring temperature and throttling events, we can maintain consistent performance over extended operation periods.
+
 > **Looking Ahead to Module 8: Diagnostics and Performance Analysis**  
 > The thermal monitoring approaches introduced here will be expanded in Module 8, where we'll implement comprehensive system diagnostics that include not just thermal monitoring but also CPU load analysis, memory usage tracking, and network performance metrics to ensure optimal system operation.
 
 <a name="part-iii"></a>
-## Part III: ROS2 Architecture and Communication Framework
+# 6. Part III: ROS2 Architecture and Communication Framework
 
-### 7. ROS2 Framework Architecture: Beyond Just Middleware
+<a name="ros2-framework"></a>
+## 6.1 ROS2 Framework Architecture: Beyond Just Middleware
 
-#### 7.1 ROS2 Architectural Overview: A Complete Robotics Platform
+<a name="ros2-architectural-overview"></a>
+### 6.1.1 ROS2 Architectural Overview: A Complete Robotics Platform
 
 **What Makes ROS2 Different from ROS1**
 
@@ -1466,7 +1563,7 @@ ROS2 (Robot Operating System 2) represents a complete redesign from its predeces
 │                                     │
 └─────────────────────────────────────┘
 ```
-*Figure 19: The ROS2 architectural layers showing the complete stack from operating system to application code.*
+*Figure 20: The ROS2 architectural layers showing the complete stack from operating system to application code.*
 
 2. **Execution Models**:
 
@@ -1530,7 +1627,7 @@ One of the most significant advances in ROS2 is the flexibility in how nodes can
 │                                                        │
 └────────────────────────────────────────────────────────┘
 ```
-*Figure 20: Comparison of traditional inter-process communication versus intra-process communication in ROS2, highlighting the performance benefits of the latter.*
+*Figure 21: Comparison of traditional inter-process communication versus intra-process communication in ROS2, highlighting the performance benefits of the latter.*
 
 **Example: Traditional vs Intra-Process Communication**
 
@@ -1575,7 +1672,8 @@ executor.spin();
 
 This configuration allows zero-copy data transfer between nodes, critical for high-bandwidth data like images or point clouds, and dramatically reduces latency—often by an order of magnitude or more compared to inter-process communication.
 
-#### 7.2 ROS2 as a Comprehensive Robotics Framework
+<a name="ros2-comprehensive-framework"></a>
+### 6.1.2 ROS2 as a Comprehensive Robotics Framework
 
 Beyond just providing communication middleware, ROS2 offers a complete ecosystem for robotics development:
 
@@ -1657,7 +1755,7 @@ ROS2 comes with numerous tools that accelerate development:
 │                                     │
 └─────────────────────────────────────┘
 ```
-*Figure 21: The ROS2 ecosystem showing key components, tools, and utilities that support robotics development.*
+*Figure 22: The ROS2 ecosystem showing key components, tools, and utilities that support robotics development.*
 
 **3. High-Level Capabilities**
 
@@ -1704,7 +1802,8 @@ ROS2 abstracts hardware interfaces through:
    - Supports multiple programming languages
    - Scales from microcontrollers to distributed systems
 
-#### 7.3 Real-World Examples: What ROS2 Handles vs. What You Build
+<a name="ros2-real-world-examples"></a>
+### 6.1.3 Real-World Examples: What ROS2 Handles vs. What You Build
 
 To understand ROS2's value, consider what you'd need to build without it:
 
@@ -1793,9 +1892,10 @@ To understand ROS2's value, consider what you'd need to build without it:
 │                                         │
 └─────────────────────────────────────────┘
 ```
-*Figure 22: Comparison of implementation effort required with and without ROS2 for typical robotics subsystems.*
+*Figure 23: Comparison of implementation effort required with and without ROS2 for typical robotics subsystems.*
 
-#### 7.4 Key Challenges in Learning and Using ROS2
+<a name="ros2-key-challenges"></a>
+### 6.1.4 Key Challenges in Learning and Using ROS2
 
 Despite its benefits, ROS2 presents several challenges for developers:
 
@@ -1856,7 +1956,8 @@ ROS2 is still evolving, with API changes between major releases:
 
 **Learning Strategy**: Always check release notes when upgrading, and consider sticking with LTS (Long Term Support) releases for production systems.
 
-#### 7.5 ROS2 Communication Model: DDS and Alternatives
+<a name="ros2-communication-model"></a>
+### 6.1.5 ROS2 Communication Model: DDS and Alternatives
 
 As mentioned earlier, ROS2's communication is built on the Data Distribution Service (DDS) standard, which offers several advantages:
 
@@ -1909,7 +2010,7 @@ As mentioned earlier, ROS2's communication is built on the Data Distribution Ser
 │                                           │
 └───────────────────────────────────────────┘
 ```
-*Figure 23: Overview of DDS Quality of Service policies and their effects on communication behavior.*
+*Figure 24: Overview of DDS Quality of Service policies and their effects on communication behavior.*
 
 **Optimizing DDS for Real-Time Robotics**
 
@@ -1961,18 +2062,23 @@ ROS2 also supports alternative communication methods:
    </profiles>
    ```
 
-### 7.6 Conclusion: ROS2 as an Enabling Framework for Real-Time Robotics
+<a name="ros2-conclusion"></a>
+### 6.1.6 Conclusion: ROS2 as an Enabling Framework for Real-Time Robotics
 
 ROS2 represents a significant advancement in robotics software architecture, particularly for real-time applications. By providing both high-level abstractions and low-level control, it allows developers to focus on their specific robotics challenges rather than rebuilding common infrastructure.
 
 For real-time performance, the key is understanding both the ROS2 framework and the underlying system optimizations covered throughout this document. When properly configured, ROS2 on an optimized Raspberry Pi can provide the deterministic performance needed for complex robotics applications, from simple motor control to sophisticated sensor fusion and autonomous navigation.
 
+> **Key Takeaway**: ROS2 provides a comprehensive ecosystem for robotics development, handling common infrastructure needs while allowing developers to focus on unique aspects of their robot. Its layered architecture, flexible execution models, and quality of service controls make it suitable for real-time applications when properly configured, significantly accelerating development compared to building similar capabilities from scratch.
+
 > **Looking Ahead to All Future Modules**  
 > The ROS2 framework serves as the integrating backbone for all the specialized components we'll explore in subsequent modules. Each module will build upon this foundation, showing how to implement specific functionality within the ROS2 architecture while maintaining the real-time properties established here.
 
-### 8. Container Networking Architecture
+<a name="container-networking"></a>
+## 6.2 Container Networking Architecture
 
-#### 8.1 Container Network Models and Performance Impact
+<a name="container-network-models"></a>
+### 6.2.1 Container Network Models and Performance Impact
 
 Docker offers multiple networking models, each with different performance characteristics:
 
@@ -2034,12 +2140,13 @@ Docker offers multiple networking models, each with different performance charac
 │                                    │
 └────────────────────────────────────┘
 ```
-*Figure 24: Comparison of Docker networking models showing the performance impact of different approaches.*
+*Figure 25: Comparison of Docker networking models showing the performance impact of different approaches.*
 
 **Engineering tradeoff analysis:**
 The `--net=host` flag eliminates a layer of network virtualization, saving both latency and CPU overhead. While this reduces isolation, the performance benefit is significant for real-time distributed systems like ROS2.
 
-#### 8.2 Multicast and Discovery Optimization
+<a name="multicast-discovery"></a>
+### 6.2.2 Multicast and Discovery Optimization
 
 ROS2 node discovery relies heavily on multicast:
 
@@ -2054,12 +2161,16 @@ ROS2 node discovery relies heavily on multicast:
 
 These settings are crucial for ensuring reliable node discovery in complex robot architectures spanning multiple network segments.
 
+> **Key Takeaway**: Container networking choices have significant implications for real-time performance. Using host networking (`--net=host`) eliminates virtualization overhead critical for low-latency communications in robotics applications. Proper multicast configuration is equally important for reliable ROS2 node discovery across network segments.
+
 <a name="part-iv"></a>
-## Part IV: Process Prioritization and Scheduling for Robotics Systems
+# 7. Part IV: Process Prioritization and Scheduling for Robotics Systems
 
-### 9. Process Prioritization in Real-Time Systems: Why It Matters
+<a name="process-prioritization"></a>
+## 7.1 Process Prioritization in Real-Time Systems: Why It Matters
 
-#### 9.1 The Critical Role of Prioritization in Real-Time Systems
+<a name="prioritization-critical-role"></a>
+### 7.1.1 The Critical Role of Prioritization in Real-Time Systems
 
 **Why Process Priorities Are Essential**
 
@@ -2121,7 +2232,7 @@ Just as an airport would ensure passengers with imminent departures get through 
 │                                    │
 └────────────────────────────────────┘
 ```
-*Figure 25: Visual analogy comparing process prioritization to airport security lanes, showing how different priority levels ensure timely processing.*
+*Figure 26: Visual analogy comparing process prioritization to airport security lanes, showing how different priority levels ensure timely processing.*
 
 **The Cost of Incorrect Prioritization**
 
@@ -2139,7 +2250,8 @@ Getting priorities wrong can have severe consequences. Consider these failure mo
    - **Result**: Control algorithms become unstable
    - **Real-world example**: A robot arm moves erratically instead of smoothly
 
-#### 9.2 Starvation Problems and Solutions
+<a name="starvation-problems"></a>
+### 7.1.2 Starvation Problems and Solutions
 
 **Understanding Process Starvation**
 
@@ -2181,7 +2293,7 @@ Here's the fundamental tension:
 │                                      │
 └──────────────────────────────────────┘
 ```
-*Figure 26: Visualization of the process starvation problem showing how high-priority tasks can completely block lower-priority tasks from execution.*
+*Figure 27: Visualization of the process starvation problem showing how high-priority tasks can completely block lower-priority tasks from execution.*
 
 **Engineering Solutions to Starvation**
 
@@ -2248,7 +2360,8 @@ One of the most famous examples of priority problems occurred on the Mars Pathfi
 
 The solution was to enable priority inheritance in the operating system, which solved the problem by temporarily boosting the priority of task C when task A was waiting for it.
 
-#### 9.3 Priority Assignment Methodology for Robotics
+<a name="priority-assignment"></a>
+### 7.1.3 Priority Assignment Methodology for Robotics
 
 **Scientific Basis for Priority Assignment**
 
@@ -2303,7 +2416,7 @@ Priority assignment isn't arbitrary—it follows established principles from rea
 │                                             │
 └─────────────────────────────────────────────┘
 ```
-*Figure 27: Comparison of different priority assignment methodologies showing their mathematical basis and application scenarios.*
+*Figure 28: Comparison of different priority assignment methodologies showing their mathematical basis and application scenarios.*
 
 **Concrete Priority Assignment for Your Ball-Tracking Robot**
 
@@ -2359,7 +2472,8 @@ sudo chrt -f 50 ./behavior_engine
 ./network_comms
 ```
 
-#### 9.4 Dynamic Priority Adjustment and Adaptation
+<a name="dynamic-priority"></a>
+### 7.1.4 Dynamic Priority Adjustment and Adaptation
 
 Modern robotics systems can benefit from more sophisticated priority management:
 
@@ -2413,7 +2527,7 @@ Different robot modes may require different priority assignments:
 │                                       │
 └───────────────────────────────────────┘
 ```
-*Figure 28: Dynamic priority adjustment based on robot operational mode, showing how priorities shift to optimize for different tasks.*
+*Figure 29: Dynamic priority adjustment based on robot operational mode, showing how priorities shift to optimize for different tasks.*
 
 **Implementing Mode-Based Priority Shifts**:
 
@@ -2558,7 +2672,8 @@ void monitor_and_adjust_priorities() {
 }
 ```
 
-#### 9.5 Measuring and Validating Priority Effectiveness
+<a name="measuring-priority"></a>
+### 7.1.5 Measuring and Validating Priority Effectiveness
 
 After implementing priority assignments, it's crucial to verify they're working as intended:
 
@@ -2623,16 +2738,20 @@ After implementing priority assignments, it's crucial to verify they're working 
 │                                                   │
 └───────────────────────────────────────────────────┘
 ```
-*Figure 29: Example visualization of process scheduling using Kernelshark, showing scheduling events, preemptions, and execution timelines.*
+*Figure 30: Example visualization of process scheduling using Kernelshark, showing scheduling events, preemptions, and execution timelines.*
 
 By properly configuring process priorities and verifying their effectiveness, you create a robotics system that maintains both deterministic real-time behavior for critical tasks and appropriate progress for all necessary functions—achieving the balance needed for reliable operation.
+
+> **Key Takeaway**: Process prioritization is the cornerstone of real-time system design, ensuring that critical tasks receive CPU time when needed while allowing less critical tasks to make sufficient progress. Using scientific priority assignment methodologies like Rate Monotonic or Deadline Monotonic scheduling, implementing dynamic priority adaptation based on robot state, and validating effectiveness through timing analysis tools help create a balanced, responsive system.
 
 > **Looking Ahead to Module 5: Sensor Fusion Techniques**  
 > The priority management techniques discussed here will be essential when implementing the multi-rate sensor fusion system in Module 5, where different sensors operate at different rates and priorities. You'll learn how to coordinate these diverse data streams while maintaining real-time performance.
 
-### 10. CPU Affinity and Cache Coherency
+<a name="cpu-affinity"></a>
+## 7.2 CPU Affinity and Cache Coherency
 
-#### 10.1 Processor Affinity: Keeping Processes at Home
+<a name="processor-affinity"></a>
+### 7.2.1 Processor Affinity: Keeping Processes at Home
 
 **What is CPU Affinity?**
 
@@ -2723,7 +2842,7 @@ These effects translate to significant performance benefits:
 │                                      │
 └──────────────────────────────────────┘
 ```
-*Figure 30: Visualization of cache hit rates with and without CPU affinity, showing the dramatic performance improvement with consistent core assignment.*
+*Figure 31: Visualization of cache hit rates with and without CPU affinity, showing the dramatic performance improvement with consistent core assignment.*
 
 Imagine a robot's PID controller that needs to run every 5ms. With consistent CPU affinity:
 - First run: 100μs (cold caches)
@@ -2743,7 +2862,8 @@ taskset -c 1 ./my_sensor_process
 taskset -c 2,3 ./my_vision_process
 ```
 
-#### 10.2 NUMA and Multi-Core Memory Architecture: The Distance Penalty
+<a name="numa-architecture"></a>
+### 7.2.2 NUMA and Multi-Core Memory Architecture: The Distance Penalty
 
 **Understanding NUMA: Memory Isn't Equally Accessible**
 
@@ -2787,7 +2907,7 @@ Imagine a library where each researcher (CPU core) has their own collection of b
 │                              │
 └──────────────────────────────┘
 ```
-*Figure 31: NUMA memory access model showing how memory access times vary depending on which core is accessing which memory region.*
+*Figure 32: NUMA memory access model showing how memory access times vary depending on which core is accessing which memory region.*
 
 In real numbers:
 - Local L1 cache: ~2ns access time
@@ -2867,7 +2987,7 @@ While invisible to your code, this protocol creates significant overhead:
 │                                │
 └────────────────────────────────┘
 ```
-*Figure 32: Visualization of the cache line ping-pong effect showing how shared data causes costly cache coherency traffic between cores.*
+*Figure 33: Visualization of the cache line ping-pong effect showing how shared data causes costly cache coherency traffic between cores.*
 
 **Practical Solutions for Real-Time Systems**
 
@@ -2897,15 +3017,19 @@ To minimize these effects in your robotics application:
 
 By understanding these hardware realities, you can design your real-time robotics software to work with the CPU architecture rather than fighting against it, resulting in more deterministic timing behavior.
 
+> **Key Takeaway**: CPU affinity and memory access patterns significantly impact real-time performance. Setting process affinity ensures cache efficiency by keeping processes on the same cores, while careful attention to data sharing patterns reduces cache coherency overhead. These optimizations are essential for achieving consistent, low-latency execution in robotics applications.
+
 > **Looking Ahead to Module 2: YOLO Computer Vision**  
 > The cache coherency and memory access principles discussed here will be particularly important when we optimize YOLO performance in Module 2, as computer vision algorithms are highly memory-intensive and can benefit greatly from proper cache optimization.
 
 <a name="part-v"></a>
-## Part V: Application-Specific Architecture for Real-Time Robotics
+# 8. Part V: Application-Specific Architecture for Real-Time Robotics
 
-### 11. Computer Vision Pipeline Architecture for Real-Time Robotics
+<a name="vision-pipeline"></a>
+## 8.1 Computer Vision Pipeline Architecture for Real-Time Robotics
 
-#### 11.1 Understanding Modern Computer Vision Pipelines: From Pixels to Decisions
+<a name="vision-pipelines"></a>
+### 8.1.1 Understanding Modern Computer Vision Pipelines: From Pixels to Decisions
 
 **The Challenge of Real-Time Vision**
 
@@ -2999,7 +3123,7 @@ Let's examine the entire vision pipeline to understand where bottlenecks occur a
 │                                    │
 └────────────────────────────────────┘
 ```
-*Figure 33: Complete computer vision pipeline showing data flow from image acquisition through processing to decision integration.*
+*Figure 34: Complete computer vision pipeline showing data flow from image acquisition through processing to decision integration.*
 
 **Visualizing the Pipeline's Computational Profile**
 
@@ -3029,7 +3153,8 @@ Integration:   ▓░░░░░░░░░  |  ▓░░░░░░░░░
 
 This profile immediately reveals the bottleneck: YOLO detection consumes the vast majority of resources and time.
 
-#### 11.2 YOLO Architecture and Real-Time Considerations: Deep Dive
+<a name="yolo-architecture"></a>
+### 8.1.2 YOLO Architecture and Real-Time Considerations: Deep Dive
 
 **What Makes YOLO Special Yet Challenging**
 
@@ -3082,7 +3207,7 @@ YOLO (You Only Look Once) revolutionized object detection by using a single neur
 │                             │
 └─────────────────────────────┘
 ```
-*Figure 34: Simplified YOLO architecture showing the single-pass design that processes the entire image to directly predict object locations and classes.*
+*Figure 35: Simplified YOLO architecture showing the single-pass design that processes the entire image to directly predict object locations and classes.*
 
 **The Inner Workings of YOLO: A Detailed Architecture Explanation**
 
@@ -3240,7 +3365,7 @@ The memory access patterns in YOLO are particularly important for optimization:
 │                                          │
 └──────────────────────────────────────────┘
 ```
-*Figure 35: Memory access patterns in YOLO showing how convolutional operations access non-contiguous memory, leading to cache inefficiency.*
+*Figure 36: Memory access patterns in YOLO showing how convolutional operations access non-contiguous memory, leading to cache inefficiency.*
 
 **Architecture Variants and Performance/Accuracy Tradeoffs**
 
@@ -3369,7 +3494,8 @@ By understanding these detailed architectural aspects of YOLO, you can make info
 > **Looking Ahead to Module 2: YOLO Computer Vision**  
 > We'll explore these YOLO architectural concepts in much greater depth in Module 2, including techniques for model optimization, quantization, and hardware acceleration. You'll have the opportunity to modify the YOLO configuration and observe how different architectural choices affect detection accuracy and speed.
 
-#### 11.3 Vision Pipeline Optimization Strategies for Real-Time Robotics
+<a name="vision-optimization"></a>
+### 8.1.3 Vision Pipeline Optimization Strategies for Real-Time Robotics
 
 **Algorithmic Optimizations: Doing Less Work Smartly**
 
@@ -3453,7 +3579,7 @@ Several strategies can reduce the computational load:
 │                                    │
 └────────────────────────────────────┘
 ```
-*Figure 36: Visualization of ROI processing and frame decimation techniques, showing how they reduce computational requirements while maintaining tracking performance.*
+*Figure 37: Visualization of ROI processing and frame decimation techniques, showing how they reduce computational requirements while maintaining tracking performance.*
 
 3. **Resolution Scaling**:
    - Process at lower resolution when possible
@@ -3553,9 +3679,10 @@ Several strategies can reduce the computational load:
 │                                          │
 └──────────────────────────────────────────┘
 ```
-*Figure 37: Memory optimization techniques showing the impact of alignment, zero-copy processing, and cache-conscious algorithm design.*
+*Figure 38: Memory optimization techniques showing the impact of alignment, zero-copy processing, and cache-conscious algorithm design.*
 
-#### 11.4 Balancing Vision Processing with Control Loops: The Integration Challenge
+<a name="vision-control-balance"></a>
+### 8.1.4 Balancing Vision Processing with Control Loops: The Integration Challenge
 
 **The Timescale Mismatch Problem**
 
@@ -3640,7 +3767,7 @@ Control Thread (high priority real-time):
 │                                                    │
 └────────────────────────────────────────────────────┘
 ```
-*Figure 38: Asynchronous vision-control architecture showing separate processing paths with different priorities and timing requirements.*
+*Figure 39: Asynchronous vision-control architecture showing separate processing paths with different priorities and timing requirements.*
 
 This architecture provides several key benefits:
 - Control loop runs at consistent high frequency regardless of vision performance
@@ -3732,7 +3859,8 @@ Managing the data flow between vision and control is critical:
    - Adjust vision parameters based on computational headroom
    - Prioritize vision resources according to robot state
 
-#### 11.5 Real-World Vision Architecture for Ball Tracking Robot
+<a name="vision-ball-tracking"></a>
+### 8.1.5 Real-World Vision Architecture for Ball Tracking Robot
 
 Let's put these concepts together for your specific ball-tracking robot with YOLO, LiDAR, and 3D sensors:
 
@@ -3772,7 +3900,7 @@ Core 3: YOLO vision processing
 │                                               │
 └───────────────────────────────────────────────┘
 ```
-*Figure 39: Hardware resource allocation for the ball-tracking robot showing core assignment and priority levels for different subsystems.*
+*Figure 40: Hardware resource allocation for the ball-tracking robot showing core assignment and priority levels for different subsystems.*
 
 **Software Architecture**:
 
@@ -3825,12 +3953,16 @@ The system continuously monitors and adapts:
 
 This architecture balances the computational demands of computer vision with the strict timing requirements of robot control, allowing your ball-tracking robot to respond quickly and accurately despite the limited resources of a Raspberry Pi.
 
+> **Key Takeaway**: Effective real-time vision processing requires careful architectural design to balance computational demands with timing requirements. By using optimization techniques like ROI processing, frame decimation, and asynchronous architectures, combined with appropriate hardware resource allocation, it's possible to achieve reliable performance even on resource-constrained platforms like the Raspberry Pi.
+
 > **Looking Ahead to Module 2: YOLO Computer Vision and Module 3: LiDAR Sensing**  
 > The vision architecture principles covered here will be expanded in both Module 2 (YOLO Computer Vision) and Module 3 (LiDAR Sensing). You'll learn how to implement and optimize these perceptual systems individually, and then in Module 5 (Sensor Fusion) you'll integrate them into a unified perception system.
 
-### 12. Sensor Fusion and State Estimation Architecture
+<a name="sensor-fusion"></a>
+## 8.2 Sensor Fusion and State Estimation Architecture
 
-#### 12.1 Understanding Sensor Fusion: Why No Single Sensor Is Enough
+<a name="sensor-fusion-understanding"></a>
+### 8.2.1 Understanding Sensor Fusion: Why No Single Sensor Is Enough
 
 **The Multi-Sensor Challenge in Robotics**
 
@@ -3880,7 +4012,7 @@ In robotics, no single sensor can provide all the information needed for reliabl
 │                                             │
 └─────────────────────────────────────────────┘
 ```
-*Figure 40: Comparison of different sensor types showing their strengths, limitations, and complementary nature for robotics applications.*
+*Figure 41: Comparison of different sensor types showing their strengths, limitations, and complementary nature for robotics applications.*
 
 **Building Intuition: The Multi-Witness Analogy**
 
@@ -3950,9 +4082,10 @@ State estimation is the process of inferring these variables from sensor measure
 │                                    │
 └────────────────────────────────────┘
 ```
-*Figure 41: The state estimation problem visualized, showing how incomplete and imperfect sensor data must be combined to infer the true state of the system.*
+*Figure 42: The state estimation problem visualized, showing how incomplete and imperfect sensor data must be combined to infer the true state of the system.*
 
-#### 12.2 Multi-Rate Sensor Fusion: Handling Different Sensor Timescales
+<a name="multi-rate-sensor-fusion"></a>
+### 8.2.2 Multi-Rate Sensor Fusion: Handling Different Sensor Timescales
 
 **The Timing Challenge in Real-World Robotics**
 
@@ -4011,7 +4144,7 @@ The control system needs consistent state updates (typically at 100-200Hz), but 
 │                                               │
 └───────────────────────────────────────────────┘
 ```
-*Figure 42: Timeline visualization of asynchronous sensor updates showing how different sensors provide information at different rates and with different delays.*
+*Figure 43: Timeline visualization of asynchronous sensor updates showing how different sensors provide information at different rates and with different delays.*
 
 **The Extended Kalman Filter (EKF): The Integration Engine**
 
@@ -4084,13 +4217,17 @@ The filter operates in two alternating steps:
      - Kₖ = Pₖ|ₖ₋₁Hₖᵀ(Sₖ)⁻¹
      - x̂ₖ|ₖ = x̂ₖ|ₖ₋₁ + Kₖỹₖ
      - Pₖ|ₖ = (I - KₖHₖ)Pₖ|ₖ₋₁
-    
+
+> **Key Takeaway**: Sensor fusion is essential in robotics because no single sensor provides complete or perfect information. The Extended Kalman Filter offers a powerful framework for combining asynchronous, multi-rate sensor data with varying degrees of accuracy and latency. By maintaining a probabilistic state estimate that's continuously updated and predicted forward in time, the EKF provides a consistent, real-time representation of the robot and its environment that's more accurate than any individual sensor.
+
 <a name="part-vi"></a>
-## Part VI: Verification and Performance Analysis
+# 9. Part VI: Verification and Performance Analysis
 
-### 14. Latency Testing and Analysis
+<a name="latency-testing"></a>
+## 9.1 Latency Testing and Analysis
 
-#### 14.1 Cyclictest and RT Testing Framework
+<a name="cyclictest"></a>
+### 9.1.1 Cyclictest and RT Testing Framework
 
 Real-time systems require specialized testing tools to verify their timing properties. Let's explore these tools and their proper usage in depth:
 
@@ -4252,8 +4389,8 @@ A comprehensive latency testing approach includes:
    - Monitor for degradation or intermittent issues
    - Test through thermal cycles and varying loads
 
-
-#### 14.2 Tracing and Performance Analysis
+<a name="tracing-performance"></a>
+### 9.1.2 Tracing and Performance Analysis
 
 Beyond simple latency measurements, in-depth analysis requires kernel tracing tools that reveal the complex interactions between OS, hardware, and applications:
 
@@ -4370,7 +4507,7 @@ Kernelshark provides a graphical interface for trace data:
 │                                                   │
 └───────────────────────────────────────────────────┘
 ```
-*Figure 53: Example visualization of process scheduling using Kernelshark, showing scheduling events, preemptions, and execution timelines across multiple CPU cores.*
+*Figure 53: Example visualization of process scheduling using Kernelshark, showing scheduling events, preemptions, and execution timelines.*
 
 **LTTng: Linux Trace Toolkit Next Generation**
 
@@ -4587,11 +4724,13 @@ Beyond one-time analysis, implementing continuous monitoring ensures system heal
 
 These tools and methodologies provide the visibility needed to build, verify, and maintain deterministic real-time systems for robotics applications.
 
+> **Key Takeaway**: Comprehensive testing and analysis are essential for ensuring real-time performance. Tools like cyclictest measure raw latency metrics, while tracing tools like ftrace, LTTng, and perf provide deeper insights into system behavior. A methodical testing strategy that includes baseline, component, integration, and longevity testing helps build confidence in system performance under all conditions.
+
 > **Looking Ahead to Module 8: Diagnostics and Performance Analysis**  
 > The performance analysis techniques introduced here will be expanded in Module 8, where you'll implement comprehensive diagnostics for the ball-tracking robot and learn to identify and resolve various types of performance issues.
 
 <a name="conclusion"></a>
-## Conclusion: Holistic System Design for Real-Time Robotics
+# 10. Conclusion: Holistic System Design for Real-Time Robotics
 
 Creating an effective real-time robotics system requires deep understanding across multiple domains of computer science and engineering:
 
@@ -4644,8 +4783,10 @@ The Raspberry Pi setup described in this document applies these principles to cr
 
 This integration of computer science theory with practical engineering is what makes modern robotics systems possible, enabling applications from precision manufacturing to autonomous vehicles.
 
+> **Key Takeaway**: Real-time robotics requires a holistic approach to system design that integrates knowledge from operating systems, computer architecture, networking, concurrent programming, and control theory. Only by addressing determinism at every layer of the stack can we create systems that reliably interact with the physical world under timing constraints.
+
 <a name="next-steps"></a>
-## Next Steps in the Ball-Tracking Robot Curriculum
+# 11. Next Steps in the Ball-Tracking Robot Curriculum
 
 This foundational module has established the core operating system and architectural principles for your ball-tracking robot. In the upcoming modules, you'll build on this foundation to implement specialized components:
 
