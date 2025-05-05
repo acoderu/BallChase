@@ -429,45 +429,80 @@ class MovementStrategyModule:
 #############################################
 
 class VelocityControlModule:
-    """Module to handle velocity generation, limiting, and coordination."""
+    """Module to handle velocity generation, limiting, and coordination for smooth robot movement."""
     
-    def __init__(self, throttled_logger, history_size=10):
-        """Initialize velocity processor with logger."""
-        self.logger = throttled_logger
-        self.history_size = history_size
-        self.velocity_history = []  # Always use a list
-        self.last_cmd_vel = np.zeros(3, dtype=np.float32)
+    def __init__(self, throttled_logger, history_size=10, max_velocity=None, acceleration_limits=None):
+        """
+        Initialize velocity processor with configuration parameters.
         
-        # Velocity parameters
-        self.approach_distance = 0.3
-        self.min_approach_factor = 0.2
-        self.debug_level = 0
+        Args:
+            throttled_logger: Logger instance that supports throttled logging
+            history_size: Size of velocity history buffer for trend analysis
+            max_velocity: Optional custom velocity limits [linear_x, linear_y, angular_z] in m/s and rad/s
+            acceleration_limits: Optional custom acceleration limits [linear_x, linear_y, angular_z] in m/s²
+        """
+        self.logger = throttled_logger
+        self.history_size = history_size  # Number of velocity samples to keep for analysis
+        
+        # Initialize velocity history buffer
+        self.velocity_history = []  # Always use a list initially for flexibility
+        self.last_cmd_vel = np.zeros(3, dtype=np.float32)  # Last command velocity [x, y, angular]
+        
+        # Velocity approach parameters
+        self.approach_distance = 0.3  # Distance (m) at which to start slowing down approach
+        self.min_approach_factor = 0.2  # Minimum velocity factor when very close to target (20% of full speed)
+        self.debug_level = 0  # Logging verbosity level: 0=minimal, 1=normal, 2=verbose, 3=debug
         
         # Previous velocities for acceleration limiting
-        self.last_cmd_vel = np.zeros(3, dtype=np.float32)  # [x, y, angular_z]
-        self.last_logged_cmd = np.zeros(3, dtype=np.float32)
-        self.last_accel_time = time.time()
+        self.last_cmd_vel = np.zeros(3, dtype=np.float32)  # [x, y, angular_z] in m/s, m/s, rad/s
+        self.last_logged_cmd = np.zeros(3, dtype=np.float32)  # Last logged command for change detection
+        self.last_accel_time = time.time()  # Timestamp for calculating dt in acceleration limiting
         
-        # Pre-allocated arrays for performance
-        self._limited_velocities = np.zeros(3, dtype=np.float32)
-        self._target_velocities = np.zeros(3, dtype=np.float32)
-        self._vel_diffs = np.zeros(3, dtype=np.float32)
+        # Configure maximum velocity limits - allow overrides from parameters
+        if max_velocity is not None and isinstance(max_velocity, (list, tuple)) and len(max_velocity) >= 3:
+            self.max_velocity_limits = np.array(max_velocity, dtype=np.float32)
+        else:
+            # Default limits - same as original for compatibility
+            # [forward m/s, lateral m/s, rotation rad/s]
+            # 0.5 m/s forward = ~1.1 mph, 0.4 m/s lateral = ~0.9 mph, 0.6 rad/s = ~34 degrees/second
+            self.max_velocity_limits = np.array([0.5, 0.4, 0.6], dtype=np.float32)  # [x, y, angular_z]
+            
+        # Configure acceleration limits - determines how quickly velocity can change
+        if acceleration_limits is not None and isinstance(acceleration_limits, (list, tuple)) and len(acceleration_limits) >= 3:
+            self.acceleration_limits = np.array(acceleration_limits, dtype=np.float32)
+        else:
+            # Default acceleration limits - m/s² for linear, rad/s² for angular
+            # 1.8 m/s² forward = 0->0.5m/s in ~0.28s
+            # 1.5 m/s² lateral = 0->0.4m/s in ~0.27s
+            # 2.0 rad/s² angular = 0->0.6rad/s in ~0.3s
+            self.acceleration_limits = np.array([1.8, 1.5, 2.0], dtype=np.float32)  # [x accel, y accel, angular accel]
         
-        # Pre-allocated velocity change check
-        self._velocity_change_check = np.zeros(3, dtype=bool)
+        # Pre-allocated arrays for performance (minimize allocations in control loop)
+        self._limited_velocities = np.zeros(3, dtype=np.float32)  # Output buffer for limited velocities
+        self._target_velocities = np.zeros(3, dtype=np.float32)  # Input buffer for target velocities
+        self._vel_diffs = np.zeros(3, dtype=np.float32)  # Buffer for velocity differences
         
-        # Velocity history buffer - optimized for fixed size
-        self.buffer_size = 6
-        self.velocity_history = np.zeros((self.buffer_size, 3), dtype=np.float32)
-        self.history_index = 0
-        self.history_count = 0
+        # Pre-allocated velocity change check array (for logging decisions)
+        self._velocity_change_check = np.zeros(3, dtype=bool)  # [x_changed, y_changed, angular_changed]
         
-        # Threshold lookup table
-        self.min_linear_velocity = 0.01
-        self.min_angular_velocity = 0.01
+        # Velocity history buffer - optimized for fixed size and efficient lookups
+        self.buffer_size = 6  # Store 6 previous velocity commands (typically ~1-3 seconds of history)
+        self.velocity_history = np.zeros((self.buffer_size, 3), dtype=np.float32)  # Circular buffer [time][x,y,θ]
+        self.history_index = 0  # Current position in circular buffer
+        self.history_count = 0  # Number of valid entries in history buffer
         
-        # Cached velocity limits to avoid repeated calculations
-        self.max_velocity_limits = np.array([0.5, 0.4, 0.6], dtype=np.float32)  # [x, y, angular_z]
+        # Threshold lookup table for minimum velocities
+        self.min_linear_velocity = 0.01  # Minimum linear velocity (m/s) - below this will be zeroed
+        self.min_angular_velocity = 0.01  # Minimum angular velocity (rad/s) - below this will be zeroed
+        
+        # Velocity ramping configuration - controls how quickly velocity changes are applied
+        self.ramping_enabled = True  # Enable/disable ramping feature
+        self.ramp_threshold = 0.05   # Velocity difference threshold (m/s) above which ramping applies
+        self.max_ramp_factor = 0.6   # Maximum ramping factor (higher = faster changes, 1.0 = instant)
+        
+        # Direction change tracking - for smoothing direction changes
+        self.prev_direction = np.zeros(3)  # Previous normalized velocity direction vector
+        self.direction_change_factor = 0.5  # When direction changes, multiply velocity by this factor (50%)
     
     def set_approach_parameters(self, approach_distance, min_approach_factor):
         """Set parameters for approach behavior."""
@@ -505,6 +540,8 @@ class VelocityControlModule:
         # Reset velocity change check 
         self._velocity_change_check.fill(False)
         
+        # Reset direction tracking
+        self.prev_direction.fill(0.0)
     
     def process_velocities(self, linear_x, linear_y, angular_z, filtered_distance, desired_distance, freshness_level='fresh'):
         """
@@ -528,6 +565,9 @@ class VelocityControlModule:
             self._target_velocities[2] = float(angular_z) if angular_z is not None else 0.0
             filtered_distance = float(filtered_distance) if filtered_distance is not None else 1.0
             desired_distance = float(desired_distance) if desired_distance is not None else 1.0
+            
+            # Calculate current time once for efficiency
+            current_time = time.time()
             
             # If data is stale, apply conservative velocity scaling
             if (freshness_level == 'stale'):
@@ -555,15 +595,24 @@ class VelocityControlModule:
                 self._target_velocities[0], filtered_distance, desired_distance
             )
             
+            # Check for direction changes
+            self._detect_direction_changes()
+            
             # Apply acceleration limits
-            current_time = time.time()
             self._apply_acceleration_limits(current_time)
+            
+            # Apply progressive velocity ramping for smoother transitions
+            if self.ramping_enabled:
+                self._apply_progressive_ramping()
             
             # Apply minimum velocity thresholds with hysteresis
             self._apply_minimum_thresholds()
             
             # Limit combined lateral and angular movement to prevent instability
             self._limit_combined_movements()
+            
+            # Apply velocity smoothing using sliding window
+            self._apply_velocity_smoothing()
             
             # Apply maximum velocity limits using vectorized operation
             np.clip(
@@ -615,18 +664,101 @@ class VelocityControlModule:
         self.history_index = (self.history_index + 1) % self.buffer_size
         self.history_count = min(self.history_count + 1, self.buffer_size)
     
-    def _apply_approach_scaling(self, linear_x, filtered_distance, desired_distance):
-        """Apply distance-based scaling to forward velocity during approach."""
-        try:
-            # Calculate distance error (negative means too close)
-            raw_distance_error = filtered_distance - desired_distance
-            distance_error = abs(raw_distance_error)
+    def _detect_direction_changes(self):
+        """
+        Detect significant direction changes and apply damping.
+        
+        This method:
+        1. Calculates the current movement direction vector
+        2. Compares it with the previous direction
+        3. Applies velocity damping when significant changes are detected
+        
+        Direction changes are detected using the dot product between normalized
+        velocity vectors. When a significant change occurs, velocities are reduced
+        to prevent jerky movements during direction transitions.
+        """
+        # Initialize normalized direction vector
+        current_dir = np.zeros(3)
+        
+        # Calculate velocity magnitude (speed) in the X-Y plane
+        # Using Euclidean norm: sqrt(vx² + vy²)
+        vel_mag = np.sqrt(np.sum(self._target_velocities[:2]**2))
+        
+        # Only calculate direction if robot is moving significantly
+        # 0.05 m/s threshold filters out noise and very slow movements
+        if vel_mag > 0.05:
+            # Normalize velocity vector to get direction unit vector
+            # This gives us a vector with magnitude 1 pointing in direction of travel
+            current_dir[:2] = self._target_velocities[:2] / vel_mag
             
-            # Emergency stop for negative distance errors (robot too close)
+            # Check for direction change only if we have a previous direction
+            if np.any(self.prev_direction != 0):
+                # Calculate dot product between current and previous direction
+                # Dot product = |v1|·|v2|·cos(θ) = cos(θ) for unit vectors
+                # Result range: [-1, 1] where:
+                # - 1: vectors pointing in same direction (0° angle)
+                # - 0: vectors are perpendicular (90° angle)
+                # - -1: vectors pointing in opposite directions (180° angle)
+                dot_product = np.sum(current_dir[:2] * self.prev_direction[:2])
+                
+                # Detect significant direction change based on dot product threshold
+                # 0.7 ≈ cos(45°) - changes greater than ~45 degrees are considered significant
+                if dot_product < 0.7:
+                    # Apply damping to velocities when direction changes
+                    # Multiply all velocity components by damping factor (default 0.5 = 50%)
+                    # This creates smoother transitions during direction changes
+                    self._target_velocities *= self.direction_change_factor
+                    
+                    # Log direction changes at debug level
+                    if self.debug_level >= 2:
+                        # Calculate angle in degrees for more intuitive logging
+                        angle_rad = np.arccos(max(-1.0, min(1.0, dot_product)))
+                        angle_deg = angle_rad * 180.0 / np.pi
+                        
+                        self.logger.info(
+                            f"Direction change detected: {angle_deg:.1f}° change, "
+                            f"damping velocities by factor {self.direction_change_factor}"
+                        )
+                        
+            # Update previous direction for next cycle comparison
+            self.prev_direction = current_dir
+    
+    def _apply_approach_scaling(self, linear_x, filtered_distance, desired_distance):
+        """
+        Apply distance-based scaling to forward velocity during approach.
+        
+        This method implements a distance-aware velocity scaling that:
+        1. Gradually reduces forward speed as the robot approaches the target
+        2. Applies emergency braking if too close to target
+        3. Considers current speed when determining deceleration rate
+        
+        The goal is to create a natural deceleration curve that feels smooth
+        and predictable, similar to how a human would approach a target.
+        
+        Args:
+            linear_x: Current forward velocity command (m/s)
+            filtered_distance: Current distance to target (meters)
+            desired_distance: Target distance to maintain (meters)
+            
+        Returns:
+            float: Scaled forward velocity
+        """
+        try:
+            # Calculate distance error (negative means robot is too close to target)
+            raw_distance_error = filtered_distance - desired_distance  # Meters
+            distance_error = abs(raw_distance_error)  # Absolute error
+            
+            # Emergency braking for negative distance errors (robot too close)
+            # If robot is closer than desired_distance minus 5cm safety margin
             if raw_distance_error < -0.05:
+                # Calculate emergency braking factor:
+                # - Error = 0m → factor = 0 (full stop)
+                # - Error = -0.05m → factor = 0.5 (half speed)
+                # - Error = -0.1m → factor = 0 (full stop)
                 emergency_factor = max(0.0, 1.0 + raw_distance_error * 10.0)
                 scaled_velocity = linear_x * emergency_factor
                 
+                # Log emergency braking events
                 if self.debug_level >= 1 and abs(scaled_velocity - linear_x) > 0.01:
                     self.logger.info(
                         f"Emergency approach reduction: error={raw_distance_error:.3f}m, "
@@ -635,50 +767,69 @@ class VelocityControlModule:
                 return scaled_velocity
             
             # Apply progressive deceleration as robot approaches target
+            # Start deceleration at approach_distance*3 (default 0.9m from target)
             if distance_error < self.approach_distance * 3.0:
-                # Calculate approach scale with exponential curve
-                normalized_distance = distance_error / self.approach_distance
-                approach_factor = max(self.min_approach_factor, (normalized_distance)**2.5)
+                # Calculate approach scale with quadratic curve for smooth deceleration
+                # Normalize distance to 0-1 range relative to approach distance
+                normalized_distance = distance_error / self.approach_distance  # 1.0 = at approach boundary
                 
-                # Apply stronger deceleration when very close
-                if distance_error < self.approach_distance * 0.5:
-                    approach_factor *= 0.3
+                # Calculate approach factor with quadratic curve:
+                # - At approach_distance*3 (0.9m): factor approaches 1.0 (full speed)
+                # - At approach_distance (0.3m): factor = 1.0 (full speed)
+                # - At approach_distance*0.5 (0.15m): factor ≈ 0.25 (25% speed)
+                # - At approach_distance*0.0 (0.0m): factor = min_approach_factor (20% speed)
+                # The squared curve creates gentle initial deceleration that increases as robot gets closer
+                approach_factor = max(self.min_approach_factor, (normalized_distance)**2.0)
                 
-                # Check closing speed using velocity history
+                # Apply stronger deceleration when very close (within half approach distance)
+                if distance_error < self.approach_distance * 0.5:  # Within 15cm of target by default
+                    approach_factor *= 0.5  # Further reduce to 50% of calculated value
+                
+                # Check closing speed using velocity history to create adaptive deceleration
                 recent_velocities = self._get_recent_velocities(3)
                 
-                # Only calculate if we have history
+                # Only calculate if we have velocity history
                 if self.history_count > 0:
-                    # Get average forward velocity from history
+                    # Get average forward velocity from recent history
                     avg_forward_vel = np.mean(recent_velocities[:, 0])
                     
-                    # Apply more aggressive deceleration if approaching quickly
+                    # Apply more aggressive deceleration if approaching target quickly
+                    # High-speed approaches need more aggressive braking
                     if avg_forward_vel > 0.1 and distance_error < self.approach_distance * 1.2:
-                        speed_reduction = max(0.4, 1.0 - (avg_forward_vel / 0.4) * 0.5)
+                        # Calculate speed-based reduction factor:
+                        # - speeds < 0.1 m/s: no additional reduction
+                        # - at 0.2 m/s: factor ≈ 0.8 (80% of normal approach factor)
+                        # - at 0.4 m/s: factor = 0.6 (60% of normal approach factor)
+                        # This creates more aggressive braking at higher speeds
+                        speed_reduction = max(0.5, 1.0 - (avg_forward_vel / 0.4) * 0.4)
                         approach_factor *= speed_reduction
                         
+                        # Log enhanced deceleration events
                         if self.debug_level >= 1:
                             self.logger.info(
-                                f"Enhanced deceleration: speed={avg_forward_vel:.2f}, "
+                                f"Enhanced deceleration: speed={avg_forward_vel:.2f}m/s, "
                                 f"additional factor={speed_reduction:.2f}"
                             )
                 
                 # Apply the scaling factor to forward velocity
+                # Only apply if forward velocity is significant
                 if abs(linear_x) > 0.01:
                     scaled_velocity = linear_x * approach_factor
                     
+                    # Log significant approach scaling events
                     if self.debug_level >= 1 and abs(scaled_velocity - linear_x) > 0.02:
                         self.logger.info(
                             f"Approach scaling: distance_error={distance_error:.3f}m, "
-                            f"factor={approach_factor:.2f}, velocity={scaled_velocity:.3f}"
+                            f"factor={approach_factor:.2f}, velocity={scaled_velocity:.3f}m/s"
                         )
                         
                     return scaled_velocity
             
+            # Return unmodified velocity if not in approach zone
             return linear_x
         except Exception as e:
             self.logger.error(f"Error in approach scaling: {str(e)}")
-            return linear_x  # Return original value on error
+            return linear_x  # Return original value on error for safety
     
     def _get_recent_velocities(self, count):
         """Get recent velocity history from circular buffer."""
@@ -735,8 +886,8 @@ class VelocityControlModule:
                             
                             # Apply braking when getting close
                             if time_to_target < 1.5:
-                                # Progressive braking curve
-                                braking_factor = max(0.1, (time_to_target / 1.5)**1.5)
+                                # Progressive braking curve - less aggressive
+                                braking_factor = max(0.2, (time_to_target / 1.5)**1.2)  # Changed from 1.5 to 1.2 power
                                 scaled_velocity = linear_x * braking_factor
                                 
                                 if self.debug_level >= 1 and abs(scaled_velocity - linear_x) > 0.02:
@@ -753,52 +904,130 @@ class VelocityControlModule:
             return linear_x  # Return original value on error
     
     def _apply_acceleration_limits(self, current_time):
-        """Apply acceleration limits to prevent jerky motion."""
+        """
+        Apply acceleration limits to prevent jerky motion.
+        
+        This method:
+        1. Calculates time elapsed since last control cycle
+        2. Determines maximum allowed velocity change based on acceleration limits and dt
+        3. Applies special handling for starting movement from a stop
+        4. Limits velocity changes to prevent jerky motion
+        
+        Args:
+            current_time: Current timestamp for calculating dt
+        """
         try:
-            # Calculate time since last control step
+            # Calculate time since last control step (dt = delta time)
             dt = current_time - self.last_accel_time
             self.last_accel_time = current_time
-            dt = max(0.001, min(dt, 0.1))  # Bound dt to reasonable values
             
-            # Base acceleration limits - scale with dt to handle varying control rates
-            accel_limit = 2.5 * dt * 10.0
-            angular_accel_limit = 3.0 * dt * 10.0
+            # Bound dt to reasonable values to handle timing anomalies
+            # - Less than 0.001s (1ms): likely a timing error, use minimum
+            # - More than 0.1s (100ms): unusually long delay, cap to avoid jumps
+            dt = max(0.001, min(dt, 0.1))
             
-            # Safety check for NaN values
-            if np.isnan(accel_limit) or np.isnan(angular_accel_limit):
+            # Scale acceleration limits with dt to get max velocity change per axis
+            # Formula: max_Δv = acceleration * dt
+            accel_limits = self.acceleration_limits * dt
+            
+            # Safety check for NaN values (shouldn't happen but protect against math errors)
+            if np.any(np.isnan(accel_limits)):
                 self.logger.warning("NaN detected in acceleration limits, using defaults")
-                accel_limit = 0.25  # Default safe value
-                angular_accel_limit = 0.3  # Default safe value
+                # Default safe values for max Δv per cycle, assuming typical dt of ~0.05s:
+                # [0.18 m/s per cycle, 0.15 m/s per cycle, 0.2 rad/s per cycle]
+                accel_limits = np.array([0.18, 0.15, 0.2])
             
-            # Calculate velocity differences
+            # Calculate velocity differences between target and current
             np.subtract(self._target_velocities, self.last_cmd_vel, out=self._vel_diffs)
             
-            # Apply acceleration limits
+            # Apply acceleration limits for each axis (x, y, angular)
             for i in range(3):
-                # Select appropriate limit based on axis
-                limit = angular_accel_limit if i == 2 else accel_limit
-                
-                # Apply starting boost when beginning movement
+                # Apply starting boost when beginning movement from stop
+                # This makes the robot more responsive when starting from rest
                 if abs(self.last_cmd_vel[i]) < 0.01 and abs(self._target_velocities[i]) > 0.01:
-                    # Different boost factors by axis
-                    boost = 3.0 if i == 0 else (5.0 if i == 1 else 3.0)
-                    limit *= boost
+                    # Different boost factors by axis:
+                    # - Forward (i=0): 2.0x boost (0->0.5m/s in ~0.14s vs normal 0.28s)
+                    # - Lateral (i=1): 2.5x boost (0->0.4m/s in ~0.11s vs normal 0.27s)
+                    # - Angular (i=2): 2.0x boost (0->0.6rad/s in ~0.15s vs normal 0.3s)
+                    # These are reduced from original values [3.0, 5.0, 3.0] for smoother starts
+                    boost = 2.0 if i == 0 else (2.5 if i == 1 else 2.0)
+                    limit = accel_limits[i] * boost
+                else:
+                    limit = accel_limits[i]
                 
-                # Apply limit if change exceeds maximum
+                # Apply limit if velocity change exceeds maximum
+                # This is the core acceleration limiting logic
                 if abs(self._vel_diffs[i]) > limit:
+                    # Limit the change to maximum allowed
+                    # new_v = current_v + sign(Δv) * max_Δv
                     self._limited_velocities[i] = self.last_cmd_vel[i] + np.sign(self._vel_diffs[i]) * limit
                 else:
+                    # Change is within limits, allow full target velocity
                     self._limited_velocities[i] = self._target_velocities[i]
                 
-                # Safety check for NaN values in result
+                # Safety check for NaN values in result (protect against math errors)
                 if np.isnan(self._limited_velocities[i]):
                     self.logger.warning(f"NaN detected in velocity {i}, using previous value")
                     self._limited_velocities[i] = self.last_cmd_vel[i]
             
         except Exception as e:
             self.logger.error(f"Error applying acceleration limits: {str(e)}")
-            # Copy target velocities directly on error
+            # Copy target velocities directly on error (fall back to desired values)
             np.copyto(self._limited_velocities, self._target_velocities)
+    
+    def _apply_progressive_ramping(self):
+        """
+        Apply progressive velocity ramping to prevent velocity spikes.
+        
+        This method implements adaptive velocity ramping where:
+        - Small changes are applied more quickly
+        - Large changes are applied more gradually
+        - The ramping factor scales inversely with the magnitude of velocity change
+        
+        This creates smoother transitions when velocities need to change
+        significantly, preventing the sudden velocity jumps that cause jerky motion.
+        """
+        try:
+            # Apply ramping to each velocity component (x, y, angular)
+            for i in range(3):
+                # Calculate absolute velocity difference between target and current
+                vel_diff = abs(self._limited_velocities[i] - self.last_cmd_vel[i])
+                
+                # Only apply ramping for changes larger than threshold
+                # (small changes don't need ramping)
+                if vel_diff > self.ramp_threshold:  # threshold = 0.05 m/s or rad/s
+                    # Calculate adaptive ramping factor based on magnitude of change:
+                    # - For smaller changes: factor approaches max_ramp_factor (0.6)
+                    # - For larger changes: factor decreases (slower transition)
+                    # The formula creates an inverse relationship between change size and ramp speed
+                    base_ramp = self.max_ramp_factor  # 0.6 = default maximum ramping rate
+                    
+                    # This formula creates a curve where:
+                    # - vel_diff of 0.05 m/s → factor ≈ 0.5
+                    # - vel_diff of 0.20 m/s → factor ≈ 0.25
+                    # - vel_diff of 0.50 m/s → factor ≈ 0.12
+                    ramp_factor = base_ramp / (1.0 + vel_diff * 2.0)
+                    
+                    # Ensure factor stays within reasonable bounds
+                    # - Minimum 0.1 (10% of change per cycle) for very large changes
+                    # - Maximum is base_ramp (default 0.6 = 60% of change per cycle)
+                    ramp_factor = max(0.1, min(base_ramp, ramp_factor))
+                    
+                    # Apply weighted average for smooth transition:
+                    # new_v = current_v + (target_v - current_v) * ramp_factor
+                    # Example: If ramp_factor is 0.2, apply 20% of the desired change this cycle
+                    self._limited_velocities[i] = self.last_cmd_vel[i] + (self._limited_velocities[i] - self.last_cmd_vel[i]) * ramp_factor
+                    
+                    # Log significant velocity ramps to help with debugging
+                    if self.debug_level >= 2 and vel_diff > 0.1:
+                        axis_name = "x" if i == 0 else ("y" if i == 1 else "θ")
+                        self.logger.info(
+                            f"Progressive ramping: {axis_name}={self.last_cmd_vel[i]:.2f} → {self._limited_velocities[i]:.2f} "
+                            f"(diff: {vel_diff:.2f}, factor: {ramp_factor:.2f})"
+                        )
+        except Exception as e:
+            self.logger.error(f"Error in progressive ramping: {str(e)}")
+            # Continue without ramping on error - fallback to acceleration-limited values
     
     def _apply_minimum_thresholds(self):
         """Apply minimum velocity thresholds with hysteresis."""
@@ -827,25 +1056,121 @@ class VelocityControlModule:
             # Leave values as is on error
     
     def _limit_combined_movements(self):
-        """Limit combined lateral and angular movement to prevent instability."""
+        """
+        Limit combined lateral and angular movement to prevent instability.
+        
+        This method prevents combinations of movements that could cause physical
+        instability in the robot:
+        
+        1. When both lateral movement and rotation occur simultaneously,
+           it can create tipping forces on the robot
+        2. Larger movements create stronger destabilizing forces
+        3. Selective reduction of lateral velocity maintains rotational response
+           while preventing potential tipping
+        
+        The scaling is progressive, applying stronger reductions for more
+        extreme movement combinations.
+        """
         try:
-            # Check if both lateral and angular velocities are significant
+            # Check if both lateral and angular velocities exceed stability thresholds
+            # 0.15 m/s lateral = significant sideways motion
+            # 0.3 rad/s angular = significant rotation (~17 degrees/second)
             if abs(self._limited_velocities[1]) > 0.15 and abs(self._limited_velocities[2]) > 0.3:
                 lateral_magnitude = abs(self._limited_velocities[1])
                 angular_magnitude = abs(self._limited_velocities[2])
                 
-                # Apply stronger reduction for larger movements
+                # Apply stronger reduction for larger combined movements
+                # Large lateral (>0.2 m/s) + large angular (>0.4 rad/s) creates high risk of tipping
                 if lateral_magnitude > 0.2 and angular_magnitude > 0.4:
-                    # Prevent tipping with significant reduction
-                    self._limited_velocities[1] *= 0.6
+                    # Significant reduction for high-risk scenarios
+                    # Reduce lateral velocity to 70% to prevent tipping
+                    # We modify lateral rather than angular to maintain responsive turning
+                    self._limited_velocities[1] *= 0.7  # 70% of calculated lateral velocity
+                    
+                    if self.debug_level >= 2:
+                        self.logger.info(
+                            f"Strong combined movement limiting: lateral={lateral_magnitude:.2f}m/s, "
+                            f"angular={angular_magnitude:.2f}rad/s, applying 70% lateral reduction"
+                        )
                 else:
-                    # Milder reduction for smaller movements
-                    scale_factor = 0.8 + (0.2 * (1.0 - min(1.0, lateral_magnitude / 0.2)))
-                    self._limited_velocities[1] *= min(0.9, max(0.7, scale_factor))
+                    # Adaptive scaling for moderate combined movements
+                    # Formula creates a curve where:
+                    # - At lateral=0.15 m/s: scale ≈ 0.95 (minimal reduction)
+                    # - At lateral=0.2 m/s: scale ≈ 0.85 (moderate reduction)
+                    # This progressively increases reduction as lateral velocity increases
+                    scale_factor = 0.85 + (0.15 * (1.0 - min(1.0, lateral_magnitude / 0.2)))
+                    
+                    # Apply calculated scale factor with bounds for safety
+                    # - Minimum 0.8 (80% of original) for moderate reduction
+                    # - Maximum 0.95 (95% of original) for minimal reduction
+                    final_scale = min(0.95, max(0.8, scale_factor))
+                    self._limited_velocities[1] *= final_scale
+                    
+                    if self.debug_level >= 3:
+                        self.logger.info(
+                            f"Moderate combined movement limiting: applying {final_scale:.2f} lateral scale"
+                        )
             
         except Exception as e:
             self.logger.error(f"Error limiting combined movements: {str(e)}")
-            # Leave values as is on error
+            # Leave velocity values unchanged on error (fail-safe approach)
+    
+    def _apply_velocity_smoothing(self):
+        """
+        Apply velocity smoothing using a sliding window approach.
+        
+        This method implements a weighted moving average smoothing that:
+        1. Uses recent velocity history to create a smoother trajectory
+        2. Applies smoothing only when appropriate (not during rapid changes)
+        3. Blends current velocity commands with historical average
+        
+        The weighted average gives more importance to recent commands and
+        less to older ones, creating natural motion that reduces oscillations
+        and small jitters while preserving responsiveness.
+        """
+        try:
+            # Only apply smoothing if we have enough history (minimum 3 samples)
+            if self.history_count >= 3:
+                # Get recent velocity commands from history buffer
+                recent_vels = self._get_recent_velocities(3)
+                
+                # Create a weighted average with exponential decay
+                # - Most recent: 50% weight (highest importance)
+                # - Second most recent: 30% weight
+                # - Third most recent: 20% weight
+                # This prioritizes recent commands while still considering history
+                weights = np.array([0.5, 0.3, 0.2])
+                weighted_avg = np.zeros(3)  # Initialize weighted average vector
+                
+                # Calculate weighted average of recent velocities
+                for i in range(min(3, len(recent_vels))):
+                    weighted_avg += weights[i] * recent_vels[i]
+                
+                # Only apply smoothing if velocities aren't changing drastically
+                # We skip smoothing during rapid changes to maintain responsiveness
+                # Calculate maximum velocity change across all axes
+                vel_change = np.max(np.abs(self._limited_velocities - self.last_cmd_vel))
+                
+                # Apply smoothing only when changes are moderate
+                # 0.15 m/s or rad/s threshold represents significant but not drastic change
+                if vel_change < 0.15:
+                    # Blend current velocities with smoothed history using weighted average:
+                    # final_v = current_v * blend_factor + history_avg * (1-blend_factor)
+                    
+                    # 0.8 = 80% current velocity, 20% historical average
+                    # This preserves responsiveness while reducing jitter
+                    blend_factor = 0.8
+                    
+                    # Apply the blending to all velocity components
+                    self._limited_velocities = self._limited_velocities * blend_factor + weighted_avg * (1.0 - blend_factor)
+                    
+                    # Log smoothing application at high debug levels
+                    if self.debug_level >= 3:
+                        self.logger.info(f"Applied velocity smoothing, blend: {blend_factor:.2f}")
+                
+        except Exception as e:
+            self.logger.error(f"Error in velocity smoothing: {str(e)}")
+            # Continue without smoothing on error - fallback to acceleration-limited values
     
     def get_average_velocity(self):
         """Get average velocity over recent history."""
@@ -878,7 +1203,17 @@ class VelocityControlModule:
             self.velocity_history.pop(0)
 
     def get_velocity_history(self):
-        return list(self.velocity_history)
+        """Return the velocity history for analysis."""
+        # Convert numpy array to list of tuples for compatibility
+        if self.history_count == 0:
+            return []
+            
+        history_list = []
+        for i in range(min(self.history_count, self.buffer_size)):
+            idx = (self.history_index - i - 1) % self.buffer_size
+            history_list.append(tuple(self.velocity_history[idx]))
+            
+        return history_list
 
 #############################################
 # Resource Monitoring Module

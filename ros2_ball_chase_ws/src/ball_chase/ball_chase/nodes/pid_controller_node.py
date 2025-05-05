@@ -1120,7 +1120,14 @@ class PIDControllerNode(Node, StateObserver):
         self.strategy_module = MovementStrategyModule(throttled_logger, pm.debug_level)
         
         # Initialize velocity control
-        self.velocity_control = VelocityControlModule(throttled_logger)
+        self.velocity_control = VelocityControlModule(
+            throttled_logger,
+            max_velocity=[
+                self.parameter_manager.linear_x_max,
+                self.parameter_manager.linear_y_max,
+                self.parameter_manager.angular_max
+            ]
+        )
         self.velocity_control.set_approach_parameters(
             pm.approach_distance, 
             pm.min_approach_factor
