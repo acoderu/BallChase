@@ -7,6 +7,57 @@ Basketball Tracking Robot - Optimized LIDAR Detection Node
 This node processes 2D LIDAR data to detect a basketball and provide 3D position information.
 It correlates LIDAR data with camera-based detections from YOLO.
 
+Understanding LIDAR Data and Detection Algorithms
+------------------------------------------------
+A 2D LIDAR sensor emits laser beams in a circular pattern (360° around the robot) and measures how long 
+it takes for each beam to bounce back. This gives us a "polar coordinate" measurement for each point:
+- An angle (θ) - which direction the laser was pointing
+- A distance (r) - how far away the object is at that angle
+
+The resulting data looks like a ring of points around the sensor. When a basketball is in view, 
+it appears as an arc or partial circle in this ring of points.
+
+Several algorithms could detect circles in this type of data:
+1. **Hough Transform** - A classic technique that can detect various shapes by transforming points 
+   to a parameter space. It works well for complete circles but is computationally expensive and 
+   struggles with partial circles.
+
+2. **Direct Least Squares Fitting** - Fits a circle to all points at once by minimizing the sum of squared 
+   errors. Very fast but extremely sensitive to outliers (noise points).
+
+3. **RANSAC (Random Sample Consensus)** - Repeatedly samples small sets of points, builds potential circles, 
+   and checks how many other points support each circle. Robust to noise and partial observations.
+
+4. **Clustering + Curve Fitting** - First group nearby points, then try to fit shapes to each cluster. 
+   Works well when multiple objects are present but requires additional algorithms to identify circles.
+
+We chose RANSAC for basketball tracking because:
+- The basketball often presents as only a partial arc in LIDAR data (we don't see the full circle)
+- The environment contains many non-basketball points (walls, furniture, people)
+- RANSAC is inherently robust to these "outlier" points
+- The basketball has a known, fixed size (9-inch diameter), which RANSAC can use as a constraint
+- RANSAC can be tuned for early termination, making it efficient for real-time robotics
+
+Sensor Fusion: LIDAR + Camera
+-----------------------------
+This node implements a powerful optimization: using the camera's detection to focus our LIDAR search.
+Instead of processing all LIDAR points (hundreds of them), we:
+
+1. Get a 2D basketball detection from the camera (using YOLO neural network)
+2. Project this detection into 3D space, estimating its position relative to the LIDAR
+3. Create a "detection cone" in that direction
+4. Filter LIDAR points to only those within this cone
+5. Run RANSAC on this much smaller set of points
+
+This approach is like narrowing your gaze to where you expect to find something, rather than 
+searching the entire room. It dramatically improves:
+- Processing speed (fewer points to analyze)
+- Accuracy (less chance of false positives)
+- Robustness (LIDAR and camera complement each other's weaknesses)
+
+If the camera detection fails or no circle is found in the LIDAR data, we have fallback 
+mechanisms that can use either sensor's data independently.
+
 Key optimizations:
 - Static transform caching with one-time initialization
 - Lightweight buffer implementation with fixed memory allocation
@@ -62,6 +113,49 @@ class ObjectPool:
     - Saves time: Creating new objects is slower than reusing existing ones.
     - Saves memory: We avoid memory fragmentation and reduce garbage collection.
     - Makes the program more efficient, especially on devices with limited resources (like Raspberry Pi).
+    
+    ---
+    
+    What is the ObjectPool pattern and why is it important?
+    - ObjectPool is a design pattern that manages a collection of reusable objects
+    - Instead of creating and destroying objects repeatedly, we keep them in a "pool" for reuse
+    - Think of it like a library: you borrow a book (object), use it, then return it so others can use it
+    
+    Why is creating objects expensive in Python?
+    - Every time you create a new object (like a large NumPy array):
+      1. Memory must be allocated on the heap
+      2. The memory is initialized (set to zeros or default values)
+      3. The Python object wrapper is created
+      4. References and garbage collection information are set up
+    - Similarly, when objects are destroyed:
+      1. Memory must be freed
+      2. Garbage collection runs to check for orphaned objects
+      3. Memory can become fragmented
+    - All of these operations take CPU time and can cause small delays
+    
+    How does our implementation work?
+    - We create a fixed number of objects when the program starts (initial_size)
+    - When code needs an object, it calls pool.get():
+      - If objects are available in the pool, it takes one
+      - If the pool is empty, it creates a new object
+    - When code is done with the object, it calls pool.put(obj):
+      - If the pool isn't full, the object is returned to the pool
+      - If the pool is full, the object is left for garbage collection
+    - We set a maximum size (max_size) to prevent using too much memory
+    
+    How does this help in real-time robotics?
+    - In our LIDAR node, we process 10-30 scans per second
+    - Each scan requires several large arrays for points, distances, angles, etc.
+    - Without object pooling, we'd create and destroy hundreds of arrays every second
+    - With object pooling, we reuse the same arrays, reducing CPU spikes
+    - This leads to smoother, more consistent performance
+    - Critical for tracking a fast-moving basketball in real-time!
+    
+    When should you use object pooling?
+    - For frequently created and destroyed objects
+    - For large objects that are expensive to create
+    - For time-critical code where consistent performance matters
+    - In resource-constrained environments like embedded systems
     """
     
     def __init__(self, factory_func, initial_size=5, max_size=20):
@@ -102,6 +196,50 @@ class LightweightBuffer:
     - Uses a fixed amount of memory, so it won't grow too large and slow down the program.
     - Fast to add and retrieve recent data, which is important for real-time robotics.
     - Useful for keeping track of recent positions, errors, or other time-series data.
+    
+    ---
+    
+    What is a LightweightBuffer and why do we need it?
+    - A LightweightBuffer is a specialized data structure for storing time-based measurements
+    - It keeps a fixed number of recent values with their timestamps
+    - Unlike Python's built-in lists that can grow indefinitely, it has a fixed maximum size
+    - It's optimized for:
+      1. Adding new values (newest replaces oldest when full)
+      2. Finding the most recent value
+      3. Finding values within specific time ranges
+    
+    How is it different from Python's deque?
+    - While Python's collections.deque also provides a fixed-size buffer:
+      - LightweightBuffer stores timestamp-value pairs, not just values
+      - It provides time-based queries (like "get value closest to this time")
+      - It's more memory-efficient for our specific needs
+      - It's simpler and more focused than a general-purpose deque
+    
+    How does this circular buffer work?
+    - Imagine a circular array with N slots (max_size)
+    - We keep track of the next position to write to (next_index)
+    - When we add an item:
+      - If the buffer isn't full yet, we append to the end
+      - If it's full, we overwrite the oldest entry and move next_index
+    - This creates a "sliding window" of the most recent N values
+    
+    Why is this important for robotics?
+    - In basketball tracking, we need recent history data for:
+      - Calculating velocities (requires position history)
+      - Smoothing measurements to reduce noise
+      - Estimating trends for prediction
+      - Debugging when things go wrong
+    - We want this history without:
+      - Using too much memory
+      - Slowing down as time goes on
+      - Having to manually clean up old data
+    
+    Advanced usage:
+    - The get_latest_before() method finds the closest value before a given time
+    - This is useful for sensor fusion when sensors have different update rates
+    - For example, matching LIDAR data with the closest camera frame
+    - The get_all_within() method retrieves all values in a time window
+    - Useful for analyzing recent behavior or computing averages
     """
     
     def __init__(self, max_size=10):
@@ -163,6 +301,50 @@ class MotionStateManager:
     - In robotics, we want to know if the ball is stopped, rolling slowly, or moving fast so we can react appropriately.
     - Hysteresis means we require several pieces of evidence before changing state, which makes the system more stable.
     - This class also keeps a history of state changes for debugging and analysis.
+    
+    ---
+    
+    What is a state machine and why use it?
+    - A state machine is a model that defines specific "states" a system can be in (like a traffic light: red, yellow, green)
+    - For our basketball tracking, we define these motion states:
+      1. UNKNOWN: Initial state before we have enough information
+      2. STATIONARY: The ball is not moving (velocity near zero)
+      3. SMALL_MOVEMENT: The ball is rolling slowly
+      4. MEDIUM_FAST: The ball is rolling quickly
+    - Knowing the state helps us optimize our tracking algorithm: 
+      - For a stationary ball, we can use stricter detection parameters
+      - For a moving ball, we might predict where it's going
+    
+    What is hysteresis and why is it crucial?
+    - Hysteresis means we resist changing states until we have strong evidence
+    - Think of it like changing lanes while driving:
+      - You don't switch lanes just because you drift slightly over the line once
+      - You only change lanes when you deliberately move all the way into the new lane
+    - Without hysteresis, small measurement errors would cause rapid state switching:
+      - A ball with measured velocity oscillating between 0.04 and 0.06 m/s
+      - Our threshold is 0.05 m/s
+      - Without hysteresis: STATIONARY → MOVING → STATIONARY → MOVING...
+      - With hysteresis: Stays STATIONARY until we get multiple readings above threshold
+    
+    How does our hysteresis implementation work?
+    - We maintain "evidence counters" for each state
+    - When we observe a velocity matching a state, we increment that state's counter and reset others
+    - We only transition to a new state when its evidence counter reaches the threshold
+    - This means we need multiple consecutive measurements indicating a new state
+    
+    What about confidence values?
+    - Each state has a confidence score (0-1)
+    - Higher confidence means we're more certain about the current state
+    - When we change states, we adjust confidence levels:
+      - Increase confidence in the new state
+      - Decrease confidence in the other states
+    - This helps other algorithms decide how much to trust our state assessment
+    
+    Why is motion state tracking essential for robotics?
+    - It makes the system more stable by avoiding rapid control changes
+    - It reduces the impact of sensor noise and measurement errors
+    - It enables context-aware processing (different strategies for different states)
+    - It provides valuable information for higher-level decision making
     """
     
     # Define motion states
@@ -665,7 +847,7 @@ class BasketballLidarDetector(Node):
         This allows us to quickly convert points between coordinate frames using matrix multiplication, which is much faster than recalculating every time.
         
         ---
-        TEXTBOOK EXPLANATION FOR STUDENTS:
+        
         Why do we need transformations in robotics?
         - On a robot, sensors like cameras and LIDARs are mounted at different physical locations and orientations.
         - Each sensor "sees" the world from its own point of view (called a coordinate frame).
@@ -873,6 +1055,43 @@ class BasketballLidarDetector(Node):
         """
         Load performance-related configuration.
         This method reads settings from the configuration file to control how the node adapts to system load (like CPU usage).
+        
+        ---
+        
+        What is adaptive performance and why is it important?
+        - Adaptive performance means the software changes its behavior based on system load
+        - Think of it like a car's automatic transmission - it shifts gears based on conditions
+        - For robotics on limited hardware (like Raspberry Pi), this is crucial:
+          - Too much CPU usage can cause thermal throttling or system lag
+          - Consistent performance is more important than maximum quality
+          - It needs to be responsive in all conditions, not just ideal ones
+        
+        How does our adaptive performance system work?
+        - We define three performance modes based on CPU load:
+          1. NORMAL mode (CPU < 50%): Full quality, maximum features
+          2. EFFICIENT mode (CPU 50-90%): Balanced quality and performance
+          3. MINIMAL mode (CPU > 90%): Bare essentials only, prioritize responsiveness
+        
+        - We continuously monitor system resources (every 5 seconds)
+        - When CPU load changes significantly, we adjust our processing:
+          - Reduce the number of LIDAR points processed
+          - Decrease RANSAC iterations for circle detection
+          - Skip processing some frames entirely
+          - Reduce logging detail
+          - Decrease diagnostic update frequency
+        
+        What's special about our implementation?
+        - Configuration-driven: All thresholds can be adjusted in config files
+        - Graceful degradation: Quality reduces smoothly rather than failing
+        - Self-monitoring: The system actively watches its own resource usage
+        - Intelligent prioritization: Critical processing remains; optional features are reduced
+        
+        Why is this critical for robotics?
+        - Robots need deterministic timing (consistent performance)
+        - Raspberry Pi has limited cooling and can throttle under heavy load
+        - Battery-powered robots need to be efficient
+        - A slow or laggy robot can't track a moving basketball effectively
+        - Better to have slightly lower quality than to miss frames entirely
         """
         perf_config = self.config.get('performance', {})
         
@@ -1142,6 +1361,48 @@ class BasketballLidarDetector(Node):
         Set up subscribers with optimized QoS profiles.
         Subscribers listen for messages from other parts of the robot (like LIDAR scans or camera detections).
         QoS (Quality of Service) settings control how messages are delivered and stored.
+        
+        ---
+        
+        What is ROS2 communication and how does it work?
+        - ROS2 (Robot Operating System 2) uses a publish-subscribe communication pattern
+        - This pattern is like a radio broadcast system:
+          - Publishers (broadcasters) send messages to named channels called "topics"
+          - Subscribers (listeners) receive messages from topics they're interested in
+        - This decouples the sender from the receiver - they don't need to know about each other
+        - For example, the LIDAR driver publishes scan data, and our node subscribes to receive it
+        
+        What are the parts of a ROS2 subscriber?
+        1. Message Type: Defines the structure of the data (e.g., LaserScan for LIDAR data)
+        2. Topic Name: The channel to listen to (e.g., "/scan" for LIDAR scans)
+        3. Callback Function: Code that runs whenever a message arrives
+        4. QoS Profile: Settings that control message delivery reliability and behavior
+        
+        What is Quality of Service (QoS) and why is it important?
+        - QoS defines how communication behaves, especially under challenging conditions
+        - Think of it like mail delivery options: regular mail, express delivery, or registered mail
+        - Key QoS settings include:
+          - Reliability: Whether all messages must be delivered (like registered mail)
+          - Durability: Whether late subscribers can get past messages
+          - History: How many messages to keep in case of backlog
+          - Depth: Maximum number of queued messages
+        
+        Why do we use different QoS for different topics?
+        - LIDAR scans (Best Effort reliability):
+          - Coming in rapidly (10-30 times per second)
+          - Getting the newest data is more important than getting every scan
+          - Missing occasional scans is acceptable
+        - YOLO detections (Reliable delivery):
+          - Less frequent (1-10 times per second)
+          - Every detection is important and shouldn't be missed
+          - We're willing to wait a bit to ensure all detections arrive
+        
+        How do callback groups help with performance?
+        - Callback groups control how callbacks are executed:
+          - Mutually Exclusive: Only one callback runs at a time
+          - Reentrant: Multiple callbacks can run simultaneously
+        - Using reentrant callbacks for subscribers helps process data faster
+        - This is especially important on multi-core processors like the Raspberry Pi 5
         """
         # Get topic config
         topics = self.config.get('topics', {})
@@ -1209,6 +1470,43 @@ class BasketballLidarDetector(Node):
         Set up publishers with optimized QoS profiles.
         Publishers send messages to other parts of the robot (like the detected ball position or diagnostics).
         QoS settings help ensure important messages are delivered reliably.
+        
+        ---
+        
+        What are publishers in ROS2?
+        - Publishers are communication endpoints that send messages to topics
+        - They're like radio stations broadcasting on specific frequencies
+        - Other nodes can subscribe to these topics to receive the information
+        - Our node publishes several types of data:
+          1. Ball position: The 3D location of the detected basketball
+          2. Debug position: Additional position data for visualization and debugging
+          3. Diagnostics: Health and status information about this node
+          4. System load: CPU usage information for other nodes to adapt their behavior
+        
+        Why customize QoS settings for different publishers?
+        - Different data has different importance and frequency:
+          - Ball position (RELIABLE delivery):
+            • Critical for control algorithms
+            • Missing position updates could cause jerky robot movement
+            • Used by other nodes that might start at different times
+          - Diagnostics (BEST_EFFORT delivery):
+            • Nice to have but not critical for operation
+            • High frequency but losing some is acceptable
+            • Used mainly for monitoring, not control
+        
+        What does TRANSIENT_LOCAL durability mean?
+        - It stores the last published message in memory
+        - When a new subscriber connects, it immediately receives this stored message
+        - This is important for ball position because:
+          - If the PID controller node starts after our detection node
+          - It immediately gets the current ball position
+          - No need to wait for the next detection
+        
+        Why do we use staged startup with timers?
+        - Publishers are initialized after subscribers on purpose
+        - This prevents publishing messages before other systems are ready to receive them
+        - The small delay (0.1 seconds) gives subscribers time to set up
+        - Reduces startup errors and improves system reliability
         """
         # Remove the timer that triggered this
         for i, timer in enumerate(self.node_timers):
@@ -1369,6 +1667,99 @@ class BasketballLidarDetector(Node):
         Process LaserScan messages from the LIDAR.
         
         Converts polar coordinates to Cartesian coordinates with optimized memory operations.
+        
+        ---
+        
+        LIDAR Scan Data Explained
+        ------------------------
+        A 2D LIDAR scan is like a radar sweep that gives us a "snapshot" of distances to all objects around 
+        the robot. When it arrives at our node, it contains:
+        
+        1. An array of hundreds of distance measurements (ranges)
+        2. The starting angle of the scan (usually -π or -180°)
+        3. The angular increment between measurements (e.g., 0.5°)
+        
+        Raw data example from a typical LIDAR:
+        ```
+        angle_min: -3.14159  # Start angle in radians (-180°)
+        angle_max: 3.14159   # End angle in radians (180°)
+        angle_increment: 0.01 # Angular distance between measurements
+        ranges: [1.2, 1.3, inf, 1.5, 0.8, ...] # Distances in meters, 'inf' = no return
+        ```
+        
+        The scan might look like this (top-down view):
+            
+                    Front
+                      |
+                  . . | . .
+                .     |     .
+               .      |      .
+              .       |       .
+             .    LIDAR (●)    .
+        Left  . . . . | . . . .  Right
+              .       |       .
+               .      |      .
+                .     |     .
+                  . . | . .
+                      |
+                     Back
+        
+        Each dot represents a distance measurement at a specific angle. Points closer to the 
+        LIDAR are objects detected at that angle and distance.
+        
+        Why do we process LIDAR scans?
+        - LIDAR (Light Detection and Ranging) sensors send out laser beams that bounce off objects
+        - The sensor measures how long it takes for the beam to return, giving us the distance to objects
+        - Each scan consists of hundreds of distance measurements at different angles around the robot
+        - We need to process these scans to find our basketball among all the other objects the LIDAR sees
+        
+        How does LIDAR data work?
+        - LIDAR data comes in polar coordinates (angle and distance)
+        - Each point in the scan tells us "at angle θ, there's an object at distance r"
+        - To make this data more useful, we convert it to Cartesian coordinates (x, y)
+        - The conversion uses trigonometry: x = r × cos(θ), y = r × sin(θ)
+        
+        Converting to Cartesian coordinates gives us:
+        - A cloud of (x,y) points that represent all detected objects
+        - These points are easier to work with for algorithms like RANSAC
+        - They represent the actual physical locations of points in space
+        
+        When we do this conversion, we filter out:
+        - Invalid readings (inf, NaN)
+        - Very short readings (likely the robot itself)
+        
+        The resulting point cloud might look like:
+        ```
+        points = [
+            [1.2, 0.0, 0.0],    # x=1.2m, y=0m, z=0m
+            [1.1, 0.2, 0.0],    # x=1.1m, y=0.2m, z=0m
+            [0.9, 0.4, 0.0],    # x=0.9m, y=0.4m, z=0m
+            ...
+        ]
+        ```
+        
+        How do we optimize memory usage?
+        - Creating and destroying arrays in Python is expensive (takes CPU time)
+        - Instead of creating new arrays each time, we:
+          1. Reuse existing arrays when possible
+          2. Get arrays from our ObjectPool when needed
+          3. Pre-allocate arrays for calculations 
+          4. Use in-place operations (like "out=" parameters in NumPy)
+        - This makes our code run faster and reduces memory fragmentation
+        
+        What is adaptive processing?
+        - The code checks CPU load and adapts its behavior:
+          - NORMAL mode: Process all valid points
+          - EFFICIENT mode: Process half the points
+          - MINIMAL mode: Process quarter of the points and skip some scans
+        - This is like changing gears in a car: when going uphill (high CPU load),
+          we shift to a lower gear (more efficient processing)
+        
+        Why is this important?
+        - For real-time robotics, processing speed matters - if we're too slow, the basketball could move!
+        - Our Raspberry Pi has limited CPU power, so optimization is essential
+        - Memory fragmentation can cause slowdowns over time
+        - By being smart about how we process data, we can track the basketball faster and more reliably
         """
         try:
             # If system is under very high load, we might skip processing some scans
@@ -1475,6 +1866,192 @@ class BasketballLidarDetector(Node):
         Handle ball detections from camera systems (YOLO).
         Matches camera detections with LIDAR points to improve accuracy.
         If no LIDAR match is found, can fall back to using the camera's estimated 3D position.
+        
+        ---
+        
+        ███████╗███████╗███╗   ██╗███████╗ ██████╗ ██████╗     ███████╗██╗   ██╗███████╗██╗ ██████╗ ███╗   ██╗
+        ██╔════╝██╔════╝████╗  ██║██╔════╝██╔═══██╗██╔══██╗    ██╔════╝██║   ██║██╔════╝██║██╔═══██╗████╗  ██║
+        ███████╗█████╗  ██╔██╗ ██║███████╗██║   ██║██████╔╝    █████╗  ██║   ██║███████╗██║██║   ██║██╔██╗ ██║
+        ╚════██║██╔══╝  ██║╚██╗██║╚════██║██║   ██║██╔══██╗    ██╔══╝  ██║   ██║╚════██║██║██║   ██║██║╚██╗██║
+        ███████║███████╗██║ ╚████║███████║╚██████╔╝██║  ██║    ██║     ╚██████╔╝███████║██║╚██████╔╝██║ ╚████║
+        ╚══════╝╚══════╝╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝    ╚═╝      ╚═════╝ ╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝
+        
+        INTRODUCTION TO SENSOR FUSION
+        ============================
+        
+        What is sensor fusion and why do we need it?
+        -------------------------------------------
+        Sensor fusion is the process of combining data from multiple sensors to create a more accurate and
+        complete understanding of the environment. Think of it like using both your eyes and ears when crossing 
+        a street - each sense gives you different information, and together they help you navigate safely.
+        
+        Each sensor has strengths and weaknesses:
+          - Camera: 
+              + Strengths: Good at recognizing objects, colors, and patterns
+              + Weaknesses: Poor at directly measuring distances, affected by lighting conditions
+          - LIDAR: 
+              + Strengths: Excellent at precise distance measurements, works in various lighting
+              + Weaknesses: Can't identify objects by appearance, only sees shapes without color
+
+        By combining both sensors' data, we overcome the limitations of each individual sensor!
+        
+        Common Sensor Fusion Approaches
+        ------------------------------
+        1. Sequential Fusion: Process data from one sensor, then use that to guide processing of another
+           (This is what we use in our basketball tracking system!)
+        
+        2. Parallel Fusion: Process data from all sensors independently, then combine the results
+        
+        3. Statistical Fusion: Use mathematical models (like Kalman filters) to optimally combine
+           multiple noisy measurements
+        
+                            ┌─────────┐                ┌─────────┐
+                            │  CAMERA │                │  LIDAR  │
+                            └────┬────┘                └────┬────┘
+                                 │                          │
+                                 ▼                          ▼
+                            ┌─────────┐                ┌─────────┐
+                            │2D Object│                │3D Point │
+                            │Detection│                │  Cloud  │
+                            └────┬────┘                └────┬────┘
+                                 │                          │
+                                 └───────────┬──────────────┘
+                                             ▼
+                                       ┌──────────┐
+                                       │  FUSION  │
+                                       └────┬─────┘
+                                            ▼
+                                    ┌───────────────┐
+                                    │Accurate 3D Ball│
+                                    │   Position    │
+                                    └───────────────┘
+        
+        How Our Sensor Fusion Works - Step by Step
+        -----------------------------------------
+        1. YOLO Camera Detection: The deep learning model identifies the basketball in the 2D image
+           and provides the pixel coordinates (x, y) and bounding box dimensions.
+           
+        2. 3D Position Estimation: We use the size of the bounding box to estimate the ball's distance,
+           based on the pinhole camera model: distance = (actual_size * focal_length) / apparent_size
+           
+        3. Coordinate Transformation: We convert the 2D camera detection into an estimated 3D point in
+           the LIDAR's coordinate frame using the robot's transform system.
+           
+        4. Focused LIDAR Search: Instead of searching the entire LIDAR scan for circle patterns, we
+           create a "detection cone" around the estimated position, focusing our computational effort.
+           
+        5. RANSAC Circle Detection: We run the RANSAC algorithm on the filtered LIDAR points to find
+           the best-fitting circle (our basketball).
+           
+        6. Fallback Mechanism: If RANSAC doesn't find a good circle in the LIDAR data, we fall back
+           to using the camera-based estimated position, ensuring we always have a position estimate.
+           
+        7. Quality Scoring: We assign a quality score (0-1) to the detection based on:
+           - YOLO confidence score
+           - How well the LIDAR points fit a circle (inlier ratio)
+           - Distance (closer objects tend to have more accurate detections)
+        
+        Sensor Fusion Data Flow Visualization
+        ------------------------------------
+        
+          YOLO Camera                      LIDAR Scan
+              │                                │
+              ▼                                ▼
+          ┌────────┐                       ┌─────────┐
+          │2D Image│                       │Point    │
+          │  (x,y) │                       │Cloud    │
+          └───┬────┘                       └────┬────┘
+              │                                 │
+              ▼                                 │
+        ┌──────────────┐                        │
+        │Estimate 3D   │                        │
+        │from 2D & Size│                        │
+        └──────┬───────┘                        │
+               │                                │
+               ▼                                │
+        ┌──────────────┐                        │
+        │Create        │                        │
+        │Detection Cone│──────────────┐         │
+        └──────────────┘              ▼         │
+                                ┌─────────────┐ │
+                                │Filter Points│◄┘
+                                │in Cone Area │
+                                └──────┬──────┘
+                                       │
+                                       ▼
+                                ┌─────────────┐
+                                │RANSAC Circle│
+                                │Detection    │
+                                └──────┬──────┘
+                                       │
+                                       ▼
+                                ┌─────────┐    ┌─────────────┐
+                                │Success? │No  │Use Camera   │
+                                └──────┬──┘───►│Estimate Only│
+                                       │       └──────┬──────┘
+                                       │Yes           │
+                                       ▼              │
+                                ┌─────────────┐       │
+                                │Use LIDAR    │       │
+                                │Circle Center│       │
+                                └──────┬──────┘       │
+                                       │              │
+                                       ▼              ▼
+                                  ┌───────────────────┐
+                                  │Publish Basketball │
+                                  │Position & Quality │
+                                  └───────────────────┘
+        
+        Detection Sources Explained
+        --------------------------
+        In our system, we support multiple sources of 2D ball detections:
+        
+        1. YOLO: A deep learning object detection system that processes camera images
+           - Gives us 2D coordinates (x, y) in the image
+           - Provides confidence score (how sure YOLO is that it's a basketball)
+           - Reports bounding box dimensions (width and height in pixels)
+           - We use these dimensions to estimate distance using the pinhole camera model
+        
+        2. HSV: (Alternative detector) Color-based detection using Hue, Saturation, Value filters
+           - Works well for brightly colored basketballs
+           - Less computationally intensive than YOLO
+           - Less accurate in challenging lighting conditions
+        
+        Understanding Detection Quality Scores
+        ------------------------------------
+        Our system assigns quality scores (0-1) to every detection. This is crucial because:
+        
+        - Higher quality means we're more confident in the detection
+        - Quality affects how much we trust this detection compared to past ones
+        - It helps downstream processes decide how much to rely on each measurement
+        
+        Factors affecting quality:
+          - YOLO confidence score: How sure is the model that this is really a basketball?
+          - RANSAC fit quality: How well do the LIDAR points match a perfect circle?
+          - Inlier ratio: What percentage of points closely fit our detected circle?
+          - Distance: Closer objects usually have more accurate detections (larger in image, more LIDAR points)
+          - Number of points: More points generally means a more reliable circle fit
+        
+        Why Our Approach Is Powerful and Educational
+        ------------------------------------------
+        1. Robustness: If one sensor fails, we still track with the other (graceful degradation)
+        
+        2. Accuracy: Combining sensors gives us more precise position estimates than either alone
+        
+        3. Efficiency: By using camera detections to focus LIDAR processing, we save computational 
+           resources (important for real-time robotics on limited hardware like Raspberry Pi)
+        
+        4. Real-world applicability: This approach mirrors techniques used in autonomous vehicles,
+           industrial robots, and many other advanced systems
+        
+        5. Educational value: This system demonstrates fundamental robotics concepts:
+           - Coordinate transformations
+           - Computer vision
+           - Sensor fusion
+           - Error handling and fallback mechanisms
+           - Optimization for embedded systems
+        
+        In essence, our sensor fusion approach creates a system that is greater than the sum of its parts!
         """
         detection_start_time = time.time()
         
@@ -1590,7 +2167,7 @@ class BasketballLidarDetector(Node):
         Optimized for a basketball (9-inch diameter) rolling on the ground.
         
         ---
-        TEXTBOOK EXPLANATION FOR STUDENTS:
+        
         This function uses a famous algorithm called RANSAC (Random Sample Consensus) to find circles in noisy data.
         Imagine you have a bunch of points from a LIDAR scan, and you want to find which ones form a circle (the basketball).
         But some points are just noise (not part of the ball). RANSAC helps us find the best circle by:
@@ -1601,6 +2178,75 @@ class BasketballLidarDetector(Node):
         5. The best circle is our detected basketball!
         
         Why do we use RANSAC? Because it's robust to outliers (bad points), so even if there is a lot of noise, it can still find the real circle.
+        
+        A visual example of what RANSAC does:
+        
+          LIDAR points (some from basketball, some from other objects):
+             .    .        .
+           .   .      .  .    .
+          .    .    .      . 
+         .      Basketball  .   .
+          .    .    .      .
+           .    .       .    .
+             .     .        .
+        
+          After RANSAC finds the circle:
+             .    .        .
+           .   .○○○○○○  .    .
+          .    ○    ○      . 
+         .     ○     ○     .   .
+          .    ○    ○      .
+           .    ○○○○○       .    .
+             .     .        .
+        
+        The steps in more detail:
+        
+        1. If we have a camera detection (seed point), we first filter LIDAR points:
+           - We create a "cone" in the direction of the seed point
+           - We only keep LIDAR points within this cone
+           - This reduces the search space dramatically
+        
+        2. For each potential seed point:
+           a. Find nearby LIDAR points 
+           b. Use RANSAC to try to fit a circle to these points
+           c. Keep track of the best circle found
+        
+        3. Calculate a quality score based on:
+           - How many points match the circle
+           - How close the radius is to our expected basketball radius
+           - The ratio of points that are inliers
+        
+        4. Return the best result or fall back to camera estimate if needed
+        
+        Pseudo-code of our algorithm:
+        ```
+        function find_basketball_ransac(camera_seed_point):
+            if camera_seed_point exists:
+                filter LIDAR points to a cone around the seed point
+            
+            seed_points = [camera_seed_point, previous_ball_position]
+            if no filtered points:
+                add random points from LIDAR as seeds
+                
+            best_circle = None
+            best_quality = 0
+            
+            for each seed_point:
+                points_to_search = filtered_points or all_points
+                nearby_points = points within search radius of seed
+                
+                circle, inliers, quality = ransac_circle_fit(nearby_points)
+                
+                if quality > best_quality:
+                    best_circle = circle
+                    
+            if best_circle found:
+                return best_circle
+            else if camera_seed_point exists:
+                return camera_seed_point as fallback
+            else:
+                return nothing found
+        ```
         
         Args:
             camera_seed_point: Optional point in LIDAR frame transformed from camera detection
@@ -1613,25 +2259,32 @@ class BasketballLidarDetector(Node):
         # Create seed points for RANSAC
         seed_points = []
         
-        # If camera detection provided a transformed point, prioritize it
+        # If camera detection provided a transformed point, prioritize it by creating a 
+        # "detection cone" - this is our sensor fusion optimization where we use camera data to 
+        # focus the LIDAR search to a specific area
         filtered_points = None
         
         if camera_seed_point is not None and len(camera_seed_point) >= 2:
             
-            # Use only x,y coordinates for 2D search in LIDAR data
+            # Add this camera-detected position as one of our seed points for RANSAC
             seed_points.append([camera_seed_point[0], camera_seed_point[1], 0])
             
-            # Convert YOLO's (x, y) to polar coordinates for filtering
-            estimated_x = camera_seed_point[0]
-            estimated_y = camera_seed_point[1]
-            r_est = math.sqrt(estimated_x**2 + estimated_y**2)
-            theta_est = math.atan2(estimated_y, estimated_x)
+            # --------- DETECTION CONE CREATION ---------
+            # Here's how we create a "detection cone" pointed toward where the camera sees the ball:
             
-            # Filter LIDAR points by distance and angle - use pre-allocated arrays
-            px = self.points_array[:, 0]
-            py = self.points_array[:, 1]
+            # Step 1: Convert the camera detection to polar coordinates
+            # (This is like converting from (x,y) to (distance, angle) from the LIDAR's perspective)
+            estimated_x = camera_seed_point[0]  # x-coordinate in meters
+            estimated_y = camera_seed_point[1]  # y-coordinate in meters
+            r_est = math.sqrt(estimated_x**2 + estimated_y**2)  # distance from LIDAR to estimated position
+            theta_est = math.atan2(estimated_y, estimated_x)    # angle from LIDAR to estimated position
             
-            # Get a distances array from the pool or reuse existing
+            # Step 2: Get coordinates of all LIDAR points for our filtering
+            px = self.points_array[:, 0]  # x-coordinates of all LIDAR points
+            py = self.points_array[:, 1]  # y-coordinates of all LIDAR points
+            
+            # Allocate memory efficiently for calculations using our object pooling system
+            # (We're reusing arrays to avoid constant memory allocation/deallocation)
             if len(self._distances_array) >= len(px):
                 distances = self._distances_array[:len(px)]
             else:
@@ -1643,26 +2296,39 @@ class BasketballLidarDetector(Node):
                     # Create new if pool object is too small
                     distances = np.zeros(len(px), dtype=np.float32)
             
-            # Calculate distances in-place
-            np.sqrt(px**2 + py**2, out=distances)
+            # Step 3: Calculate distance from LIDAR to each point
+            # (This is the "r" in polar coordinates for each LIDAR point)
+            np.sqrt(px**2 + py**2, out=distances)  # In-place calculation for efficiency
             
+            # Step 4: Calculate angle from LIDAR to each point
+            # (This is the "θ" in polar coordinates for each LIDAR point)
             angles = np.arctan2(py, px)
             
-            # Set tolerances - adjust these based on motion state if available
-            distance_tolerance = 0.3  # meters
-            angular_tolerance = math.radians(15)  # 15 degrees in radians
+            # Step 5: Define how big our detection cone should be
+            # We're creating a cone with:
+            # - A distance range (how far from LIDAR in the direction of the estimated position)
+            # - An angular range (how wide the cone should be)
             
-            # Adjust tolerances based on motion state
+            # Default tolerance values
+            distance_tolerance = 0.3  # meters (±30cm from estimated distance)
+            angular_tolerance = math.radians(15)  # 15 degrees in radians (cone is 30° wide)
+            
+            # Step 6: Adapt cone size based on ball's motion state
+            # If ball is moving fast, we need a wider cone to account for:
+            # - Sensor delays (ball moved since detection)
+            # - Prediction errors (harder to predict fast motion)
             if hasattr(self, 'motion_manager'):
                 motion_state = self.motion_manager.current_state
                 if motion_state == MotionStateManager.STATIONARY:
-                    distance_tolerance = 0.2  # Tighter tolerance for stationary
-                    angular_tolerance = math.radians(10)
+                    # Tighter cone for stationary ball (more precise)
+                    distance_tolerance = 0.2  # meters
+                    angular_tolerance = math.radians(10)  # 10 degrees (20° cone)
                 elif motion_state == MotionStateManager.MEDIUM_FAST:
-                    distance_tolerance = 0.4  # Wider tolerance for fast movement
-                    angular_tolerance = math.radians(20)
+                    # Wider cone for fast movement (more tolerance)
+                    distance_tolerance = 0.4  # meters
+                    angular_tolerance = math.radians(20)  # 20 degrees (40° cone)
             
-            # Get mask from pool or create new
+            # Allocate mask array (will hold TRUE/FALSE for each point - whether it's in our cone)
             if len(self._inlier_mask) >= len(px):
                 mask = self._inlier_mask[:len(px)]
             else:
@@ -1674,38 +2340,41 @@ class BasketballLidarDetector(Node):
                     # Create new if needed
                     mask = np.zeros(len(px), dtype=bool)
             
-            # Apply distance filter (in-place)
+            # Step 7: Build our detection cone by filtering points
+            # First by distance: Keep points within a "ring" at the estimated distance
             valid_dist = (distances >= (r_est - distance_tolerance)) & (distances <= (r_est + distance_tolerance))
             
-            # Apply angle filter (in-place)
+            # Then by angle: Keep points within angular tolerance of the estimated direction
+            # Need to handle angle wrap-around (e.g., difference between 359° and 1° should be 2°, not 358°)
             delta = np.abs(angles - theta_est)
             delta = np.where(delta > math.pi, 2*math.pi - delta, delta)  # handle angle wrap-around
             valid_angle = delta <= angular_tolerance
             
-            # Combine both masks (in-place)
+            # Combine distance and angle filters to get the final cone shape
             np.logical_and(valid_dist, valid_angle, out=mask[:len(valid_dist)])
             
-            # Extract filtered points
+            # Step 8: Extract only the points that are inside our detection cone
             filtered_indices = np.where(mask[:len(valid_dist)])[0]
             if len(filtered_indices) > 0:
-                # Get point array from pool
+                # Get memory from our pool system
                 if len(filtered_indices) <= 500:  # Standard pool size
                     filtered_points_array = self.point_pool.get()
                     filtered_points = filtered_points_array[:len(filtered_indices)]
                 else:
-                    # Create new for large sets
+                    # Create new for unusually large sets
                     filtered_points = np.zeros((len(filtered_indices), 3), dtype=np.float32)
                 
-                # Copy selected points
+                # Copy the selected points into our filtered array
                 for i, idx in enumerate(filtered_indices):
-                    filtered_points[i, 0] = self.points_array[idx, 0]
-                    filtered_points[i, 1] = self.points_array[idx, 1]
-                    filtered_points[i, 2] = self.points_array[idx, 2]
+                    filtered_points[i, 0] = self.points_array[idx, 0]  # x
+                    filtered_points[i, 1] = self.points_array[idx, 1]  # y
+                    filtered_points[i, 2] = self.points_array[idx, 2]  # z
             else:
-                filtered_points = None
+                filtered_points = None  # No points found in our cone
             
-            # Log filtering results (throttled)
+            # Log results for debugging and tuning
             if filtered_points is not None and len(filtered_points) >= self.min_points:
+                # Success! We filtered from potentially hundreds of points to just those in our cone
                 self.throttled_log(
                     f"Filtered LIDAR points from {len(self.points_array)} to {len(filtered_points)} "
                     f"using cone at distance {r_est:.2f}m, angle {math.degrees(theta_est):.1f}°",
@@ -1713,6 +2382,10 @@ class BasketballLidarDetector(Node):
                     min_interval=1.0
                 )
             else:
+                # Not enough points found in our cone - might be:
+                # - Wrong camera estimate
+                # - Basketball not visible to LIDAR
+                # - Too narrow cone tolerances
                 self.throttled_log(
                     f"Not enough points ({0 if filtered_points is None else len(filtered_points)}) in detection cone. "
                     f"Falling back to standard detection.",
@@ -1721,6 +2394,36 @@ class BasketballLidarDetector(Node):
                     level="warn"
                 )
                 filtered_points = None  # Fall back to standard search
+                
+            # Visual representation of our detection cone (top-down view):
+            #
+            #              Detection Cone
+            #                    ▲
+            #                   /|\ 
+            #                  / | \
+            #                 /  |  \
+            #                /   |   \
+            #               /    |    \
+            #              /     |     \
+            #             /      |      \
+            #    LIDAR   /       |       \   All LIDAR points
+            #     ●─────┼───────┼────────────● outside the cone
+            #           |       |        /  are ignored
+            #           |       |       /
+            #           |       |      /
+            #           |       |     /
+            #           |       |    /
+            #           |       |   /
+            #           |       |  /
+            #           |       | /
+            #           ●───────●
+            #        LIDAR    Camera-based
+            #      Origin    Detection Point
+            #
+            # The detection cone helps us filter LIDAR points to only those 
+            # near where the camera detected the ball, improving both speed
+            # and accuracy. Points inside the cone (angle_min to angle_max)
+            # are kept, points outside are filtered out.
         
         # Include previous ball position if available
         if self.previous_ball_position is not None:
@@ -1892,7 +2595,7 @@ class BasketballLidarDetector(Node):
         Optimized for performance with explicit data types and minimal allocations.
         
         ---
-        TEXTBOOK EXPLANATION FOR STUDENTS:
+        
         RANSAC (Random Sample Consensus) is an algorithm for fitting models (like lines or circles) to data that may have lots of noise or outliers.
         Here, we use it to fit a circle to 2D points from the LIDAR.
         
@@ -1906,6 +2609,112 @@ class BasketballLidarDetector(Node):
         2. After all iterations, return the best circle found.
         
         Why is this useful? Because in real data, not all points are perfect. Some are noise. RANSAC helps us ignore the noise and find the real shape.
+        
+        Visual explanation of RANSAC (the core algorithm):
+        
+            Iteration 1: Random sample → Poor model
+             ●         ◌
+              \\       /
+               \\     /
+            ◌   \\___/   ●    
+                /   \\
+               /     \\
+              /       \\
+             ●         ◌
+            Inliers: 3/8 = 37.5%
+            
+            Iteration 2: Random sample → Better model
+             ●         ◌
+              ○○○○○○○○○
+            ◌   ○   ○   ●    
+                ○   ○
+               ○     ○
+              ○       ○
+             ●         ◌
+            Inliers: 5/8 = 62.5%
+            
+            Iteration 3: Random sample → Best model
+             ○○○○○○○○○○○
+              ○       ○
+            ◌   ○   ○   ●    
+                ○   ○
+               ○     ○
+              ○       ○
+             ○○○○○○○○○○○
+            Inliers: 7/8 = 87.5%
+            
+        Legend:
+        ● = Points randomly picked for model fitting
+        ◌ = Other data points
+        ○ = Circle model being evaluated
+        
+        How RANSAC makes circle detection robust:
+        
+        1. If we used all points to fit a circle (least squares method), noise would skew our results.
+        2. By using random samples and checking which points agree with each model, we can find the true circle even with:
+           - Random noise from the environment
+           - Points from other objects nearby
+           - Imperfect LIDAR measurements
+           - Partial views of the basketball (we might only see part of the circle)
+        
+        The algorithm's core insight is that:
+        - Outliers (noise) will be random and won't consistently support any one model
+        - Inliers (actual basketball points) will consistently support the correct model
+        - By trying many random samples, we'll eventually hit a sample of mostly inliers
+        
+        Early stopping optimization:
+        - If we find a model with many inliers (e.g., 70% of points) and excellent quality score
+        - We can stop the search early, saving computation time
+        - This is acceptable because we know we've found a good solution
+        
+        Pseudo-code for the RANSAC core algorithm:
+        ```
+        function ransac_circle_fit(points, max_iterations, threshold):
+            best_inliers = 0
+            best_model = None
+            
+            for i = 1 to max_iterations:
+                // 1. Select random sample
+                sample = randomly select 3 points from points
+                
+                // 2. Fit model to sample
+                try:
+                    center, radius = fit_circle(sample)
+                    
+                    // Check if radius is reasonable for basketball
+                    if |radius - expected_radius| > 0.5 * expected_radius:
+                        continue  // Skip this iteration
+                        
+                    // 3. Count inliers
+                    inliers = 0
+                    for each point in points:
+                        distance = |distance(point, center) - radius|
+                        if distance < threshold:
+                            inliers += 1
+                            
+                    // 4. Calculate quality metrics
+                    inlier_ratio = inliers / total_points
+                    radius_error = |radius - expected_radius| / expected_radius
+                    quality = 0.7 * inlier_ratio + 0.3 * (1 - radius_error)
+                    
+                    // 5. Update best model if better
+                    if inliers > best_inliers or (inliers == best_inliers and quality > best_quality):
+                        best_inliers = inliers
+                        best_model = (center, radius)
+                        best_quality = quality
+                        
+                    // 6. Early stopping check
+                    if quality > 0.85 and inliers > 0.7 * total_points:
+                        break  // Found an excellent model, stop searching
+                        
+                except:
+                    continue  // Sample might be collinear or problematic
+                    
+            return best_model, best_inliers, best_quality
+        ```
+        
+        This implementation is optimized for speed with NumPy vectorized operations, pre-allocated arrays,
+        and adaptivity based on system load (reducing iterations when CPU is busy).
         """
         if points is None or len(points) < 3:
             return None, 0, 0
@@ -1991,7 +2800,7 @@ class BasketballLidarDetector(Node):
         Optimized for basketball size (9-inch diameter) on Raspberry Pi.
         
         ---
-        TEXTBOOK EXPLANATION FOR STUDENTS:
+        
         This function finds the best-fitting circle for a set of 2D points. This is useful for detecting round objects like a basketball in LIDAR data.
         
         There are two main cases:
@@ -2161,7 +2970,7 @@ class BasketballLidarDetector(Node):
         Used to update the motion state manager.
         
         ---
-        TEXTBOOK EXPLANATION FOR STUDENTS:
+        
         This function calculates how fast the basketball is moving (its velocity) using its recent positions.
         
         Why do we care about velocity?
@@ -2255,20 +3064,114 @@ class BasketballLidarDetector(Node):
         Uses cached transforms and reused matrices for efficiency.
         
         ---
-        TEXTBOOK EXPLANATION FOR STUDENTS:
-        This function takes a 2D detection from a camera (like the center and size of a bounding box around the basketball)
-        and estimates where the ball is in 3D space (real world coordinates).
         
-        The math behind it:
-        1. The camera sees the ball as a circle of a certain size (in pixels). The real ball has a known diameter (in meters).
-        2. Using the formula: distance = (real_diameter * focal_length) / observed_diameter_in_pixels
-           - This comes from the pinhole camera model in geometry.
-        3. The center of the bounding box tells us the direction from the camera center to the ball (in image coordinates).
-        4. We convert this direction into a 3D vector using the camera's focal length.
-        5. We then use the camera's position and orientation (from the transform) to convert this direction into the LIDAR's frame.
-        6. Finally, we multiply the direction by the estimated distance to get the 3D position of the ball.
+        ┌─────────────────────────────────────────────────────────────────────┐
+        │                    3D POSITION ESTIMATION FROM 2D                    │
+        │                     CAMERA IMAGE DETECTIONS                          │
+        └─────────────────────────────────────────────────────────────────────┘
         
-        This is a classic example of using geometry and camera calibration to go from 2D images to 3D positions!
+        THIS IS THE SECRET SAUCE OF OUR SENSOR FUSION!
+        
+        Overview: From Flat Image to 3D Position
+        ---------------------------------------
+        This function takes a 2D detection from a camera (the center point and size of a bounding box 
+        around the basketball in the image) and estimates where that ball actually is in 3D space.
+        
+        This is one of the most fascinating parts of computer vision - reconstructing the 3D world 
+        from 2D images!
+        
+        The Math Behind Distance Estimation
+        ---------------------------------
+        We use a principle called "apparent size" to estimate distance. It works like this:
+        
+        • Objects appear smaller as they get farther away (think of looking down railroad tracks)
+        • The relationship is inversely proportional:
+          - An object 2x farther away appears 1/2 the size
+          - An object 3x farther away appears 1/3 the size
+        
+        For a basketball with known diameter, we can use this formula:
+        
+            distance = (actual_ball_diameter * camera_focal_length) / apparent_diameter_in_pixels
+        
+        Where:
+        - actual_ball_diameter = 0.24 meters (9.4 inches) for a standard basketball
+        - focal_length = 345.58 pixels (calibrated for our camera)
+        - apparent_diameter = geometric mean of bounding box width and height (√(w×h))
+        
+        Visual Example: Pinhole Camera Model
+        ----------------------------------
+                      ┌───────┐
+                      │       │
+            Ball      │       │ Image
+             ●        │   ●   │ Plane
+              \\      │       │
+               \\     │       │
+                \\    │       │
+                 \\   │       │
+                  \\  │       │
+                   \\ │       │
+        Real World   \\│       │
+                     ●┼───────┤ Focal
+                 Camera│       │ Length
+                 Center│       │
+        
+        In this diagram:
+        - The smaller the dot appears in the image, the further away it is
+        - The relationship follows this equation: h_image/f = h_real/distance
+          where h_image is apparent size, f is focal length, h_real is actual size
+        
+        Step-by-Step Process
+        -------------------
+        1. Extract Detection Information:
+           - Get the (x,y) coordinates of the ball in the image
+           - Get the width and height of the bounding box
+        
+        2. Calculate Distance:
+           - Use the pinhole camera formula shown above
+           - Apply smoothing using exponential moving average to reduce jitter
+        
+        3. Calculate 3D Direction:
+           - Get the camera's position and orientation in the LIDAR frame (using transforms)
+           - Calculate the direction vector from the camera center to the detected point
+           - Apply the camera's rotation matrix to convert this direction to the LIDAR frame
+        
+        4. Calculate Final 3D Position:
+           - Position = Camera Position + (Direction Vector × Distance)
+           - Force the z-coordinate to be at the known basketball center height
+        
+        Memory and Performance Optimizations
+        ----------------------------------
+        This implementation includes several important optimizations:
+        
+        1. Transform Caching:
+           - We store previously calculated transforms between coordinate frames
+           - This avoids expensive lookups for each detection
+        
+        2. Matrix Reuse:
+           - We pre-allocate the transformation matrix and reuse it
+           - This avoids repeated memory allocations in the hot path
+        
+        3. Early Exit Conditions:
+           - We check validity of inputs before performing calculations
+           - We handle edge cases gracefully to avoid crashes
+        
+        4. Smoothed Distance Estimation:
+           - We apply an exponential moving average to distance calculations
+           - This reduces jitter without adding significant latency
+        
+        Real-World Applications
+        ---------------------
+        This technique is not just useful for tracking basketballs - it's the same mathematical
+        principle used in:
+        
+        • Augmented reality (AR) apps that place virtual objects in the real world
+        • Autonomous vehicles that need to determine distances to obstacles
+        • Robotic manipulation tasks that require picking up objects
+        • Drone navigation systems for obstacle avoidance
+        • Computer vision systems that build 3D models from 2D images
+        
+        The ability to go from flat 2D images to accurate 3D positions is one of the
+        most powerful capabilities in robotics and computer vision!
         """
         try:
             # Known basketball diameter in meters

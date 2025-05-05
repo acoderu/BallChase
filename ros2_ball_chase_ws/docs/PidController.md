@@ -349,7 +349,7 @@ ros2 topic echo --csv /pid_controller/output/angular_z > angular_output.csv &
 xychart-beta
     title "Angular Control Oscillation Problem"
     x-axis "Time (s)" [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-    y-axis "Angular Error (degrees)" [-25, -15, -5, 0, 5, 15, 25]
+    y-axis "Angular Error (degrees)"
     line [0, -5, -12, -3, 8, 15, 5, -10, -18, -5, 12, 20, 6, -8, -22, -6, 10, 22]
     note "Oscillation with increasing amplitude" at (13, 15)
     note "Target Angle (Zero Error)" at (5, 0)
@@ -599,7 +599,7 @@ Create a step input and analyze the system's response to extract critical inform
 xychart-beta
     title "Step Response Analysis Parameters"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7]
-    y-axis "Response" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+    y-axis "Response"
     line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0]
     line [0, 0, 0.2, 0.65, 1.15, 0.95, 1.03, 0.98, 1.0]
     note "Step Input" at (0.75, 0.5)
@@ -796,7 +796,7 @@ The following graphs compare how different control methods respond to a simple s
 xychart-beta
     title "Response to Step Input"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+    y-axis "Position"
     line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     line [0, 0, 0.42, 0.9, 1.18, 1.08, 1.02, 1.0, 1.0]
     line [0, 0, 0.22, 0.58, 0.82, 0.94, 0.98, 1.0, 1.0]
@@ -860,7 +860,7 @@ This comparison shows how different controllers handle external disturbances:
 xychart-beta
     title "Disturbance Rejection Comparison"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position" [0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+    y-axis "Position"
     line [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     line [1.0, 1.0, 0.7, 0.85, 1.05, 0.8, 0.9, 0.97, 1.0]
     line [1.0, 1.0, 0.8, 0.92, 0.98, 0.85, 0.92, 0.97, 0.99]
@@ -1473,7 +1473,7 @@ The following diagram illustrates how each PID component contributes to the cont
 xychart-beta
     title "PID Component Effects on System Response"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+    y-axis "Position"
     line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] 
     line [0, 0, 0.5, 1.1, 0.9, 1.05, 0.95, 1.0, 1.0] 
     line [0, 0, 0.4, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0] 
@@ -1650,9 +1650,11 @@ classDiagram
     classDef performanceComponents fill:#66bb6a,stroke:#338a3e,stroke-width:2px,color:#000000
     
     class ImprovedPID mainController
-    class BasicPIDCore,GainSystem coreComponents
+    class BasicPIDCore coreComponents
+    class GainSystem coreComponents
     class ErrorManagement errorComponents
-    class AntiWindup,OutputControl safetyComponents
+    class AntiWindup safetyComponents
+    class OutputControl safetyComponents
     class PerformanceData performanceComponents
 ```
 
@@ -1817,7 +1819,7 @@ Zero-crossings are challenging for traditional PID controllers because:
 xychart-beta
     title "The Zero-Crossing Problem"
     x-axis "Time" [0, 2, 4, 6, 8, 10, 12, 14, 16]
-    y-axis "Error" [-1.0, -0.5, 0, 0.5, 1.0]
+    y-axis "Error"
     line [0, 0, 0.8, 0.4, 0, -0.4, -0.8, -0.5, 0, 0.5, 0.3, 0, -0.3, -0.1, 0, 0.1, 0]
     note "Target Position (Zero Error)" at (2, 0)
     note "Zero-Crossing Points" at (4.5, -0.2)
