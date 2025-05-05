@@ -351,9 +351,11 @@ xychart-beta
     x-axis "Time (s)" [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
     y-axis "Angular Error (degrees)"
     line [0, -5, -12, -3, 8, 15, 5, -10, -18, -5, 12, 20, 6, -8, -22, -6, 10, 22]
-    note "Oscillation with increasing amplitude" at (13, 15)
-    note "Target Angle (Zero Error)" at (5, 0)
 ```
+
+<div style="font-style: italic; margin-top: -10px;">
+Angular error oscillating around zero (target) with increasing amplitude over time
+</div>
 
 <em>Initial observation: Angular error oscillating around zero with increasing amplitude over time</em>
 
@@ -602,13 +604,11 @@ xychart-beta
     y-axis "Response"
     line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0]
     line [0, 0, 0.2, 0.65, 1.15, 0.95, 1.03, 0.98, 1.0]
-    note "Step Input" at (0.75, 0.5)
-    note "Rise Time" at (0.8, 0.35)
-    note "Peak Time" at (3.2, 1.15)
-    note "Overshoot" at (3.75, 1.1)
-    note "Settling Time" at (6.5, 1.05)
-    note "Steady-State" at (6.5, 0.95)
 ```
+
+<div style="font-style: italic; margin-top: -10px;">
+Step response analysis showing key parameters: Step Input (0.75, 0.5), Rise Time (0.8, 0.35), Peak Time (3.2, 1.15), Overshoot (3.75, 1.1), Settling Time (6.5, 1.05), and Steady-State (6.5, 0.95).
+</div>
 
 From this analysis, calculate:
 - **Rise Time**: Indicates whether Kp is appropriate
@@ -802,13 +802,11 @@ xychart-beta
     line [0, 0, 0.22, 0.58, 0.82, 0.94, 0.98, 1.0, 1.0]
     line [0, 0, 0.3, 0.68, 0.88, 0.94, 0.98, 1.0, 1.0]
     line [0, 0, 0.52, 0.78, 0.88, 0.92, 0.94, 0.96, 0.96]
-    note "Setpoint (Target)" at (0, 0.85)
-    note "PID Controller" at (0.2, 1.22)
-    note "MPC" at (8, 1.0)
-    note "LQR" at (3.5, 0.98)
-    note "Fuzzy Logic" at (6, 0.88)
-    note "Pure P" at (8, 0.96)
 ```
+
+<div style="font-style: italic; margin-top: -10px;">
+Response of different controllers to a step change in target position: Setpoint (Target), PID Controller, MPC, LQR, Fuzzy Logic, and Pure P.
+</div>
 
 <em>Response of different controllers to a step change in target position</em>
 
@@ -867,14 +865,11 @@ xychart-beta
     line [1.0, 1.0, 0.75, 0.85, 0.95, 0.8, 0.88, 0.94, 0.98]
     line [1.0, 1.0, 0.85, 0.88, 0.92, 0.75, 0.82, 0.87, 0.91]
     line [1.0, 1.0, 0.75, 0.82, 0.86, 0.7, 0.75, 0.78, 0.8]
-    note "Setpoint" at (1, 1.0)
-    note "Disturbances" at (3.5, 0.5)
-    note "MPC" at (8, 0.99)
-    note "PID Controller" at (8, 1.0)
-    note "LQR" at (8, 0.98)
-    note "Fuzzy Logic" at (8, 0.91)
-    note "Pure P" at (8, 0.8)
 ```
+
+<div style="font-style: italic; margin-top: -10px;">
+Comparison of different controllers handling disturbances at t=2s and t=5s: Setpoint, MPC, PID Controller, LQR, Fuzzy Logic, and Pure P.
+</div>
 
 <em>Response to external disturbances at t=2s and t=5s</em>
 
@@ -1229,6 +1224,7 @@ The PID control system operates through a sequential flow of information, with e
 The following diagram illustrates the advanced PID control system architecture with its key components and data flow:
 
 ```mermaid
+%%{init: {"flowchart": {"htmlLabels": true, "curve": "basis"}, "theme": "default"}}%%
 flowchart TD
     %% Main Data Flow
     SensorFusion["Sensor Fusion Node"] -->|Basketball Position Data| TargetTracking
@@ -1299,11 +1295,24 @@ flowchart TD
     class VelocityControl velocityModule
     class ErrorTrackers trackerModule
     
-    class Filtering,Prediction,FusionRate,Freshness,Selection,Blending,Trends,Oscillation,ForwardPID,LateralPID,AngularPID,Safety,Acceleration,Coordination subComponent
-    class SensorFusion,ErrorCalc,Motors dataComponent
+    class Filtering subComponent
+    class Prediction subComponent
+    class FusionRate subComponent
+    class Freshness subComponent
+    class Selection subComponent
+    class Blending subComponent
+    class Trends subComponent
+    class Oscillation subComponent
+    class ForwardPID subComponent
+    class LateralPID subComponent
+    class AngularPID subComponent
+    class Safety subComponent
+    class Acceleration subComponent
+    class Coordination subComponent
     
-    %% Make data flow lines stand out
-    linkStyle 0,1,2,3,4,5,6,7,8,9,10 stroke:#424242,stroke-width:1.5px
+    class SensorFusion dataComponent
+    class ErrorCalc dataComponent
+    class Motors dataComponent
 ```
 
 This architecture reflects several key design principles:
@@ -1479,12 +1488,11 @@ xychart-beta
     line [0, 0, 0.4, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0] 
     line [0, 0, 0.3, 0.85, 0.9, 0.95, 1.0, 1.0, 1.0] 
     line [0, 0, 0.45, 0.95, 0.98, 1.0, 1.0, 1.0, 1.0] 
-    note "Setpoint (Target)" at (2, 1.0)
-    note "P-only (Steady-State Error)" at (7, 0.95)
-    note "PI Control (No Damping)" at (7, 1.0)
-    note "PID Control (Balanced)" at (7, 1.02)
-    note "Step Change Input" at (0, 0.1)
 ```
+
+<div style="font-style: italic; margin-top: -10px;">
+Comparison of different controller types: Setpoint (Target), P-only (Steady-State Error), PI Control (No Damping), PID Control (Balanced), and Step Change Input.
+</div>
 
 **Component Effects:**
 - **P (Proportional)**: Provides quick initial response but may cause oscillation
@@ -1821,10 +1829,11 @@ xychart-beta
     x-axis "Time" [0, 2, 4, 6, 8, 10, 12, 14, 16]
     y-axis "Error"
     line [0, 0, 0.8, 0.4, 0, -0.4, -0.8, -0.5, 0, 0.5, 0.3, 0, -0.3, -0.1, 0, 0.1, 0]
-    note "Target Position (Zero Error)" at (2, 0)
-    note "Zero-Crossing Points" at (4.5, -0.2)
-    note "Oscillation around target" at (11, 0.3)
 ```
+
+<div style="font-style: italic; margin-top: -10px;">
+Target position is at zero error. The system oscillates around the target, crossing zero multiple times with gradually decreasing amplitude.
+</div>
 
 #### 3.3.2 Zero-Crossing Handling
 
@@ -2875,12 +2884,12 @@ This function transforms a linear blend factor into a smooth S-curve, creating n
 xychart-beta
     title "Smoothstep vs Linear Blending"
     x-axis "Time" [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-    y-axis "Blend Factor" [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    y-axis "Blend Factor"
     line [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     line [0, 0.03, 0.1, 0.21, 0.35, 0.5, 0.65, 0.79, 0.9, 0.97, 1.0]
-    note "Linear Blend (Constant Rate)" at (0.8, 0.7)
-    note "Smoothstep (Gradual Start/End)" at (0.3, 0.2)
 ```
+
+<div style="font-style: italic; margin-bottom: 10px; margin-top: -10px;">Linear blend (constant rate) vs. Smoothstep (gradual start/end) transition</div>
 
 #### 6.3.5 Direction Change Adaptation
 
