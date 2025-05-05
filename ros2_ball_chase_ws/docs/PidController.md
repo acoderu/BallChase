@@ -456,15 +456,15 @@ After each change, we recorded new data and analyzed the results.
 xychart-beta
     title "Effect of Individual Solutions"
     x-axis "Time (s)" [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-    y-axis "Angular Error (degrees)" [-15, -10, -5, 0, 5, 10, 15]
+    y-axis "Angular Error (degrees)"
     line [0, -4, -8, -3, 4, 7, 3, -5, -8, -4, 5, 7, 3, -4, -8, -3, 5, 7]
     line [0, -3, -7, -2, 2, 5, 2, -4, -6, -3, 3, 5, 2, -3, -6, -2, 4, 5]
     line [0, -2, -3, -1, 1, 2, 0, -1, -2, 0, 1, 1, 0, -1, -1, 0, 1, 0]
-    note "Original Problem" at (12, 7)
-    note "Solution 1: Increased Kd" at (12, 5)
-    note "Combined Solution" at (12, 1)
-    note "Target Angle" at (2, 0)
 ```
+
+<div style="font-style: italic; margin-top: -10px;">
+Comparing solutions: Original Problem (top line with largest oscillations), Solution 1: Increased Kd (middle line with reduced oscillations), and Combined Solution (bottom line showing minimal error). The target angle is at zero.
+</div>
 
 **Solution Results**:
 
@@ -826,19 +826,17 @@ The second comparison shows how different controllers perform when tracking a co
 xychart-beta
     title "Tracking a Moving Target"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]
+    y-axis "Position"
     line [0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.6, 0.8]
     line [0.4, 0.55, 0.75, 0.95, 0.82, 0.65, 0.45, 0.58, 0.75]
     line [0.4, 0.52, 0.72, 0.94, 0.79, 0.62, 0.42, 0.58, 0.76]
     line [0.4, 0.5, 0.68, 0.88, 0.74, 0.6, 0.48, 0.55, 0.72]
     line [0.4, 0.45, 0.6, 0.75, 0.65, 0.55, 0.45, 0.51, 0.65]
-    note "Target Position" at (4.5, 0.4)
-    note "MPC" at (7.5, 0.76)
-    note "PID Controller" at (7.5, 0.75)
-    note "LQR" at (6.5, 0.55)
-    note "Fuzzy Logic" at (7.5, 0.72)
-    note "Pure P" at (4.5, 0.55)
 ```
+
+<div style="font-style: italic; margin-top: -10px;">
+Tracking performance with a continuously moving target. Top line shows Target Position, with MPC, PID Controller, LQR, Fuzzy Logic, and Pure P controllers showing varying degrees of tracking ability.
+</div>
 
 <em>Tracking performance with a continuously moving target</em>
 
