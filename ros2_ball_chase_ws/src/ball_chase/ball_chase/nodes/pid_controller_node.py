@@ -176,16 +176,16 @@ class ParameterManager:
                 ('linear_x_kd', 0.3),
                 ('linear_x_min', 0.0),
                 ('linear_x_max', 0.1),
-                ('linear_y_kp', 0.2),
-                ('linear_y_ki', 0.01),
+                ('linear_y_kp', 0.7),
+                ('linear_y_ki', 0.005),
                 ('linear_y_kd', 0.7),
                 ('linear_y_min', -0.2),
                 ('linear_y_max', 0.3),
                 ('angular_kp', 0.8),
                 ('angular_ki', 0.01),
-                ('angular_kd', 1.0),
+                ('angular_kd', 0.9),
                 ('angular_min', -0.5),
-                ('angular_max', 0.7),
+                ('angular_max', 0.5),
                 ('min_distance', 0.9),
                 ('max_distance', 2.0),
                 ('target_offset_x', 0.0),
@@ -196,8 +196,8 @@ class ParameterManager:
                 ('adaptive_gains', True),
                 ('use_lateral_control', True),
                 ('distance_threshold', 0.1),
-                ('lateral_threshold', 0.025),
-                ('angular_threshold', 2.0),
+                ('lateral_threshold', 0.02),
+                ('angular_threshold', 1.8),
                 ('angular_at_target_factor', 1.0),
                 ('adaptive_control_rate', True),
                 ('enable_resource_monitoring', True),
@@ -208,8 +208,8 @@ class ParameterManager:
                 ('angular_first_control', True),
                 ('strategy_blend_duration', 0.15),
                 ('coordinated_movement', True),
-                ('filter_buffer_size', 4),
-                ('prediction_horizon', 0.05),
+                ('filter_buffer_size', 3),
+                ('prediction_horizon', 0.04),
                 ('approach_distance', 0.3),
                 ('min_approach_factor', 0.15),
                 ('use_simplified_control_when_possible', True),
@@ -223,13 +223,13 @@ class ParameterManager:
                 ('cpu_throttle_interval', 0.5),
                 ('enable_cycle_skipping', False),
                 ('max_cpu_skip_threshold', 90.0),
-                ('coordinated_coupling_factor', 0.3),
-                ('coordinated_smoothing_factor', 0.7),
-                ('coordinated_min_angle_for_reduction', 0.06),
+                ('coordinated_coupling_factor', 0.45),  
+                ('coordinated_smoothing_factor', 0.6),  
+                ('coordinated_min_angle_for_reduction', 0.1),
                 ('coordinated_zero_angle_threshold', 0.015),
-                ('coordinated_max_angle_factor', 0.3),
-                ('coordinated_same_sign_scale', 0.6),
-                ('coordinated_opposite_sign_scale', 0.9),
+                ('coordinated_max_angle_factor', 0.2),
+                ('coordinated_same_sign_scale', 0.8),  
+                ('coordinated_opposite_sign_scale', 0.9),  
             ]
         )
 
@@ -789,7 +789,7 @@ class StandardControlStrategy(ControlStrategy):
         self.lateral_error_tracker = lateral_error_tracker
         self.angular_error_tracker = angular_error_tracker
         self.velocity_control = velocity_control
-        
+    
     def compute_velocity_command(self, errors, position_data, current_time, freshness_level="fresh"):
         """Compute velocity commands using full PID control with coordination."""
         # Unpack errors
@@ -799,6 +799,14 @@ class StandardControlStrategy(ControlStrategy):
         use_forward = True
         use_lateral = True
         use_angular = True
+        
+        # ADD THIS SECTION: Check for significant angular error and apply angular-first strategy
+        significant_angular_error = False
+        if self.parameter_manager.angular_first_control:
+            # Convert to degrees for easier threshold comparison
+            angular_degrees = angular_error * 57.29578  # 180/pi
+            if abs(angular_degrees) > 11.0:  # ~0.2 radians
+                significant_angular_error = True
         
         # Compute velocities based on the selected strategy
         if self.parameter_manager.coordinated_movement and use_lateral and use_angular:
@@ -817,6 +825,12 @@ class StandardControlStrategy(ControlStrategy):
                 current_time,    # current time
                 0.0              # current orientation - this is taken directly from the coordinated controller
             )
+            
+            # ADD THIS SECTION: Apply angular-first strategy if significant angular error
+            if significant_angular_error:
+                # Reduce linear and lateral velocities until angular error is smaller
+                linear_x_velocity *= 0.7
+                lateral_velocity *= 0.8
             
             # Disable individual components if strategy requires
             if not use_lateral:
@@ -845,6 +859,12 @@ class StandardControlStrategy(ControlStrategy):
                 not use_angular,
                 self.angular_error_tracker.get_trend()
             )
+            
+            # ADD THIS SECTION: Apply angular-first strategy if significant angular error
+            if significant_angular_error:
+                # Reduce linear and lateral velocities until angular error is smaller
+                linear_x_velocity *= 0.7
+                lateral_velocity *= 0.8
         
         # Apply freshness-based velocity scaling
         if freshness_level == "stale":
@@ -870,6 +890,7 @@ class StandardControlStrategy(ControlStrategy):
             freshness_level=freshness_level
         )
         
+        # ADD THIS LINE: Return the computed velocities
         return limited_velocities
     
     def get_strategy_name(self):

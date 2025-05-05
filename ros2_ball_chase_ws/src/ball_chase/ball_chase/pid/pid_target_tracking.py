@@ -256,14 +256,38 @@ class TargetTrackingModule:
             is_moving = movement_info.get('is_moving', False)
             direction_change = movement_info.get('direction_change', True)
             
-            # For consistent movement, use prediction
-            if is_moving and not direction_change:
-                predicted_position = self.target_filter.get_predicted_position()
+            # CHANGE: More aggressive prediction for diagonal movements
+            predicted_position = self.target_filter.get_predicted_position()
+            
+            # CHANGE: Check for diagonal movement by examining both lateral and distance changes
+            diagonal_movement = False
+            if predicted_position and len(predicted_position) >= 3 and is_moving:
+                # Calculate if both lateral and distance are changing significantly
+                lateral_change = abs(predicted_position[1] - filtered_position[1])
+                distance_change = abs(predicted_position[0] - filtered_position[0])
+                
+                # If both are changing by more than 5cm, we have diagonal movement
+                diagonal_movement = (lateral_change > 0.05 and distance_change > 0.05)
+            
+            # For consistent movement or diagonal movements, use prediction
+            if (is_moving and not direction_change) or diagonal_movement:
                 if predicted_position and len(predicted_position) >= 3:
-                    # Use prediction for control
-                    self.filtered_metrics[0] = predicted_position[0]
-                    self.filtered_metrics[1] = predicted_position[1]
-                    self.filtered_metrics[2] = predicted_position[2]
+                    # CHANGE: Use stronger prediction blend for diagonal movements
+                    if diagonal_movement:
+                        # Use 70% prediction for diagonal movements - look further ahead
+                        prediction_weight = 0.7
+                        
+                        # Log the enhanced prediction for diagonal movement
+                        if self.debug_level >= 2:
+                            self.logger.info(f"Using enhanced prediction for diagonal movement: weight={prediction_weight:.1f}")
+                    else:
+                        # Use normal prediction weight
+                        prediction_weight = 0.5
+                        
+                    # CHANGE: Blend filtered and predicted values based on movement type
+                    self.filtered_metrics[0] = filtered_position[0] * (1-prediction_weight) + predicted_position[0] * prediction_weight
+                    self.filtered_metrics[1] = filtered_position[1] * (1-prediction_weight) + predicted_position[1] * prediction_weight
+                    self.filtered_metrics[2] = filtered_position[2] * (1-prediction_weight) + predicted_position[2] * prediction_weight
                 else:
                     # Fall back to filtered values if prediction fails
                     self.filtered_metrics[0] = filtered_position[0]
@@ -274,13 +298,13 @@ class TargetTrackingModule:
                 self.filtered_metrics[0] = filtered_position[0]
                 self.filtered_metrics[1] = filtered_position[1]
                 self.filtered_metrics[2] = filtered_position[2]
-                
+                    
             if self.debug_level >= 2:
                 now = time.time()
                 if not hasattr(self, '_last_logged_selected_position') or now - self._last_logged_selected_position > 1.0:
                     self.logger.info(f"Selected position values: {self.filtered_metrics}")
                     self._last_logged_selected_position = now
-                
+                    
         except Exception as e:
             self.logger.error(f"Error selecting position values: {str(e)}")
             # Fall back to filtered values on error
@@ -543,6 +567,57 @@ class VelocityControlModule:
         # Reset direction tracking
         self.prev_direction.fill(0.0)
     
+
+    def _balance_velocity_distribution(self):
+        """
+        Balance velocity distribution to improve multi-axis movements.
+        Ensures one movement axis doesn't dominate at the expense of others.
+        """
+        try:
+            # Only apply balancing when multiple significant velocities exist
+            significant_axes = 0
+            for i in range(3):
+                if abs(self._limited_velocities[i]) > 0.05:  # 5cm/s or 0.05rad/s threshold
+                    significant_axes += 1
+                    
+            # Only balance when we have multiple significant movement axes
+            if significant_axes >= 2:
+                # Calculate magnitude of total movement vector
+                total_magnitude = np.sqrt(np.sum(self._limited_velocities[:2]**2))  # Just x and y components
+                
+                # Only apply balancing for significant movement
+                if total_magnitude > 0.1:  # At least 10cm/s combined movement
+                    # Calculate what portion of total movement each component represents
+                    proportions = np.abs(self._limited_velocities) / max(0.001, total_magnitude)
+                    
+                    # Check if linear X is dominating (forward/backward)
+                    if proportions[0] > 0.85 and abs(self._limited_velocities[1]) > 0.05:
+                        # Linear X is taking >85% of movement budget while Y needs >5cm/s
+                        # Redistribute to give lateral movement more priority
+                        self._limited_velocities[0] *= 0.8  # Reduce X to 80%
+                        
+                        # Log the balancing if in debug mode
+                        if self.debug_level >= 2:
+                            self.logger.info(
+                                f"Balanced velocity distribution: reduced X dominance "
+                                f"from {self._limited_velocities[0]/0.8:.2f} to {self._limited_velocities[0]:.2f}"
+                            )
+                    
+                    # Similar check for Y dominating
+                    if proportions[1] > 0.85 and abs(self._limited_velocities[0]) > 0.05:
+                        # Linear Y is taking >85% of movement budget while X needs >5cm/s
+                        self._limited_velocities[1] *= 0.8  # Reduce Y to 80%
+                        
+                        # Log the balancing if in debug mode
+                        if self.debug_level >= 2:
+                            self.logger.info(
+                                f"Balanced velocity distribution: reduced Y dominance "
+                                f"from {self._limited_velocities[1]/0.8:.2f} to {self._limited_velocities[1]:.2f}"
+                            )
+        except Exception as e:
+            self.logger.error(f"Error in velocity balancing: {str(e)}")
+            # Continue without balancing on error
+    
     def process_velocities(self, linear_x, linear_y, angular_z, filtered_distance, desired_distance, freshness_level='fresh'):
         """
         Process and limit velocities for smooth, natural movement.
@@ -614,6 +689,9 @@ class VelocityControlModule:
             # Apply velocity smoothing using sliding window
             self._apply_velocity_smoothing()
             
+            # Balance velocity distribution for diagonal movements
+            self._balance_velocity_distribution()
+            
             # Apply maximum velocity limits using vectorized operation
             np.clip(
                 self._limited_velocities, 
@@ -621,7 +699,7 @@ class VelocityControlModule:
                 self.max_velocity_limits,
                 out=self._limited_velocities
             )
-            
+
             # Log limited velocities at debug level
             if self.debug_level >= 2:
                 self.logger.info(
@@ -667,15 +745,6 @@ class VelocityControlModule:
     def _detect_direction_changes(self):
         """
         Detect significant direction changes and apply damping.
-        
-        This method:
-        1. Calculates the current movement direction vector
-        2. Compares it with the previous direction
-        3. Applies velocity damping when significant changes are detected
-        
-        Direction changes are detected using the dot product between normalized
-        velocity vectors. When a significant change occurs, velocities are reduced
-        to prevent jerky movements during direction transitions.
         """
         # Initialize normalized direction vector
         current_dir = np.zeros(3)
@@ -694,20 +763,17 @@ class VelocityControlModule:
             # Check for direction change only if we have a previous direction
             if np.any(self.prev_direction != 0):
                 # Calculate dot product between current and previous direction
-                # Dot product = |v1|·|v2|·cos(θ) = cos(θ) for unit vectors
-                # Result range: [-1, 1] where:
-                # - 1: vectors pointing in same direction (0° angle)
-                # - 0: vectors are perpendicular (90° angle)
-                # - -1: vectors pointing in opposite directions (180° angle)
                 dot_product = np.sum(current_dir[:2] * self.prev_direction[:2])
                 
                 # Detect significant direction change based on dot product threshold
-                # 0.7 ≈ cos(45°) - changes greater than ~45 degrees are considered significant
-                if dot_product < 0.7:
-                    # Apply damping to velocities when direction changes
-                    # Multiply all velocity components by damping factor (default 0.5 = 50%)
-                    # This creates smoother transitions during direction changes
-                    self._target_velocities *= self.direction_change_factor
+                # CHANGE: Reduced threshold from 0.7 to 0.5 (cos 60° instead of cos 45°)
+                # This makes the controller more responsive during diagonal tracking
+                # by only considering more severe direction changes (>60 degrees)
+                if dot_product < 0.5:
+                    # CHANGE: Apply less aggressive damping (0.7 instead of 0.5)
+                    # This keeps more momentum during direction changes
+                    damping_factor = 0.7  # Changed from 0.5 (50%) to 0.7 (70%)
+                    self._target_velocities *= damping_factor
                     
                     # Log direction changes at debug level
                     if self.debug_level >= 2:
@@ -717,7 +783,7 @@ class VelocityControlModule:
                         
                         self.logger.info(
                             f"Direction change detected: {angle_deg:.1f}° change, "
-                            f"damping velocities by factor {self.direction_change_factor}"
+                            f"damping velocities by factor {damping_factor}"
                         )
                         
             # Update previous direction for next cycle comparison
