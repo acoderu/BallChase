@@ -1,14 +1,83 @@
 """
-Basketball Tracking Robot - Optimized PID Controller Modules
-===========================================================
+Basketball Tracking Robot - Advanced Target Tracking and Movement Planning
+==========================================================================
 
-This file contains refactored and performance-optimized modules for the PID controller.
-Optimizations focus on:
-- Matching control rate to actual fusion data rate (1-5Hz)
-- Reducing CPU and memory usage on Raspberry Pi 5
-- Enhanced data freshness detection
-- Event-driven control capability
-- Simplified resource management
+EDUCATIONAL DOCUMENTATION
+------------------------
+
+This module forms the backbone of the robot's tracking intelligence, turning
+raw sensor data into smooth, intelligent movement decisions. It bridges the gap
+between perception (where is the ball?) and action (how should the robot move?),
+implementing sophisticated algorithms for target tracking, movement strategy
+selection, and velocity control.
+
+Key Concepts for Beginners:
+--------------------------
+
+1. MODULAR SOFTWARE ARCHITECTURE
+
+   The code is organized into specialized modules, each with clear responsibilities:
+   
+   - TARGET TRACKING: Keeps track of ball position, filters data, predicts future positions
+   - MOVEMENT STRATEGY: Decides HOW to move based on the current situation
+   - VELOCITY CONTROL: Converts strategy decisions into safe, smooth motor commands
+   
+   This modular design makes the system easier to understand, test, and improve.
+   Each module can be enhanced independently without affecting the others.
+
+2. ADAPTIVE TRACKING AND PREDICTION
+
+   The robot doesn't just react to where the ball IS - it anticipates where it WILL BE:
+   
+   - FUSION RATE DETECTION: Automatically detects how frequently sensor data arrives
+   - FRESHNESS ANALYSIS: Determines if data is recent enough to be reliable
+   - MOVEMENT PATTERN DETECTION: Identifies if the ball is moving consistently
+   - DIAGONAL MOVEMENT HANDLING: Special processing for balls moving diagonally
+   
+   These capabilities allow the robot to track the ball smoothly even when
+   sensor data is delayed or inconsistent.
+
+3. STRATEGY-BASED MOVEMENT PLANNING
+
+   Rather than directly connecting errors to movements, the robot uses a
+   strategy-based approach:
+   
+   - STRATEGY SELECTION: Chooses the best movement strategy based on ball position
+   - STRATEGY BLENDING: Smoothly transitions between strategies to prevent jerky motion
+   - COORDINATED MOVEMENT: Ensures forward, lateral, and rotational movements work together
+   
+   This approach creates much more natural and efficient movement than
+   simple reactive control.
+
+4. SAFETY AND PERFORMANCE OPTIMIZATION
+
+   The system incorporates numerous features to ensure safe, efficient operation:
+   
+   - VELOCITY LIMITING: Prevents unsafe speeds
+   - ACCELERATION LIMITING: Ensures smooth acceleration and deceleration
+   - RESOURCE MONITORING: Adapts processing based on available CPU
+   - FAIL-SAFE MECHANISMS: Handles data loss and sensor failures gracefully
+   
+   These optimizations are especially important for running on resource-constrained
+   systems like the Raspberry Pi 5.
+
+Module Architecture:
+------------------
+
+1. TargetTrackingModule: Processes and filters sensor data, predicts ball movement
+2. MovementStrategyModule: Determines how the robot should move to follow the ball
+3. VelocityControlModule: Converts movement decisions into safe motor commands
+
+Together, these modules implement a sophisticated control pipeline that creates
+smooth, intelligent robot movement with minimal computational overhead.
+
+Performance Optimizations:
+------------------------
+- ADAPTIVE PROCESSING: Matches control rate to actual fusion data rate (1-5Hz)
+- EFFICIENT MEMORY USAGE: Pre-allocates buffers and reuses objects
+- MINIMAL ALLOCATIONS: Avoids creating new objects during real-time processing
+- VECTORIZED OPERATIONS: Uses NumPy for efficient numerical operations
+- GRADUATED FRESHNESS: Smart handling of potentially stale data
 """
 
 import rclpy
@@ -35,10 +104,64 @@ from ball_chase.pid.pid_computation import PIDControllers
 #############################################
 
 class TargetTrackingModule:
-    """Module that handles target tracking, filtering, and prediction with fusion rate detection."""
+    """
+    Advanced target tracking, filtering, and prediction system for basketball tracking.
+    
+    EDUCATIONAL EXPLANATION:
+    -----------------------
+    The TargetTrackingModule is the sensory processing center of the robot. It takes
+    raw positional data from sensors and transforms it into reliable, predictive
+    information about where the basketball is and where it's going.
+    
+    KEY CAPABILITIES:
+    ---------------
+    
+    1. FILTERING AND SMOOTHING
+       - Removes sensor noise and random fluctuations
+       - Creates a stable position estimate from potentially noisy data
+       - Allows smooth control even with imperfect sensors
+       - Prevents the robot from reacting to sensor glitches
+    
+    2. MOVEMENT PREDICTION
+       - Estimates where the ball will be in the near future (prediction_horizon)
+       - Uses physics-based prediction for consistent movement
+       - Applies special handling for diagonal movements
+       - Allows the robot to anticipate the ball's path
+    
+    3. FUSION RATE DETECTION
+       - Automatically detects how frequently new sensor data arrives
+       - Adapts processing parameters based on actual data rate
+       - Ensures control logic matches the system's capabilities
+       - Provides crucial information for data freshness evaluation
+    
+    4. DATA FRESHNESS ANALYSIS
+       - Determines if data is fresh enough to be reliable
+       - Provides graduated freshness levels (fresh, stale, critical)
+       - Adapts thresholds based on detected fusion rate
+       - Enables graceful handling of sensor delays or failures
+    
+    This module embodies the concept of "smart sensing" - going beyond
+    raw data to create a higher-level understanding of the basketball's
+    behavior that directly supports intelligent decision-making.
+    """
     
     def __init__(self, throttled_logger, filter_buffer_size=5, prediction_horizon=0.2, debug_level=0):
-        """Initialize the target tracking module."""
+        """
+        Initialize target tracking with configurable filtering and prediction parameters.
+        
+        Args:
+            throttled_logger: Logger with rate limiting to prevent log flooding
+            filter_buffer_size: Number of positions to keep in filtering buffer (default: 5)
+            prediction_horizon: How far ahead to predict ball position in seconds (default: 0.2)
+            debug_level: Controls verbosity of diagnostic output (0-3)
+            
+        The filter_buffer_size affects how many previous positions are used for filtering.
+        Larger values create smoother filtering but slower response to sudden changes.
+        
+        The prediction_horizon controls how far ahead the system predicts the ball's
+        position (typically 0.2-0.3 seconds). This compensates for processing delays
+        and allows the robot to move toward where the ball will be, not where it was.
+        """
         self.logger = throttled_logger
         self.debug_level = debug_level
         self.current_target = None
@@ -75,10 +198,47 @@ class TargetTrackingModule:
     
     def update_target(self, target_msg, debug_level=None):
         """
-        Process a new target message and update position data.
+        Process new sensor data to update tracking and prediction systems.
         
+        EDUCATIONAL EXPLANATION:
+        -----------------------
+        This method is called whenever new position data arrives from sensors
+        (typically via the fusion node). It's the entry point for all new
+        basketball position information and performs several critical functions:
+        
+        1. DATA VALIDATION
+           - Checks if the message contains valid position data
+           - Verifies that the data structure has expected properties
+           - Prevents invalid data from corrupting tracking
+        
+        2. FUSION RATE CALCULATION
+           - Measures time intervals between incoming messages
+           - Computes the actual rate at which sensor data is arriving
+           - Updates internal parameters to match the detected rate
+           - This adaptive approach handles varying sensor performance
+        
+        3. POSITION EXTRACTION AND CONVERSION
+           - Extracts raw position data (x, y, z) from the message
+           - Converts from sensor coordinates to robot-centric metrics
+             (distance, lateral offset, bearing angle)
+           - These more intuitive metrics are easier to use for control
+        
+        4. FILTERING AND PREDICTION
+           - Passes the new position to the filtering system
+           - Updates velocity and acceleration estimates
+           - Recalculates predicted future positions
+           - Produces filtered, stable position metrics
+        
+        The result is a set of reliable, filtered metrics (distance, lateral, bearing)
+        that can be used for robot control, even if the original sensor data
+        was noisy or inconsistent.
+        
+        Args:
+            target_msg: Message containing target position information
+            debug_level: Optional override for diagnostic output verbosity
+            
         Returns:
-            bool: True if data was updated, False otherwise
+            bool: True if data was successfully processed, False otherwise
         """
         if debug_level is None:
             debug_level = self.debug_level
@@ -342,15 +502,61 @@ class TargetTrackingModule:
     
     def is_target_fresh(self, max_age=None):
         """
-        Check if the target data is fresh enough to use with graduated freshness levels.
+        Evaluate if target data is recent enough to be reliable with graduated freshness levels.
+        
+        EDUCATIONAL EXPLANATION:
+        -----------------------
+        Data freshness is critical for robotics - using outdated position information
+        can lead to incorrect or unsafe movements. This method implements a sophisticated
+        freshness evaluation system using the concept of "graduated freshness."
+        
+        GRADUATED FRESHNESS CONCEPT:
+        --------------------------
+        Rather than a simple binary fresh/not-fresh approach, this system recognizes
+        different levels of freshness:
+        
+        1. FRESH (Level 1)
+           - Data is very recent (within 1.2x expected update interval)
+           - Full confidence in the data
+           - Normal control operations proceed
+        
+        2. STALE (Level 2)
+           - Data is somewhat old (1.2x to 2x expected update interval)
+           - Reduced confidence in the data
+           - Control proceeds with caution (e.g., reduced speed)
+        
+        3. CRITICAL (Level 3)
+           - Data is old but potentially still usable (2x to 3x expected interval)
+           - Very low confidence in the data
+           - May trigger fallback behaviors or reduced functionality
+        
+        4. INVALID (Level 4)
+           - Data is too old to use (beyond 3x expected interval)
+           - No confidence in the data
+           - Typically triggers safety stops or recovery behaviors
+        
+        ADAPTIVE THRESHOLDS:
+        ------------------
+        The brilliance of this approach is that the freshness thresholds automatically
+        adapt to the actual fusion rate. If sensor data typically arrives every 0.5 seconds,
+        the thresholds will be different than if data arrives every 0.1 seconds.
+        
+        This adaptive approach means the system works optimally regardless of:
+        - Hardware differences (faster/slower sensors)
+        - Processing load variations
+        - Communication delays
+        
+        The graduated freshness concept allows for graceful degradation of
+        performance when sensor data becomes delayed, rather than an abrupt
+        failure or unsafe behavior.
         
         Args:
-            max_age: Maximum age in seconds, if None calculated based on fusion rate
+            max_age: Optional fixed maximum age (seconds), overrides adaptive calculation
                   
         Returns:
             tuple: (is_fresh, freshness_level, age)
                 is_fresh: Boolean indicating if data is usable at all
-                freshness_level: String indicating freshness level ('fresh', 'stale', 'critical')
+                freshness_level: String indicating level ('fresh', 'stale', 'critical', 'invalid')
                 age: Current age of the data in seconds
         """
         if self.last_target_time is None:
@@ -398,10 +604,60 @@ class TargetTrackingModule:
 #############################################
 
 class MovementStrategyModule:
-    """Module that handles movement strategy selection and blending by delegating to StrategyManager."""
+    """
+    Strategic movement planning system that transforms errors into coordinated movement plans.
+    
+    EDUCATIONAL EXPLANATION:
+    -----------------------
+    The MovementStrategyModule serves as the robot's "thinking center" for movement
+    decisions. Rather than directly transforming errors into velocities (as simple PID
+    controllers do), this module uses a sophisticated strategy-based approach.
+    
+    STRATEGY-BASED APPROACH:
+    ----------------------
+    Think of this like different driving strategies a human might use:
+    
+    - When far away: Focus on getting closer quickly (DISTANCE_PRIORITY)
+    - When at an angle: Turn to face the ball first (ANGULAR_PRIMARY)
+    - When aligned but offset: Move sideways to align (LATERAL_CORRECTION)
+    - When approaching diagonally: Move forward and sideways together (DIAGONAL_MOVEMENT)
+    
+    Rather than hardcoding these behaviors, the system selects from dozens of
+    predefined strategies based on the current error pattern. Each strategy defines:
+    
+    1. WHICH DIMENSIONS TO USE
+       - Forward/backward movement
+       - Lateral (sideways) movement
+       - Rotational movement
+    
+    2. HOW STRONGLY TO USE EACH DIMENSION
+       - Scaling factors (0.0-1.0) for each dimension
+       - These create different movement "styles"
+    
+    3. STRATEGY BLENDING
+       - Smooth transitions between strategies
+       - Prevents jerky changes in movement
+       - Creates natural, fluid motion
+    
+    This approach creates much more natural and efficient movement than
+    simple reactive control. It's similar to how a human would move - 
+    we don't follow rigid formulas but adapt our movement style to
+    the specific situation.
+    """
     
     def __init__(self, throttled_logger, debug_level=0):
-        """Initialize the movement strategy module."""
+        """
+        Initialize the strategic movement planning system.
+        
+        Args:
+            throttled_logger: Logger with rate limiting to prevent log flooding
+            debug_level: Controls verbosity of diagnostic output (0-3)
+            
+        This module delegates most of its functionality to the StrategyManager
+        from the PIDControllers module, which maintains the strategy database
+        and selection logic. The module adds tracking of strategy changes and
+        transition management.
+        """
         self.logger = throttled_logger
         self.debug_level = debug_level
         # Use centralized StrategyManager from PIDControllers
@@ -453,17 +709,66 @@ class MovementStrategyModule:
 #############################################
 
 class VelocityControlModule:
-    """Module to handle velocity generation, limiting, and coordination for smooth robot movement."""
+    """
+    Advanced velocity control system that ensures safe, smooth robot movement.
+    
+    EDUCATIONAL EXPLANATION:
+    -----------------------
+    The VelocityControlModule is the robot's "motor control center," converting
+    high-level movement commands into safe, smooth velocity commands for the motors.
+    This module addresses several critical challenges in robotics motion control:
+    
+    KEY CAPABILITIES:
+    ---------------
+    
+    1. SAFETY CONSTRAINTS
+       - Enforces maximum velocity limits in each dimension
+       - Prevents the robot from moving too quickly
+       - Supports different limits for forward, lateral, and rotational movement
+       - These limits protect the robot and environment from damage
+    
+    2. SMOOTH ACCELERATION CONTROL
+       - Limits how quickly velocity can change (acceleration limits)
+       - Prevents jarring starts, stops, and direction changes
+       - Creates natural, smooth motion profiles
+       - Reduces mechanical stress and improves tracking stability
+    
+    3. PROXIMITY-BASED VELOCITY SCALING
+       - Automatically slows down as the robot approaches the target
+       - Uses distance-based scaling factors for gentle final approach
+       - Prevents overshooting and oscillation around the target
+       - Mimics how humans naturally slow down when approaching a destination
+    
+    4. MULTI-DIMENSIONAL COORDINATION
+       - Handles forward, lateral, and rotational movements simultaneously
+       - Ensures coordinated motion across all dimensions
+       - Maintains proper velocity ratios for the selected strategy
+       - Creates natural, efficient movement patterns
+    
+    The result is a robot that moves smoothly and naturally, with acceleration
+    and deceleration profiles that appear intentional and controlled, rather
+    than mechanical and jerky.
+    """
     
     def __init__(self, throttled_logger, history_size=10, max_velocity=None, acceleration_limits=None):
         """
-        Initialize velocity processor with configuration parameters.
+        Initialize the advanced velocity control system with safety parameters.
         
         Args:
-            throttled_logger: Logger instance that supports throttled logging
-            history_size: Size of velocity history buffer for trend analysis
-            max_velocity: Optional custom velocity limits [linear_x, linear_y, angular_z] in m/s and rad/s
-            acceleration_limits: Optional custom acceleration limits [linear_x, linear_y, angular_z] in m/s²
+            throttled_logger: Logger with rate limiting to prevent log flooding
+            history_size: Number of previous velocities to record for trending
+            max_velocity: Optional custom velocity limits [forward, lateral, rotational]
+                          in meters/second and radians/second
+            acceleration_limits: Optional custom acceleration limits [forward, lateral, rotational]
+                               in meters/second² and radians/second²
+            
+        The max_velocity limits prevent the robot from moving too quickly, which
+        could be unsafe or cause control issues. The acceleration_limits control
+        how quickly velocities can change, ensuring smooth motion.
+        
+        If not provided, these limits use conservative defaults that work well
+        for most small-to-medium sized robots, balancing responsiveness with
+        safe, smooth operation.
         """
         self.logger = throttled_logger
         self.history_size = history_size  # Number of velocity samples to keep for analysis
@@ -620,18 +925,63 @@ class VelocityControlModule:
     
     def process_velocities(self, linear_x, linear_y, angular_z, filtered_distance, desired_distance, freshness_level='fresh'):
         """
-        Process and limit velocities for smooth, natural movement.
+        Process raw velocity commands into safe, smooth movement instructions.
+        
+        EDUCATIONAL EXPLANATION:
+        -----------------------
+        This method is the core of the robot's motion control system, transforming
+        raw velocity commands from the PID controllers into smooth, safe, natural-looking
+        movement. Think of it as converting "what the robot wants to do" into "how the
+        robot should actually move" to achieve its goal effectively.
+        
+        THE VELOCITY PIPELINE:
+        -------------------
+        Raw velocity commands pass through a sophisticated multi-stage processing pipeline:
+        
+        1. DATA FRESHNESS HANDLING
+           - Reduces velocities when working with stale sensor data
+           - More conservative movement when uncertainty is higher
+           - Prevents unsafe movements based on outdated information
+        
+        2. DISTANCE-AWARE APPROACH
+           - Automatically slows forward movement as robot approaches target
+           - Creates a gentle, controlled final approach
+           - Different scaling for different distances, like a car slowing near destination
+        
+        3. PREDICTIVE BRAKING
+           - Looks ahead to anticipate stopping needs
+           - Starts slowing down before reaching the target
+           - Creates smooth deceleration profiles
+        
+        4. DIRECTION CHANGE DETECTION
+           - Identifies when movement direction changes significantly
+           - Applies special handling to prevent jerky transitions
+           - Makes turns and reverses appear smooth and intentional
+        
+        5. ACCELERATION LIMITING
+           - Restricts how quickly velocities can change
+           - Prevents jarring starts, stops, and transitions
+           - Maintains momentum for natural-looking motion
+        
+        6. ADDITIONAL REFINEMENTS
+           - Progressive velocity ramping for smooth transitions
+           - Minimum velocity thresholds to prevent stuttering
+           - Combined movement limitation to prevent instability
+           - Velocity distribution balancing for optimal performance
+        
+        This sophisticated pipeline is what transforms jerky, robotic motion into
+        smooth, natural movement that appears intelligent and deliberate.
         
         Args:
-            linear_x: Calculated forward velocity
-            linear_y: Calculated lateral velocity
-            angular_z: Calculated angular velocity
-            filtered_distance: Current filtered distance to target
-            desired_distance: Desired distance to target
-            freshness_level: Data freshness level ('fresh', 'stale', 'critical')
+            linear_x: Forward/backward velocity command (m/s, positive = forward)
+            linear_y: Lateral velocity command (m/s, positive = left)
+            angular_z: Rotational velocity command (rad/s, positive = counterclockwise)
+            filtered_distance: Current filtered distance to target (meters)
+            desired_distance: Target distance to maintain (meters)
+            freshness_level: Data quality indicator ('fresh', 'stale', 'critical')
             
         Returns:
-            tuple: (limited_linear_x, limited_linear_y, limited_angular_z)
+            tuple: Safe, limited velocity commands (linear_x, linear_y, angular_z)
         """
         try:
             # Validate inputs

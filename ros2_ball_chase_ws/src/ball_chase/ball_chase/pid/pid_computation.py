@@ -1,14 +1,88 @@
 """
-PID Controller Module
+Basketball Tracking Robot - Advanced PID Control System
+======================================================
 
-This module provides an improved PID controller implementation with enhanced features:
-- Adaptive gains based on error trends
-- Improved zero-crossing handling
-- Coordinated movement strategies
-- Anti-windup mechanisms
+EDUCATIONAL DOCUMENTATION
+------------------------
 
-This controller is specifically designed for robotic applications requiring
-precise motion control with smooth transitions.
+This module implements a sophisticated PID control system specifically designed
+for controlling a basketball-tracking robot with mecanum wheels. It goes far beyond
+a basic PID controller, incorporating numerous advanced control techniques that
+make the robot's movement smooth, efficient, and natural-looking.
+
+Key Concepts for Beginners:
+--------------------------
+
+1. BEYOND BASIC PID CONTROL
+
+   While standard PID control provides a foundation, this system adds several
+   layers of sophistication:
+   
+   - ADAPTIVE GAIN ADJUSTMENT: PID gains change automatically based on the robot's situation
+   - COORDINATED MULTI-DIMENSIONAL CONTROL: Handles forward, lateral, and angular movement together
+   - MOVEMENT STRATEGIES: Different movement patterns for different situations
+   - SMOOTH TRANSITIONS: Blends between strategies to prevent jerky movement
+   - ANTI-WINDUP MECHANISMS: Prevents integral term from causing oscillations
+   
+   These enhancements transform basic PID control into a sophisticated 
+   robotics control system.
+
+2. MOVEMENT STRATEGIES AND THE STRATEGY PATTERN
+
+   The robot uses different movement "strategies" based on the specific situation:
+   
+   - Each strategy defines how to use forward, lateral, and angular movement
+   - Strategies focus movement in different directions based on the current error pattern
+   - The robot smoothly transitions between strategies using blending
+   
+   This approach comes from the "Strategy Pattern" in software design - switching
+   algorithms at runtime based on conditions.
+
+3. ERROR CATEGORIZATION WITH HYSTERESIS
+
+   The system translates numerical errors into meaningful categories:
+   
+   - "none", "very_small", "small", "medium", "large", etc.
+   - These categories are more intuitive for decision-making
+   - Hysteresis ("stickiness") prevents rapid oscillation between categories
+   
+   This categorical approach allows robust decision-making without 
+   being affected by minor sensor noise.
+
+4. ZERO-CROSSING HANDLING
+
+   Special handling occurs when errors change sign (cross zero):
+   
+   - The robot detects when it passes its target and adjusts control accordingly
+   - Integral terms are reduced to prevent overshooting
+   - Gains are adjusted to provide optimal damping
+   
+   This prevents the common problem of oscillating around the target point.
+
+5. COORDINATED MOVEMENT
+
+   The robot coordinates its movements across different dimensions:
+   
+   - Lateral and angular movements are coordinated together
+   - When turning, forward speed is appropriately reduced
+   - Mutually beneficial movements are enhanced, conflicts are reduced
+   
+   This makes the robot move in a more natural, human-like manner.
+
+Component Architecture:
+---------------------
+
+This module contains the following key components:
+
+1. ImprovedPID: Enhanced PID controller with adaptive gains and anti-windup
+2. StrategyManager: Selects movement strategies based on error patterns
+3. MovementStrategy: Defines a specific movement pattern
+4. StrategyBlender: Smoothly transitions between different strategies
+5. CoordinatedController: Coordinates related movements to create natural motion
+
+Together, these components create a control system that makes the robot move
+efficiently and naturally, while being robust to real-world conditions like
+sensor noise and mechanical limitations.
 """
 
 import time
@@ -38,6 +112,62 @@ class PIDControllers:
     class StrategyManager:
         """
         Manages movement strategies for robotic control systems.
+        
+        MOVEMENT STRATEGY SELECTION: HOW THE ROBOT DECIDES HOW TO MOVE
+        -----------------------------------------------------------
+        
+        Imagine you're chasing a ball. How you move depends on where the ball is:
+        - If it's far ahead, you run straight toward it
+        - If it's to your side, you move diagonally
+        - If it's behind you, you turn around first, then move
+        
+        The StrategyManager does this decision-making for the robot. It:
+        1. Takes the current errors (distance, lateral, angular)
+        2. Categorizes each error (none, very_small, small, medium, large, etc.)
+        3. Looks up the appropriate strategy in a table
+        4. Returns movement priorities and scaling factors
+        
+        This creates natural, human-like movement patterns that efficiently
+        track the target while avoiding jerky or mechanical-looking motion.
+        
+        HOW THE STRATEGY TABLE WORKS:
+        ---------------------------
+        
+        The strategy table is like a big decision matrix that maps error patterns
+        to movement behaviors. For example:
+        
+        Error Pattern                 →  Strategy Name        →  Movement Behavior
+        ----------------------------------------------------------------
+        (large distance,  *,  *)      →  DISTANCE_PRIORITY    →  Focus on moving forward
+        (*,  large lateral,  *)       →  LATERAL_PRIORITY     →  Focus on sideways alignment
+        (*,  *,  large angular)       →  ANGULAR_PRIMARY      →  Turn to face target first
+        (medium, medium, small)       →  DIAGONAL_MOVEMENT    →  Move forward+sideways together
+        (none, medium, none)          →  LATERAL_CORRECTION   →  Pure sideways movement
+        
+        The * is a wildcard that matches any error category. This allows us to
+        prioritize the most important errors.
+        
+        Each strategy defines:
+        - Which dimensions to use (forward, lateral, angular)
+        - Scaling factors for each dimension (0.0-1.0)
+        - A human-readable description of the strategy
+        
+        For example, the ANGULAR_PRIMARY strategy might use:
+        - Use forward motion? True (but scaled down)
+        - Use lateral motion? True (but scaled down)
+        - Use angular motion? True (at high priority)
+        - Scaling: [0.4, 0.3, 0.9] - prioritizing rotation
+        
+        This means "turn to face the target, while moving slowly toward it."
+        
+        BENEFITS OF THIS APPROACH:
+        -----------------------
+        
+        1. NATURAL MOVEMENT: Creates smooth, human-like movement patterns
+        2. ADAPTABILITY: Easily adjusted for different robots or tasks
+        3. EXPLAINABILITY: Clear reasoning behind movement decisions
+        4. EFFICIENCY: Optimized paths to target
+        5. CONFIGURABILITY: Easy to tune without changing code
         
         This class centralizes the strategy table, error categorization, and
         strategy matching logic to provide a consistent interface for determining
@@ -351,14 +481,73 @@ class PIDControllers:
             Categorize an error value with hysteresis to prevent oscillation.
             Modified to support lenient categorization for angular errors.
             
+            TRANSLATING NUMERICAL ERRORS INTO MEANINGFUL CATEGORIES
+            -----------------------------------------------------
+            
+            This method takes raw error values (like "0.5 meters too far" or "15 degrees off-angle")
+            and translates them into categorical values that are more intuitive and useful for
+            decision-making:
+            
+              Error Categories:
+              - "none": Error is within acceptable limits (target achieved)
+              - "very_small": Just barely outside acceptable range
+              - "small": Minor correction needed
+              - "small_medium": Moderate correction needed
+              - "medium": Significant correction needed
+              - "medium_large": Large correction needed
+              - "large": Very large correction needed
+              - "very_large": Extreme correction needed
+            
+            EXAMPLE: For a distance error (in meters)
+              - 0.05m error → "none" (close enough)
+              - 0.15m error → "very_small" (minor adjustment)
+              - 0.25m error → "small" (small movement needed)
+              - 0.5m error → "medium" (significant movement needed)
+              - 1.2m error → "large" (far away, fast approach needed)
+            
+            Each error type (distance, lateral, angular) has different thresholds that make
+            sense for that dimension.
+            
+            WHAT IS HYSTERESIS AND WHY WE NEED IT
+            -----------------------------------
+            
+            Hysteresis is a "stickiness" in state changes that prevents rapid oscillation
+            between categories. For example:
+            
+            WITHOUT hysteresis:
+              - Error crosses from 0.14m to 0.16m
+              - Category immediately changes from "none" to "very_small"
+              - This could happen rapidly back and forth at the boundary
+              - Causes unstable, jittery movement
+            
+            WITH hysteresis:
+              - Error must cross a larger gap to change categories
+              - Error must drop to 0.12m to go from "very_small" back to "none"
+              - Provides 20% "sticky buffer" at category boundaries
+              - Results in smooth, stable movement
+            
+            This is like having a thermostat that turns on at 68°F but doesn't
+            turn off until 72°F, preventing rapid cycling.
+            
+            HOW THIS IMPACTS ROBOT BEHAVIOR
+            -----------------------------
+            
+            These categorizations directly drive strategy selection. When errors change
+            categories, the robot may switch movement strategies, like going from
+            "PURE_APPROACH" to "APPROACH_WITH_ALIGNMENT" as the angular error
+            increases from "none" to "medium".
+            
+            The hysteresis prevents the robot from rapidly switching between strategies
+            when near category boundaries, creating smoother, more natural movement.
+            
             Args:
-                error: The error value to categorize
+                error: The error value to categorize (in meters or radians)
                 error_type: The type of error (distance, lateral, angular)
-                prev_category: Previous category for hysteresis
+                prev_category: Previous category for hysteresis (stickiness)
                 lenient_factor: Factor to make categories more lenient (higher means more lenient)
                 
             Returns:
-                String: The error category
+                String: The error category (none, very_small, small, medium, large, etc.)
             """
             abs_error = abs(error)
             
@@ -712,17 +901,71 @@ class PIDControllers:
             self.use_lateral_control = enabled
 
     class CoordinatedController:
-        """Controller that coordinates lateral and angular movements."""
+        """
+        Synchronized controller that coordinates lateral and angular movements.
+        
+        EDUCATIONAL EXPLANATION:
+        -----------------------
+        Imagine driving a car - when you make a turn, you naturally slow down.
+        This controller brings that same intuitive coordination to the robot.
+        
+        THE COORDINATION PROBLEM:
+        -----------------------
+        In a multi-dimensional robot control system, separate PID controllers
+        operate independently for each dimension:
+        
+        - Forward controller: Controls forward/backward movement
+        - Lateral controller: Controls left/right movement (unique to mecanum wheels)
+        - Angular controller: Controls rotation
+        
+        When operating independently, these controllers can create inefficient
+        or unnatural movements. For example:
+        
+        - Trying to move sideways at full speed while also turning sharply
+        - Moving forward at full speed while trying to correct a lateral error
+        - Performing big lateral movements when a small rotation would be better
+        
+        THE SOLUTION: MOVEMENT COORDINATION
+        ---------------------------------
+        This class connects the controllers and applies human-like coordination:
+        
+        1. ANGULAR PRIORITY
+           - When large angular errors exist, rotation takes priority
+           - Forward and lateral movements are reduced until facing the target
+           - This mimics how humans first turn toward a target before approaching
+        
+        2. COUPLING FACTOR
+           - Lateral speed is reduced based on the angular error
+           - The reduction is proportional to the angular error's magnitude
+           - This creates smooth, natural combined movements
+        
+        3. SIGN RELATIONSHIP
+           - When errors have the same sign, they compete with each other
+           - When errors have opposite signs, they help each other
+           - Adjusts the movement accordingly to optimize the combined effect
+            
+        4. SMOOTH TRANSITIONS
+           - Prevents abrupt changes in velocity
+           - Creates fluid, continuous movement
+           - Makes the robot's motion appear natural and purposeful
+        
+        This coordination makes the robot move in a way that appears intelligent
+        and human-like, rather than mechanical and robotic.
+        """
         
         def __init__(self, linear_pid, angular_pid, throttled_logger, config=None):
             """
-            Initialize the coordinated controller.
+            Initialize a multi-dimensional movement coordinator.
             
             Args:
-                linear_pid: PID controller for lateral movement
-                angular_pid: PID controller for angular movement
-                logger: Logger instance for diagnostic output
-                config: Configuration dictionary
+                linear_pid: PID controller for lateral (side-to-side) movement
+                angular_pid: PID controller for rotational movement
+                throttled_logger: Logger instance with throttling support
+                config: Optional configuration dictionary for customization
+                
+            The coordinator sets up coupling factors, thresholds, and scaling values
+            that determine how lateral and angular movements interact. These values
+            are carefully tuned to create natural, efficient movement patterns.
             """
             self.linear_pid = linear_pid
             self.angular_pid = angular_pid
@@ -895,11 +1138,71 @@ class PIDControllers:
                 self.compute_count = 0
 
     class MovementStrategy:
-        """Represents a robot movement strategy with blending capabilities."""
+        """
+        Defines a specific pattern of robot movement across multiple dimensions.
+        
+        EDUCATIONAL EXPLANATION:
+        -----------------------
+        A MovementStrategy encapsulates a specific "way of moving" for the robot.
+        Think of it like different driving styles for different situations:
+        
+        - Highway driving: High forward speed, minimal steering
+        - Parallel parking: Low speed, high lateral and angular movement
+        - Three-point turn: Coordinated forward/reverse with steering
+        
+        Each strategy defines:
+        
+        1. WHICH DIMENSIONS TO USE
+           - Should the robot move forward/backward?
+           - Should the robot move laterally (sideways)?
+           - Should the robot rotate?
+           
+        2. HOW STRONGLY TO USE EACH DIMENSION
+           - Scale factors (0.0-1.0) for each dimension
+           - Higher values mean stronger movement in that dimension
+           - These proportions create different movement patterns
+        
+        3. REASONING
+           - Human-readable explanation of why this strategy was chosen
+           - Useful for debugging and understanding robot behavior
+        
+        EXAMPLE STRATEGIES:
+        -----------------
+        
+        - "ANGULAR_PRIMARY": Strong rotation, minimal forward/lateral
+          Used when the robot needs to turn to face the target
+          
+        - "DIAGONAL_MOVEMENT": Equal forward and lateral, minimal angular
+          Used when approaching the target from an angle
+          
+        - "FORWARD_APPROACH": Strong forward, no lateral or angular
+          Used when aligned with target and just needs to approach
+          
+        - "LATERAL_CORRECTION": No forward or angular, only lateral
+          Used when at correct distance but needs side-to-side alignment
+        
+        The system has dozens of strategies for different situations, and
+        automatically selects the appropriate one based on current errors.
+        """
         
         def __init__(self, name, use_forward, use_lateral, use_angular, 
                     forward_scale, lateral_scale, angular_scale, reason):
-            """Initialize a movement strategy."""
+            """
+            Initialize a movement strategy with specific characteristics.
+            
+            Args:
+                name: Strategy identifier (e.g., "ANGULAR_PRIMARY")
+                use_forward: Whether to use forward/backward movement
+                use_lateral: Whether to use lateral (side-to-side) movement
+                use_angular: Whether to use rotational movement
+                forward_scale: Scaling factor for forward movement (0.0-1.0)
+                lateral_scale: Scaling factor for lateral movement (0.0-1.0)
+                angular_scale: Scaling factor for angular movement (0.0-1.0)
+                reason: Human-readable explanation for this strategy
+                
+            Each strategy creates a specific movement pattern by enabling or
+            disabling dimensions and setting their relative strengths.
+            """
             self.strategy_name = name
             self.use_forward = use_forward
             self.use_lateral = use_lateral
@@ -910,10 +1213,69 @@ class PIDControllers:
             self.reason = reason
     
     class StrategyBlender:
-        """Handles smooth transitions between movement strategies."""
+        """
+        Creates smooth transitions between movement strategies for natural motion.
+        
+        EDUCATIONAL EXPLANATION:
+        -----------------------
+        Without blending, switching between movement strategies would cause
+        abrupt, jerky changes in the robot's motion. The StrategyBlender 
+        solves this by gradually transitioning between strategies over time.
+        
+        THE BLENDING PROCESS:
+        -------------------
+        When a new strategy is selected, the blender:
+        
+        1. Stores both the current and target strategies
+        2. Records the time when the transition begins
+        3. Over a short duration (typically 0.1-0.5 seconds):
+           - Gradually decreases the influence of the old strategy
+           - Gradually increases the influence of the new strategy
+           - Uses smoothstep function for acceleration/deceleration
+        4. Creates a temporary "blended" strategy for each time step
+        
+        ENHANCED FEATURES:
+        ---------------
+        This implementation includes additional refinements:
+        
+        - DIRECTION CHANGE DETECTION
+          When movements change direction (e.g., left to right), 
+          transitions occur faster to maintain responsiveness
+          
+        - SMOOTHSTEP FUNCTION
+          Uses a cubic smoothstep function (3x² - 2x³) for natural
+          acceleration and deceleration during transitions
+          
+        - BOOLEAN LOGIC HANDLING
+          Special handling for boolean flags (use_forward, etc.)
+          to prevent flickering during transitions
+        
+        VISUAL ANALOGY:
+        -------------
+        Think of this like cross-fading between two songs:
+        - Current strategy volume decreases
+        - Target strategy volume increases
+        - Both play simultaneously during the transition
+        - Listeners experience a smooth audio transition
+        
+        This creates fluid, natural-looking robot movement that
+        transitions seamlessly between different movement patterns.
+        """
         
         def __init__(self, logger, blend_duration=0.1):  # Reduced from 0.5 to 0.2 seconds
-            """Initialize the strategy blender with faster transitions."""
+            """
+            Initialize a strategy blending system for smooth transitions.
+            
+            Args:
+                logger: Logger instance for diagnostic output
+                blend_duration: Time in seconds for transition (default: 0.1s)
+                
+            The blend_duration determines how long transitions take. Shorter
+            durations are more responsive but may appear more mechanical,
+            while longer durations create smoother transitions but might
+            feel less responsive. This value has been optimized for the
+            basketball tracking application.
+            """
             self.current_strategy = None
             self.target_strategy = None
             self.blend_start_time = 0.0
@@ -1113,11 +1475,78 @@ class PIDControllers:
         return temp_manager.categorize_error(error, error_type, prev_category, lenient_factor)
 
     class ImprovedPID:
-        """PID controller with enhanced integral handling and adaptive gains."""
+        """
+        Advanced PID controller with adaptive gains and enhanced stability features.
+        
+        EDUCATIONAL EXPLANATION:
+        -----------------------
+        A PID controller calculates output based on three terms:
+        
+        1. PROPORTIONAL (P) - Responds directly to current error
+           - Acts like a spring pulling toward the target
+           - Larger errors create stronger responses
+           - Provides immediate responsiveness
+        
+        2. INTEGRAL (I) - Accumulates error over time
+           - Eliminates persistent errors (steady-state errors)
+           - Helps overcome friction and other constant forces
+           - Acts like a gradually increasing push
+        
+        3. DERIVATIVE (D) - Responds to rate of change of error
+           - Acts like a damper or shock absorber
+           - Prevents overshooting by counteracting rapid changes
+           - Adds stability to the system
+        
+        STANDARD PID VS. IMPROVED PID:
+        ----------------------------
+        A standard PID controller always uses fixed gains (kp, ki, kd).
+        This advanced implementation adds:
+        
+        - ADAPTIVE GAINS: Gains change based on the situation
+        - ANTI-WINDUP: Prevents integral term from growing too large
+        - ZERO-CROSSING HANDLING: Special care when passing the target
+        - GAIN SCHEDULING: Different gains for different controller types
+        - TREND-BASED ADAPTATION: Adjusts control based on whether error is improving
+        
+        WHY THESE IMPROVEMENTS MATTER:
+        ----------------------------
+        These enhancements solve several common PID problems:
+        
+        1. OSCILLATION: Standard PIDs often oscillate around the target
+           Our zero-crossing detection prevents this
+        
+        2. OVERSHOOTING: Standard PIDs often overshoot the target
+           Our adaptive gains reduce this
+        
+        3. SLOW RESPONSE: Fixed gains must compromise between stability and speed
+           Our adaptive approach can be both stable AND fast
+        
+        4. INTEGRATOR WINDUP: When the system can't reach the target, the 
+           integral term grows without limit
+           Our anti-windup mechanisms prevent this
+        
+        The end result is a controller that creates smooth, natural movement
+        while adapting to different conditions.
+        """
         # NOTE: Initialization errors should be raised explicitly and not masked, for consistency with the node's error handling policy.
         
         def __init__(self, base_kp, base_ki, base_kd, output_min, output_max, name="PID", logger=None):
-            """Initialize the improved PID controller."""
+            """
+            Initialize an advanced PID controller with adaptive capabilities.
+            
+            Args:
+                base_kp: Base proportional gain coefficient
+                base_ki: Base integral gain coefficient
+                base_kd: Base derivative gain coefficient
+                output_min: Minimum output value
+                output_max: Maximum output value
+                name: Controller name (Linear X, Linear Y, Angular)
+                logger: Logger instance for diagnostic output
+                
+            The controller uses the base gain values as starting points, but
+            will adaptively adjust these values during operation based on
+            error trends and system behavior.
+            """
             # Base gains
             self.base_kp = base_kp
             self.base_ki = base_ki
@@ -1189,16 +1618,56 @@ class PIDControllers:
 
         def compute(self, error, current_time=None, force_zero=False, error_trend=None):
             """
-            Compute the control output based on the error with improved zero-crossing handling.
+            Compute optimized control output with adaptive gains and zero-crossing logic.
+            
+            EDUCATIONAL EXPLANATION:
+            -----------------------
+            This method implements the core PID computation with many advanced features.
+            Understanding its operation requires following several key processes:
+            
+            1. ERROR TREND ANALYSIS
+               - Is the error getting better or worse?
+               - Adjust gains accordingly (more aggressive when worsening)
+               - Use gentle control when error is already improving
+            
+            2. ZERO-CROSSING DETECTION
+               - Detect when the error changes sign (crossed the target)
+               - Apply special handling to prevent oscillation
+               - Reduce integral term to prevent overshooting 
+               
+            3. ADAPTIVE GAIN ADJUSTMENT
+               - For Linear X (forward): Prioritize smooth approach
+               - For Linear Y (lateral): More aggressive damping
+               - For Angular (rotation): Reduced integral gain
+               - All controllers: Adjust gains based on error magnitude
+               
+            4. INTELLIGENT INTEGRAL HANDLING
+               - Apply deadband (ignore tiny errors)
+               - Use position-based decay for final approach
+               - Reset integral when crossing zero
+               - Anti-windup when output saturates
+               
+            5. ENHANCED DERIVATIVE HANDLING
+               - Amplify derivative during oscillations
+               - Apply controller-specific adjustments
+               - Protect against division by zero
+            
+            6. OUTPUT SMOOTHING
+               - Detect and smooth out abrupt changes
+               - Apply different smoothing based on controller type
+               - Prevent jerky movements
+               
+            All these mechanisms work together to create a controller that produces
+            smooth, natural movement with minimal oscillation.
             
             Args:
-                error: Current error value
+                error: Current error value (target - current)
                 current_time: Current time (defaults to now)
-                force_zero: Whether to force zero output
-                error_trend: Trend of error (from ErrorTracker)
+                force_zero: Whether to force zero output (overrides PID)
+                error_trend: Trend of error (-1 to 1, from ErrorTracker)
                 
             Returns:
-                float: Calculated control output
+                float: Calculated control output, limited to output_min/max range
             """
             try:
                 # Validate error tracker is available if no error_trend is provided

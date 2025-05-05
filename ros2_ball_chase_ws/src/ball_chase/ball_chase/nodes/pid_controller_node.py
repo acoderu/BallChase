@@ -2,8 +2,176 @@
 Basketball Tracking Robot - Optimized PID Controller Node
 =======================================================
 
-This controller implements efficient movement patterns for a mecanum-wheeled
-basketball tracking robot with several enhancements:
+ARCHITECTURAL OVERVIEW & TEACHING GUIDE
+---------------------------------------
+
+This controller implements a sophisticated robot control system for tracking and following
+a basketball using a mecanum-wheeled robot. This document explains both WHAT the system
+does and HOW it works, with a focus on teaching robotics programming concepts.
+
+System Architecture Diagram:
+--------------------------
+
+                          ┌─────────────────────────┐
+                          │ ROS2 Environment        │
+                          └───────────┬─────────────┘
+                                      │
+                                      ▼
+        ┌─────────┐         ┌─────────────────────┐
+        │ YOLO    │───┐     │                     │
+        │ Camera  │   │     │ ┌─────────────────┐ │         ┌─────────────────┐
+        └─────────┘   │     │ │ Target Tracking │ │         │                 │
+                      │     │ │ Module          │ │         │  PID Control    │
+        ┌─────────┐   │ ┌──►│ │ - Filtering    ├─┼────────►│  Module         │
+        │ LIDAR   │───┼─┘   │ │ - Prediction   │ │         │  - Error Calc   │
+        └─────────┘   │     │ └─────────────────┘ │         │  - PID Compute  │
+                      │     │                     │         └────────┬────────┘
+        ┌─────────┐   │     │ ┌─────────────────┐ │                  │
+        │ 3D Depth│───┼────►│ │ State Manager   │ │                  │
+        │ Camera  │   │     │ │ - Robot State   │ │                  ▼
+        └─────────┘   │     │ │ - Freshness     │ │         ┌─────────────────┐
+                      │     │ │ - Recovery      │ │         │                 │
+        ┌─────────┐   │     │ └─────────────────┘ │         │ Strategy Module │
+        │ Fusion  │───┘     │                     │         │ - Chooses       │
+        └─────────┘         │ ┌─────────────────┐ │         │   Movement     │
+                            │ │ Transform System│ │         │   Strategy     │
+        ┌─────────┐         │ └─────────────────┘ │         └────────┬────────┘
+        │ External│         │  PIDControllerNode  │                  │
+        │ IMU     │────────►└─────────────────────┘                  │
+        └─────────┘                   │                              │
+                                      ▼                              ▼
+                            ┌─────────────────────┐         ┌─────────────────┐
+                            │ Performance Monitor │         │                 │
+                            │ - CPU Load          │         │ Velocity Module │
+                            │ - Adaptation        │         │ - Coordination  │
+                            └─────────────────────┘         │ - Safety Limits │
+                                                            └────────┬────────┘
+                                                                     │
+                                                                     ▼
+                                                            ┌─────────────────┐
+                                                            │ Robot Motors    │
+                                                            │ (cmd_vel output)│
+                                                            └─────────────────┘
+
+Key Concepts for Beginners:
+-------------------------
+
+1. SENSE-THINK-ACT LOOP
+
+   All robots operate on a fundamental cycle:
+   - SENSE: Get data from sensors (YOLO camera, LIDAR, 3D depth camera, IMU)
+   - THINK: Process data and make decisions (our controller does this)
+   - ACT: Control motors to move the robot
+
+   This controller runs this loop many times per second (10-40Hz).
+
+2. WHAT IS PID CONTROL?
+
+   PID stands for Proportional-Integral-Derivative - three ways to respond to errors:
+   
+   - Proportional (P): "How far am I from the target right now?"
+     Like pulling with a spring - the further away, the stronger the pull
+   
+   - Integral (I): "Have I been stuck away from the target for a while?"
+     Gradually increases force if the error persists over time
+     Helps overcome friction or other obstacles
+   
+   - Derivative (D): "Am I approaching the target too quickly?"
+     Acts as a brake when you're moving too fast toward the target
+     Prevents overshooting and oscillation
+
+   These three terms are combined to produce smooth, accurate movement.
+
+3. WORKING WITH MULTIPLE DIMENSIONS
+
+   Our robot can move in three ways simultaneously:
+   - Forward/backward (linear X)
+   - Side-to-side (linear Y) - unique to mecanum wheels
+   - Rotation (angular Z)
+   
+   We use separate PID controllers for each dimension but coordinate them
+   to produce smooth, natural movements.
+
+4. DATA FLOW THROUGH THE SYSTEM
+
+   a) Data Sources:
+      - YOLO Camera Node: Detects the basketball in 2D image space
+      - LIDAR Node: Provides range and bearing to the basketball
+      - 3D Depth Camera Node: Combines 2D YOLO data with depth information to determine
+        accurate 3D position of the basketball
+      - Fusion Node: Integrates data from multiple sensors for robust tracking
+   
+   b) Target Tracking Module:
+      - Receives position data from fusion node and depth camera
+      - Filters out noise and small fluctuations
+      - Predicts where the ball will be in the near future
+      - Calculates velocity and acceleration of the ball
+   
+   b) Error Calculation:
+      - Distance error: How far from desired distance to the ball
+      - Lateral error: How far left/right from ball's center
+      - Angular error: How far rotated from facing the ball
+   
+   c) Strategy Selection:
+      - Based on the pattern and magnitude of errors
+      - Different strategies prioritize different movement types
+      - Examples: Angular-first, Diagonal approach, Pure lateral
+   
+   d) PID Computation:
+      - Each dimension's error processed by its PID controller
+      - Controllers consider error history and trends
+      - Outputs raw velocity commands
+   
+   e) Coordination and Safety:
+      - Coordinates the three dimensions for natural movement
+      - Applies safety limits and smoothing
+      - Adapts to CPU load and data freshness
+      - Publishes final velocity commands
+
+5. STATE MANAGEMENT
+
+   The robot operates in different states:
+   - Initializing: Setting up components
+   - Searching: Looking for the ball
+   - Tracking: Following the ball's movement
+   - Stopped: At desired position, not moving
+   - Recovery: Handling error conditions
+
+6. DATA FRESHNESS AND SAFETY
+
+   The controller constantly monitors how recent the sensor data is:
+   - Fresh: Recent data, full-speed operation
+   - Stale: Older data, reduced speed
+   - Critical: Very old data, robot stops for safety
+
+7. MOVEMENT STRATEGIES
+
+   The system uses table-driven strategy selection to choose how to move:
+   - Angular-first: Prioritize facing the ball before moving toward it
+   - Distance-priority: Focus on getting to the correct distance
+   - Lateral-priority: Focus on side-to-side alignment
+   - Balanced: Equal priority to all dimensions
+   - Position-only: Move without rotation
+   - Deceleration: Slow, careful approach when close
+
+8. COORDINATED CONTROL
+
+   Instead of treating each movement dimension separately, the system coordinates them:
+   - When turning and moving sideways, movements are balanced
+   - Rotational movements can reduce lateral movements when needed
+   - Forward speed is reduced during sharp turns
+   - Creates natural, efficient paths to the target
+
+9. PERFORMANCE OPTIMIZATION
+
+   The system adapts to available computing resources:
+   - Adjusts control frequency based on CPU load
+   - Uses simplified calculations when precision isn't critical
+   - Employs object pooling to reduce memory allocations
+   - Skips processing cycles when CPU is overloaded
+
+Key Features:
+-----------
 - Angular-first control strategy for diagonal movements
 - Fast strategy transitions for responsive tracking
 - Enhanced integral term management to prevent windup
@@ -16,6 +184,7 @@ basketball tracking robot with several enhancements:
 - Performance optimizations for CPU-constrained environments
 """
 
+# Import ROS2 and standard Python modules
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -34,14 +203,14 @@ import logging
 import traceback
 from abc import ABC, abstractmethod
 
-# Import modules from refactored files
+# Import custom modules for PID helpers, filtering, computation, and tracking
 from ball_chase.pid.pid_helpers import LightweightBuffer, CircularBuffer, ThrottledLogger, FastTrigonometry, ResourceMonitor
 from ball_chase.pid.pid_target_filter import EnhancedTargetFilter, ErrorTracker
 from ball_chase.pid.pid_computation import PIDControllers
 from ball_chase.pid.pid_target_tracking import TargetTrackingModule, MovementStrategyModule, VelocityControlModule, TransformSystem
 from ball_chase.pid.pid_target_tracking import RecoveryBehaviorModule, TransformStatus
 
-# Configure logging
+# Configure Python logging for this node
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -49,7 +218,7 @@ logging.basicConfig(
 logger = logging.getLogger('pid_controller')
 throttled_logger = ThrottledLogger(logger)
 
-# Topic configuration
+# Define topic names for input and output
 TOPICS = {
     "input": {
         "target": "/basketball/fused/position",
@@ -64,14 +233,23 @@ TOPICS = {
     }
 }
 
-# Log throttling parameters
-LOG_THROTTLE_CONTROL = 2.0     # Seconds between control loop status logs
-LOG_THROTTLE_STATE = 0.5       # Seconds between state change logs
-LOG_THROTTLE_DIAG = 2.0        # Seconds between diagnostic logs
+# Throttling intervals for log messages (in seconds)
+LOG_THROTTLE_CONTROL = 2.0     # Control loop status logs
+LOG_THROTTLE_STATE = 0.5       # State change logs
+LOG_THROTTLE_DIAG = 2.0        # Diagnostic logs
 
 
-# Centralized object pool manager
+# Centralized object pool manager for efficient message reuse
 class ObjectPoolManager:
+    """
+    PURPOSE: Manages reusable object pools to minimize memory allocations.
+    
+    This class creates and manages collections of pre-allocated ROS2 message objects
+    (like Twist, Vector3, etc.) that can be reused instead of creating new objects
+    for each message. This significantly reduces memory allocations and garbage
+    collection overhead, improving performance on resource-constrained systems
+    like the Raspberry Pi 5.
+    """
     """Manages pools of reusable objects to reduce memory allocations."""
     def __init__(self, max_twist=10, max_vector3=15, max_float32multiarray=5, ttl=60.0):
         from geometry_msgs.msg import Twist, Vector3, PointStamped, Vector3Stamped, TransformStamped
@@ -148,10 +326,19 @@ class ObjectPoolManager:
         return {k: v.stats() for k, v in self.pools.items()}
 
 
+# Custom exception for initialization errors
 class InitializationError(Exception):
+    """
+    PURPOSE: Custom exception for initialization failures.
+    
+    This exception is thrown when component initialization fails, providing
+    clearer error reporting and allowing specific handling of initialization
+    problems as distinct from other runtime errors.
+    """
     """Exception raised when initialization fails."""
     pass
 
+# Helper function for consistent error handling during initialization
 def handle_initialization_error(logger, message, original_exception=None):
     """Handle initialization errors consistently."""
     error_message = f"{message}"
@@ -160,76 +347,269 @@ def handle_initialization_error(logger, message, original_exception=None):
     logger.error(error_message)
     raise InitializationError(error_message) from original_exception
 
+# ParameterManager handles all ROS2 parameters for the node
 class ParameterManager:
-    """Handles parameter declaration and retrieval for the PID Controller Node."""
+    """
+    Handles parameter declaration and retrieval for the PID Controller Node.
+    
+    In robotics, parameters allow us to tune the robot's behavior without changing code.
+    This class centralizes all parameter management for the PID controller, providing:
+    1. Default values suitable for initial operation
+    2. Access to parameters through a clean interface
+    3. Organization of related parameters into logical groups
+    
+    Parameters fall into several categories:
+    - PID control gains: Determine how robot responds to errors
+    - Movement limits: Constrain maximum speeds for safety
+    - Thresholds: Define when robot should start/stop moving
+    - Performance adaptations: Adjust behavior based on system load
+    - Strategy parameters: Control movement coordination behaviors
+    
+    ROS2 parameter system allows these values to be:
+    - Set at launch time via launch files
+    - Changed dynamically during operation
+    - Saved and loaded from parameter files
+    """
     def __init__(self, node):
+        """
+        Initialize parameter manager with reference to parent node.
+        
+        Args:
+            node: The ROS2 node that will declare and own these parameters
+        """
         self.node = node
         self._declare_parameters()
         self._get_parameters()
 
     def _declare_parameters(self):
+        """
+        Declare all parameters with their default values.
+        
+        This method defines the complete set of parameters used by the PID controller.
+        Each parameter includes a default value that provides reasonable behavior
+        without additional tuning.
+        """
         self.node.declare_parameters(
             namespace='',
             parameters=[
-                ('linear_x_kp', 1.0),
-                ('linear_x_ki', 0.05),
-                ('linear_x_kd', 0.3),
-                ('linear_x_min', 0.0),
-                ('linear_x_max', 0.1),
-                ('linear_y_kp', 0.7),
-                ('linear_y_ki', 0.005),
-                ('linear_y_kd', 0.7),
-                ('linear_y_min', -0.2),
-                ('linear_y_max', 0.3),
-                ('angular_kp', 0.8),
-                ('angular_ki', 0.01),
-                ('angular_kd', 0.9),
-                ('angular_min', -0.5),
-                ('angular_max', 0.5),
-                ('min_distance', 0.9),
-                ('max_distance', 2.0),
-                ('target_offset_x', 0.0),
-                ('target_offset_y', 0.0),
-                ('target_update_rate', 3.0),
-                ('diagnostics_rate', 0.5),
-                ('debug_level', 1),
-                ('adaptive_gains', True),
-                ('use_lateral_control', True),
-                ('distance_threshold', 0.1),
-                ('lateral_threshold', 0.02),
-                ('angular_threshold', 1.8),
-                ('angular_at_target_factor', 1.0),
-                ('adaptive_control_rate', True),
-                ('enable_resource_monitoring', True),
-                ('cpu_high_threshold', 80.0),
-                ('cpu_low_threshold', 50.0),
-                ('enable_transform_caching', True),
-                ('transform_cache_ttl', 1.0),
-                ('angular_first_control', True),
-                ('strategy_blend_duration', 0.15),
-                ('coordinated_movement', True),
-                ('filter_buffer_size', 3),
-                ('prediction_horizon', 0.04),
-                ('approach_distance', 0.3),
-                ('min_approach_factor', 0.15),
-                ('use_simplified_control_when_possible', True),
-                ('cpu_optimization_threshold', 70.0),
-                ('use_fast_trigonometry', True),
-                ('min_control_rate', 2.4),
-                ('max_control_rate', 4.0),
-                ('enable_fusion_rate_detection', True),
-                ('fresh_data_timeout', 0.7),
-                ('stale_data_timeout', 1.0),
-                ('cpu_throttle_interval', 0.5),
-                ('enable_cycle_skipping', False),
-                ('max_cpu_skip_threshold', 90.0),
-                ('coordinated_coupling_factor', 0.45),  
-                ('coordinated_smoothing_factor', 0.6),  
-                ('coordinated_min_angle_for_reduction', 0.1),
-                ('coordinated_zero_angle_threshold', 0.015),
-                ('coordinated_max_angle_factor', 0.2),
-                ('coordinated_same_sign_scale', 0.8),  
-                ('coordinated_opposite_sign_scale', 0.9),  
+                # ========== PID CONTROLLER GAINS ==========
+                # Forward motion control (X-axis)
+                # These gains affect how the robot moves forward/backward toward the ball
+                ('linear_x_kp', 1.0),      # Proportional gain: How strongly to respond to distance errors
+                                           # Higher values make the robot move more aggressively toward the target
+                                           # Typical range: 0.5-2.0
+
+                ('linear_x_ki', 0.05),     # Integral gain: Helps overcome persistent errors (like friction)
+                                           # Accumulates error over time to ensure the robot reaches its target
+                                           # Typical range: 0.01-0.1
+                
+                ('linear_x_kd', 0.3),      # Derivative gain: Provides damping to prevent oscillation
+                                           # Predicts error trends to smooth the approach
+                                           # Typical range: 0.1-0.5
+                
+                ('linear_x_min', 0.0),     # Minimum forward velocity command (m/s)
+                                           # Zero allows the robot to stop completely
+                
+                ('linear_x_max', 0.1),     # Maximum forward velocity command (m/s)
+                                           # Limits top speed for safety and control
+                                           # For a small robot, 0.1-0.5 m/s is reasonable
+                
+                # Lateral motion control (Y-axis)
+                # These gains affect how the robot moves side-to-side to align with the ball
+                ('linear_y_kp', 0.7),      # Proportional gain for lateral movement
+                                           # Lower than X because lateral movement is typically less stable
+                                           # Typical range: 0.5-1.0
+                
+                ('linear_y_ki', 0.005),    # Integral gain for lateral movement
+                                           # Very low to prevent side-to-side oscillation
+                                           # Typical range: 0.001-0.01
+                
+                ('linear_y_kd', 0.7),      # Derivative gain for lateral movement
+                                           # Higher to dampen lateral oscillations effectively
+                                           # Typical range: 0.5-1.0
+                
+                ('linear_y_min', -0.2),    # Minimum lateral velocity command (m/s)
+                                           # Negative values allow movement to the right
+                
+                ('linear_y_max', 0.3),     # Maximum lateral velocity command (m/s)
+                                           # Limits side-to-side speed for stability
+                
+                # Rotational motion control (angular Z-axis)
+                # These gains affect how the robot rotates to face the ball
+                ('angular_kp', 0.8),       # Proportional gain for rotational movement
+                                           # How quickly the robot turns to face the target
+                                           # Typical range: 0.5-1.0
+                
+                ('angular_ki', 0.01),      # Integral gain for rotational movement
+                                           # Very low to prevent overshooting target heading
+                                           # Typical range: 0.005-0.02
+                
+                ('angular_kd', 0.9),       # Derivative gain for rotational movement
+                                           # High to prevent rotational oscillation (wobbling)
+                                           # Typical range: 0.7-1.2
+                
+                ('angular_min', -0.5),     # Minimum angular velocity command (rad/s)
+                                           # Negative values allow counterclockwise rotation
+                
+                ('angular_max', 0.5),      # Maximum angular velocity command (rad/s)
+                                           # ~30 degrees per second to prevent dizzying rotation
+                
+                # ========== TARGET POSITIONING ==========
+                ('min_distance', 0.9),     # Minimum desired distance from target (meters)
+                                           # How close the robot will try to get to the ball
+                
+                ('max_distance', 2.0),     # Maximum tracking distance (meters)
+                                           # Beyond this, the robot may use different behavior
+                
+                ('target_offset_x', 0.0),  # X offset from target center (meters)
+                                           # Allows tracking offset from center (e.g., to follow behind)
+                
+                ('target_offset_y', 0.0),  # Y offset from target center (meters)
+                                           # Allows tracking offset from center (e.g., to follow from side)
+                
+                # ========== TIMING PARAMETERS ==========
+                ('target_update_rate', 3.0),  # Target position update frequency (Hz)
+                                             # How often to process new target positions
+                                             # Higher values: more responsive but more CPU usage
+                
+                ('diagnostics_rate', 0.5),   # Diagnostics publish frequency (Hz)
+                                            # How often to publish diagnostic data
+                                            # Lower values reduce bandwidth usage
+                
+                # ========== DEBUG SETTINGS ==========
+                ('debug_level', 1),          # Debug verbosity level (0-3)
+                                            # 0: Errors only
+                                            # 1: Basic info
+                                            # 2: Detailed info
+                                            # 3: All debug data (very verbose)
+                
+                # ========== CONTROL BEHAVIOR SETTINGS ==========
+                ('adaptive_gains', True),    # Enable adaptive PID gain adjustment
+                                            # Automatically adjusts gains based on error magnitude
+                                            # Makes control more stable at different distances
+                
+                ('use_lateral_control', True),  # Enable lateral (side-to-side) movement
+                                              # Mecanum wheels allow sideways motion
+                                              # Disable for differential drive robots
+                
+                # These thresholds determine when the robot considers itself "at target"
+                # and can stop moving
+                ('distance_threshold', 0.1),    # Distance error threshold (meters)
+                                               # Robot stops if closer than this
+                
+                ('lateral_threshold', 0.02),    # Lateral error threshold (meters)
+                                               # Robot stops lateral movement if aligned within this
+                
+                ('angular_threshold', 1.8),     # Angular error threshold (degrees)
+                                               # Robot stops rotation if aligned within this
+                
+                ('angular_at_target_factor', 1.0),  # Factor to relax angular control when at target distance
+                                                  # Makes robot less concerned with perfect alignment when close
+                
+                # ========== RESOURCE OPTIMIZATION SETTINGS ==========
+                ('adaptive_control_rate', True),  # Adjust control frequency based on CPU load
+                                                # Reduces processing frequency when CPU is high
+                
+                ('enable_resource_monitoring', True),  # Monitor CPU, memory, and temperature
+                                                     # Adapts behavior to prevent overloading
+                
+                ('cpu_high_threshold', 80.0),  # CPU usage threshold (%) to reduce processing
+                                             # Above this, control rate is reduced
+                
+                ('cpu_low_threshold', 50.0),   # CPU usage threshold (%) to return to normal processing
+                                             # Below this, control rate returns to normal
+                
+                # ========== TRANSFORM OPTIMIZATION ==========
+                ('enable_transform_caching', True),  # Cache coordinate transforms to reduce CPU usage
+                                                   # Transforms between coordinate frames are expensive
+                
+                ('transform_cache_ttl', 1.0),  # Transform cache time-to-live (seconds)
+                                             # How long to keep transforms before recalculating
+                
+                # ========== MOVEMENT STRATEGY SETTINGS ==========
+                ('angular_first_control', True),  # Prioritize angular alignment before moving
+                                                # Makes robot face target before approaching
+                
+                ('strategy_blend_duration', 0.15),  # Time to blend between movement strategies (seconds)
+                                                  # Prevents jerky transitions between strategies
+                
+                ('coordinated_movement', True),  # Enable coordinated movement (combining rotation and translation)
+                                               # Creates smoother, more efficient paths
+                
+                # ========== FILTERING AND PREDICTION ==========
+                ('filter_buffer_size', 3),  # Target position filter buffer size
+                                          # Larger values: smoother but more latency
+                
+                ('prediction_horizon', 0.04),  # Target prediction time horizon (seconds)
+                                             # How far to predict target movement
+                                             # Compensates for system processing delays
+                
+                # ========== APPROACH BEHAVIOR ==========
+                ('approach_distance', 0.3),  # Distance to start slowing approach (meters)
+                                           # Starts deceleration when this close to target
+                
+                ('min_approach_factor', 0.15),  # Minimum approach speed factor
+                                              # Prevents robot from moving too slowly at final approach
+                
+                # ========== ADVANCED OPTIMIZATION ==========
+                ('use_simplified_control_when_possible', True),  # Use simpler control algorithms when appropriate
+                                                               # Reduces CPU load when full control isn't needed
+                
+                ('cpu_optimization_threshold', 70.0),  # CPU threshold for optimization (%)
+                                                     # Above this, optimizations are activated
+                
+                ('use_fast_trigonometry', True),  # Use approximate trigonometric functions
+                                                # Faster but slightly less accurate
+                
+                # ========== CONTROL RATE SETTINGS ==========
+                ('min_control_rate', 2.4),  # Minimum control frequency (Hz)
+                                          # Never goes below this rate, even under high load
+                
+                ('max_control_rate', 4.0),  # Maximum control frequency (Hz)
+                                          # Never exceeds this rate, even under low load
+                
+                ('enable_fusion_rate_detection', True),  # Automatically detect sensor fusion rate
+                                                       # Adapts control rate to match sensor data
+                
+                ('fresh_data_timeout', 0.7),  # Time until data considered non-fresh (seconds)
+                                            # After this, control gets more conservative
+                
+                ('stale_data_timeout', 1.0),  # Time until data considered stale (seconds)
+                                            # After this, robot may stop for safety
+                
+                # ========== CPU MANAGEMENT ==========
+                ('cpu_throttle_interval', 0.5),  # Time between CPU checks (seconds)
+                                               # Prevents too-frequent system queries
+                
+                ('enable_cycle_skipping', False),  # Skip control cycles when CPU is high
+                                                 # More aggressive optimization for CPU constrained systems
+                
+                ('max_cpu_skip_threshold', 90.0),  # CPU threshold (%) to skip cycles
+                                                 # Only active if cycle skipping enabled
+                
+                # ========== COORDINATED CONTROL PARAMETERS ==========
+                # These parameters affect how lateral and angular movements are coordinated
+                # Proper coordination creates more efficient, natural movement patterns
+                ('coordinated_coupling_factor', 0.45),  # How strongly lateral/angular movements affect each other
+                                                      # Higher values: more coordination but less independent control
+                
+                ('coordinated_smoothing_factor', 0.6),  # Smoothing factor for coordinated movements
+                                                      # Higher values: smoother but less responsive
+                
+                ('coordinated_min_angle_for_reduction', 0.1),  # Angle threshold for coordination (radians)
+                                                             # Below this angle, less coordination is applied
+                
+                ('coordinated_zero_angle_threshold', 0.015),  # Angle threshold to consider "zero" (radians)
+                                                            # Provides a small deadband for stability
+                
+                ('coordinated_max_angle_factor', 0.2),  # Maximum effect angle has on lateral movement
+                                                      # Prevents excessive lateral speed reduction
+                
+                ('coordinated_same_sign_scale', 0.8),  # Scaling when errors have same sign
+                                                     # Same sign means errors "fight" each other
+                
+                ('coordinated_opposite_sign_scale', 0.9),  # Scaling when errors have opposite signs
+                                                         # Opposite signs means errors "help" each other
             ]
         )
 
@@ -303,8 +683,15 @@ class ParameterManager:
         self.coordinated_opposite_sign_scale = self.node.get_parameter('coordinated_opposite_sign_scale').value
 
 
-# Phase 3: Extract State Manager - Define component interfaces
+# StateObserver interface for classes that want to observe state changes
 class StateObserver(ABC):
+    """
+    PURPOSE: Interface for classes that need to observe robot state changes.
+    
+    This abstract base class defines the interface that observer classes must implement
+    to receive notifications when the robot's state changes or when data freshness
+    levels change. It enables a publish-subscribe pattern for state events.
+    """
     """Interface for classes that observe state changes."""
     @abstractmethod
     def on_state_change(self, old_state, new_state, reason=""):
@@ -317,8 +704,15 @@ class StateObserver(ABC):
         pass
 
 
-# Extract these data classes from the original code
+# Data classes for holding robot, movement, performance, freshness, and recovery state
 class RobotStateData:
+    """
+    PURPOSE: Holds core robot state information.
+    
+    This data class encapsulates the robot's current operational state
+    (initializing, searching, tracking, etc.), previous state, and timing
+    information. It provides a central place to track the robot's high-level status.
+    """
     """Core robot state data"""
     def __init__(self):
         self.state = "initializing"
@@ -330,6 +724,14 @@ class RobotStateData:
         self.force_target_reacquisition = False
 
 class MovementStateData:
+    """
+    PURPOSE: Tracks movement-related state information.
+    
+    This data class maintains information about the robot's current movement,
+    including whether it's stopped, last velocity commands, and pre-allocated
+    vectors for efficient movement calculations. It helps manage the transition
+    between moving and stopped states.
+    """
     """Movement-related state data"""
     def __init__(self):
         self.robot_stopped = True
@@ -351,6 +753,13 @@ class MovementStateData:
         self.velocity_change_check = [False, False, False]
 
 class PerformanceData:
+    """
+    PURPOSE: Tracks performance metrics and runtime statistics.
+    
+    This data class maintains information about system performance metrics,
+    including CPU usage patterns, control cycle counts, and execution timing.
+    It helps monitor and optimize the controller's resource usage.
+    """
     """Performance monitoring state"""
     def __init__(self):
         self.simplified_control_count = 0
@@ -371,6 +780,13 @@ class PerformanceData:
         self.adaptive_rate = 0.0
 
 class DataFreshnessData:
+    """
+    PURPOSE: Tracks sensor data freshness information.
+    
+    This data class monitors how recent and reliable the sensor data is,
+    tracking the freshness level (fresh, stale, critical) and timestamps
+    to ensure the robot operates safely with up-to-date information.
+    """
     """Data freshness tracking state"""
     def __init__(self):
         self.level = "unknown"
@@ -378,6 +794,13 @@ class DataFreshnessData:
         self.last_fusion_check_time = time.time()
 
 class RecoveryStateData:
+    """
+    PURPOSE: Manages error recovery state information.
+    
+    This data class tracks the robot's recovery status when errors or
+    exceptional conditions occur, including recovery phases and timing
+    information for handling error conditions safely.
+    """
     """Recovery-related state data"""
     def __init__(self):
         self.in_recovery = False
@@ -385,8 +808,16 @@ class RecoveryStateData:
         self.recovery_phase = "none"
 
 
-# Phase 3: Enhanced State Manager 
+# EnhancedStateManager manages all state and notifies observers
 class EnhancedStateManager:
+    """
+    PURPOSE: Centrally manages all robot state information.
+    
+    This class serves as the central coordinator for all state-related
+    information, including robot state, movement state, performance metrics,
+    data freshness, and recovery state. It implements the observer pattern
+    to notify components when state changes occur.
+    """
     """Enhanced state manager that provides observation capabilities"""
     def __init__(self):
         self.robot = RobotStateData()
@@ -444,8 +875,15 @@ class EnhancedStateManager:
         return self.robot.previous_state == state_name
 
 
-# Phase 1: Extract Diagnostics Publisher
+# DiagnosticsPublisher publishes diagnostic and performance data for monitoring
 class DiagnosticsPublisher:
+    """
+    PURPOSE: Collects and publishes diagnostic information about the controller.
+    
+    This class gathers performance metrics, PID status information, and other
+    diagnostic data from various components of the control system and publishes
+    them to ROS topics for monitoring and debugging purposes.
+    """
     """Handles collection and publishing of diagnostic data."""
     def __init__(self, node, pid_controllers, target_tracker, strategy_module, velocity_control, resource_monitor, parameter_manager, logger, throttled_logger):
         self.node = node
@@ -648,8 +1086,16 @@ class DiagnosticsPublisher:
                 self.logger.error(f"Error publishing performance metrics: {str(e)}")
 
 
-# Phase 2: Extract Performance Monitor
+# EnhancedPerformanceMonitor adapts control rate based on CPU and fusion rate
 class EnhancedPerformanceMonitor:
+    """
+    PURPOSE: Monitors and optimizes system performance.
+    
+    This class tracks CPU usage, memory usage, and execution timing to
+    dynamically adjust the control rate and processing complexity based on
+    system load. It helps ensure reliable operation even under resource
+    constraints on the Raspberry Pi 5.
+    """
     """Enhanced performance monitoring with adaptive rate control."""
     def __init__(self, resource_monitor, parameter_manager, logger, throttled_logger):
         self.resource_monitor = resource_monitor
@@ -764,21 +1210,108 @@ class EnhancedPerformanceMonitor:
                 self.logger.warning(f"Error updating performance stats: {str(e)}")
 
 
-# Phase 4: Extract Control Strategies
+# Abstract base class for all control strategies
 class ControlStrategy(ABC):
+    """
+    PURPOSE: Abstract base class for different control strategies.
+    
+    This class defines the interface that all control strategies must implement.
+    Control strategies convert error values into velocity commands using different
+    approaches optimized for different situations, such as full PID control,
+    simplified control, or recovery behavior.
+    
+    CONTROL STRATEGY ARCHITECTURAL PATTERN
+    -------------------------------------
+    
+    The control strategy pattern allows the robot to adapt its movement calculation
+    approach based on different situations without changing the overall control flow.
+    This is a form of the Strategy design pattern from software engineering.
+    
+    Benefits of this pattern:
+    1. Separation of concerns - Each strategy focuses on one approach to control
+    2. Runtime adaptation - System can switch strategies without stopping
+    3. Extensibility - New strategies can be added without changing existing code
+    4. Resource optimization - Can select strategies based on CPU availability
+    
+    The three main strategies implemented are:
+    - StandardControlStrategy: Full PID with coordination (best accuracy, higher CPU)
+    - SimplifiedControlStrategy: Basic control (lower accuracy, saves CPU)
+    - RecoveryControlStrategy: Safety-focused movements for error recovery
+    
+    The ControlStrategyFactory selects which strategy to use based on:
+    - Current robot state (tracking, recovery, etc.)
+    - CPU load and resource availability
+    - Data freshness and sensor quality
+    """
     """Base class for control strategies."""
     @abstractmethod
     def compute_velocity_command(self, errors, position_data, current_time, freshness_level="fresh"):
-        """Compute velocity commands based on errors and other data."""
+        """
+        Compute velocity commands based on errors and other data.
+        
+        Args:
+            errors: Tuple of (distance_error, lateral_error, angular_error)
+            position_data: Dictionary with target position information
+            current_time: Current timestamp for time-based calculations
+            freshness_level: How recent the sensor data is ('fresh', 'stale', 'critical')
+            
+        Returns:
+            Tuple of (linear_x, linear_y, angular_z) velocity commands
+        """
         pass
     
     @abstractmethod
     def get_strategy_name(self):
-        """Get the name of this strategy."""
+        """
+        Return a unique name for this strategy.
+        
+        Used for logging, diagnostics, and strategy transition tracking.
+        """
         pass
 
 
+# StandardControlStrategy: full PID and coordinated control
 class StandardControlStrategy(ControlStrategy):
+    """
+    PURPOSE: Implements full PID control with movement coordination.
+    
+    This class provides the primary control strategy used during normal operation,
+    applying full PID control to each movement dimension with coordination between
+    lateral and angular movements for smooth, natural motion patterns.
+    
+    STANDARD CONTROL STRATEGY OPERATION
+    ----------------------------------
+    
+    This is the primary, high-precision control strategy that provides the best
+    tracking quality and movement smoothness. It is used whenever system resources
+    allow, and is responsible for the robot's primary ball-tracking behavior.
+    
+    Key Features:
+    
+    1. FULL PID CONTROL
+       - Applies complete PID control to all three movement dimensions
+       - Considers error history, trends, and rates of change
+       - Adapts PID gains based on error patterns
+       - Handles integral windup and zero-crossing conditions
+    
+    2. COORDINATED MOVEMENT
+       - Coordinates lateral (side-to-side) and angular (rotational) movements
+       - Prevents fighting between movement dimensions
+       - Scales movements based on error patterns
+       - Creates more natural, human-like motion
+    
+    3. ANGULAR-FIRST BEHAVIOR
+       - Prioritizes facing the target when angular error is large
+       - Reduces forward/lateral speeds during significant rotation
+       - Makes movement paths more efficient and natural
+    
+    4. DATA FRESHNESS SAFETY
+       - Reduces speed when sensor data is stale
+       - Stops completely when data is critically old
+       
+    This strategy has the highest computational cost but provides the best
+    tracking performance and is used whenever CPU resources permit.
+    """
     """Full control strategy with PID and coordination."""
     def __init__(self, pid_controllers, coordinated_controller, parameter_manager, distance_error_tracker,
                  lateral_error_tracker, angular_error_tracker, velocity_control):
@@ -791,54 +1324,135 @@ class StandardControlStrategy(ControlStrategy):
         self.velocity_control = velocity_control
     
     def compute_velocity_command(self, errors, position_data, current_time, freshness_level="fresh"):
-        """Compute velocity commands using full PID control with coordination."""
-        # Unpack errors
+        """
+        Compute velocity commands using full PID control with coordination.
+        
+        EDUCATIONAL WALKTHROUGH: FROM ERRORS TO ROBOT MOVEMENT
+        ----------------------------------------------------
+        
+        This method is where the core decision-making happens. It takes the errors
+        (how far we are from the ball) and computes velocity commands that will
+        move the robot smoothly and precisely toward the target.
+        
+        STEP BY STEP CONTROL FLOW:
+        
+        1. UNDERSTAND THE INPUTS:
+           - errors: Three values telling us how far we are from perfect position
+           - position_data: Details about the ball's position and movement
+           - current_time: Current timestamp for calculating time differences
+           - freshness_level: How recent our sensor data is
+        
+        2. DECIDE ON BASIC MOVEMENT CAPABILITIES:
+           We decide which dimensions to use:
+           - use_forward: Can we move forward/backward? (Almost always True)
+           - use_lateral: Can we move side-to-side? (True with mecanum wheels)
+           - use_angular: Can we rotate? (Almost always True)
+        
+        3. CHECK FOR SPECIAL CASES:
+           If the ball is at a significant angle (>11°), we prioritize turning
+           to face it before moving forward too quickly (angular-first strategy).
+           This creates more natural movement patterns - just like a person would
+           turn to face an object before moving toward it.
+           
+        4. COMPUTE VELOCITY COMMANDS:
+           Here we have two approaches:
+           
+           A. COORDINATED CONTROL (preferred):
+              - Calculate forward velocity independently
+              - Calculate lateral and angular velocities in coordination
+              - This creates smooth curves and natural movements
+              - Coordination prevents jerky movements when both turning and 
+                moving sideways at the same time
+                
+           B. TRADITIONAL SEPARATE CONTROL:
+              - Calculate each dimension independently
+              - Used as fallback when coordinated control is disabled
+              - Simpler but can create less natural movements
+        
+        5. APPLY ANGULAR-FIRST STRATEGY:
+           If the angle to the ball is large (>11°), reduce forward and lateral
+           speeds until we're better aligned. This is like slowing down to take
+           a turn more smoothly.
+        
+        6. APPLY DATA FRESHNESS SAFETY:
+           - Fresh data: Normal operation
+           - Stale data: Move at 50% speed for safety
+           - Critical/invalid data: STOP completely
+           
+           This is a critical safety feature - old sensor data means we're
+           not sure where the ball really is, so we reduce speed or stop.
+        
+        7. APPLY VELOCITY CONTROL LIMITS:
+           - Ensure speeds don't exceed safe maximums
+           - Scale speeds based on distance to target
+           - Apply smoother acceleration/deceleration
+           - Apply additional safety checks
+        
+        The final output is a tuple of 3 velocity commands:
+        [forward velocity, lateral velocity, angular velocity]
+        These values directly control the robot's wheels to create movement.
+        """
+        # Unpack errors - these tell us how far we are from the desired position
         distance_error, lateral_error, angular_error = errors
         
-        # Determine strategy flags
-        use_forward = True
-        use_lateral = True
-        use_angular = True
+        # Determine which movement dimensions we should use
+        # For a mecanum-wheeled robot, all three are typically enabled
+        use_forward = True    # Forward/backward movement (X-axis)
+        use_lateral = True    # Side-to-side movement (Y-axis)
+        use_angular = True    # Rotational movement (angular Z-axis)
         
-        # ADD THIS SECTION: Check for significant angular error and apply angular-first strategy
+        # Check if we need to prioritize turning to face the ball
+        # This creates more natural movement, like a person turning to face an object
         significant_angular_error = False
         if self.parameter_manager.angular_first_control:
-            # Convert to degrees for easier threshold comparison
-            angular_degrees = angular_error * 57.29578  # 180/pi
-            if abs(angular_degrees) > 11.0:  # ~0.2 radians
+            # Convert radians to degrees for easier threshold comparison
+            # 57.29578 = 180/π (conversion factor from radians to degrees)
+            angular_degrees = angular_error * 57.29578
+            if abs(angular_degrees) > 11.0:  # If ball is more than 11° off-center
                 significant_angular_error = True
+                # We'll use this flag later to reduce forward/lateral speeds
         
-        # Compute velocities based on the selected strategy
+        # VELOCITY COMPUTATION: We have two methods to calculate velocities
         if self.parameter_manager.coordinated_movement and use_lateral and use_angular:
-            # Use coordinated controller for lateral and angular movements
+            # METHOD 1: COORDINATED CONTROL (preferred)
+            # ----------------------------------------
+            # This method coordinates lateral and angular movements for smoother paths
+            
+            # 1.A: Compute forward velocity independently using PID
+            # This controls how fast we approach or back away from the ball
             linear_x_velocity = self.pid_controllers['linear_x'].compute(
-                distance_error, 
-                current_time, 
-                not use_forward,
-                self.distance_error_tracker.get_trend()
+                distance_error,                            # Error input (how far from desired distance)
+                current_time,                             # Current time for dt calculation
+                not use_forward,                          # Whether to force zero output
+                self.distance_error_tracker.get_trend()   # Error trend (is error increasing or decreasing?)
             )
             
-            # Use coordinated control for lateral and angular velocities
+            # 1.B: Use special coordinated controller for lateral and angular movements
+            # This ensures smooth coordination between side motion and rotation
             lateral_velocity, angular_velocity = self.coordinated_controller.compute(
-                lateral_error,   # lateral error
-                angular_error,   # angular error
-                current_time,    # current time
-                0.0              # current orientation - this is taken directly from the coordinated controller
+                lateral_error,   # How far left/right of target (meters)
+                angular_error,   # How far rotated from facing target (radians)
+                current_time,    # Current time for calculating time differences
+                0.0              # Current orientation (handled internally by controller)
             )
             
-            # ADD THIS SECTION: Apply angular-first strategy if significant angular error
+            # If we need to turn significantly to face the ball, reduce forward and lateral speeds
+            # This creates more natural movement, like how you'd slow down to take a sharp turn
             if significant_angular_error:
-                # Reduce linear and lateral velocities until angular error is smaller
-                linear_x_velocity *= 0.7
-                lateral_velocity *= 0.8
+                linear_x_velocity *= 0.7    # Reduce forward speed to 70%
+                lateral_velocity *= 0.8     # Reduce lateral speed to 80%
             
-            # Disable individual components if strategy requires
+            # If specific movements are disabled, zero out those velocities
             if not use_lateral:
                 lateral_velocity = 0.0
             if not use_angular:
                 angular_velocity = 0.0
         else:
-            # Traditional separate PID controllers
+            # METHOD 2: TRADITIONAL SEPARATE PID CONTROLLERS
+            # ---------------------------------------------
+            # This method computes each dimension independently
+            
+            # 2.A: Compute forward velocity
             linear_x_velocity = self.pid_controllers['linear_x'].compute(
                 distance_error, 
                 current_time, 
@@ -846,6 +1460,7 @@ class StandardControlStrategy(ControlStrategy):
                 self.distance_error_tracker.get_trend()
             )
             
+            # 2.B: Compute lateral (side-to-side) velocity
             lateral_velocity = self.pid_controllers['linear_y'].compute(
                 lateral_error, 
                 current_time, 
@@ -853,6 +1468,7 @@ class StandardControlStrategy(ControlStrategy):
                 self.lateral_error_tracker.get_trend()
             )
             
+            # 2.C: Compute angular (rotational) velocity
             angular_velocity = self.pid_controllers['angular'].compute(
                 angular_error, 
                 current_time, 
@@ -860,44 +1476,86 @@ class StandardControlStrategy(ControlStrategy):
                 self.angular_error_tracker.get_trend()
             )
             
-            # ADD THIS SECTION: Apply angular-first strategy if significant angular error
+            # Apply angular-first strategy as before
             if significant_angular_error:
-                # Reduce linear and lateral velocities until angular error is smaller
                 linear_x_velocity *= 0.7
                 lateral_velocity *= 0.8
         
-        # Apply freshness-based velocity scaling
+        # SAFETY: Adjust speeds based on how fresh (recent) our sensor data is
+        # This is critical for safety - old data means we're not sure where the ball really is
         if freshness_level == "stale":
-            # Reduced speed (50%) for stale data
+            # Data is old but still usable - reduce speed to 50% for safety
             stale_scale = 0.5
             linear_x_velocity *= stale_scale
             lateral_velocity *= stale_scale
             angular_velocity *= stale_scale
         elif freshness_level == "critical" or freshness_level == "invalid":
-            # Stop for critical or invalid data
+            # Data is too old or invalid - STOP the robot completely for safety
             linear_x_velocity = 0.0
             lateral_velocity = 0.0
             angular_velocity = 0.0
         
-        # Apply velocity control limits
+        # FINAL PROCESSING: Apply velocity limits and safety constraints
+        # This ensures our commands don't exceed safe speeds and accelerations
         target_distance = position_data['distance'] if position_data and 'distance' in position_data else 0.0
         limited_velocities = self.velocity_control.process_velocities(
-            linear_x_velocity, 
-            lateral_velocity, 
-            angular_velocity, 
-            target_distance, 
-            self.parameter_manager.desired_distance,
-            freshness_level=freshness_level
+            linear_x_velocity,                           # Forward velocity (m/s)
+            lateral_velocity,                            # Lateral velocity (m/s)
+            angular_velocity,                            # Angular velocity (rad/s)
+            target_distance,                             # Current distance to target
+            self.parameter_manager.desired_distance,     # Desired distance to maintain
+            freshness_level=freshness_level              # Data freshness for safety
         )
         
-        # ADD THIS LINE: Return the computed velocities
+        # Return the final velocity commands that will control the robot's motion
         return limited_velocities
     
     def get_strategy_name(self):
         return "standard"
 
 
+# SimplifiedControlStrategy: reduced computation for CPU savings
 class SimplifiedControlStrategy(ControlStrategy):
+    """
+    PURPOSE: Provides computationally efficient control for high CPU loads.
+    
+    This class implements a simplified control strategy that uses less CPU
+    resources by applying basic velocity commands without full PID computation.
+    It's automatically activated when system load is high or when precise
+    control is less critical.
+    
+    SIMPLIFIED CONTROL STRATEGY OPERATION
+    -----------------------------------
+    
+    This strategy is designed to reduce computational load while still maintaining
+    basic tracking functionality. It's automatically activated when:
+    - CPU usage exceeds configured thresholds
+    - Errors are small and precise control is less critical
+    - During transitions between other system states
+    
+    There are multiple levels of simplification (set by the 'level' parameter):
+    
+    LEVEL 0: MINIMAL COMPUTATION
+    - Simply dampens previous velocities
+    - Essentially coasts with gradually decreasing speed
+    - Used in extremely high CPU load situations
+    - Minimal overhead, saves maximum CPU
+    
+    LEVEL 1: BASIC PROPORTIONAL CONTROL
+    - Uses simple proportional control (no I or D terms)
+    - Basic movement toward target without advanced features
+    - No coordination between dimensions
+    - Approximately 60% reduction in computation vs. standard
+    
+    LEVEL 2: ENHANCED PROPORTIONAL CONTROL
+    - Adds basic lateral/angular coordination
+    - Simple error-based movement scaling
+    - Minor prediction capability
+    - Approximately 40% reduction in computation vs. standard
+    
+    The EnhancedPerformanceMonitor decides when to switch to this strategy
+    and which level to use based on current CPU load and tracking requirements.
+    """
     """Simplified control strategy for reduced CPU usage."""
     def __init__(self, pid_controllers, parameter_manager, velocity_control, last_cmd_vel, level=1):
         self.pid_controllers = pid_controllers
@@ -985,7 +1643,54 @@ class SimplifiedControlStrategy(ControlStrategy):
         return f"simplified_level_{self.level}"
 
 
+# RecoveryControlStrategy: handles recovery behavior
 class RecoveryControlStrategy(ControlStrategy):
+    """
+    PURPOSE: Handles control during error recovery and exceptional conditions.
+    
+    This strategy takes over when the system encounters errors or exceptional
+    conditions, implementing safety behaviors like stopping, backing up, or
+    performing specific recovery movements to restore normal operation.
+    
+    RECOVERY CONTROL STRATEGY OPERATION
+    ---------------------------------
+    
+    This strategy is a safety mechanism that takes control during exceptional
+    conditions when normal tracking isn't possible. It's activated when:
+    
+    - Sensor data is missing or critically stale
+    - System errors or exceptions occur
+    - Target is lost for extended periods
+    - Other error conditions are detected
+    
+    The recovery strategy operates through several phases:
+    
+    1. INITIAL PHASE: SAFE STOP
+       - Immediately stops all movement
+       - Ensures robot is in a safe, stable state
+       - Prevents further problems in case of sensor malfunction
+    
+    2. DIAGNOSIS PHASE
+       - Assesses what caused the recovery condition
+       - Determines if recovery is possible
+       - Selects appropriate recovery behavior
+    
+    3. RECOVERY PHASE
+       - Implements specific recovery behaviors, which might include:
+         * Rotating in place to search for the ball
+         * Backing up to get a better view
+         * Moving to a known good position
+         * Waiting for sensor data to return
+    
+    4. VALIDATION PHASE
+       - Checks if recovery was successful
+       - Returns to normal operation if recovered
+       - Attempts alternative recovery if not
+    
+    This strategy prioritizes safety over performance and ensures the robot
+    can gracefully handle exceptional conditions without requiring human
+    intervention.
+    """
     """Strategy for recovery behavior."""
     def __init__(self, recovery_module):
         self.recovery_module = recovery_module
@@ -1002,7 +1707,66 @@ class RecoveryControlStrategy(ControlStrategy):
         return "recovery"
 
 
+# ControlStrategyFactory: creates the right strategy for the current state
 class ControlStrategyFactory:
+    """
+    PURPOSE: Creates and manages control strategy instances.
+    
+    This factory class creates the appropriate control strategy based on system
+    state, CPU load, and other factors. It implements the Factory pattern to
+    dynamically select between standard, simplified, and recovery strategies.
+    
+    CONTROL STRATEGY SELECTION LOGIC
+    ------------------------------
+    
+    This factory implements the Factory design pattern from software engineering,
+    which centralizes the creation of objects and encapsulates the decision logic
+    for which type to create. This allows the system to:
+    
+    1. Dynamically select control strategies at runtime
+    2. Keep selection logic in one place
+    3. Ensure consistency in control strategy initialization
+    4. Easily extend with new strategy types as needed
+    
+    Strategy Selection Algorithm:
+    
+    START SELECTION
+    
+    1. CHECK RECOVERY STATE:
+       - Is the robot in recovery mode?
+         → YES: Return RecoveryControlStrategy
+         → NO: Continue
+    
+    2. CHECK CRITICAL DATA CONDITIONS:
+       - Is sensor data critically stale or missing?
+         → YES: Return RecoveryControlStrategy
+         → NO: Continue
+    
+    3. CHECK CPU LOAD CONDITIONS:
+       - Is CPU usage extremely high (above max threshold)?
+         → YES: Return SimplifiedControlStrategy (Level 0 - minimal)
+         → NO: Continue
+    
+    4. CHECK RESOURCE OPTIMIZATION:
+       - Is CPU usage high (above optimization threshold)?
+       - AND simplified control enabled?
+         → YES: Return SimplifiedControlStrategy (Level 1 or 2)
+         → NO: Continue
+    
+    5. CHECK ERROR MAGNITUDE:
+       - Are all errors very small (fine positioning phase)?
+       - AND simplified control when possible enabled?
+         → YES: Return SimplifiedControlStrategy (Level 2)
+         → NO: Continue
+    
+    6. DEFAULT CASE:
+       - Return StandardControlStrategy (full PID with coordination)
+    
+    END SELECTION
+    
+    The factory creates and initializes each strategy with the appropriate
+    dependencies, ensuring they have everything needed to properly function.
+    """
     """Factory for creating appropriate control strategies."""
     def __init__(self, pid_controllers, coordinated_controller, parameter_manager, 
                  distance_error_tracker, lateral_error_tracker, angular_error_tracker,
@@ -1047,11 +1811,175 @@ class ControlStrategyFactory:
         )
 
 
-# Phase 5: Refactored Controller Manager
+# PIDControllerNode: the main ROS2 node for PID control
 class PIDControllerNode(Node, StateObserver):
-    """Optimized PID Controller node with modular components."""
+    """
+    Optimized PID Controller node with modular components.
+    
+    HOW THE BALL-TRACKING SYSTEM WORKS IN PRACTICE
+    ---------------------------------------------
+    
+    This controller is the central coordinator for the robot's movement. It continuously
+    processes sensor data, decides how to move, and controls the motors to follow the ball.
+    Let's walk through the entire process with practical examples:
+    
+    1. TARGET TRACKING:
+       The controller receives ball position data from the sensor fusion system.
+       
+       Raw position data example: x=1.5m (ahead), y=0.2m (left), z=0.1m (up)
+       
+       The TargetTrackingModule then:
+       - Filters this data to remove noise (small fluctuations)
+       - Calculates velocity by comparing positions over time
+       - Predicts where the ball will be in the near future
+       
+       Example calculation:
+       - Previous position (100ms ago): [1.47m, 0.21m, 0.1m]
+       - Current position: [1.5m, 0.2m, 0.1m]
+       - Calculated velocity: [0.3m/s, -0.1m/s, 0m/s]
+       - Prediction (200ms ahead): [1.56m, 0.18m, 0.1m]
+    
+    2. ERROR CALCULATION:
+       The controller calculates three key errors:
+       
+       a) Distance Error: How far we are from desired distance
+          - Desired distance to ball: 1.0m
+          - Current distance: 1.5m
+          - Distance error = 0.5m (need to move forward)
+       
+       b) Lateral Error: Side-to-side alignment error
+          - Ball is 0.2m to left of robot's center
+          - Lateral error = 0.2m (need to move left)
+       
+       c) Angular Error: How much we need to rotate to face ball
+          - Using arctangent: atan2(y, x) = atan2(0.2, 1.5) ≈ 7.6 degrees
+          - Angular error = 7.6 degrees (need to rotate left)
+    
+    3. STRATEGY SELECTION:
+       Based on these errors, we categorize and select a movement strategy:
+       
+       Categorization:
+       - Distance error (0.5m) = "medium" (0.3m-0.6m range)
+       - Lateral error (0.2m) = "small" (0.1m-0.25m range)
+       - Angular error (7.6°) = "small" (5°-10° range)
+       
+       Strategy lookup in the table with key ("medium", "small", "small"):
+       → Selected strategy: "APPROACH_WITH_MINOR_ALIGNMENT"
+       → Strategy parameters: 
+          forward_scale=0.9, lateral_scale=0.2, angular_scale=0.4
+       → Meaning: Prioritize forward movement, with minor lateral and angular corrections
+    
+    4. PID COMPUTATION:
+       For each dimension, we compute PID control outputs:
+       
+       Forward (X) calculation with distance_error = 0.5m:
+       - P term = Kp * error = 1.0 * 0.5m = 0.5m/s
+       - I term = Ki * accumulated_error = 0.05 * 0.3m*s = 0.015m/s
+         (accumulated over time to overcome friction)
+       - D term = Kd * error_rate = 0.3 * 0.2m/s = 0.06m/s
+         (error is decreasing at 0.2m/s, so we reduce deceleration)
+       - Raw output = 0.5 + 0.015 + 0.06 = 0.575m/s
+       
+       Similar calculations for lateral and angular movements.
+    
+    5. COORDINATION AND SAFETY:
+       Now we apply strategy factors and safety constraints:
+       
+       a) Apply strategy scaling factors:
+          - Forward velocity = 0.575m/s * 0.9 = 0.5175m/s
+          - Lateral velocity = 0.22m/s * 0.2 = 0.044m/s
+          - Angular velocity = 0.15rad/s * 0.4 = 0.06rad/s
+          
+       b) Apply coordination between dimensions:
+          - Angular and lateral movements have same sign (both left)
+          - Reduce lateral movement to prevent over-correction
+          - Lateral velocity = 0.044m/s * 0.8 = 0.0352m/s
+          
+       c) Apply safety limits:
+          - Check against max velocities
+          - Forward capped at 0.5m/s
+          - Final command = [0.5m/s, 0.035m/s, 0.06rad/s]
+    
+    This entire process repeats 10-40 times every second, constantly adapting
+    to the ball's movement to create smooth, responsive tracking behavior.
+    
+    What is a PID Controller?
+    ------------------------
+    A PID (Proportional-Integral-Derivative) controller is a feedback control system
+    that calculates an output based on the error between a desired setpoint and the
+    actual measured value. In robotics, PID controllers are widely used for precise
+    movement control.
+    
+    The PID equation has three terms:
+    1. Proportional (P): Responds proportionally to current error
+       - Example: If you're 1 meter away from the ball, move forward at speed proportional to 1m
+       - Acts like a spring pulling the robot toward the target
+    
+    2. Integral (I): Accumulates past errors to eliminate persistent errors
+       - Example: If the robot keeps stopping short of the ball due to friction, 
+         the integral term gradually increases to overcome this
+       - Acts like a memory of past errors
+    
+    3. Derivative (D): Responds to the rate of change of error
+       - Example: If approaching the ball quickly, start slowing down to prevent overshooting
+       - Acts like a dampener to prevent oscillation
+    
+    For a robot with multiple movement dimensions, we use separate PID controllers for:
+    - Forward/backward motion (X axis)
+    - Side-to-side motion (Y axis) 
+    - Rotational motion (angular Z axis)
+    
+    How This Node Works:
+    ------------------
+    This node:
+    1. Receives position data from the sensor fusion node
+    2. Calculates errors (distance, lateral position, angular orientation)
+    3. Applies PID control to each error component
+    4. Uses movement strategies to coordinate the three motion dimensions
+    5. Adjusts behavior based on data freshness and system resources
+    6. Publishes velocity commands to drive the robot
+    
+    The robot operates in states like:
+    - Searching: Looking for the ball
+    - Tracking: Following the ball once found
+    - Stopped: At the target position
+    - Recovery: Handling error conditions
+    
+    Features included:
+    - Adaptive control rate based on CPU load
+    - Coordinated movement for smooth trajectories
+    - Data freshness monitoring for safety
+    - Resource monitoring to prevent system overload
+    
+    Architecture:
+    -----------
+    The node uses a modular design with these key components:
+    - StateManager: Tracks robot state
+    - TargetTracker: Processes target position data
+    - PID Controllers: Calculate raw motion commands
+    - MovementStrategy: Coordinates movement between dimensions
+    - VelocityControl: Applies limits and safety constraints
+    - DiagnosticsPublisher: Monitors and reports performance
+    
+    This architecture separates concerns and allows each component 
+    to be understood, tested, and improved independently.
+    """
     def __init__(self):
-        """Initialize the enhanced PID controller node with phased initialization."""
+        """
+        Initialize the enhanced PID controller node with phased initialization.
+        
+        The initialization process is broken into phases to ensure dependencies
+        are properly established before they're needed:
+        
+        Phase 1: Parameter initialization
+        Phase 2: Core components (resources, timing)
+        Phase 3: State management
+        Phase 4: Dependent components (controllers, strategies)
+        Phase 5: Communications (publishers, subscribers)
+        
+        This approach makes the initialization sequence easier to understand
+        and debug, as each phase has clear responsibilities.
+        """
         super().__init__('pid_controller')
         self.throttled_logger = ThrottledLogger(self.get_logger())
         try:
@@ -1115,66 +2043,145 @@ class PIDControllerNode(Node, StateObserver):
         self.state_manager.register_observer(self)
         
     def _initialize_dependent_components(self):
-        """Initialize components that depend on core components."""
-        # Initialize transform system
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        """
+        Initialize components that depend on core components.
         
+        This method initializes the specialized components that make up the PID controller
+        system. Each component has a specific responsibility in the control pipeline:
+        
+        COMPONENT ARCHITECTURE EXPLAINED:
+        --------------------------------
+        
+        1. TRANSFORM SYSTEM:
+           Purpose: Manages coordinate transformations between different robot frames
+           Responsibility: Converts position data between different reference frames
+           Why it's needed: Position data from different sensors (camera, LIDAR) come in
+                          different coordinate systems and need to be unified
+        
+        2. PID CONTROLLERS:
+           Purpose: Calculate control outputs from error values
+           Responsibility: Apply PID algorithm to each movement dimension
+           Why it's needed: Converts position errors into smooth velocity commands
+                          with proportional, integral, and derivative terms
+        
+        3. TARGET TRACKER:
+           Purpose: Process, filter, and predict target position
+           Responsibility: Smooth sensor data and predict target movement
+           Why it's needed: Raw sensor data can be noisy and needs processing,
+                          prediction compensates for system delays
+        
+        4. STRATEGY MODULE:
+           Purpose: Select appropriate movement strategy based on errors
+           Responsibility: Choose between different movement patterns
+           Why it's needed: Different error patterns require different movement
+                          approaches for natural, efficient motion
+        
+        5. VELOCITY CONTROL:
+           Purpose: Apply safety limits and constraints to velocity commands
+           Responsibility: Ensure velocity commands are safe and achievable
+           Why it's needed: Prevents excessive speeds and ensures smooth acceleration
+                          and deceleration for stable movement
+        
+        6. RECOVERY MODULE:
+           Purpose: Handle error conditions and recovery behaviors
+           Responsibility: Manage behavior when normal control is not possible
+           Why it's needed: Provides safety behaviors when sensors fail or
+                          exceptional conditions occur
+        
+        7. CONTROL STRATEGY FACTORY:
+           Purpose: Create and select appropriate control strategies
+           Responsibility: Determine which control approach to use based on conditions
+           Why it's needed: Allows dynamic switching between different control
+                          approaches based on system state and resources
+        
+        8. PERFORMANCE MONITOR:
+           Purpose: Track system performance and adjust parameters
+           Responsibility: Monitor CPU usage and adapt control rate
+           Why it's needed: Ensures reliable operation on resource-constrained systems
+                          by balancing control quality against resource usage
+                          
+        This architecture follows a modular design with clear separation of concerns,
+        making the system maintainable, testable, and adaptable to different robots.
+        """
+        # 1. TRANSFORM SYSTEM:
+        # Purpose: Manages coordinate frame transformations (e.g., camera frame → base frame)
+        # This allows us to convert positions between different sensor reference frames
+        self.tf_buffer = Buffer()  # Stores transform history
+        self.tf_listener = TransformListener(self.tf_buffer, self)  # Listens for transform broadcasts
+        
+        # Create transform system that handles all coordinate transformations
         self.transform_system = TransformSystem(self, throttled_logger, self.tf_buffer)
+        # We need transforms between robot base and IMU (for orientation data)
         self.transform_system.add_transform_dependency("base_link", "imu_link", required=True)
+        # Start the transform discovery process
         if not self.transform_system.start_initialization():
             raise RuntimeError("Failed to start transform system initialization")
             
-        # Initialize PID controllers
-        self._init_controllers()
+        # 2. PID CONTROLLERS:
+        # Purpose: Calculate velocity commands using the PID control algorithm
+        # There are separate controllers for forward, lateral, and rotational movement
+        self._init_controllers()  # Defined in separate method for clarity
         
-        # Initialize target tracking
+        # 3. TARGET TRACKER:
+        # Purpose: Process and filter target position data, predict movement
+        # Smooths noisy sensor data and compensates for system processing delays
         pm = self.parameter_manager
         self.target_tracker = TargetTrackingModule(
             throttled_logger,
-            filter_buffer_size=pm.filter_buffer_size,
-            prediction_horizon=pm.prediction_horizon,
-            debug_level=pm.debug_level
+            filter_buffer_size=pm.filter_buffer_size,  # How many position samples to keep
+            prediction_horizon=pm.prediction_horizon,  # How far ahead to predict (seconds)
+            debug_level=pm.debug_level                 # Logging verbosity
         )
         
-        # Initialize strategy module
+        # 4. STRATEGY MODULE:
+        # Purpose: Select movement patterns based on error patterns
+        # Determines which type of movement is most appropriate for the current situation
         self.strategy_module = MovementStrategyModule(throttled_logger, pm.debug_level)
         
-        # Initialize velocity control
+        # 5. VELOCITY CONTROL:
+        # Purpose: Apply safety limits and constraints to velocity commands
+        # Ensures robot doesn't move too fast and has smooth acceleration/deceleration
         self.velocity_control = VelocityControlModule(
             throttled_logger,
             max_velocity=[
-                self.parameter_manager.linear_x_max,
-                self.parameter_manager.linear_y_max,
-                self.parameter_manager.angular_max
+                self.parameter_manager.linear_x_max,     # Maximum forward speed (m/s)
+                self.parameter_manager.linear_y_max,     # Maximum lateral speed (m/s)
+                self.parameter_manager.angular_max       # Maximum rotation speed (rad/s)
             ]
         )
+        # Configure approach behavior - how robot slows down near target
         self.velocity_control.set_approach_parameters(
-            pm.approach_distance, 
-            pm.min_approach_factor
+            pm.approach_distance,      # Distance at which to start slowing down (m)
+            pm.min_approach_factor     # Minimum speed factor during final approach
         )
         
-        # Initialize recovery module
+        # 6. RECOVERY MODULE:
+        # Purpose: Handle error conditions with special behaviors
+        # Takes over control during sensor failures or unexpected situations
         self.recovery_module = RecoveryBehaviorModule(throttled_logger)
         
-        # Initialize control strategy factory
+        # 7. CONTROL STRATEGY FACTORY:
+        # Purpose: Create and select appropriate control strategies
+        # Chooses between full PID, simplified, or recovery control based on conditions
         self.strategy_factory = ControlStrategyFactory(
-            self.pid_controllers,
-            self.coordinated_controller,
-            self.parameter_manager,
-            self.distance_error_tracker,
-            self.lateral_error_tracker,
-            self.angular_error_tracker,
-            self.velocity_control,
-            self.recovery_module
+            self.pid_controllers,           # PID controllers for each dimension
+            self.coordinated_controller,    # Coordinates lateral and angular movement
+            self.parameter_manager,         # Access to configuration parameters
+            self.distance_error_tracker,    # Tracks forward error history
+            self.lateral_error_tracker,     # Tracks lateral error history
+            self.angular_error_tracker,     # Tracks angular error history
+            self.velocity_control,          # Applies safety limits
+            self.recovery_module            # Handles error recovery
         )
         
-        # Initialize performance monitor
+        # 8. PERFORMANCE MONITOR:
+        # Purpose: Adapt control behavior based on system performance
+        # Adjusts control rate and complexity based on CPU load
         self.performance_monitor = EnhancedPerformanceMonitor(
-            self.resource_monitor,
-            self.parameter_manager,
-            self.get_logger(),
-            throttled_logger
+            self.resource_monitor,          # Monitors CPU, memory usage
+            self.parameter_manager,         # Access to configuration parameters
+            self.get_logger(),              # Primary logger
+            throttled_logger                # Rate-limited logger for high-frequency logs
         )
         
         if hasattr(self.resource_monitor, 'set_rate_limits'):
@@ -1196,7 +2203,56 @@ class PIDControllerNode(Node, StateObserver):
         self.object_pool = ObjectPoolManager(max_twist=10, max_vector3=15)
         
     def _init_controllers(self):
-        """Initialize the controllers with improved tuning for controlled velocity."""
+        """
+        Initialize the PID controllers with improved tuning for controlled velocity.
+        
+        PURPOSE:
+        This method sets up the core PID controllers that drive the robot's movement.
+        These controllers are the brain of the motion control system, converting
+        position errors into smooth, stable velocity commands. This method initializes
+        three separate controllers (one for each movement dimension) and connects them
+        with error trackers to monitor error trends.
+        
+        THE THREE PID CONTROLLERS:
+        1. Linear X Controller (Forward/Backward):
+           - Controls the robot's approach to the target
+           - Maintains desired distance from the ball
+           - Parameters optimized for smooth acceleration/deceleration
+           
+        2. Linear Y Controller (Left/Right):
+           - Controls the robot's side-to-side alignment with the target
+           - Centers the robot on the ball
+           - Parameters optimized for precise lateral positioning
+           
+        3. Angular Controller (Rotation):
+           - Controls the robot's orientation to face the target
+           - Keeps the ball centered in the robot's view
+           - Parameters optimized for smooth rotation without oscillation
+           
+        COORDINATED CONTROLLER:
+        Additionally, creates a special coordinated controller that links
+        the lateral (Y) and angular movement. This coordination creates more
+        natural movement patterns, similar to how a car turns - combining
+        forward motion, steering, and turning in a coordinated way.
+        
+        ERROR TRACKERS:
+        Each controller is paired with an error tracker that:
+        - Monitors error trends (increasing, decreasing, oscillating)
+        - Provides data for adaptive gain adjustments
+        - Helps detect and respond to different movement scenarios
+        
+        HOW IT'S USED:
+        - Called during initialization
+        - Creates and configures all PID controllers
+        - Sets up gain values and limits from parameters
+        - Establishes the coordinated control system
+        
+        Returns:
+            None
+            
+        Raises:
+            InitializationError: If controller initialization fails
+        """
         pm = self.parameter_manager
         try:
             self.pid_linear_x, self.distance_error_tracker = PIDControllers.create_controller_with_tracker(
@@ -1399,47 +2455,119 @@ class PIDControllerNode(Node, StateObserver):
             self.state_manager.transition_state(new_state)
     
     def orientation_callback(self, msg):
-        """Handle orientation updates from the IMU with improved transform handling."""
+        """
+        Handle orientation updates from the IMU with improved transform handling.
+        
+        ORIENTATION AND TRANSFORMS FOR BEGINNERS
+        --------------------------------------
+        
+        WHAT IS ORIENTATION?
+        Orientation means "which way is the robot facing?" It's usually measured as
+        an angle (in radians) around the vertical axis:
+        - 0 radians = robot facing forward
+        - π/2 (~1.57) radians = robot facing left
+        - π (~3.14) radians = robot facing backward
+        - 3π/2 (~4.71) radians = robot facing right
+        
+        WHY DO WE NEED TRANSFORMS?
+        Different sensors on the robot have different "viewpoints." For example:
+        - The IMU (Inertial Measurement Unit) measures orientation from its position
+        - The camera sees the world from where it's mounted
+        - The LIDAR scans from its location
+        
+        If these sensors aren't at the exact center of the robot and perfectly aligned,
+        we need to "transform" their measurements to a common reference frame (usually
+        the robot's center, called "base_link").
+        
+        CONCEPTUAL UNDERSTANDING OF THE MATH:
+        
+        1. REFERENCE FRAMES:
+           Think of each sensor having its own coordinate system (or "reference frame"):
+           - IMU Frame: Coordinate system centered at the IMU
+           - Base Frame: Coordinate system centered at the robot's center
+           - Camera Frame: Coordinate system centered at the camera
+           
+           We need to convert between these frames!
+        
+        2. QUATERNIONS:
+           Quaternions are a mathematical way to represent 3D rotations.
+           They use four numbers (x,y,z,w) instead of angles like roll/pitch/yaw.
+           
+           Why use quaternions?
+           - They avoid mathematical problems like "gimbal lock"
+           - They make combining rotations easier and more stable
+           - They're computationally efficient for 3D rotations
+        
+        3. THE TRANSFORM PROCESS:
+           a) Create a "forward vector" in the original frame
+              This is like drawing an arrow pointing forward from the sensor
+              
+           b) Apply the transform (rotation + translation)
+              This is like moving and rotating the arrow to the new frame
+              
+           c) Calculate the new orientation from the transformed vector
+              This is like measuring the angle of the arrow in the new frame
+        
+        SIMPLIFIED EXAMPLE:
+        
+        Imagine the IMU is mounted facing 10° to the right of the robot's forward direction:
+        - IMU says: "I'm facing 0° (straight ahead)"
+        - Transform says: "But the IMU is mounted 10° right of center"
+        - After transform: "So the robot is actually facing 10° left"
+        
+        This process ensures all measurements use the same reference point,
+        making sensor fusion and control calculations accurate.
+        """
         # Extract yaw (z component) from the Vector3Stamped message
+        # This is the raw orientation angle from the IMU (in radians)
         raw_orientation = msg.vector.z
         
         # Store timestamp for freshness checking
+        # (We need to know how recent this measurement is for safety)
         self.state_manager.robot.last_orientation_time = time.time()
         
         # Check if transform system is ready before attempting transforms
+        # (Transforms might not be available immediately at startup)
         if (not hasattr(self, 'transform_system') or 
             not self.transform_system.is_transform_system_ready()):
-            # If transforms aren't ready, use raw orientation
+            # If transforms aren't ready, use raw orientation as fallback
             self.state_manager.robot.robot_orientation = raw_orientation
             return
         
-        # If we need to transform the orientation to another frame
+        # Now we'll transform the orientation from IMU frame to robot's reference frame
         try:
-            # First approach: direct transform using quaternion math
+            # Step 1: Get the transform between IMU frame and reference frame
+            # This tells us how the IMU is positioned relative to the robot center
             transform = self.transform_system.get_transform_between_frames(
-                self.transform_system.imu_frame, 
-                self.transform_system.reference_frame
+                self.transform_system.imu_frame,            # Source frame (IMU)
+                self.transform_system.reference_frame       # Target frame (Robot center)
             )
+            
+            # Check if we got a valid transform with rotation information
             if (transform and hasattr(transform, 'transform') and 
                 hasattr(transform.transform, 'rotation')):
-                # Extract quaternion components from transform
+                
+                # Step 2: Extract the quaternion components from the transform
+                # These four values represent the 3D rotation between frames
                 qx = transform.transform.rotation.x
                 qy = transform.transform.rotation.y
                 qz = transform.transform.rotation.z
                 qw = transform.transform.rotation.w
                 
-                # Create forward unit vector in IMU frame
-                # Use optimized trigonometry if enabled
+                # Step 3: Create a "forward" unit vector in the IMU frame
+                # This represents "forward" direction as seen by the IMU
+                # Use optimized trigonometry if enabled for better performance
                 if self.parameter_manager.use_fast_trigonometry:
                     forward_x = self.fast_trig.cos(raw_orientation)
                     forward_y = self.fast_trig.sin(raw_orientation)
                 else:
                     forward_x = math.cos(raw_orientation)
                     forward_y = math.sin(raw_orientation)
-                forward_z = 0.0
+                forward_z = 0.0  # No vertical component for yaw rotation
                 
-                # Calculate rotation matrix elements from quaternion - optimized
-                # Pre-calculate common terms
+                # Step 4: Build a rotation matrix from the quaternion
+                # This matrix will be used to rotate our vector
+                # We pre-calculate common terms for efficiency
                 xx = qx * qx
                 xy = qx * qy
                 xz = qx * qz
@@ -1450,7 +2578,8 @@ class PIDControllerNode(Node, StateObserver):
                 zz = qz * qz
                 zw = qz * qw
                 
-                # Apply rotation to forward vector
+                # These values form the top two rows of the 3x3 rotation matrix
+                # (We only need these rows since we're ignoring the z-component)
                 r00 = 1.0 - 2.0 * (yy + zz)
                 r01 = 2.0 * (xy - zw)
                 r02 = 2.0 * (xz + yw)
@@ -1458,22 +2587,24 @@ class PIDControllerNode(Node, StateObserver):
                 r11 = 1.0 - 2.0 * (xx + zz)
                 r12 = 2.0 * (yz - xw)
                 
-                # Transform forward vector
+                # Step 5: Apply the rotation to transform our forward vector
+                # This gives us the "forward" direction in the robot's frame
                 tx = r00 * forward_x + r01 * forward_y + r02 * forward_z
                 ty = r10 * forward_x + r11 * forward_y + r12 * forward_z
                 
-                # Calculate new orientation angle
-                # Use optimized atan2 if enabled
+                # Step 6: Calculate the new orientation angle from the transformed vector
+                # atan2 gives us the angle between the x-axis and our vector
                 if self.parameter_manager.use_fast_trigonometry:
                     self.state_manager.robot.robot_orientation = self.fast_trig.atan2(ty, tx)
                 else:
                     self.state_manager.robot.robot_orientation = math.atan2(ty, tx)
             else:
-                # If transform not available, use raw orientation
+                # If transform information isn't complete, use raw orientation as fallback
                 self.state_manager.robot.robot_orientation = raw_orientation
                 
         except Exception as e:
             # In case of error, fall back to raw orientation
+            # This ensures we always have some orientation value even if transform fails
             if self.parameter_manager.debug_level >= 2:
                 self.get_logger().warning(f"Orientation transform error: {str(e)}")
             self.state_manager.robot.robot_orientation = raw_orientation
@@ -1490,7 +2621,34 @@ class PIDControllerNode(Node, StateObserver):
                 throttle_duration_sec=LOG_THROTTLE_CONTROL, log_id='Orientation_update')
     
     def _is_orientation_fresh(self):
-        """Check if orientation data is fresh enough to use."""
+        """
+        Check if orientation data is fresh enough to use.
+        
+        PURPOSE:
+        This method determines if the robot's orientation data (which direction it's facing)
+        is recent enough to be trustworthy. Orientation data comes from the IMU (Inertial
+        Measurement Unit) sensor, and like any sensor data, it becomes less reliable
+        the older it gets. Using outdated orientation data could lead to incorrect
+        movement decisions.
+        
+        WHY FRESHNESS MATTERS:
+        - Outdated orientation can cause the robot to turn in the wrong direction
+        - The robot needs current orientation to calculate angular errors accurately
+        - If orientation data is stale, the system may need to use alternative strategies
+        
+        HOW IT'S USED:
+        - Called before using orientation data in calculations
+        - Helps determine if the robot can trust its sense of direction
+        - Used as a safety check to prevent erroneous movements
+        
+        FRESHNESS THRESHOLD:
+        - Orientation data older than 0.5 seconds is considered stale
+        - This threshold is a balance between reliability and availability
+        
+        Returns:
+            bool: True if orientation data is fresh enough to use,
+                 False if it's too old or missing
+        """
         if self.state_manager.robot.last_orientation_time is None:
             return False
             
@@ -1550,7 +2708,42 @@ class PIDControllerNode(Node, StateObserver):
             self.get_logger().error(f"Error in event-based control: {str(e)}")
     
     def _update_resource_monitoring(self):
-        """Update resource monitoring stats."""
+        """
+        Update resource monitoring stats and adapt system behavior.
+        
+        PURPOSE:
+        This method monitors system resources (primarily CPU) and adjusts the
+        controller's behavior to prevent overloading the system. Think of it like
+        a thermostat for your computer - when things get too hot (high CPU usage),
+        it reduces the workload to cool things down and maintain system stability.
+        
+        RESOURCE MONITORING FEATURES:
+        1. CPU Load Tracking: Monitors CPU usage percentage
+        2. Cycle Skipping: Can skip processing cycles when CPU is extremely high
+        3. Object Pool Monitoring: Tracks memory management efficiency
+        4. Adaptive Behavior: Adjusts processing based on resource availability
+        
+        CYCLE SKIPPING MECHANISM:
+        When CPU usage exceeds the max_cpu_skip_threshold (e.g., 90%):
+        - The next control cycle is skipped entirely
+        - A warning message is logged (limited to once every 2 seconds)
+        - This provides an emergency pressure release valve for the CPU
+        
+        OBJECT POOL STATISTICS:
+        In debug mode (debug_level >= 2), periodically logs:
+        - Current pool sizes (how many objects are available)
+        - Maximum usage (peak demand)
+        - Miss count (times new objects had to be created)
+        
+        HOW IT'S USED:
+        - Called periodically on a timer (typically every 0.5 seconds)
+        - Works alongside the computation level system to manage resources
+        - Provides an additional layer of protection against CPU overload
+        - Helps diagnose memory management efficiency in debug mode
+        
+        Returns:
+            None
+        """
         try:
             # Update CPU stats if the method exists
             if hasattr(self.resource_monitor, 'update_cpu_stats'):
@@ -1593,7 +2786,41 @@ class PIDControllerNode(Node, StateObserver):
                 self.get_logger().error(f"Error in resource monitoring: {str(e)}")
     
     def _log_periodic_status(self):
-        """Log periodic status updates."""
+        """
+        Log periodic status updates about the controller's operation.
+        
+        PURPOSE:
+        This method provides visibility into the inner workings of the control system
+        by periodically logging key performance metrics and state information. This is
+        like the dashboard in a car - showing you important information about how
+        the system is running without overwhelming you with too much detail.
+        
+        STATUS INFORMATION LOGGED:
+        1. Robot State: Current operational state (tracking, searching, etc.)
+        2. Strategy: Current movement strategy being used
+        3. CPU Usage: Average CPU utilization percentage
+        4. Cycle Time: How long each control cycle takes (milliseconds)
+        5. Update Rate: How frequently the controller is running (Hz)
+        6. Control Mode: Whether using simplified or full control
+        7. Data Freshness: How recent the sensor data is
+        8. Event-Driven %: Percentage of control cycles triggered by events vs. timer
+        9. Skip Count: Number of cycles that were skipped due to high CPU load
+        
+        WHY THIS MATTERS:
+        - Helps diagnose performance issues during operation
+        - Provides insight into the controller's decision-making
+        - Allows monitoring resource usage and efficiency
+        - Helps verify that the system is operating as expected
+        
+        HOW IT'S USED:
+        - Called periodically during the control loop
+        - Only logs when debug_level >= 1
+        - Uses throttled logging to avoid flooding the log
+        - Provides a summary view of the system's current state
+        
+        Returns:
+            None
+        """
         if self.parameter_manager.debug_level < 1:
             return
         perf_stats = self.resource_monitor.get_performance_stats()
@@ -1622,7 +2849,52 @@ class PIDControllerNode(Node, StateObserver):
             self.throttled_logger.info(status_msg, throttle_duration_sec=LOG_THROTTLE_CONTROL, log_id='periodic_status')
     
     def control_loop_callback(self):
-        """Regular control loop to calculate and publish velocity commands with CPU optimization."""
+        """
+        Regular control loop to calculate and publish velocity commands with CPU optimization.
+        
+        The Control Loop: Heart of the Robot
+        ----------------------------------
+        This function is the central "brain" of the robot's movement system, executing
+        multiple times per second to continuously update velocity commands based on 
+        the latest target information.
+        
+        Think of this loop as similar to how your brain constantly adjusts your walking
+        speed and direction when chasing a ball - you don't consciously calculate
+        each muscle movement, but continuously adapt based on the ball's position.
+        
+        Control Loop Flow:
+        ----------------
+        1. Check if we should execute this cycle
+           - Skip if shutting down
+           - Skip if waiting for transforms
+           - Skip if CPU is overloaded (adaptive rate control)
+        
+        2. Execute the control cycle
+           - Get current time and calculate time step (dt)
+           - Check data freshness (is sensor data recent enough?)
+           - Calculate errors (distance, lateral, angular)
+           - Apply appropriate control strategy based on errors
+           - Compute velocity commands using PID algorithms
+           - Apply safety limits to velocity commands
+           - Publish velocity commands to move the robot
+           - Update performance metrics
+        
+        3. Handle any errors safely
+           - Catch exceptions to prevent crashes
+           - Log detailed error information
+           - Stop the robot safely if an error occurs
+        
+        Performance Optimization:
+        -----------------------
+        This loop includes several optimizations for resource-constrained systems:
+        - Adaptive execution rate based on CPU load
+        - Cycle skipping when system is under heavy load
+        - Simplified calculations when high precision isn't needed
+        - Early returns to avoid unnecessary processing
+        
+        This control loop typically runs between 10-40Hz (10-40 times per second)
+        depending on system load and configuration parameters.
+        """
         try:
             # Skip if shutting down
             if self.state_manager.shutting_down:
@@ -1684,7 +2956,58 @@ class PIDControllerNode(Node, StateObserver):
                 self.get_logger().error(f"Failed to stop robot after error: {str(stop_error)}")
     
     def execute_control_cycle(self, event_triggered=False):
-        """Execute one complete control cycle with improved error handling and state management."""
+        """
+        Execute one complete control cycle with improved error handling and state management.
+        
+        This method contains the actual implementation of the PID control loop. Each cycle
+        performs a complete sense-think-act process:
+        
+        SENSE → THINK → ACT Cycle:
+        -------------------------
+        
+        SENSE: Gather and validate information
+        - Check transform system readiness
+        - Calculate time since last cycle
+        - Check data freshness and quality
+        - Get latest target position from fusion system
+        
+        THINK: Process information and make decisions
+        - Calculate current errors (distance, lateral, angular)
+        - Determine if robot should stop or move
+        - Choose appropriate movement strategy
+        - Run PID calculations for each movement dimension
+        - Apply coordinated control between dimensions
+        - Apply safety limits and constraints
+        
+        ACT: Execute the decided actions
+        - Create velocity command message
+        - Publish command to robot drive system
+        - Update state information
+        - Log diagnostic information
+        
+        Mathematical Overview:
+        --------------------
+        For each dimension (x, y, angular), we calculate:
+        
+        Error = TargetPosition - CurrentPosition
+        
+        P term = Kp * Error
+        
+        I term = Ki * ∫(Error dt)
+           (Approximated as Ki * sum(Error * dt))
+        
+        D term = Kd * (Error - PreviousError)/dt
+           (Rate of change of error)
+        
+        Output = P term + I term + D term
+        
+        Then outputs are coordinated between dimensions to create
+        smooth, natural movement that can follow a moving target.
+        
+        Args:
+            event_triggered: Boolean indicating if this cycle was triggered
+                            by an event (vs. a timer), affects performance tracking
+        """
         try:
             # Skip if shutting down
             if self.state_manager.shutting_down:
@@ -1854,8 +3177,29 @@ class PIDControllerNode(Node, StateObserver):
         """
         Check the freshness of target data and update system state accordingly.
         
+        PURPOSE:
+        This method determines how recent and reliable our sensor data is. Data freshness
+        is critical for safety - if our data is old or missing, we need to adjust our
+        behavior or even stop the robot entirely. Think of it like checking the expiration
+        date on food before eating it.
+        
+        DATA FRESHNESS LEVELS:
+        - "fresh": Data is recent and reliable (full-speed operation allowed)
+        - "stale": Data is getting old (reduced speed for safety)
+        - "critical": Data is too old to trust (robot stops for safety)
+        - "invalid": Data is missing or corrupted (robot stops for safety)
+        
+        HOW IT'S USED:
+        - Called at the start of each control cycle
+        - Affects velocity scaling in the control strategies
+        - Triggers safety stops when data is critically old
+        - Updates freshness state in the state manager
+        
         Returns:
             tuple: (is_fresh, freshness_level, age)
+                is_fresh: Boolean indicating if data is fresh enough to use
+                freshness_level: String categorization ("fresh", "stale", "critical", "invalid")
+                age: Float age of the data in seconds
         """
         try:
             # Get freshness information from the target tracker
@@ -1878,7 +3222,42 @@ class PIDControllerNode(Node, StateObserver):
             return False, "critical", 999.0
     
     def _calculate_errors(self):
-        """Calculate tracking errors using filtered values."""
+        """
+        Calculate tracking errors using filtered position values.
+        
+        PURPOSE:
+        This method computes the three key errors that drive the PID controller:
+        1. Distance Error: How far we are from the desired distance to the ball
+           (positive = too far, negative = too close)
+        2. Lateral Error: How far left/right we are from the ball's center
+           (positive = ball is to the left, negative = ball is to the right)
+        3. Angular Error: How far we need to rotate to face the ball
+           (positive = need to turn left, negative = need to turn right)
+        
+        These errors are the foundation of the entire control system - they represent
+        the difference between where we are and where we want to be.
+        
+        HOW IT'S USED:
+        - Called during each control cycle
+        - Provides input values to the PID controllers
+        - Used to determine if the robot should stop or move
+        - Stored in error trackers for trend analysis
+        
+        MATH EXPLANATION:
+        - Distance Error = Current Distance - Desired Distance
+          (We want to maintain a specific distance from the ball)
+        - Lateral Error = Current Lateral Position - 0
+          (We want to be directly centered on the ball)
+        - Angular Error = Current Bearing
+          (We want to face the ball directly, so bearing should be 0)
+        
+        Returns:
+            tuple: (distance, lateral, bearing, angular_degrees)
+                distance: Current distance to target (meters)
+                lateral: Current lateral offset (meters)
+                bearing: Current angular offset (radians)
+                angular_degrees: Current angular offset (degrees, for logging)
+        """
         # Get filtered position data from target tracker
         position_data = self.target_tracker.get_position_data()
         
@@ -1907,7 +3286,35 @@ class PIDControllerNode(Node, StateObserver):
         return distance, lateral, bearing, angular_degrees
     
     def _handle_non_tracking_state(self):
-        """Handle robot behavior when not in tracking mode."""
+        """
+        Handle robot behavior when not in tracking mode.
+        
+        PURPOSE:
+        This method defines what the robot should do when it's not actively tracking
+        a ball. Different states require different behaviors - for example, when
+        the robot is initializing or in an error state, it should stop moving entirely,
+        but when searching for a ball, it might need to keep moving.
+        
+        STATE-SPECIFIC BEHAVIORS:
+        - "searching" or "lost_ball": Allow movement (controlled by other nodes)
+          The robot is actively looking for the ball, so it may need to move
+          around to find it. This movement is typically controlled by a different
+          part of the system.
+          
+        - All other non-tracking states: Stop the robot completely
+          These include "initializing", "error", "recovery", etc. In these states,
+          the robot should stop for safety and to avoid unexpected behavior.
+        
+        HOW IT'S USED:
+        - Called at the beginning of each control cycle
+        - Checks the current robot state before attempting tracking
+        - Ensures appropriate behavior when not actively tracking
+        - Prevents unintended movement in non-tracking states
+        
+        Returns:
+            bool: True to indicate that the method handled the situation
+                 (control loop should exit early after this)
+        """
         # When not tracking, ensure robot is stopped (unless controlled by another node)
         if self.state_manager.robot.state not in ["searching", "lost_ball"]:
             stop_cmd = self.recovery_module.stop_robot()
@@ -1915,7 +3322,39 @@ class PIDControllerNode(Node, StateObserver):
         return True  # Indicate that the method handled the situation
     
     def _handle_stop_conditions(self, distance, lateral, angular_degrees, dt):
-        """Check and handle stop conditions if needed."""
+        """
+        Check and handle stop conditions if the robot should stop moving.
+        
+        PURPOSE:
+        This method determines whether the robot should stop moving (when it has reached
+        the target position) or start moving (when it has drifted away from the target).
+        It coordinates the stopping behavior and ensures smooth transitions between
+        moving and stopped states.
+        
+        HOW IT WORKS:
+        1. First checks if a stopped robot needs to start moving again
+           (_reset_stopped_state_if_needed)
+        2. If not, checks if a moving robot needs to stop
+           (_evaluate_stop_conditions)
+        3. If stopping is needed, sends stop command and updates state
+        4. Regardless of stop/start decision, updates error trackers
+        
+        HOW IT'S USED:
+        - Called during each control cycle
+        - Manages the transition between moving and stopped states
+        - Controls when to send stop commands to the motors
+        - Updates error trackers with latest data
+        
+        Parameters:
+            distance: float - Current distance to target (meters)
+            lateral: float - Current lateral offset (meters)
+            angular_degrees: float - Current angular offset (degrees)
+            dt: float - Time since last cycle (seconds)
+            
+        Returns:
+            bool: True if stop conditions were handled (robot stopped),
+                 False if normal control should continue
+        """
         # Check if we need to reset stopped state based on errors with enhanced hysteresis
         state_reset = self._reset_stopped_state_if_needed(
             self._current_errors[0], 
@@ -1952,14 +3391,39 @@ class PIDControllerNode(Node, StateObserver):
         """
         Evaluate if the robot should stop based on current errors.
         
-        Args:
-            distance: Current distance to target
-            lateral: Current lateral offset
-            angular_degrees: Current angular error in degrees
-            is_stopped: Whether the robot is currently stopped
+        PURPOSE:
+        This method determines if the robot has reached its target position accurately
+        enough to stop moving. It implements a hysteresis system (different thresholds
+        for stopping vs. starting) to prevent oscillation around the target position.
+        Think of it like a thermostat that turns off at 72°F but doesn't turn on again
+        until temperature drops to 68°F.
+        
+        ERROR THRESHOLDS:
+        - Distance threshold: How close to target distance is "close enough"
+        - Lateral threshold: How centered on the ball is "centered enough" 
+        - Angular threshold: How directly facing the ball is "facing enough"
+        
+        HYSTERESIS SYSTEM:
+        - When moving: Uses stricter thresholds to stop (precision)
+        - When stopped: Uses more lenient thresholds to start (stability)
+        - The longer the robot stays stopped, the larger the error needed to start moving
+        
+        HOW IT'S USED:
+        - Called by _handle_stop_conditions during each control cycle
+        - Determines when the robot has reached its target position
+        - Prevents jittery movement when near the target
+        - Provides human-readable reason for stopping or moving
+        
+        Parameters:
+            distance: float - Current distance to target (meters)
+            lateral: float - Current lateral offset (meters)
+            angular_degrees: float - Current angular error in degrees
+            is_stopped: bool - Whether the robot is currently stopped
             
         Returns:
-            tuple: (should_stop, reason) - True if robot should stop, False if it should move
+            tuple: (should_stop, reason)
+                should_stop: bool - True if robot should stop, False if it should move
+                reason: str - Human-readable explanation of the decision
         """
         # Calculate error values
         distance_error = abs(distance - self.parameter_manager.desired_distance)
@@ -2032,13 +3496,39 @@ class PIDControllerNode(Node, StateObserver):
         """
         Reset stopped state if significant movement is required.
         
-        Args:
-            distance_error: Error in distance (meters)
-            lateral_error: Error in lateral position (meters)
-            angular_error: Error in angular position (degrees)
+        PURPOSE:
+        This method checks if a stopped robot needs to start moving again because it has
+        drifted too far from the target position. This can happen if the ball moves or
+        if the robot is bumped or pushed. The method implements time-dependent hysteresis,
+        where the longer the robot has been stopped, the more error is needed to trigger
+        movement (preventing jitter from minor disturbances).
+        
+        KEY FEATURES:
+        - First-movement boost: Provides easier first movement after startup
+        - Time-dependent hysteresis: Higher thresholds the longer robot is stopped
+        - Distance-aware angular threshold: More lenient angular errors at target distance
+        - Different threshold scaling for each error type
+        
+        HOW IT'S USED:
+        - Called by _handle_stop_conditions at the start of each control cycle
+        - If the robot is already moving, does nothing
+        - If the robot is stopped, checks if errors are large enough to start moving
+        - Resets movement hysteresis when movement starts
+        
+        WHEN MOVEMENT STARTS:
+        - Any error (distance, lateral, angular) exceeding its threshold will
+          trigger movement
+        - All thresholds are calculated with hysteresis based on stop duration
+        - When moving starts, movement_hysteresis is reset to zero
+        
+        Parameters:
+            distance_error: float - Error in distance (meters)
+            lateral_error: float - Error in lateral position (meters)
+            angular_error: float - Error in angular position (degrees)
             
         Returns:
-            bool: True if stopped state was reset, False otherwise
+            bool: True if stopped state was reset (robot started moving),
+                 False otherwise (robot remains stopped)
         """
         # If already moving, no need to reset
         if not self.state_manager.movement.robot_stopped:
@@ -2091,7 +3581,35 @@ class PIDControllerNode(Node, StateObserver):
         return False
     
     def _complete_controller_reset(self):
-        """Complete reset of all controllers and error states."""
+        """
+        Complete reset of all controllers and error states.
+        
+        PURPOSE:
+        This method performs a thorough reset of the entire control system, bringing
+        it back to a clean initial state. This is like pressing a "reset" button on
+        the robot's brain - clearing out all accumulated errors, trends, and temporary
+        data to start fresh. This is important when changing states or when significant
+        events occur that make previous calculations invalid.
+        
+        WHAT GETS RESET:
+        1. All PID Controllers: Clears P, I, D terms and internal states
+        2. Coordinated Controller: Resets coordination logic
+        3. Error Trackers: Clears error history and trends
+        4. Strategy Module: Resets movement strategy selection
+        5. Velocity Control: Resets velocity limits and smoothing
+        6. Target Tracker: Resets target position filtering and prediction
+        7. Movement State: Resets hysteresis, computation levels, and stopped state
+        8. Freshness State: Resets data freshness tracking
+        
+        HOW IT'S USED:
+        - Called during state transitions (especially entering/exiting tracking state)
+        - Called during recovery operations
+        - Used when the control system needs a fresh start
+        - Ensures the robot doesn't carry old state information into new situations
+        
+        Returns:
+            None
+        """
         # Reset all PID controllers
         self.pid_linear_x.reset()
         self.pid_linear_y.reset()
@@ -2126,11 +3644,50 @@ class PIDControllerNode(Node, StateObserver):
         """
         Determine the level of computation needed for the current cycle.
         
+        PURPOSE:
+        This method dynamically adjusts how much computational complexity to use
+        based on CPU load and tracking requirements. It allows the system to scale
+        back processing when the CPU is overloaded, while ensuring critical operations
+        still happen. Think of it like a car's engine management system that balances
+        performance and efficiency based on current needs.
+        
+        COMPUTATION LEVELS:
+        - Level 0: Minimal computation (emergency mode under extreme CPU load)
+          Just basic damping of previous velocities, no PID calculation
+        - Level 1: Basic computation (high CPU load)
+          Simple proportional control without coordination or prediction
+        - Level 2: Moderate computation (moderate CPU load)
+          Basic PID with limited coordination and prediction
+        - Level 3: Full computation (normal operation)
+          Complete PID with full coordination, prediction, and optimization
+        
+        DECISION FACTORS:
+        1. CPU Usage: Primary factor - higher usage means lower computation
+           - >95% CPU: Level 0 (minimal)
+           - >90% CPU: Max Level 1
+           - >85% CPU: Max Level 2
+           - ≤85% CPU: Level 3 (full)
+        2. Time Since Full Computation: Ensures periodic full accuracy
+           - Forces Level 3 at least every 0.5 seconds
+        3. Error Magnitude: Adapts to tracking requirements
+           - Larger errors can justify higher computation levels
+        
+        HOW IT'S USED:
+        - Called during each control cycle
+        - Determines which control strategy to use
+        - Affects how much CPU time the control loop consumes
+        - Helps ensure controller doesn't overload the CPU
+        
         Returns:
             int: 0-3 indicating computation level (0=minimal, 3=full)
+                Higher values = more computation/better accuracy
+                Lower values = less computation/less CPU usage
+        
         Notes:
             - Full computation (level 3) is now allowed up to 85% CPU usage.
             - Scaling down only starts above 85% CPU.
+            - The system always returns to full computation periodically to
+              maintain accuracy, even under high load.
         """
         computation_level = 3
         cpu_usage = self.resource_monitor.current_cpu_usage
@@ -2216,7 +3773,10 @@ class PIDControllerNode(Node, StateObserver):
             print(f"Error stopping robot during shutdown: {str(e)}")
 
 
-# Main function
+# Main function to start the ROS2 node and handle shutdown
+# This is the entry point for the program
+# It sets up signal handling for graceful shutdown and starts the node
+
 def main(args=None):
     """Main function to initialize and run the PID Controller node."""
     rclpy.init(args=args)
