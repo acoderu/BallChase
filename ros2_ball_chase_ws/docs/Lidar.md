@@ -212,8 +212,7 @@ xychart-beta
     x-axis "X Distance (meters)" 
     y-axis "Y Distance (meters)"
     line [0, 0, 0, 0, 0, 0, 0, 0, 0]
-    scatter [1.0, 1.2, 1.1, 1.3, 1.2, 1.0, 0.9, 1.1, 1.2]
-    scatter [2.0, 0.8, -0.9, -2.1, -2.0, -1.8, -1.0, 0.5, 1.8]
+    scatter [1.0, 1.2, 1.1, 1.3, 1.2, 1.0, 0.9, 1.1, 1.2, 2.0, 0.8, -0.9, -2.1, -2.0, -1.8, -1.0, 0.5, 1.8]
 ```
 
 <div style="text-align: center; margin-top: 10px; margin-bottom: 20px;">
@@ -890,17 +889,17 @@ $$d_{3D} = \left| \sqrt{(x - h)^2 + (y - k)^2 + (z - l)^2} - r \right|$$
 
 ```mermaid
 %%{init: {"theme": "neutral", "themeVariables": {"fontSize": "14px"}}}%%
-graph TB
+flowchart TB
     subgraph "2D LIDAR Detection"
         A[2D LIDAR Scan] --> B[2D Point Cloud]
         B --> C[Circle Fitting]
-        C --> D[Circle Parameters<br/>(h,k,r)]
+        C --> D["Circle Parameters<br/>(h,k,r)"]
     end
     
     subgraph "3D LIDAR Detection"
         E[3D LIDAR Scan] --> F[3D Point Cloud]
         F --> G[Sphere Fitting]
-        G --> H[Sphere Parameters<br/>(h,k,l,r)]
+        G --> H["Sphere Parameters<br/>(h,k,l,r)"]
     end
     
     A -.-> |"More<br/>dimensions"| E
@@ -1707,15 +1706,59 @@ This section provides visual analysis of sensor fusion performance compared to s
 The following chart illustrates detection accuracy across different scenarios, comparing LIDAR-only, camera-only, and fusion approaches:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"primaryColor": "#00758f", "primaryTextColor": "#ffffff", "primaryBorderColor": "#00758f", "lineColor": "#555555", "secondaryColor": "#006100", "tertiaryColor": "#fff8dc", "fontSize": "14px"}}}%%
-xychart-beta
-    title "Detection Accuracy By Method and Scenario"
-    x-axis "Distance (meters)" [1, 2, 3, 4, 5, 6, 7]
-    y-axis "Accuracy (%)" [0, 20, 40, 60, 80, 100]
-    bar [98, 96, 94, 91, 85, 79, 65] "Sensor Fusion"
-    bar [98, 95, 87, 78, 68, 60, 51] "LIDAR Only"
-    bar [95, 93, 90, 88, 85, 82, 78] "Camera Only"
+%%{init: {"theme": "neutral"}}%%
+flowchart TD
+    subgraph Diagram ["Detection Accuracy By Method and Distance"]
+        style Diagram fill:#f5f5f5,stroke:#333,stroke-width:1px
+        
+        subgraph DistanceRanges ["Distance Ranges"]
+            D1["Close<br/>(1-2m)"]
+            D2["Medium<br/>(3-5m)"]
+            D3["Far<br/>(6-7m)"]
+        end
+        
+        subgraph SensorFusion ["Sensor Fusion Accuracy"]
+            style SensorFusion fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+            SF1["95-98%"] --- D1
+            SF2["85-94%"] --- D2
+            SF3["65-79%"] --- D3
+        end
+        
+        subgraph LidarOnly ["LIDAR-Only Accuracy"]
+            style LidarOnly fill:#ffebee,stroke:#c62828,stroke-width:2px
+            LO1["95-98%"] --- D1
+            LO2["68-87%"] --- D2
+            LO3["51-60%"] --- D3
+        end
+        
+        subgraph CameraOnly ["Camera-Only Accuracy"]
+            style CameraOnly fill:#e8f5e9,stroke:#388e3c,stroke-width:2px
+            CO1["93-95%"] --- D1
+            CO2["85-90%"] --- D2
+            CO3["78-82%"] --- D3
+        end
+    end
+
+    IntTitle["Key Insights:"]
+    Int1["• At close range, all methods perform similarly (93-98%)"]
+    Int2["• At medium range, fusion maintains higher accuracy than LIDAR alone"]
+    Int3["• At far range, camera outperforms LIDAR, but fusion is best overall"]
+    Int4["• Fusion provides the most consistent performance across all ranges"]
+    
+    IntTitle --> Int1
+    IntTitle --> Int2
+    IntTitle --> Int3
+    IntTitle --> Int4
+    
+    classDef insights fill:#fff8dc,stroke:#ff9800,stroke-width:1px,rx:5,ry:5
+    class IntTitle,Int1,Int2,Int3,Int4 insights
 ```
+
+Key observations:
+- At close ranges (1-2m), all methods perform similarly with 93-98% accuracy
+- At medium ranges (3-5m), fusion maintains high accuracy (85-94%) while LIDAR-only degrades (68-87%)
+- At longer ranges (6-7m), camera accuracy (78-82%) exceeds LIDAR (51-60%), but fusion (65-79%) outperforms both
+- Sensor fusion provides the most consistent performance across all distance ranges
 
 Key observations:
 - At close ranges (<2m), all methods perform similarly
@@ -1789,41 +1832,18 @@ timeline
 
 The heatmap below shows error rates in different scenarios when using sensor fusion:
 
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"primaryColor": "#00758f", "primaryTextColor": "#ffffff", "primaryBorderColor": "#00758f", "lineColor": "#555555", "secondaryColor": "#006100", "tertiaryColor": "#fff8dc", "fontSize": "14px"}}}%%
-heatmap
-    title "Error Rates in Different Conditions"
-    x-axis "Basketball Speed" ["0 m/s", "1 m/s", "2 m/s", "3 m/s", ">3 m/s"]
-    y-axis "Detection Mode" ["Fusion (optimal)", "Fusion (LIDAR priority)", "Fusion (camera priority)", "LIDAR only", "Camera only"]
-    (0,0) 0.2
-    (1,0) 0.8
-    (2,0) 1.4
-    (3,0) 4.2
-    (4,0) 12.6
-    (0,1) 0.4
-    (1,1) 1.2
-    (2,1) 2.5
-    (3,1) 8.7
-    (4,1) 18.3
-    (0,2) 0.9
-    (1,2) 1.8
-    (2,2) 3.7
-    (3,2) 6.4
-    (4,2) 12.9
-    (0,3) 1.1
-    (1,3) 3.6
-    (2,3) 9.8
-    (3,3) 22.3
-    (4,3) 37.5
-    (0,4) 1.3
-    (1,4) 2.7
-    (2,4) 7.6
-    (3,4) 11.9
-    (4,4) 21.4
-    "%" as unit
-    "0" as min-value
-    "40%" as max-value
-    colorscheme Blues
+```
+Error Rates Table (Heatmap visualization)
+
+|             | 0 m/s | 1 m/s | 2 m/s | 3 m/s | >3 m/s |
+|-------------|-------|-------|-------|-------|--------|
+| Fusion (optimal) | 0.2%  | 0.8%  | 1.4%  | 4.2%  | 12.6%  |
+| Fusion (LIDAR priority) | 0.4%  | 1.2%  | 2.5%  | 8.7%  | 18.3%  |
+| Fusion (camera priority) | 0.9%  | 1.8%  | 3.7%  | 6.4%  | 12.9%  |
+| LIDAR only  | 1.1%  | 3.6%  | 9.8%  | 22.3% | 37.5%  |
+| Camera only | 1.3%  | 2.7%  | 7.6%  | 11.9% | 21.4%  |
+
+Note: Lower percentages indicate better performance (less error)
 ```
 
 Key findings:
@@ -2391,16 +2411,64 @@ Note: Platforms are sorted by average detection time (best performance first). A
 The detection time and accuracy vary with the basketball's distance from the LIDAR:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"primaryColor": "#00758f", "primaryTextColor": "#ffffff", "primaryBorderColor": "#00758f", "lineColor": "#555555", "secondaryColor": "#006100", "tertiaryColor": "#fff8dc", "fontSize": "14px"}}}%%
-xychart-beta
-    title "Detection Performance vs. Distance"
-    x-axis "Distance (meters)" [1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Detection Rate (%)" [0, 20, 40, 60, 80, 100]
-    line [99, 98, 95, 90, 82, 68, 45, 22]
+%%{init: {"theme": "neutral"}}%%
+flowchart TD
+    subgraph PerformanceChart ["Detection Performance vs. Distance"]
+        style PerformanceChart fill:#f5f5f5,stroke:#333,stroke-width:1px
+        
+        subgraph XAxis ["Distance from LIDAR (meters)"]
+            X1["1m"] --- X2["2m"] --- X3["3m"] --- X4["4m"] --- X5["5m"] --- X6["6m"] --- X7["7m"] --- X8["8m"]
+        end
+        
+        subgraph DetectionRate ["Detection Rate (%)"]
+            style DetectionRate fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+            DR1["99%"] --- X1
+            DR2["98%"] --- X2 
+            DR3["95%"] --- X3
+            DR4["90%"] --- X4
+            DR5["82%"] --- X5
+            DR6["68%"] --- X6
+            DR7["45%"] --- X7
+            DR8["22%"] --- X8
+        end
+        
+        subgraph ProcessingTime ["Processing Time (ms)"]
+            style ProcessingTime fill:#fff8e1,stroke:#ffa000,stroke-width:2px
+            PT1["2.1ms"] --- X1
+            PT2["2.3ms"] --- X2
+            PT3["3.0ms"] --- X3
+            PT4["4.2ms"] --- X4
+            PT5["5.5ms"] --- X5
+            PT6["7.2ms"] --- X6
+            PT7["8.9ms"] --- X7
+            PT8["9.8ms"] --- X8
+        end
+    end
     
-    y2-axis "Processing Time (ms)" [0, 2, 4, 6, 8, 10]
-    line [2.1, 2.3, 3.0, 4.2, 5.5, 7.2, 8.9, 9.8]
+    Insight1["Key Observations:"]
+    Insight2["• Detection rate drops significantly beyond 5 meters"]
+    Insight3["• Processing time increases nearly 5× from 1m to 8m"]
+    Insight4["• Inverse relationship: As detection gets harder (distance increases),"]
+    Insight5["  accuracy decreases while computational cost increases"]
+    
+    Insight1 --> Insight2
+    Insight1 --> Insight3
+    Insight1 --> Insight4
+    Insight1 --> Insight5
+    
+    classDef insights fill:#fff8dc,stroke:#ff9800,stroke-width:1px,rx:5,ry:5
+    class Insight1,Insight2,Insight3,Insight4,Insight5 insights
 ```
+
+The above chart shows:
+1. **Detection Rate** (blue): Percentage of successful basketball detections at each distance
+2. **Processing Time** (yellow): Milliseconds required to process and detect at each distance
+
+As the basketball moves farther from the LIDAR sensor:
+- Detection rate decreases dramatically (99% at 1m to just 22% at 8m)
+- Processing time increases substantially (2.1ms at 1m to 9.8ms at 8m)
+
+This inverse relationship creates a challenging trade-off for real-time detection systems.
 
 The above chart shows how detection rate (blue line) decreases with distance while processing time (orange line) increases due to more challenging detection scenarios.
 

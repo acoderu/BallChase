@@ -266,19 +266,19 @@ For advanced users who understand control theory and have access to the robot's 
 Our basketball tracking robot operates in various conditions, requiring different control parameters.
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "14px", "primaryColor": "#3f51b5", "primaryTextColor": "#ffffff", "primaryBorderColor": "#3f51b5", "secondaryColor": "#009688", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#009688", "tertiaryColor": "#f8f9fa"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "14px", "primaryColor": "#3f51b5", "primaryTextColor": "#ffffff", "primaryBorderColor": "#3f51b5", "secondaryColor": "#009688", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#009688", "tertiaryColor": "#f8f9fa"}}}%%
 graph TD
     subgraph GainScheduling["Gain Scheduling System"]
         direction TB
-        Distance["Distance to Target"] --> |Far| Far["Aggressive Gains\nKp=0.8, Ki=0.15, Kd=0.3"]
-        Distance --> |Medium| Medium["Balanced Gains\nKp=0.6, Ki=0.1, Kd=0.4"]
-        Distance --> |Close| Close["Gentle Gains\nKp=0.4, Ki=0.05, Kd=0.5"]
+        Distance["Distance to Target"] --> |Far| Far["Aggressive Gains<br/>Kp=0.8, Ki=0.15, Kd=0.3"]
+        Distance --> |Medium| Medium["Balanced Gains<br/>Kp=0.6, Ki=0.1, Kd=0.4"]
+        Distance --> |Close| Close["Gentle Gains<br/>Kp=0.4, Ki=0.05, Kd=0.5"]
         
-        VelocityCheck["Target Velocity"] --> |Fast Moving| FastGains["Increased Prediction\nReduced Ki"]
-        VelocityCheck --> |Stationary| StaticGains["Standard Gains\nIncreased Ki"]
+        VelocityCheck["Target Velocity"] --> |Fast Moving| FastGains["Increased Prediction<br/>Reduced Ki"]
+        VelocityCheck --> |Stationary| StaticGains["Standard Gains<br/>Increased Ki"]
         
         Surface["Field Surface"] --> |Smooth| SmoothGains["Standard Damping"]
-        Surface --> |Rough| RoughGains["Increased Damping\nHigher Kd"]
+        Surface --> |Rough| RoughGains["Increased Damping<br/>Higher Kd"]
     end
     
     classDef distanceNode fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,rx:5,ry:5
@@ -344,18 +344,35 @@ ros2 topic echo --csv /pid_controller/error/angular_z > angular_error.csv &
 ros2 topic echo --csv /pid_controller/output/angular_z > angular_output.csv &
 ```
 
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "14px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff", "primaryBorderColor": "#f44336", "secondaryColor": "#03a9f4", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#03a9f4", "tertiaryColor": "#f8f9fa", "lineColor": "#e91e63"}}}%%
-xychart-beta
-    title "Angular Control Oscillation Problem"
-    x-axis "Time (s)" [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-    y-axis "Angular Error (degrees)"
-    line [0, -5, -12, -3, 8, 15, 5, -10, -18, -5, 12, 20, 6, -8, -22, -6, 10, 22]
+```
+                   Angular Control Oscillation Problem
+                   
+Angular Error (degrees)
+    +25 |                                            
+        |                        *           
+    +20 |                                   *        
+        |                    *               
+    +15 |               *                    
+        |                                     
+    +10 |                               *     
+        |        *               *            
+     +5 |             *                       
+        |                                      
+      0 |*                       *       *    * Time (s)
+        |----+----+----+----+----+----+----+----------->
+        |    2    4    6    8    10   12   14   16   18   20
+     -5 |     *            *    *                  
+        |                                 *         
+    -10 |               *                           
+        |                                            
+    -15 |                                            
+        |                                            
+    -20 |                             *              
+        |                                            
+    -25 |                                            
 ```
 
-<div style="font-style: italic; margin-top: -10px;">
-Angular error oscillating around zero (target) with increasing amplitude over time
-</div>
+**Figure: Angular Control Oscillation Problem.** This diagram shows how the angular error oscillates around zero (the target) with increasing amplitude over time. Initially, the oscillations are small, but as the controller responds, the corrections become increasingly extreme, leading to worsening performance. This is a classic example of an unstable control system that requires parameter adjustment to achieve stability.
 
 <em>Initial observation: Angular error oscillating around zero with increasing amplitude over time</em>
 
@@ -452,14 +469,14 @@ After each change, we recorded new data and analyzed the results.
 #### Step 6: Analyze Results and Implement Solution
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "14px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff", "primaryBorderColor": "#f44336", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#4caf50", "tertiaryTextColor": "#ffffff", "tertiaryBorderColor": "#4caf50", "lineColor": "colorScheme"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "14px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff", "primaryBorderColor": "#f44336", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#4caf50", "tertiaryTextColor": "#ffffff", "tertiaryBorderColor": "#4caf50", "lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000"}}}%%
 xychart-beta
     title "Effect of Individual Solutions"
     x-axis "Time (s)" [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-    y-axis "Angular Error (degrees)"
-    line [0, -4, -8, -3, 4, 7, 3, -5, -8, -4, 5, 7, 3, -4, -8, -3, 5, 7]
-    line [0, -3, -7, -2, 2, 5, 2, -4, -6, -3, 3, 5, 2, -3, -6, -2, 4, 5]
-    line [0, -2, -3, -1, 1, 2, 0, -1, -2, 0, 1, 1, 0, -1, -1, 0, 1, 0]
+    y-axis "Angular Error (degrees)" [-10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10]
+    line [0, -4, -8, -3, 4, 7, 3, -5, -8, -4, 5, 7, 3, -4, -8, -3, 5, 7] "Original Problem"
+    line [0, -3, -7, -2, 2, 5, 2, -4, -6, -3, 3, 5, 2, -3, -6, -2, 4, 5] "Increased Kd"
+    line [0, -2, -3, -1, 1, 2, 0, -1, -2, 0, 1, 1, 0, -1, -1, 0, 1, 0] "Combined Solution"
 ```
 
 <div style="font-style: italic; margin-top: -10px;">
@@ -597,13 +614,13 @@ Beyond basic parameter tuning, these advanced techniques can help diagnose and r
 Create a step input and analyze the system's response to extract critical information:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "14px", "primaryColor": "#673ab7", "primaryTextColor": "#ffffff", "primaryBorderColor": "#673ab7", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#f8f9fa"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "14px", "primaryColor": "#673ab7", "primaryTextColor": "#ffffff", "primaryBorderColor": "#673ab7", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#f8f9fa", "lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000"}}}%%
 xychart-beta
     title "Step Response Analysis Parameters"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7]
-    y-axis "Response"
-    line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0]
-    line [0, 0, 0.2, 0.65, 1.15, 0.95, 1.03, 0.98, 1.0]
+    y-axis "Response (normalized)" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+    line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0] "Reference Step Input"
+    line [0, 0, 0.2, 0.65, 1.15, 0.95, 1.03, 0.98, 1.0] "System Response"
 ```
 
 <div style="font-style: italic; margin-top: -10px;">
@@ -725,7 +742,7 @@ def compensate_for_delay(error_history, velocity, delay_seconds):
 We've developed a real-time monitoring tool that helps visualize PID behavior during operation. This tool is invaluable for debugging complex issues:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#0277bd", "primaryTextColor": "#ffffff", "secondaryColor": "#7b1fa2", "secondaryTextColor": "#ffffff", "tertiaryColor": "#d32f2f", "tertiaryTextColor": "#ffffff"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#0277bd", "primaryTextColor": "#ffffff", "secondaryColor": "#7b1fa2", "secondaryTextColor": "#ffffff", "tertiaryColor": "#d32f2f", "tertiaryTextColor": "#ffffff"}}}%%
 graph TB
     subgraph MonitoringTool["Real-time PID Monitoring Tool"]
         direction LR
@@ -737,7 +754,7 @@ graph TB
         end
         
         subgraph Analysis["Analysis Tools"]
-            Metrics["Performance Metrics\n- Rise Time\n- Settling Time\n- Overshoot"]
+            Metrics["Performance Metrics<br/>- Rise Time<br/>- Settling Time<br/>- Overshoot"]
             Anomalies["Anomaly Detection"]
             Suggestions["Tuning Suggestions"]
         end
@@ -792,16 +809,16 @@ To fully understand the strengths and limitations of PID control, it's valuable 
 The following graphs compare how different control methods respond to a simple step input (the target suddenly changes position):
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px"}}}%%
 xychart-beta
     title "Response to Step Input"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position"
-    line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-    line [0, 0, 0.42, 0.9, 1.18, 1.08, 1.02, 1.0, 1.0]
-    line [0, 0, 0.22, 0.58, 0.82, 0.94, 0.98, 1.0, 1.0]
-    line [0, 0, 0.3, 0.68, 0.88, 0.94, 0.98, 1.0, 1.0]
-    line [0, 0, 0.52, 0.78, 0.88, 0.92, 0.94, 0.96, 0.96]
+    y-axis "Position (meters)" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+    line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] "Target"
+    line [0, 0, 0.42, 0.9, 1.18, 1.08, 1.02, 1.0, 1.0] "Strategy A"
+    line [0, 0, 0.22, 0.58, 0.82, 0.94, 0.98, 1.0, 1.0] "Strategy B"
+    line [0, 0, 0.3, 0.68, 0.88, 0.94, 0.98, 1.0, 1.0] "Strategy C"
+    line [0, 0, 0.52, 0.78, 0.88, 0.92, 0.94, 0.96, 0.96] "Strategy D"
 ```
 
 <div style="font-style: italic; margin-top: -10px;">
@@ -822,16 +839,16 @@ Response of different controllers to a step change in target position: Setpoint 
 The second comparison shows how different controllers perform when tracking a continuously moving target (like our basketball):
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px"}}}%%
 xychart-beta
     title "Tracking a Moving Target"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position"
-    line [0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.6, 0.8]
-    line [0.4, 0.55, 0.75, 0.95, 0.82, 0.65, 0.45, 0.58, 0.75]
-    line [0.4, 0.52, 0.72, 0.94, 0.79, 0.62, 0.42, 0.58, 0.76]
-    line [0.4, 0.5, 0.68, 0.88, 0.74, 0.6, 0.48, 0.55, 0.72]
-    line [0.4, 0.45, 0.6, 0.75, 0.65, 0.55, 0.45, 0.51, 0.65]
+    y-axis "Position (meters)" [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+    line [0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.6, 0.8] "Target"
+    line [0.4, 0.55, 0.75, 0.95, 0.82, 0.65, 0.45, 0.58, 0.75] "Controller A"
+    line [0.4, 0.52, 0.72, 0.94, 0.79, 0.62, 0.42, 0.58, 0.76] "Controller B"
+    line [0.4, 0.5, 0.68, 0.88, 0.74, 0.6, 0.48, 0.55, 0.72] "Controller C"
+    line [0.4, 0.45, 0.6, 0.75, 0.65, 0.55, 0.45, 0.51, 0.65] "Controller D"
 ```
 
 <div style="font-style: italic; margin-top: -10px;">
@@ -852,17 +869,17 @@ Tracking performance with a continuously moving target. Top line shows Target Po
 This comparison shows how different controllers handle external disturbances:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px"}}}%%
 xychart-beta
     title "Disturbance Rejection Comparison"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position"
-    line [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-    line [1.0, 1.0, 0.7, 0.85, 1.05, 0.8, 0.9, 0.97, 1.0]
-    line [1.0, 1.0, 0.8, 0.92, 0.98, 0.85, 0.92, 0.97, 0.99]
-    line [1.0, 1.0, 0.75, 0.85, 0.95, 0.8, 0.88, 0.94, 0.98]
-    line [1.0, 1.0, 0.85, 0.88, 0.92, 0.75, 0.82, 0.87, 0.91]
-    line [1.0, 1.0, 0.75, 0.82, 0.86, 0.7, 0.75, 0.78, 0.8]
+    y-axis "Position (meters)" [0.6, 0.7, 0.8, 0.9, 1.0, 1.1]
+    line [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] "Desired"
+    line [1.0, 1.0, 0.7, 0.85, 1.05, 0.8, 0.9, 0.97, 1.0] "Controller A"
+    line [1.0, 1.0, 0.8, 0.92, 0.98, 0.85, 0.92, 0.97, 0.99] "Controller B"
+    line [1.0, 1.0, 0.75, 0.85, 0.95, 0.8, 0.88, 0.94, 0.98] "Controller C"
+    line [1.0, 1.0, 0.85, 0.88, 0.92, 0.75, 0.82, 0.87, 0.91] "Controller D"
+    line [1.0, 1.0, 0.75, 0.82, 0.86, 0.7, 0.75, 0.78, 0.8] "Controller E"
 ```
 
 <div style="font-style: italic; margin-top: -10px;">
@@ -893,7 +910,7 @@ Comparison of different controllers handling disturbances at t=2s and t=5s: Setp
 This chart compares the computational resources required by each control method, relative to PID control:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff", "secondaryColor": "#7b1fa2", "secondaryTextColor": "#ffffff", "tertiaryColor": "#388e3c", "tertiaryTextColor": "#ffffff"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff", "secondaryColor": "#7b1fa2", "secondaryTextColor": "#ffffff", "tertiaryColor": "#388e3c", "tertiaryTextColor": "#ffffff"}}}%%
 graph TD
     subgraph Resources["Computational Resources Required"]
         direction LR
@@ -1054,7 +1071,7 @@ No matter your background, we've designed this guide to help you progressively b
 Our basketball tracking robot uses a sophisticated multi-module control system to transform sensor data into smooth, natural movement. At its core is an advanced PID control system that goes far beyond the basic P+I+D formula taught in introductory courses.
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#3f51b5", "primaryTextColor": "#ffffff", "secondaryColor": "#009688", "secondaryTextColor": "#ffffff", "tertiaryColor": "#e91e63", "tertiaryTextColor": "#ffffff", "lineColor": "#37474f"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#3f51b5", "primaryTextColor": "#ffffff", "secondaryColor": "#009688", "secondaryTextColor": "#ffffff", "tertiaryColor": "#e91e63", "tertiaryTextColor": "#ffffff", "lineColor": "#37474f"}}}%%
 flowchart TD
     subgraph BASKETBALL_TRACKING_ROBOT["BASKETBALL TRACKING ROBOT"]
         direction LR
@@ -1235,7 +1252,7 @@ flowchart TD
         Freshness["Freshness Analysis"]
     end
     
-    TargetTracking -->|Filtered Position| ErrorCalc["Error Calculation\n- Distance Error\n- Lateral Error\n- Angular Error"]
+    TargetTracking -->|Filtered Position| ErrorCalc["Error Calculation<br/>- Distance Error<br/>- Lateral Error<br/>- Angular Error"]
     
     ErrorCalc -->|Error Values| MovementStrategy
     
@@ -1258,9 +1275,9 @@ flowchart TD
     
     subgraph PIDControllers["Advanced PID Controllers"]
         direction LR
-        ForwardPID["Forward PID\nController"]
-        LateralPID["Lateral PID\nController"]
-        AngularPID["Angular PID\nController"]
+        ForwardPID["Forward PID<br/>Controller"]
+        LateralPID["Lateral PID<br/>Controller"]
+        AngularPID["Angular PID<br/>Controller"]
     end
     
     ForwardPID -->|Forward Velocity| VelocityControl
@@ -1271,7 +1288,7 @@ flowchart TD
         direction TB
         Safety["Safety Constraints"]
         Acceleration["Acceleration Control"]
-        Coordination["Multi-Dimensional\nCoordination"]
+        Coordination["Multi-Dimensional<br/>Coordination"]
     end
     
     VelocityControl -->|Final Velocity Commands| Motors["Robot Motor Controllers"]
@@ -1348,10 +1365,10 @@ The PID control loop follows this basic cycle:
 
 ```mermaid
 flowchart LR
-    sp[Desired Setpoint\nr] --> sum((+\n-))
-    y[Measured Process\nVariable] --> |Feedback Loop| sum
-    sum --> |Error\ne = r-y| pid[PID\nController]
-    pid --> |Control\nSignal| process[Process]
+    sp[Desired Setpoint<br/>r] --> sum((+<br/>-))
+    y[Measured Process<br/>Variable] --> |Feedback Loop| sum
+    sum --> |Error<br/>e = r-y| pid[PID<br/>Controller]
+    pid --> |Control<br/>Signal| process[Process]
     process --> y
     
     %% Enhanced color scheme for better readability
@@ -1476,16 +1493,16 @@ The effectiveness of a PID controller depends heavily on tuning the Kp, Ki, and 
 The following diagram illustrates how each PID component contributes to the control response:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#fff", "primaryBorderColor": "#1976d2", "lineColor": "#1976d2", "tertiaryColor": "#f8f9fa"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#fff", "primaryBorderColor": "#1976d2", "lineColor": "#1976d2", "tertiaryColor": "#f8f9fa"}}}%%
 xychart-beta
     title "PID Component Effects on System Response"
     x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position"
-    line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] 
-    line [0, 0, 0.5, 1.1, 0.9, 1.05, 0.95, 1.0, 1.0] 
-    line [0, 0, 0.4, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0] 
-    line [0, 0, 0.3, 0.85, 0.9, 0.95, 1.0, 1.0, 1.0] 
-    line [0, 0, 0.45, 0.95, 0.98, 1.0, 1.0, 1.0, 1.0] 
+    y-axis "Position (normalized)" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+    line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] "Reference"
+    line [0, 0, 0.5, 1.1, 0.9, 1.05, 0.95, 1.0, 1.0] "High P" 
+    line [0, 0, 0.4, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0] "Balanced"
+    line [0, 0, 0.3, 0.85, 0.9, 0.95, 1.0, 1.0, 1.0] "High I"
+    line [0, 0, 0.45, 0.95, 0.98, 1.0, 1.0, 1.0, 1.0] "High D"
 ```
 
 <div style="font-style: italic; margin-top: -10px;">
@@ -1669,7 +1686,7 @@ classDiagram
 The heart of our advanced PID implementation is the `compute()` method, which processes the error value to produce a control output. Here's a simplified view of its operation:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#3f51b5", "primaryTextColor": "#ffffff", "secondaryColor": "#00796b", "secondaryTextColor": "#ffffff", "tertiaryColor": "#c2185b", "tertiaryTextColor": "#ffffff", "lineColor": "#37474f"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#3f51b5", "primaryTextColor": "#ffffff", "secondaryColor": "#00796b", "secondaryTextColor": "#ffffff", "tertiaryColor": "#c2185b", "tertiaryTextColor": "#ffffff", "lineColor": "#37474f"}}}%%
 flowchart LR
     %% Main flow groups
     subgraph Input["Input Processing"]
@@ -1756,8 +1773,8 @@ flowchart TD
     Increasing --> IkiIncrease["Increase Ki (multiply by 1.1)"]
     Increasing --> IkdReduce["Reduce Kd (multiply by 0.8)"]
     
-    DkpReduce & DkiReduce & DkdIncrease --> Damping["More Damping\nLess Overshoot"]
-    IkpIncrease & IkiIncrease & IkdReduce --> Aggressive["More Aggressive\nFaster Response"]
+    DkpReduce & DkiReduce & DkdIncrease --> Damping["More Damping<br/>Less Overshoot"]
+    IkpIncrease & IkiIncrease & IkdReduce --> Aggressive["More Aggressive<br/>Faster Response"]
     
     %% Enhanced color scheme for better readability
     classDef analysisNode fill:#673ab7,stroke:#320b86,stroke-width:2px,rx:10,ry:10,color:#ffffff
@@ -1821,12 +1838,12 @@ Zero-crossings are challenging for traditional PID controllers because:
 - Without special handling, the system often overshoots and oscillates around the target
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff", "primaryBorderColor": "#1976d2", "secondaryColor": "#ff5722", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff5722", "tertiaryColor": "#f8f9fa"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff", "primaryBorderColor": "#1976d2", "secondaryColor": "#ff5722", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff5722", "tertiaryColor": "#f8f9fa", "lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000"}}}%%
 xychart-beta
     title "The Zero-Crossing Problem"
-    x-axis "Time" [0, 2, 4, 6, 8, 10, 12, 14, 16]
-    y-axis "Error"
-    line [0, 0, 0.8, 0.4, 0, -0.4, -0.8, -0.5, 0, 0.5, 0.3, 0, -0.3, -0.1, 0, 0.1, 0]
+    x-axis "Time (seconds)" [0, 2, 4, 6, 8, 10, 12, 14, 16]
+    y-axis "Error (distance from target)" [-1, -0.5, 0, 0.5, 1]
+    line [0, 0, 0.8, 0.4, 0, -0.4, -0.8, -0.5, 0, 0.5, 0.3, 0, -0.3, -0.1, 0, 0.1, 0] "System Response"
 ```
 
 <div style="font-style: italic; margin-top: -10px;">
@@ -2397,26 +2414,26 @@ Each freshness level has specific implications for control:
 A key innovation in our approach is that freshness thresholds automatically adapt to the detected fusion rate:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px"}}}%%
 graph TD
     %% Title
     title["Adaptive Freshness Thresholds"]
     
     %% System update rate comparison
     subgraph HighRate["5Hz System (Expected Interval = 0.2s)"]
-        HFresh["FRESH: 0 - 0.24s\n(≤ 1.2 × expected interval)"]
-        HStale["STALE: 0.24s - 0.4s\n(≤ 2.0 × expected interval)"]
-        HCritical["CRITICAL: 0.4s - 0.6s\n(≤ 3.0 × expected interval)"]
-        HInvalid["INVALID: > 0.6s\n(> 3.0 × expected interval)"]
+        HFresh["FRESH: 0 - 0.24s<br/>(≤ 1.2 × expected interval)"]
+        HStale["STALE: 0.24s - 0.4s<br/>(≤ 2.0 × expected interval)"]
+        HCritical["CRITICAL: 0.4s - 0.6s<br/>(≤ 3.0 × expected interval)"]
+        HInvalid["INVALID: > 0.6s<br/>(> 3.0 × expected interval)"]
         
         HFresh --> HStale --> HCritical --> HInvalid
     end
     
     subgraph LowRate["1Hz System (Expected Interval = 1.0s)"]
-        LFresh["FRESH: 0 - 1.2s\n(≤ 1.2 × expected interval)"]
-        LStale["STALE: 1.2s - 2.0s\n(≤ 2.0 × expected interval)"]
-        LCritical["CRITICAL: 2.0s - 3.0s\n(≤ 3.0 × expected interval)"]
-        LInvalid["INVALID: > 3.0s\n(> 3.0 × expected interval)"]
+        LFresh["FRESH: 0 - 1.2s<br/>(≤ 1.2 × expected interval)"]
+        LStale["STALE: 1.2s - 2.0s<br/>(≤ 2.0 × expected interval)"]
+        LCritical["CRITICAL: 2.0s - 3.0s<br/>(≤ 3.0 × expected interval)"]
+        LInvalid["INVALID: > 3.0s<br/>(> 3.0 × expected interval)"]
         
         LFresh --> LStale --> LCritical --> LInvalid
     end
@@ -2527,7 +2544,7 @@ The Movement Strategy System represents a fundamental shift from traditional PID
 In traditional robotics control, error values directly drive motor outputs through PID controllers. Our system introduces an intermediary "strategy" layer:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff", "secondaryColor": "#673ab7", "tertiaryColor": "#2e7d32", "lineColor": "#424242"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff", "secondaryColor": "#673ab7", "tertiaryColor": "#2e7d32", "lineColor": "#424242"}}}%%
 flowchart LR
     %% Traditional Approach
     subgraph Traditional["Traditional Approach"]
@@ -2878,13 +2895,13 @@ def _smoothstep(self, x):
 This function transforms a linear blend factor into a smooth S-curve, creating natural acceleration and deceleration:
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff", "primaryBorderColor": "#2196f3", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#f8f9fa"}}}%%
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff", "primaryBorderColor": "#2196f3", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#f8f9fa"}}}%%
 xychart-beta
     title "Smoothstep vs Linear Blending"
-    x-axis "Time" [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-    y-axis "Blend Factor"
-    line [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-    line [0, 0.03, 0.1, 0.21, 0.35, 0.5, 0.65, 0.79, 0.9, 0.97, 1.0]
+    x-axis "Time (normalized)" [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    y-axis "Blend Factor (0-1)" [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    line [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] "Linear"
+    line [0, 0.03, 0.1, 0.21, 0.35, 0.5, 0.65, 0.79, 0.9, 0.97, 1.0] "Smoothstep"
 ```
 
 <div style="font-style: italic; margin-bottom: 10px; margin-top: -10px;">Linear blend (constant rate) vs. Smoothstep (gradual start/end) transition</div>

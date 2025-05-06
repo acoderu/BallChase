@@ -2,122 +2,273 @@
 
 """
 Highly Optimized State-Aware Fusion Node for ROS 2
+================================================
 Designed for resource-constrained systems like Raspberry Pi 5
 Focuses on efficient state management, reduced CPU usage, and robust tracking
 
-This file implements a sensor fusion node for tracking a basketball using multiple sensors (LiDAR, YOLO 3D, YOLO 2D) in a robotics context.
+This node implements advanced sensor fusion for tracking a basketball using multiple sensors 
+(LiDAR, YOLO 3D, YOLO 2D) in a robotics context. It represents the "brain" of the tracking system
+that combines all sensor data into a single, reliable position estimate.
+
+Key Features:
+------------
+1. Multi-sensor fusion with adaptive weighting based on sensor reliability
+2. Intelligent motion state tracking (stationary vs. moving)
+3. Kalman filtering with dynamic uncertainty management
+4. Optimized for real-time performance on Raspberry Pi 5
+5. Self-monitoring with diagnostics and performance metrics
+6. Graceful degradation when sensors fail
 
 ---
 
 # What is Sensor Fusion?
-Sensor fusion is the process of combining data from multiple sensors to get a more accurate, reliable, and robust estimate of the state of an object (like its position and velocity) than any single sensor could provide alone. This is important because each sensor has its own strengths and weaknesses (for example, LiDAR is very accurate but can be blocked, while cameras can see more but are less precise).
+Sensor fusion is the process of combining data from multiple sensors to get a more accurate,
+reliable, and robust estimate of the state of an object (like its position and velocity) than
+any single sensor could provide alone. This is important because each sensor has its own
+strengths and weaknesses:
+
+* LiDAR provides precise distance measurements but can be confused by other round objects
+* YOLO object detection provides reliable identification but less precise positioning
+* Depth cameras offer 3D information but may have limited range
+
+By combining these sources intelligently, we get the benefits of each while minimizing their
+individual weaknesses.
 
 # What is a Kalman Filter?
-A Kalman filter is a mathematical algorithm that estimates the state of a system (like the position and velocity of a ball) by combining predictions (from physics) and measurements (from sensors), while keeping track of uncertainty. It works in two steps:
-1. **Prediction:** Use the previous state and physics to predict where the object should be now.
-2. **Update:** Use new sensor measurements to correct the prediction, weighting them by how certain we are about each.
+A Kalman filter is a mathematical algorithm that estimates the state of a system (like the position
+and velocity of a ball) by combining predictions (from physics) and measurements (from sensors),
+while keeping track of uncertainty. It works in two steps:
 
-The filter also keeps track of how uncertain it is about its estimate, and this uncertainty changes as new data comes in.
+1. **Prediction:** Use the previous state and physics to predict where the object should be now.
+   * x̂ₖ⁻ = Fₖx̂ₖ₋₁ (state prediction)
+   * Pₖ⁻ = FₖPₖ₋₁Fₖᵀ + Qₖ (uncertainty prediction)
+
+2. **Update:** Use new sensor measurements to correct the prediction, weighting them by how certain we are about each.
+   * Kₖ = Pₖ⁻Hₖᵀ(HₖPₖ⁻Hₖᵀ + Rₖ)⁻¹ (Kalman gain)
+   * x̂ₖ = x̂ₖ⁻ + Kₖ(zₖ - Hₖx̂ₖ⁻) (state update)
+   * Pₖ = (I - KₖHₖ)Pₖ⁻ (uncertainty update)
+
+The filter also keeps track of how uncertain it is about its estimate, and this uncertainty
+changes as new data comes in.
 
 # What is State Management?
-State management here means keeping track of whether the ball is moving, stationary, or in between. This is important because we want to treat measurements differently depending on how the ball is behaving (for example, we can trust our estimate more if the ball is stationary).
+State management here means keeping track of whether the ball is moving, stationary, or in between.
+This is important because we want to treat measurements differently depending on how the ball is
+behaving (for example, we can trust our estimate more if the ball is stationary). 
+
+Our state machine implements:
+- Detection of stationary periods (when the ball isn't moving)
+- Recognition of small movements vs. rapid motion
+- Hysteresis to prevent rapid state flickering
+- Adaptive parameter tuning based on the current state
 
 ---
 
-This code is heavily optimized for performance, but the comments and docstrings below will explain the intuition and math behind each part, so a high school student can follow along.
+Educational Guide to the Code:
+-----------------------------
+This code is heavily optimized for performance, but the comments and docstrings below will explain
+the intuition and math behind each part, so a high school student can follow along. Key sections:
+
+1. LightweightBuffer: Efficient storage of time-series sensor data
+2. SensorManager: Tracking which sensors are active and their reliability
+3. MotionStateManager: Determining if the ball is moving or stationary
+4. Kalman Filter Implementation: Core sensor fusion algorithm
+5. MeasurementValidator: Rejecting outlier measurements
+6. Main Node Implementation: Tying everything together with ROS 2
 """
+# ROS 2 Core imports
 import rclpy
 from rclpy.node import Node
 from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
 from rclpy.lifecycle import Publisher as LifecyclePublisher
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup, MutuallyExclusiveCallbackGroup
-import numpy as np
-import time
-import math
-import json
-from collections import deque
-from functools import lru_cache
+
+# Standard Python libraries
+import numpy as np  # For efficient numerical operations
+import time         # For timestamp management
+import math         # For mathematical functions
+import json         # For configuration handling
+from collections import deque  # For efficient queue operations
+from functools import lru_cache  # For memoization (caching function results)
+
+# ROS 2 Transformation libraries
 from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
 from tf2_geometry_msgs import do_transform_point
-from geometry_msgs.msg import PointStamped, TwistStamped
-from std_msgs.msg import Float32, Bool, String
 
-# Try to import for resource monitoring
+# ROS 2 Message types
+from geometry_msgs.msg import PointStamped, TwistStamped  # For position and velocity
+from std_msgs.msg import Float32, Bool, String  # For basic data types
+
+# Optional imports for resource monitoring (CPU, memory usage)
 try:
-    import psutil
+    import psutil  # For monitoring system resources (CPU, memory)
     HAS_PSUTIL = True
 except ImportError:
+    # Gracefully handle missing psutil (will disable resource monitoring)
     HAS_PSUTIL = False
 
 
 class LightweightBuffer:
     """
-    LightweightBuffer is a circular buffer (fixed-size queue) for storing recent sensor measurements.
-    This is like a small notebook where you always write the newest value on top, and erase the oldest when you run out of space.
-    This helps us keep memory usage low and access the most recent data quickly.
+    LightweightBuffer: Memory-Efficient Time Series Data Storage
+    ----------------------------------------------------------
+    A circular buffer (fixed-size queue) for storing recent sensor measurements with timestamps.
+    
+    This is like a small notebook where you always write the newest value on top, and erase the 
+    oldest when you run out of space. This helps us keep memory usage low and access the most
+    recent data quickly.
+    
+    Key Features:
+    * O(1) insertion time (constant-time operations)
+    * Pre-allocated memory to prevent fragmentation
+    * Fast access to latest values
+    * Time-based querying (find values within time ranges)
+    * Memory-efficient for resource-constrained systems
+    
+    This is especially important in robotics since:
+    1. We need to keep track of recent measurements without using too much memory
+    2. We often need to sync up data from different sensors taken at slightly different times
+    3. We need to quickly retrieve the most recent valid measurement
     """
     
     def __init__(self, max_size=10):
-        """Initialize with fixed buffer size."""
-        # Pre-allocate the full buffer with None values
+        """
+        Initialize buffer with a fixed maximum capacity.
+        
+        Args:
+            max_size: Maximum number of elements to store in the buffer (default: 10)
+                      Larger buffers can store more history but use more memory
+        """
+        # Pre-allocate the full buffer with placeholder values to prevent memory fragmentation
+        # Each entry is a tuple of (timestamp, data_value)
         self.data = [(0.0, None) for _ in range(max_size)]
-        self.max_size = max_size
-        self.next_index = 0
-        self.is_full = False
-        self.count = 0
+        self.max_size = max_size          # Maximum capacity
+        self.next_index = 0               # Where to write the next value
+        self.is_full = False              # Whether we've filled the buffer at least once
+        self.count = 0                    # Number of valid entries
     
     def add(self, timestamp, value):
-        """Add value to buffer with fixed memory allocation."""
+        """
+        Add a new timestamped value to the buffer.
+        
+        This overwrites the oldest data point when the buffer is full,
+        creating a rolling window of the most recent measurements.
+        
+        Args:
+            timestamp: Time when the data was recorded (float seconds)
+            value: The data to store (any type)
+        """
+        # Store the new data at the current position
         self.data[self.next_index] = (timestamp, value)
+        
+        # Update the position for the next write (wrap around if needed)
         self.next_index = (self.next_index + 1) % self.max_size
+        
+        # Mark as full if we've wrapped around
         if not self.is_full and self.next_index == 0:
             self.is_full = True
+            
+        # Update the count of valid entries
         self.count = self.max_size if self.is_full else self.next_index
     
     def get_latest(self):
-        """Get the most recent value."""
+        """
+        Get the most recently added value.
+        
+        Returns:
+            The latest value, or None if the buffer is empty
+        """
+        # Return None if nothing has been added yet
         if self.count == 0:
             return None
+            
+        # Get the most recently added entry (one position behind the next index)
         latest_idx = (self.next_index - 1) % self.max_size
         return self.data[latest_idx][1]
     
     def get_latest_before(self, timestamp, max_age=1.0):
-        """Get the most recent value before the given timestamp."""
+        """
+        Get the most recent value that was recorded before the given timestamp.
+        
+        This is extremely useful for synchronizing data from different sensors
+        that report at different rates. For example, we might want the camera
+        reading that's closest to when the LiDAR measurement was taken.
+        
+        Args:
+            timestamp: The reference time (float seconds)
+            max_age: How old the data can be, at most (in seconds)
+            
+        Returns:
+            The value with the closest timestamp before the reference time,
+            or None if no suitable value exists
+        """
         if self.count == 0:
             return None
         
         best_time_diff = float('inf')
         best_value = None
         
-        # Only iterate through actual data entries
+        # Search through actual data entries (not empty slots)
         for i in range(min(self.count, self.max_size)):
+            # Start from the newest and work backwards
             idx = (self.next_index - 1 - i) % self.max_size
             t, value = self.data[idx]
+            
+            # Calculate how far this data point is from our target time
             time_diff = timestamp - t
+            
+            # Only consider data points that:
+            # 1. Came before our target time (positive diff)
+            # 2. Are closer than what we've found so far
+            # 3. Aren't too old
             if 0 <= time_diff < best_time_diff and time_diff <= max_age:
                 best_time_diff = time_diff
                 best_value = value
-                # Early exit if we find a very recent value
+                
+                # Performance optimization: Early exit if we find a very recent value
+                # (within 50ms, which is close enough for most purposes)
                 if time_diff < 0.05:
                     break
         
         return best_value
     
     def get_all_within(self, start_time, end_time):
-        """Get all values within a time range."""
+        """
+        Get all values that were recorded within a specific time range.
+        
+        This is useful for analyzing data over windows of time, such as
+        calculating average velocity over the last half second.
+        
+        Args:
+            start_time: The beginning of the time range (float seconds)
+            end_time: The end of the time range (float seconds)
+            
+        Returns:
+            List of (timestamp, value) tuples within the specified range
+        """
         result = []
-        # Only iterate through actual data entries
+        
+        # Search through actual data entries (not empty slots)
         for i in range(min(self.count, self.max_size)):
+            # Start from the newest and work backwards
             idx = (self.next_index - 1 - i) % self.max_size
             t, v = self.data[idx]
+            
+            # Check if this timestamp falls within our desired range
             if start_time <= t <= end_time:
                 result.append((t, v))
+                
         return result
     
     def clear(self):
-        """Clear the buffer."""
-        # Don't reallocate, just reset indicators
+        """
+        Reset the buffer to empty state without deallocating memory.
+        
+        This is more efficient than creating a new buffer, as it avoids
+        garbage collection and memory reallocation.
+        """
+        # Don't reallocate memory, just reset pointers
         self.next_index = 0
         self.is_full = False
         self.count = 0
@@ -125,128 +276,238 @@ class LightweightBuffer:
 
 class SensorManager:
     """
-    SensorManager keeps track of all the sensors, their recent data, and their health (are they working?).
-    It uses LightweightBuffer for each sensor to store recent measurements.
-    It also tracks how often each sensor is updating, and whether it's currently active.
+    SensorManager: Multi-Sensor Status and Health Monitoring
+    ------------------------------------------------------
+    Central system for tracking the status, reliability, and data from multiple sensors.
+    
+    In a robotics system using multiple sensors, it's crucial to know which sensors are:
+    - Currently providing data (active)
+    - Providing reliable data (health)
+    - Updating at expected rates (frequency)
+    
+    This manager handles all these aspects while providing efficient access to the most
+    recent readings from each sensor. It enables the fusion system to adapt in real-time
+    to changing sensor availability.
+    
+    Key Features:
+    * Tracks which sensors are active/inactive
+    * Monitors sensor update rates (frames per second)
+    * Maintains recent data from each sensor
+    * Provides diagnostics about sensor health
+    * Uses adaptive thresholds for different sensor types
+    * Optimizes memory usage with different buffer sizes for different sensors
     """
     
     def __init__(self, sensor_names=None):
-        """Initialize with specified sensors."""
-        self.sensors = sensor_names or []
-        self.data_buffers = {}
-        self.last_update_time = {}
-        self.update_count = {}
-        self.fps_estimates = {}
+        """
+        Initialize the sensor manager with a list of sensor names.
         
-        # Initialize buffers for all sensors - optimize buffer sizes based on importance
+        Args:
+            sensor_names: List of sensor identifiers (e.g., ['lidar', 'yolo_3d', 'yolo_2d'])
+                          If None, an empty list is used
+        """
+        # List of all registered sensors
+        self.sensors = sensor_names or []
+        
+        # Data storage and statistics
+        self.data_buffers = {}          # Holds recent measurements for each sensor
+        self.last_update_time = {}      # When each sensor was last heard from
+        self.update_count = {}          # Total updates received from each sensor
+        self.fps_estimates = {}         # Estimated frames per second for each sensor
+        
+        # Initialize memory-efficient buffers for all sensors
+        # Optimization: Use larger buffers for more important sensors
         for sensor in self.sensors:
-            # LiDAR and YOLO 3D are more important, so they get larger buffers
+            # LiDAR and YOLO 3D provide crucial 3D information, so store more history
             buffer_size = 12 if sensor in ['lidar', 'yolo_3d'] else 8
             self.data_buffers[sensor] = LightweightBuffer(buffer_size)
             self.last_update_time[sensor] = 0.0
             self.update_count[sensor] = 0
             self.fps_estimates[sensor] = 0.0
         
-        # Track sensor health
-        self.sensor_active = {sensor: False for sensor in self.sensors}
-        self.sensor_gap_durations = {sensor: 0.0 for sensor in self.sensors}
-        self.sensor_update_intervals = {sensor: 0.0 for sensor in self.sensors}
+        # Sensor health tracking
+        self.sensor_active = {sensor: False for sensor in self.sensors}          # Is sensor currently providing data?
+        self.sensor_gap_durations = {sensor: 0.0 for sensor in self.sensors}     # Time since last update
+        self.sensor_update_intervals = {sensor: 0.0 for sensor in self.sensors}  # Time between updates
         
-        # Tracking for active sensor count to avoid recomputing
-        self._active_sensor_count = 0
-        self._active_high_quality_sensors = 0
-        self._last_health_update = 0.0
+        # Performance optimization: Cache these values to avoid recomputing
+        self._active_sensor_count = 0               # How many sensors are currently active
+        self._active_high_quality_sensors = 0       # How many 3D sensors are active
+        self._last_health_update = 0.0              # When we last checked sensor health
     
     def add_measurement(self, sensor, timestamp, data):
-        """Add a new measurement for a sensor."""
+        """
+        Add a new measurement from a sensor.
+        
+        This updates all relevant statistics and marks the sensor as active.
+        
+        Args:
+            sensor: Identifier for the sensor (string)
+            timestamp: When the measurement was taken (float seconds)
+            data: The sensor measurement (any type)
+        """
+        # Skip unknown sensors
         if sensor not in self.sensors:
             return
         
         current_time = timestamp
         
-        # Update buffer
+        # Add data to the circular buffer
         self.data_buffers[sensor].add(current_time, data)
         
-        # Update statistics
+        # Update statistics if this isn't the first measurement
         if self.last_update_time[sensor] > 0:
+            # Calculate time since last update from this sensor
             interval = current_time - self.last_update_time[sensor]
-            # Store interval for tracking
+            
+            # Store for diagnostic purposes
             self.sensor_update_intervals[sensor] = interval
-            # Use exponential moving average for FPS estimate
+            
+            # Estimate frames per second using exponential moving average
+            # This gives more weight to recent measurements while still considering history
             if self.fps_estimates[sensor] > 0:
-                alpha = 0.3  # Smoothing factor
+                alpha = 0.3  # Smoothing factor (0.3 means 30% weight to new data)
+                # Update formula: new_avg = (1-α) * old_avg + α * new_value
                 self.fps_estimates[sensor] = (1 - alpha) * self.fps_estimates[sensor] + alpha * (1.0 / max(interval, 0.001))
             else:
+                # First estimate: just use the interval
                 self.fps_estimates[sensor] = 1.0 / max(interval, 0.001)
         
+        # Update the last heard time
         self.last_update_time[sensor] = current_time
         self.update_count[sensor] += 1
         
-        # Mark sensor as active
+        # Sensor is now active if it wasn't before
         if not self.sensor_active[sensor]:
             self.sensor_active[sensor] = True
-            # Force health update to reflect new active sensor
+            # Force an immediate health update to reflect this change
             self._last_health_update = 0.0
         
+        # Reset gap duration since we just heard from this sensor
         self.sensor_gap_durations[sensor] = 0.0
     
     def get_latest(self, sensor):
-        """Get the latest measurement for a sensor."""
+        """
+        Get the most recent measurement from a specific sensor.
+        
+        Args:
+            sensor: Identifier for the sensor
+            
+        Returns:
+            The most recent measurement from that sensor, or None if no data
+            is available
+        """
         if sensor not in self.sensors:
             return None
         return self.data_buffers[sensor].get_latest()
     
     def update_sensor_health(self, current_time, max_gap=1.0):
-        """Update sensor health status based on update times."""
-        # Only update health every 100ms to reduce CPU usage
+        """
+        Update the active/inactive status of all sensors based on their last update time.
+        
+        This function determines which sensors are still "alive" and which have timed out.
+        A sensor is considered inactive if it hasn't provided a measurement in 'max_gap' seconds.
+        
+        Args:
+            current_time: Current system time (float seconds)
+            max_gap: Maximum allowed time between updates before considering a sensor inactive (seconds)
+        
+        Performance optimization:
+            Only updates every 100ms to reduce CPU usage
+        """
+        # Throttle health updates to reduce CPU usage (max 10 updates per second)
         if current_time - self._last_health_update < 0.1:
             return
         
+        # Reset active sensor counters
         self._active_sensor_count = 0
         self._active_high_quality_sensors = 0
         
+        # Check each sensor
         for sensor in self.sensors:
+            # Calculate how long it's been since we heard from this sensor
             gap_duration = current_time - self.last_update_time.get(sensor, 0)
             self.sensor_gap_durations[sensor] = gap_duration
             
-            # Mark as inactive if gap exceeds threshold
+            # Different sensors have different expected update rates
+            # Apply sensor-specific threshold adjustments
             sensor_specific_max_gap = max_gap
-            # More lenient for 2D sensors
+            
+            # 2D camera-based sensors update more slowly, so be more lenient
             if sensor.startswith('yolo_2d'):
                 sensor_specific_max_gap = max_gap * 1.5
             
+            # Update active status based on gap duration
             old_active = self.sensor_active[sensor]
-            # Mark as inactive if gap exceeds threshold
             self.sensor_active[sensor] = gap_duration <= sensor_specific_max_gap
             
-            # Update active sensor counts
+            # Count active sensors for quick access later
             if self.sensor_active[sensor]:
                 self._active_sensor_count += 1
+                
+                # Separately track high-quality (3D) sensors
                 if sensor in ['lidar', 'yolo_3d']:
                     self._active_high_quality_sensors += 1
         
+        # Update the last health check time
         self._last_health_update = current_time
     
     def get_active_sensor_count(self):
-        """Get the count of currently active sensors."""
+        """
+        Get the number of sensors currently providing data.
+        
+        Returns:
+            Integer count of active sensors
+            
+        Note: This uses a cached count that's updated by update_sensor_health()
+        """
         return self._active_sensor_count
     
     def get_active_high_quality_sensors(self):
-        """Get the count of active high-quality (3D) sensors."""
+        """
+        Get the number of high-quality 3D sensors currently active.
+        
+        High-quality sensors provide more reliable 3D position information.
+        
+        Returns:
+            Integer count of active high-quality (3D) sensors
+            
+        Note: This uses a cached count that's updated by update_sensor_health()
+        """
         return self._active_high_quality_sensors
     
     def get_diagnostic_info(self):
-        """Get diagnostic information about sensors."""
+        """
+        Get detailed diagnostic information about all sensors.
+        
+        This is useful for:
+        - Debugging sensor issues
+        - Monitoring system health
+        - Logging sensor performance
+        
+        Returns:
+            Dictionary containing status information for each sensor:
+            {
+                'sensor_name': {
+                    'active': bool,      # Whether the sensor is currently active
+                    'gap': float,        # Time since last update (seconds)
+                    'count': int,        # Total updates received
+                    'fps': float         # Current estimated update rate (frames/sec)
+                },
+                ...
+            }
+        """
         current_time = time.time()
         
+        # Build diagnostic info for each sensor
         info = {}
         for sensor in self.sensors:
             gap = current_time - self.last_update_time.get(sensor, 0)
             info[sensor] = {
-                'active': self.sensor_active[sensor],
-                'gap': gap,
-                'count': self.update_count[sensor],
-                'fps': self.fps_estimates[sensor]
+                'active': self.sensor_active[sensor],    # Is the sensor currently active?
+                'gap': gap,                              # Time since last update (seconds)
+                'count': self.update_count[sensor],      # Total number of updates received
+                'fps': self.fps_estimates[sensor]        # Estimated frames per second
             }
         
         return info
@@ -254,49 +515,70 @@ class SensorManager:
 
 class MotionStateManager:
     """
-    MotionStateManager keeps track of the motion state of the ball (is it stationary, moving slowly, or moving fast?).
-    This is important because we want to treat measurements differently depending on how the ball is behaving.
+    MotionStateManager: Intelligent Ball Motion State Tracking
+    --------------------------------------------------------
+    Advanced state machine for tracking whether the basketball is stationary or moving.
+    
+    This system answers the crucial question: "Is the ball moving right now?"
+    
+    The answer to this question fundamentally changes how we handle sensor data:
+    - For stationary balls: We can use stronger filtering, trust position more, and apply less physics prediction
+    - For moving balls: We need more physics prediction, trust velocity more, and use looser filtering
     
     ## States:
-    - UNKNOWN: We don't know yet.
-    - STATIONARY: The ball is not moving.
-    - LONG_STATIONARY: The ball has been still for a long time.
-    - SMALL_MOVEMENT: The ball is moving a little.
-    - MEDIUM_FAST: The ball is moving quickly.
+    - UNKNOWN: Initial state when we don't have enough information
+    - STATIONARY: The ball is not moving (velocity near zero)
+    - LONG_STATIONARY: The ball has been still for a significant time period
+    - SMALL_MOVEMENT: The ball is moving slowly (rolling or gentle toss)
+    - MEDIUM_FAST: The ball is moving quickly (thrown or bouncing)
 
-    The state is determined by looking at the velocity (speed) of the ball and using thresholds (cutoff values).
-    To avoid switching states too quickly due to noise, we use 'hysteresis' (requiring several measurements before changing state).
+    ## Key Concepts:
+    1. **State-based Parameter Tuning**: Different filtering parameters based on motion state
+    2. **Hysteresis**: Requiring sustained evidence before changing states
+    3. **Velocity Thresholds**: Using measured velocity to determine basic state
+    4. **Confidence Metrics**: Tracking how certain we are about the current state
+    5. **Time-based Transitions**: Some transitions depend on how long a ball has been in a state
+    
+    This state machine is crucial for balancing responsiveness (detecting real movement quickly)
+    and stability (not being fooled by sensor noise or small disturbances).
     """
     
-    # Define motion states as class constants for better performance 
-    # (avoids string comparisons)
-    UNKNOWN = 0
-    STATIONARY = 1
-    LONG_STATIONARY = 2
-    SMALL_MOVEMENT = 3
-    MEDIUM_FAST = 4
+    # Define motion states as integer constants for better performance 
+    # String comparisons are much slower than integer comparisons
+    UNKNOWN = 0        # Initial state - we don't have enough information yet
+    STATIONARY = 1     # Ball is not moving (velocity near zero)
+    LONG_STATIONARY = 2  # Ball has been stationary for a significant period
+    SMALL_MOVEMENT = 3 # Ball is moving slowly (e.g., rolling)
+    MEDIUM_FAST = 4    # Ball is moving at moderate to high speed
     
-    # State name mapping for logging
+    # Human-readable names for each state (for logging and diagnostics)
     STATE_NAMES = {
-        0: "unknown",
-        1: "stationary",
-        2: "long_stationary",
-        3: "small_movement",
-        4: "medium_fast"
+        0: "unknown",          # Initial state
+        1: "stationary",       # Not moving
+        2: "long_stationary",  # Not moving for extended period
+        3: "small_movement",   # Slow movement
+        4: "medium_fast"       # Fast movement
     }
     
     def __init__(self):
         """
-        Initializes the motion state manager.
-        - Sets the current and previous state to UNKNOWN.
-        - Sets up confidence values for each state (how sure are we that we're in that state?).
-        - Sets up counters for how much evidence we have for each state (used for hysteresis).
-        - Sets up thresholds for what counts as stationary or moving.
-        - Precomputes a lookup table for mapping velocities to states for fast decision-making.
+        Initialize the motion state tracking system.
+        
+        This sets up:
+        1. The current motion state (initially UNKNOWN)
+        2. Confidence values for the current state
+        3. Counters for state transition hysteresis
+        4. Velocity thresholds for different movement categories
+        5. Timing for state transitions
+        6. History tracking for debugging
+        
+        The motion state system is designed with hysteresis - requiring
+        multiple consistent measurements before changing state - to avoid
+        rapid state flickering due to noise or momentary sensor errors.
         """
-        # Current state
-        self.current_state = self.UNKNOWN
-        self.previous_state = self.UNKNOWN
+        # Current and previous motion state
+        self.current_state = self.UNKNOWN    # What state are we in right now?
+        self.previous_state = self.UNKNOWN   # What state were we in previously?
         
         # State confidence (0-1)
         self.state_confidence = {
@@ -2889,33 +3171,55 @@ class OptimizedFusionNode(LifecycleNode):
 
 def main(args=None):
     """
-    Main function to start the node.
-    - Initializes ROS 2.
-    - Creates the fusion node.
-    - Runs the node using a multi-threaded executor.
-    - Handles clean shutdown on exit.
+    Main Function: Entry Point for the Fusion Node
+    ---------------------------------------------
+    
+    This function serves as the entry point for the State-Aware Fusion Node, setting up the ROS 2
+    environment, creating the node, handling execution, and ensuring proper cleanup on shutdown.
+    
+    Sequence of operations:
+    1. Initialize the ROS 2 client library
+    2. Set up a multi-threaded executor with resource-aware configuration
+    3. Create the fusion node instance
+    4. Add the node to the executor
+    5. Run the main processing loop (via executor.spin())
+    6. Handle clean shutdown when terminated
+    
+    Resource Optimization:
+    The executor is configured with a reduced thread count appropriate for
+    the Raspberry Pi's limited CPU cores, ensuring we don't oversubscribe
+    the system and leave resources for other critical nodes.
     """
+    # Initialize the ROS 2 Python client library
     rclpy.init(args=args)
     
-    # Use MultiThreadedExecutor with reduced thread count
-    # Pi has 4 cores, and we need to share with other nodes
+    # Create a multi-threaded executor with resource-aware configuration
+    # The Raspberry Pi 5 has 4 cores, but we need to share resources with
+    # other nodes in the system. Using 2 threads provides good performance
+    # without overwhelming the CPU.
     executor = MultiThreadedExecutor(num_threads=2)
     
-    # Create node
+    # Create an instance of our fusion node
     node = OptimizedFusionNode()
     
-    # Add to executor
+    # Add the node to the executor
+    # This allows the executor to manage the node's callbacks
     executor.add_node(node)
     
     try:
-        # Spin the executor
+        # Start the main processing loop
+        # This will not return until the node is shut down
         executor.spin()
     except KeyboardInterrupt:
+        # Handle graceful shutdown on Ctrl+C
         pass
     finally:
-        # Clean shutdown
+        # Clean shutdown sequence
+        # 1. Destroy the node (cleans up publishers, subscribers, etc.)
         node.destroy_node()
+        # 2. Shut down the ROS 2 client library
         rclpy.shutdown()
 
+# Standard Python entry point pattern
 if __name__ == '__main__':
     main()
