@@ -114,161 +114,6 @@ ros2 run rviz2 rviz2 -d $(ros2 pkg prefix ball_chase)/share/ball_chase/config/li
 18. [Further Reading](#further-reading)
 19. [References](#references)
 
-<a name="prerequisites"></a>
-## 17. Prerequisites
-
-This documentation is designed to be accessible to readers with varying levels of expertise. However, familiarity with the following concepts will help you get the most out of this material:
-
-### Required Knowledge
-
-1. **Basic Programming Concepts**:
-   - Python programming fundamentals
-   - Object-oriented programming principles
-   - Data structures (arrays, lists, dictionaries)
-   - Basic algorithms
-
-2. **ROS2 Fundamentals**:
-   - Understanding of nodes, topics, publishers, and subscribers
-   - Basic knowledge of ROS2 message types
-   - Familiarity with launch files and parameter configuration
-
-3. **Mathematics**:
-   - Coordinate systems (Cartesian, polar)
-   - Basic trigonometry and geometry
-   - Understanding of vectors and matrices
-   - Basic probability concepts
-
-### Recommended Background
-
-1. **Computer Vision**:
-   - Basic understanding of image processing concepts
-   - Familiarity with feature detection techniques
-
-2. **Robotics**:
-   - Basic understanding of sensors and actuators
-   - Familiarity with robot coordinate frames
-
-3. **Hardware**:
-   - Understanding of LIDAR sensor principles
-   - Familiarity with camera calibration concepts
-
-### Setup Requirements
-
-To work with the BasketballLidarDetector system, you will need:
-
-1. **Hardware**:
-   - Raspberry Pi 4 (4GB+ RAM recommended)
-   - 2D LIDAR sensor (RPLidar A1/A2 or similar)
-   - USB camera compatible with ROS2
-   - Robot platform with differential drive (recommended)
-
-2. **Software**:
-   - Ubuntu 22.04 or compatible Linux distribution
-   - ROS2 Humble Hawksbill
-   - Python 3.8+
-   - NumPy, SciPy, and OpenCV libraries
-
-<div align="right"><a href="#table-of-contents">Back to Table of Contents</a></div>
-
-<a name="further-reading"></a>
-## 18. Further Reading
-
-This section provides resources for deepening your understanding of LIDAR-based detection and related technologies.
-
-### Books
-
-1. **LIDAR and Computer Vision**:
-   - *Laser Scanning for the Environmental Sciences* by George L. Heritage and Andrew R.G. Large
-   - *Computer Vision: Algorithms and Applications* by Richard Szeliski
-   - *Probabilistic Robotics* by Sebastian Thrun, Wolfram Burgard, and Dieter Fox
-
-2. **ROS2 Resources**:
-   - *Programming Robots with ROS: A Practical Introduction to the Robot Operating System* by Morgan Quigley, Brian Gerkey, and William D. Smart
-   - *A Gentle Introduction to ROS2* by Jason M. O'Kane
-   - *ROS2 Design Documentation* [Online Documentation](https://design.ros2.org/)
-
-3. **Mathematics and Algorithms**:
-   - *Multiple View Geometry in Computer Vision* by Richard Hartley and Andrew Zisserman
-   - *Pattern Recognition and Machine Learning* by Christopher M. Bishop
-   - *Introduction to Algorithms* by Thomas H. Cormen, Charles E. Leiserson, Ronald L. Rivest, and Clifford Stein
-
-### Online Resources
-
-1. **Tutorials and Courses**:
-   - [ROS2 Tutorials](https://index.ros.org/doc/ros2/Tutorials/)
-   - [Point Cloud Library (PCL) Tutorials](https://pcl.readthedocs.io/projects/tutorials/en/latest/)
-   - [OpenCV-Python Tutorials](https://docs.opencv.org/master/d6/d00/tutorial_py_root.html)
-
-2. **Research Papers**:
-   - Rusu, R.B. and Cousins, S., "3D is here: Point Cloud Library (PCL)"
-   - Fischler, M.A. and Bolles, R.C., "Random Sample Consensus: A Paradigm for Model Fitting"
-   - Kaehler, A. and Bradski, G., "Learning OpenCV 3: Computer Vision in C++ with the OpenCV Library"
-
-3. **Community Resources**:
-   - [ROS Discourse](https://discourse.ros.org/)
-   - [ROS Answers](https://answers.ros.org/)
-   - [GitHub Repositories for Similar Projects](https://github.com/topics/lidar-detection)
-
-### Hardware Documentation
-
-1. **Sensor Documentation**:
-   - [RPLidar Documentation](https://www.slamtec.com/en/Support#rplidar-a-series)
-   - [Intel RealSense Documentation](https://dev.intelrealsense.com/docs)
-   - [Velodyne LIDAR Documentation](https://velodynelidar.com/downloads.html)
-
-2. **Raspberry Pi Resources**:
-   - [Raspberry Pi Documentation](https://www.raspberrypi.com/documentation/)
-   - [Raspberry Pi for Computer Vision](https://www.pyimagesearch.com/raspberry-pi-for-computer-vision/)
-
-<div align="right"><a href="#table-of-contents">Back to Table of Contents</a></div>
-
-<a name="references"></a>
-## 19. References
-
-This section provides formal academic citations for the key papers, algorithms, and methodologies referenced throughout this document. Each reference is numbered and can be cited in the text using the format [n].
-
-### Core Algorithms and Methods
-
-[1] Fischler, M. A., & Bolles, R. C. (1981). Random sample consensus: A paradigm for model fitting with applications to image analysis and automated cartography. *Communications of the ACM, 24*(6), 381-395. https://doi.org/10.1145/358669.358692
-
-[2] Rusu, R. B., & Cousins, S. (2011). 3D is here: Point Cloud Library (PCL). *IEEE International Conference on Robotics and Automation (ICRA)*, 1-4. https://doi.org/10.1109/ICRA.2011.5980567
-
-[3] Chen, H., & Bhanu, B. (2007). 3D free-form object recognition in range images using local surface patches. *Pattern Recognition Letters, 28*(10), 1252-1262. https://doi.org/10.1016/j.patrec.2007.02.009
-
-### Computer Vision and Sensor Fusion
-
-[4] Szeliski, R. (2010). *Computer Vision: Algorithms and Applications*. Springer. https://doi.org/10.1007/978-1-84882-935-0
-
-[5] Hartley, R., & Zisserman, A. (2004). *Multiple View Geometry in Computer Vision* (2nd ed.). Cambridge University Press. https://doi.org/10.1017/CBO9780511811685
-
-[6] Kaehler, A., & Bradski, G. (2016). *Learning OpenCV 3: Computer Vision in C++ with the OpenCV Library*. O'Reilly Media.
-
-### LIDAR and Robotics
-
-[7] Thrun, S., Burgard, W., & Fox, D. (2005). *Probabilistic Robotics*. MIT Press.
-
-[8] Hokuyo Automatic Co. (2021). *UTM-30LX Scanning Laser Rangefinder Specification*. Hokuyo Automatic Co., Ltd.
-
-[9] Heritage, G. L., & Large, A. R. G. (2009). *Laser Scanning for the Environmental Sciences*. Wiley-Blackwell.
-
-### Sensor Fusion and Tracking
-
-[10] Hall, D. L., & Llinas, J. (1997). An introduction to multisensor data fusion. *Proceedings of the IEEE, 85*(1), 6-23. https://doi.org/10.1109/5.554205
-
-[11] Bar-Shalom, Y., & Li, X. R. (1995). *Multitarget-Multisensor Tracking: Principles and Techniques*. YBS Publishing.
-
-[12] Kalman, R. E. (1960). A new approach to linear filtering and prediction problems. *Journal of Basic Engineering, 82*(1), 35-45. https://doi.org/10.1115/1.3662552
-
-### ROS2 and Robotics Software
-
-[13] Quigley, M., Gerkey, B., & Smart, W. D. (2015). *Programming Robots with ROS: A Practical Introduction to the Robot Operating System*. O'Reilly Media.
-
-[14] O'Kane, J. M. (2018). *A Gentle Introduction to ROS2*. CreateSpace Independent Publishing Platform.
-
-[15] Open Robotics. (2022). *ROS2 Design Documentation*. Retrieved from https://design.ros2.org/
-
-<div align="right"><a href="#table-of-contents">Back to Table of Contents</a></div>
-
 <a name="understanding-lidar-data"></a>
 ## 1. Understanding LIDAR Data
 
@@ -5490,5 +5335,160 @@ The implementation of these advanced capabilities would significantly enhance th
         <a href="#prerequisites">Next: 17. Prerequisites →</a>
     </div>
 </div>
+
+<div align="right"><a href="#table-of-contents">Back to Table of Contents</a></div>
+
+<a name="prerequisites"></a>
+## 17. Prerequisites
+
+This documentation is designed to be accessible to readers with varying levels of expertise. However, familiarity with the following concepts will help you get the most out of this material:
+
+### Required Knowledge
+
+1. **Basic Programming Concepts**:
+   - Python programming fundamentals
+   - Object-oriented programming principles
+   - Data structures (arrays, lists, dictionaries)
+   - Basic algorithms
+
+2. **ROS2 Fundamentals**:
+   - Understanding of nodes, topics, publishers, and subscribers
+   - Basic knowledge of ROS2 message types
+   - Familiarity with launch files and parameter configuration
+
+3. **Mathematics**:
+   - Coordinate systems (Cartesian, polar)
+   - Basic trigonometry and geometry
+   - Understanding of vectors and matrices
+   - Basic probability concepts
+
+### Recommended Background
+
+1. **Computer Vision**:
+   - Basic understanding of image processing concepts
+   - Familiarity with feature detection techniques
+
+2. **Robotics**:
+   - Basic understanding of sensors and actuators
+   - Familiarity with robot coordinate frames
+
+3. **Hardware**:
+   - Understanding of LIDAR sensor principles
+   - Familiarity with camera calibration concepts
+
+### Setup Requirements
+
+To work with the BasketballLidarDetector system, you will need:
+
+1. **Hardware**:
+   - Raspberry Pi 4 (4GB+ RAM recommended)
+   - 2D LIDAR sensor (RPLidar A1/A2 or similar)
+   - USB camera compatible with ROS2
+   - Robot platform with differential drive (recommended)
+
+2. **Software**:
+   - Ubuntu 22.04 or compatible Linux distribution
+   - ROS2 Humble Hawksbill
+   - Python 3.8+
+   - NumPy, SciPy, and OpenCV libraries
+
+<div align="right"><a href="#table-of-contents">Back to Table of Contents</a></div>
+
+<a name="further-reading"></a>
+## 18. Further Reading
+
+This section provides resources for deepening your understanding of LIDAR-based detection and related technologies.
+
+### Books
+
+1. **LIDAR and Computer Vision**:
+   - *Laser Scanning for the Environmental Sciences* by George L. Heritage and Andrew R.G. Large
+   - *Computer Vision: Algorithms and Applications* by Richard Szeliski
+   - *Probabilistic Robotics* by Sebastian Thrun, Wolfram Burgard, and Dieter Fox
+
+2. **ROS2 Resources**:
+   - *Programming Robots with ROS: A Practical Introduction to the Robot Operating System* by Morgan Quigley, Brian Gerkey, and William D. Smart
+   - *A Gentle Introduction to ROS2* by Jason M. O'Kane
+   - *ROS2 Design Documentation* [Online Documentation](https://design.ros2.org/)
+
+3. **Mathematics and Algorithms**:
+   - *Multiple View Geometry in Computer Vision* by Richard Hartley and Andrew Zisserman
+   - *Pattern Recognition and Machine Learning* by Christopher M. Bishop
+   - *Introduction to Algorithms* by Thomas H. Cormen, Charles E. Leiserson, Ronald L. Rivest, and Clifford Stein
+
+### Online Resources
+
+1. **Tutorials and Courses**:
+   - [ROS2 Tutorials](https://index.ros.org/doc/ros2/Tutorials/)
+   - [Point Cloud Library (PCL) Tutorials](https://pcl.readthedocs.io/projects/tutorials/en/latest/)
+   - [OpenCV-Python Tutorials](https://docs.opencv.org/master/d6/d00/tutorial_py_root.html)
+
+2. **Research Papers**:
+   - Rusu, R.B. and Cousins, S., "3D is here: Point Cloud Library (PCL)"
+   - Fischler, M.A. and Bolles, R.C., "Random Sample Consensus: A Paradigm for Model Fitting"
+   - Kaehler, A. and Bradski, G., "Learning OpenCV 3: Computer Vision in C++ with the OpenCV Library"
+
+3. **Community Resources**:
+   - [ROS Discourse](https://discourse.ros.org/)
+   - [ROS Answers](https://answers.ros.org/)
+   - [GitHub Repositories for Similar Projects](https://github.com/topics/lidar-detection)
+
+### Hardware Documentation
+
+1. **Sensor Documentation**:
+   - [RPLidar Documentation](https://www.slamtec.com/en/Support#rplidar-a-series)
+   - [Intel RealSense Documentation](https://dev.intelrealsense.com/docs)
+   - [Velodyne LIDAR Documentation](https://velodynelidar.com/downloads.html)
+
+2. **Raspberry Pi Resources**:
+   - [Raspberry Pi Documentation](https://www.raspberrypi.com/documentation/)
+   - [Raspberry Pi for Computer Vision](https://www.pyimagesearch.com/raspberry-pi-for-computer-vision/)
+
+<div align="right"><a href="#table-of-contents">Back to Table of Contents</a></div>
+
+<a name="references"></a>
+## 19. References
+
+This section provides formal academic citations for the key papers, algorithms, and methodologies referenced throughout this document. Each reference is numbered and can be cited in the text using the format [n].
+
+### Core Algorithms and Methods
+
+[1] Fischler, M. A., & Bolles, R. C. (1981). Random sample consensus: A paradigm for model fitting with applications to image analysis and automated cartography. *Communications of the ACM, 24*(6), 381-395. https://doi.org/10.1145/358669.358692
+
+[2] Rusu, R. B., & Cousins, S. (2011). 3D is here: Point Cloud Library (PCL). *IEEE International Conference on Robotics and Automation (ICRA)*, 1-4. https://doi.org/10.1109/ICRA.2011.5980567
+
+[3] Chen, H., & Bhanu, B. (2007). 3D free-form object recognition in range images using local surface patches. *Pattern Recognition Letters, 28*(10), 1252-1262. https://doi.org/10.1016/j.patrec.2007.02.009
+
+### Computer Vision and Sensor Fusion
+
+[4] Szeliski, R. (2010). *Computer Vision: Algorithms and Applications*. Springer. https://doi.org/10.1007/978-1-84882-935-0
+
+[5] Hartley, R., & Zisserman, A. (2004). *Multiple View Geometry in Computer Vision* (2nd ed.). Cambridge University Press. https://doi.org/10.1017/CBO9780511811685
+
+[6] Kaehler, A., & Bradski, G. (2016). *Learning OpenCV 3: Computer Vision in C++ with the OpenCV Library*. O'Reilly Media.
+
+### LIDAR and Robotics
+
+[7] Thrun, S., Burgard, W., & Fox, D. (2005). *Probabilistic Robotics*. MIT Press.
+
+[8] Hokuyo Automatic Co. (2021). *UTM-30LX Scanning Laser Rangefinder Specification*. Hokuyo Automatic Co., Ltd.
+
+[9] Heritage, G. L., & Large, A. R. G. (2009). *Laser Scanning for the Environmental Sciences*. Wiley-Blackwell.
+
+### Sensor Fusion and Tracking
+
+[10] Hall, D. L., & Llinas, J. (1997). An introduction to multisensor data fusion. *Proceedings of the IEEE, 85*(1), 6-23. https://doi.org/10.1109/5.554205
+
+[11] Bar-Shalom, Y., & Li, X. R. (1995). *Multitarget-Multisensor Tracking: Principles and Techniques*. YBS Publishing.
+
+[12] Kalman, R. E. (1960). A new approach to linear filtering and prediction problems. *Journal of Basic Engineering, 82*(1), 35-45. https://doi.org/10.1115/1.3662552
+
+### ROS2 and Robotics Software
+
+[13] Quigley, M., Gerkey, B., & Smart, W. D. (2015). *Programming Robots with ROS: A Practical Introduction to the Robot Operating System*. O'Reilly Media.
+
+[14] O'Kane, J. M. (2018). *A Gentle Introduction to ROS2*. CreateSpace Independent Publishing Platform.
+
+[15] Open Robotics. (2022). *ROS2 Design Documentation*. Retrieved from https://design.ros2.org/
 
 <div align="right"><a href="#table-of-contents">Back to Table of Contents</a></div>
