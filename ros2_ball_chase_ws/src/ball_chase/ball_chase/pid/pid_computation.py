@@ -10,6 +10,30 @@ for controlling a basketball-tracking robot with mecanum wheels. It goes far bey
 a basic PID controller, incorporating numerous advanced control techniques that
 make the robot's movement smooth, efficient, and natural-looking.
 
+┌───────────────────────────────────────────────────────────────────────────┐
+│                   ADVANCED PID CONTROL ARCHITECTURE                       │
+└───────────────────────────────────────────────────────────────────────────┘
+                                    │
+         ┌──────────────────────────┼──────────────────────────┐
+         │                          │                          │
+         ▼                          ▼                          ▼
+┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+│  ImprovedPID     │      │  StrategyManager │      │  Coordinated     │
+│  Controllers     │      │  & Blender       │      │  Controller      │
+└────────┬─────────┘      └────────┬─────────┘      └────────┬─────────┘
+         │                          │                          │
+         │                          │                          │
+         ▼                          ▼                          ▼
+┌──────────────────┐      ┌──────────────────┐      ┌──────────────────┐
+│ • Adaptive gains │      │ • Chooses best   │      │ • Links lateral  │
+│ • Anti-windup    │      │   movement       │      │   and angular    │
+│ • Zero-crossing  │      │   strategy based │      │   movements      │
+│   protection     │      │   on error       │      │ • Creates smooth │
+│ • Trend analysis │      │   patterns       │      │   natural paths  │
+│ • Dampening      │      │ • Smooth blending│      │ • Reduces        │
+│                  │      │   between        │      │   conflicts      │
+└──────────────────┘      └──────────────────┘      └──────────────────┘
+
 Key Concepts for Beginners:
 --------------------------
 
@@ -17,6 +41,26 @@ Key Concepts for Beginners:
 
    While standard PID control provides a foundation, this system adds several
    layers of sophistication:
+   
+   ┌───────────────────────────────────────────────────────────────────────┐
+   │                          PID CONTROLLER EVOLUTION                     │
+   └───────────────────────────────────────────────────────────────────────┘
+    
+    BASIC PID:                     ADVANCED PID:
+    ┌─────────────────┐            ┌─────────────────────────────┐
+    │                 │            │     Dynamic Gain Adjustment │
+    │     Fixed       │            │ ┌─────┐      ┌─────┐        │
+    │     Gains       │            │ │ Kp  │◄─┐   │ Dt  │◄───┐   │
+    │                 │            │ └─────┘  │   └─────┘    │   │
+    │ ┌───┐ ┌───┐ ┌───┐            │ ┌─────┐  │   ┌─────┐   │   │
+    │ │ P │ │ I │ │ D │            │ │ Ki  │◄─┼───┤Error│───┘   │
+    │ └─┬─┘ └─┬─┘ └─┬─┘            │ └─────┘  │   └─────┘       │
+    │   │     │     │              │ ┌─────┐  │   ┌─────┐       │
+    │   └─────┼─────┘              │ │ Kd  │◄─┴───┤Trend│       │
+    │         │                    │ └─────┘      └─────┘       │
+    │         ▼                    │                           │
+    │      Output                  │    Anti-Windup Protection  │
+    └─────────────────┘            └─────────────────────────────┘
    
    - ADAPTIVE GAIN ADJUSTMENT: PID gains change automatically based on the robot's situation
    - COORDINATED MULTI-DIMENSIONAL CONTROL: Handles forward, lateral, and angular movement together
@@ -31,6 +75,32 @@ Key Concepts for Beginners:
 
    The robot uses different movement "strategies" based on the specific situation:
    
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                          STRATEGY PATTERN                                 │
+   └───────────────────────────────────────────────────────────────────────────┘
+   
+   Error Condition                Strategy Selected              Movement Priority
+   ┌────────────────┐            ┌────────────────┐            ┌────────────────┐
+   │                │            │                │            │                │
+   │ Large Angular  │────┐       │  ANGULAR_      │            │  90% Angular   │
+   │ Error          │    │       │  FIRST         │────┐       │  40% Forward   │
+   │                │    │       │                │    │       │  30% Lateral   │
+   └────────────────┘    │       └────────────────┘    │       │                │
+                         │                              │       └────────────────┘
+   ┌────────────────┐    │       ┌────────────────┐    │       ┌────────────────┐
+   │                │    │       │                │    │       │                │
+   │ Large Lateral  │────┼─────▶│  LATERAL_      │────┼─────▶│  20% Angular   │
+   │ Medium Distance│    │       │  PRIORITY      │    │       │  70% Forward   │
+   │                │    │       │                │    │       │ 100% Lateral   │
+   └────────────────┘    │       └────────────────┘    │       │                │
+                         │                              │       └────────────────┘
+   ┌────────────────┐    │       ┌────────────────┐    │       ┌────────────────┐
+   │                │    │       │                │    │       │                │
+   │ Ball Moving    │────┘       │  PREDICTIVE_   │────┘       │  50% Angular   │
+   │ Diagonally     │            │  DIAGONAL      │            │  80% Forward   │
+   │                │            │                │            │  80% Lateral   │
+   └────────────────┘            └────────────────┘            └────────────────┘
+   
    - Each strategy defines how to use forward, lateral, and angular movement
    - Strategies focus movement in different directions based on the current error pattern
    - The robot smoothly transitions between strategies using blending
@@ -41,6 +111,47 @@ Key Concepts for Beginners:
 3. ERROR CATEGORIZATION WITH HYSTERESIS
 
    The system translates numerical errors into meaningful categories:
+   
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                    ERROR CATEGORIZATION WITH HYSTERESIS                   │
+   └───────────────────────────────────────────────────────────────────────────┘
+   
+           ┌─────────────────────────────────────────────────────────┐
+   Error   │                                                         │
+   Value   │                                                         │
+           │                                                         │
+     0.8   │                              ┌──────┐                   │
+           │                              │LARGE │                   │
+     0.6   │                 ┌──────┐     └──────┘                   │
+           │                 │MEDIUM│                                │
+     0.4   │    ┌──────┐     └──────┘                                │
+           │    │SMALL │                                             │
+     0.2   │    └──────┘                                             │
+           │                                                         │
+     0.0   │                                                         │
+           └─────────────────────────────────────────────────────────┘
+               Error increasing →                                    
+                                                                     
+                                                                     
+           ┌─────────────────────────────────────────────────────────┐
+   Error   │                                                         │
+   Value   │                                                         │
+           │                                                         │
+     0.8   │                                                         │
+           │                              ┌──────┐                   │
+     0.6   │                              │LARGE │                   │
+           │                 ┌──────┐     └──────┘                   │
+     0.4   │                 │MEDIUM│                                │
+           │    ┌──────┐     └──────┘                                │
+     0.2   │    │SMALL │                                             │
+           │    └──────┘                                             │
+     0.0   │                                                         │
+           └─────────────────────────────────────────────────────────┘
+               ← Error decreasing                                    
+   
+   Note the HYSTERESIS effect: When error is increasing, the categories change
+   at different thresholds than when error is decreasing. This "sticky" behavior
+   prevents rapid oscillation between categories when error is near a threshold.
    
    - "none", "very_small", "small", "medium", "large", etc.
    - These categories are more intuitive for decision-making
@@ -53,6 +164,38 @@ Key Concepts for Beginners:
 
    Special handling occurs when errors change sign (cross zero):
    
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                          ZERO-CROSSING HANDLING                           │
+   └───────────────────────────────────────────────────────────────────────────┘
+   
+   Error      │                 Zero-Crossing                                    
+   Value      │                 Detection                                        
+              │                     │                                            
+       +      │      ╱              │               ╲                            
+              │     ╱               │                ╲                           
+       0 ─────┼────╱────────────────┼─────────────────╲────────                 
+              │   ╱                 │                  ╲                         
+       -      │  ╱                  │                   ╲                        
+              │                     │                                            
+              └─────────────────────┼─────────────────────────────────────      
+                                    │                                            
+                         ┌──────────▼──────────┐                                 
+                         │ When Zero-Crossing  │                                 
+                         │     Detected:       │                                 
+                         └──────────┬──────────┘                                 
+                                    │                                            
+             ┌───────────────────────────────────────────────┐                   
+             │                                               │                   
+             ▼                                               ▼                   
+    ┌─────────────────┐                             ┌─────────────────┐          
+    │ Reset Integral  │                             │  Adjust Gains   │          
+    │     Term        │                             │                 │          
+    └─────────────────┘                             └─────────────────┘          
+                                                                                
+    Prevents accumulated                            Increases damping            
+    integral value from                             for smoother                 
+    causing overshoot                               approach to target           
+   
    - The robot detects when it passes its target and adjusts control accordingly
    - Integral terms are reduced to prevent overshooting
    - Gains are adjusted to provide optimal damping
@@ -62,6 +205,33 @@ Key Concepts for Beginners:
 5. COORDINATED MOVEMENT
 
    The robot coordinates its movements across different dimensions:
+   
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                          COORDINATED MOVEMENT                             │
+   └───────────────────────────────────────────────────────────────────────────┘
+   
+    BASIC APPROACH:                          COORDINATED APPROACH:
+    
+    ┌───────────────────────┐                ┌───────────────────────┐
+    │                       │                │                       │
+    │   Forward ──────────┐ │                │                       │
+    │                     │ │                │   ┌─────────────────┐ │
+    │   Lateral ──────────┼─┼─▶ Outputs      │   │   Coordinator   │ │
+    │                     │ │                │   │                 │ │
+    │   Angular ──────────┘ │                │   │  ┌─┐ ┌─┐   ┌─┐ │ │
+    │                       │                │   │  │F│ │L├───┤A│ │ │
+    └───────────────────────┘                │   │  └─┘ └─┘   └─┘ │ │
+                                             │   │                 │ │
+    Each dimension controlled                │   └─────────┬───────┘ │
+    independently - can create               │             │         │
+    jerky, robotic movement                  │             ▼         │
+                                             │                       │
+                                             │           Outputs     │
+                                             └───────────────────────┘
+                                             
+                                             Dimensions influence each other
+                                             creating smoother, more natural
+                                             movement patterns
    
    - Lateral and angular movements are coordinated together
    - When turning, forward speed is appropriately reduced
@@ -94,19 +264,63 @@ from enum import Enum, auto
 from ball_chase.pid.pid_target_filter import ErrorTracker
 
 class PIDControllers:
-    """Namespace for PID controller classes and related functionality."""
+    """
+    Collection of advanced PID control systems for the basketball tracking robot.
+    
+    Think of this class as a toolbox containing all the different control tools
+    needed for making the robot move smoothly and efficiently. This includes:
+    
+    - PID controllers with advanced features
+    - Movement strategy selection system
+    - Coordinated movement patterns
+    - Smooth transitions between behaviors
+    
+    What makes this different from basic PID controllers is the combination of
+    multiple specialized components working together to create motion that appears
+    natural and intelligent, rather than robotic and mechanical.
+    """
     
     @staticmethod
     def create_controller_with_tracker(controller_type, kp, ki, kd, output_min, output_max, tracker_name, throttled_logger, max_history=8):
-        """Factory method to create a controller with its error tracker properly initialized."""
+        """
+        Creates a complete PID controller with an attached error tracker.
+        
+        Think of this like setting up a car with both an engine (the controller) 
+        and dashboard instruments (the error tracker) at the same time.
+        
+        Args:
+            controller_type: The kind of PID controller to create (BasicPID, ImprovedPID, etc.)
+            kp: Proportional gain - how strongly to react to current error
+            ki: Integral gain - how strongly to react to accumulated error over time
+            kd: Derivative gain - how strongly to react to rate of change of error
+            output_min: Minimum allowable output value (prevents commands that are too small)
+            output_max: Maximum allowable output value (prevents commands that are too large)
+            tracker_name: Name for the error tracker (for logging and debugging)
+            throttled_logger: Logger that prevents too many repeated messages
+            max_history: How many past error values to remember
+            
+        Returns:
+            A tuple containing (controller, error_tracker)
+            
+        Raises:
+            RuntimeError: If the error tracker fails to initialize properly
+        """
+        # Create the error tracker that will monitor error patterns
         error_tracker = ErrorTracker(tracker_name, throttled_logger, max_history=max_history)
+        
+        # Create the actual PID controller
         controller = PIDControllers.create_controller(
             controller_type, kp, ki, kd, output_min, output_max
         )
+        
+        # Attach the error tracker to the controller
         controller.error_tracker = error_tracker
         controller.logger = throttled_logger  
+        
+        # Make sure everything was set up correctly
         if not hasattr(controller, 'error_tracker') or controller.error_tracker is None:
             raise RuntimeError(f"Failed to initialize error tracker for {controller_type.name} controller")
+            
         return controller, error_tracker
 
     class StrategyManager:
@@ -478,76 +692,98 @@ class PIDControllers:
         
         def categorize_error(self, error, error_type="distance", prev_category=None, lenient_factor=1.0):
             """
-            Categorize an error value with hysteresis to prevent oscillation.
-            Modified to support lenient categorization for angular errors.
+            Turns numbers into words that describe how big the error is.
+            
+            IMAGINE THIS: ✨
+            ---------------
+            You're playing a game where you need to throw a ball into a basket.
+            Instead of saying "you missed by 0.5 meters" or "you missed by 15 degrees",
+            this method would tell you "you missed by a MEDIUM amount" or "you missed
+            by a LARGE amount" - it translates exact measurements into useful categories
+            that help decide how to adjust.
             
             TRANSLATING NUMERICAL ERRORS INTO MEANINGFUL CATEGORIES
             -----------------------------------------------------
             
             This method takes raw error values (like "0.5 meters too far" or "15 degrees off-angle")
-            and translates them into categorical values that are more intuitive and useful for
+            and translates them into simple words that are more intuitive and useful for
             decision-making:
             
               Error Categories:
-              - "none": Error is within acceptable limits (target achieved)
-              - "very_small": Just barely outside acceptable range
-              - "small": Minor correction needed
-              - "small_medium": Moderate correction needed
-              - "medium": Significant correction needed
-              - "medium_large": Large correction needed
-              - "large": Very large correction needed
-              - "very_large": Extreme correction needed
+              - "none": Perfect! No correction needed (like "bulls-eye!")
+              - "very_small": Just a tiny bit off (like "almost perfect!")
+              - "small": A little bit off (like "close but needs a small adjustment")
+              - "small_medium": Somewhat off (like "getting there but needs work")
+              - "medium": Noticeably off (like "definitely needs correction")
+              - "medium_large": Quite far off (like "needs significant correction")
+              - "large": Very far off (like "way off target")
+              - "very_large": Extremely far off (like "completely missed")
             
-            EXAMPLE: For a distance error (in meters)
-              - 0.05m error → "none" (close enough)
-              - 0.15m error → "very_small" (minor adjustment)
-              - 0.25m error → "small" (small movement needed)
-              - 0.5m error → "medium" (significant movement needed)
-              - 1.2m error → "large" (far away, fast approach needed)
+            REAL-WORLD EXAMPLES:
+            -----------------
+            For a distance error (in meters):
+              - 0.05m error → "none" (you're close enough - like parking within 5cm of the curb)
+              - 0.15m error → "very_small" (like being just one step away from where you should stand)
+              - 0.25m error → "small" (like missing a basketball shot by a small amount)
+              - 0.5m error → "medium" (like throwing a dart that landed in the outer ring)
+              - 1.2m error → "large" (like throwing a paper into a trash can from across the room)
             
             Each error type (distance, lateral, angular) has different thresholds that make
-            sense for that dimension.
+            sense for that measurement - just like how being off by 5cm when parking is minor,
+            but being off by 5 degrees when flying an airplane could be a big deal!
             
             WHAT IS HYSTERESIS AND WHY WE NEED IT
             -----------------------------------
             
-            Hysteresis is a "stickiness" in state changes that prevents rapid oscillation
-            between categories. For example:
+            Hysteresis is like "stickiness" that prevents flip-flopping between categories.
+            It's easiest to understand with everyday examples:
             
-            WITHOUT hysteresis:
-              - Error crosses from 0.14m to 0.16m
+            🌡️ THERMOSTAT EXAMPLE:
+            A good thermostat doesn't turn on exactly at 70°F and off at 70°F.
+            Instead, it might turn on at 68°F and off at 72°F. This 4-degree gap
+            prevents the heater from rapidly turning on and off when the temperature
+            hovers around 70°F.
+            
+            🚘 CRUISE CONTROL EXAMPLE:
+            When you set cruise control to 65 mph, your car doesn't constantly
+            adjust speed if you go 64.9, then 65.1, then 65.0 mph. Instead, it
+            waits until you're maybe 2 mph off before making adjustments.
+            
+            WITHOUT hysteresis (bad):
+              - Error changes from 0.14m to 0.16m
               - Category immediately changes from "none" to "very_small"
-              - This could happen rapidly back and forth at the boundary
-              - Causes unstable, jittery movement
+              - The robot keeps flip-flopping between strategies
+              - Results in jittery, unstable movement (like a nervous driver)
             
-            WITH hysteresis:
-              - Error must cross a larger gap to change categories
-              - Error must drop to 0.12m to go from "very_small" back to "none"
-              - Provides 20% "sticky buffer" at category boundaries
-              - Results in smooth, stable movement
+            WITH hysteresis (good):
+              - Error must increase to 0.16m to go from "none" to "very_small"
+              - But must decrease to 0.12m (not just 0.14m) to go back to "none"
+              - This 20% buffer creates "stickiness" at the boundaries
+              - Results in smooth, stable movement (like a confident driver)
             
-            This is like having a thermostat that turns on at 68°F but doesn't
-            turn off until 72°F, preventing rapid cycling.
+            HOW THIS MAKES THE ROBOT MOVE BETTER
+            ----------------------------------
             
-            HOW THIS IMPACTS ROBOT BEHAVIOR
-            -----------------------------
+            Think of these categories like "driving modes":
+            - When errors are "none" → the robot is in "I arrived!" mode
+            - When errors are "small" → the robot is in "careful adjustment" mode
+            - When errors are "large" → the robot is in "hurry to the target" mode
             
-            These categorizations directly drive strategy selection. When errors change
-            categories, the robot may switch movement strategies, like going from
-            "PURE_APPROACH" to "APPROACH_WITH_ALIGNMENT" as the angular error
-            increases from "none" to "medium".
+            Without hysteresis, the robot might rapidly switch between these modes
+            when near the boundaries, making it seem indecisive and jittery - like
+            a driver who can't decide whether to speed up or slow down.
             
-            The hysteresis prevents the robot from rapidly switching between strategies
-            when near category boundaries, creating smoother, more natural movement.
+            With hysteresis, the robot sticks with a mode until there's a meaningful
+            change in the error, creating smoother, more natural-looking movement.
             
             Args:
-                error: The error value to categorize (in meters or radians)
-                error_type: The type of error (distance, lateral, angular)
-                prev_category: Previous category for hysteresis (stickiness)
-                lenient_factor: Factor to make categories more lenient (higher means more lenient)
+                error: How far off we are (in meters or degrees)
+                error_type: What kind of error ("distance", "lateral", or "angular")
+                prev_category: What category we were in last time (for hysteresis)
+                lenient_factor: How forgiving to be with categorization (higher = more forgiving)
                 
             Returns:
-                String: The error category (none, very_small, small, medium, large, etc.)
+                A word describing how big the error is ("none", "very_small", "small", etc.)
             """
             abs_error = abs(error)
             
@@ -658,14 +894,39 @@ class PIDControllers:
         
         def match_strategy(self, key, strategies=None):
             """
-            Match a key against the strategy table with wildcard support.
+            Finds the right movement strategy for the current situation.
+            
+            IMAGINE THIS: 📚
+            ---------------
+            Think of this like looking up a recipe in a cookbook:
+            
+            1. You check if you have ingredients like: 
+               - How far away is the target? (distance error)
+               - How far to the side is the target? (lateral error)
+               - How much do I need to turn? (angular error)
+               
+            2. You use these "ingredients" to find a matching recipe (strategy)
+               for how the robot should move.
+               
+            WHAT MAKES THIS SMART: 🔍
+            ---------------------
+            This method can handle "wildcards" - which means if it can't find an
+            exact match for the current situation, it will find the closest match:
+            
+            Example:
+            - Exact match: "medium distance error, small lateral error, large angular error"
+            - Wildcard match: "medium distance error, * lateral error, large angular error"
+              (where * means "any value")
+            
+            This is like having a recipe that says "use any vegetable you have on hand"
+            instead of requiring a specific vegetable.
             
             Args:
-                key: Tuple of (distance_state, lateral_state, angular_state)
-                strategies: Optional strategy table to use (defaults to self.strategy_table)
+                key: The current error situation (distance, lateral, and angular categories)
+                strategies: Optional special strategy table (usually you don't need this)
                 
             Returns:
-                List: The matched strategy definition
+                The best movement strategy for the current situation
             """
             # Use provided strategies or default to the built-in table
             strategies = strategies or self.strategy_table
@@ -700,19 +961,47 @@ class PIDControllers:
         
         def determine_strategy(self, distance_error, lateral_error, angular_error_degrees, is_robot_stopped=False):
             """
-            Determine the optimal movement strategy using table-driven approach
-            with hysteresis and angular-first prioritization.
-            Modified to reduce angular corrections when at target distance and
-            prioritize forward movement during startup.
+            Decides the best way for the robot to move right now.
+            
+            IMAGINE THIS: 🧠
+            ---------------
+            This is like the robot's "brain" that decides how to drive. It works like this:
+            
+            1. ASSESSMENT: "Where am I compared to where I should be?"
+               - How far away am I? (distance_error)
+               - How far to the side am I? (lateral_error) 
+               - Am I facing the wrong direction? (angular_error_degrees)
+               
+            2. CATEGORIZATION: "How big are these errors?"
+               - Turns numerical errors into categories like "small", "medium", "large"
+               - Uses hysteresis to prevent flip-flopping between categories
+               
+            3. STRATEGY SELECTION: "What's the best way to move?"
+               - Looks up the best movement pattern for the current situation
+               - Decides which dimensions to move in and how strongly
+               - Returns a complete movement plan
+               
+            SPECIAL FEATURES: 🌟
+            ----------------
+            - STARTUP BOOST: When first moving, prioritizes forward movement
+              (like how a car needs extra gas to start moving from a standstill)
+              
+            - AT-TARGET BEHAVIOR: When at the right distance, cares less about
+              perfect angular alignment (like being more relaxed with parking
+              angle when you're already in the spot)
+              
+            - SMOOTH TRANSITIONS: Uses "strategy blending" to gradually transition
+              between movement patterns (like how a good driver doesn't jerk the
+              steering wheel but makes smooth adjustments)
             
             Args:
-                distance_error: Error in distance (meters)
-                lateral_error: Error in lateral position (meters)
-                angular_error_degrees: Error in angular position (degrees)
+                distance_error: How far from target (in meters, + = too far, - = too close)
+                lateral_error: How far to the side (in meters, + = too right, - = too left)
+                angular_error_degrees: How much rotation needed (in degrees)
                 is_robot_stopped: Whether the robot is currently stopped
                 
             Returns:
-                MovementStrategy: Strategy object including strategy name, movement flags, and scale factors
+                A complete movement strategy object with instructions for how to move
             """
             current_time = time.time()
             
@@ -856,16 +1145,32 @@ class PIDControllers:
         @staticmethod
         def create_strategy_from_definition(strategy_def, distance_error=0.0, lateral_error=0.0, angular_error=0.0):
             """
-            Create a MovementStrategy object from a strategy definition.
+            Builds a complete movement strategy from a simple definition.
+            
+            IMAGINE THIS: 🏗️
+            ---------------
+            This is like assembling a toy from a box of parts:
+            
+            1. You have a list of parts (the strategy_def)
+            2. You put them together into a complete, working toy (MovementStrategy)
+            
+            The strategy definition contains all the information needed:
+            - What to name the strategy ("FORWARD_APPROACH", "ANGULAR_CORRECTION", etc.)
+            - Which dimensions to use (forward, lateral, angular)
+            - How strongly to use each dimension (scale factors)
+            - A reason message template explaining why this strategy was chosen
+            
+            This method adds the current error values to the reason template
+            to create a complete, informative message.
             
             Args:
-                strategy_def: Strategy definition from the strategy table
-                distance_error: Distance error value for reason formatting
-                lateral_error: Lateral error value for reason formatting
-                angular_error: Angular error value for reason formatting
+                strategy_def: The blueprint for the strategy (from the strategy table)
+                distance_error: How far from target (for message formatting)
+                lateral_error: How far to the side (for message formatting)
+                angular_error: How much rotation needed (for message formatting)
                 
             Returns:
-                MovementStrategy: The created strategy object
+                A complete, ready-to-use MovementStrategy object
             """
             try:
                 # Extract strategy components
@@ -888,16 +1193,51 @@ class PIDControllers:
                 )
         
         def set_debug_level(self, level):
-            """Set the debug output level."""
+            """
+            Controls how much information the robot shares about its decisions.
+            
+            Think of this like adjusting how chatty the robot is:
+            - Level 0: Silent (only critical errors)
+            - Level 1: Basic info (strategy changes)
+            - Level 2: Detailed info (all decisions and calculations)
+            - Level 3: Super detailed (absolutely everything)
+            
+            Higher levels are helpful when learning or troubleshooting,
+            but can slow things down in regular operation.
+            """
             self.debug_level = level
         
         def set_distance_threshold(self, threshold):
-            """Set the distance threshold for at-target behavior."""
+            """
+            Sets how close is "close enough" for distance to target.
+            
+            This is like setting the "parking tolerance" - how precisely
+            do we need to reach our exact distance target?
+            
+            - Smaller values (e.g., 0.1m): Very precise positioning required
+            - Larger values (e.g., 0.3m): More relaxed about exact position
+            
+            This affects when the robot considers itself "at target distance"
+            and starts using special at-target movement strategies.
+            """
             if threshold > 0:
                 self.distance_threshold = threshold
         
         def set_lateral_control(self, enabled):
-            """Enable or disable lateral control."""
+            """
+            Turns sideways movement on or off.
+            
+            When enabled = True:
+              Robot will use sideways (lateral) movement to position itself
+              (This is what makes mecanum wheels special - regular wheels can't do this!)
+              
+            When enabled = False:
+              Robot will only use forward/backward movement and rotation
+              (Like a regular car that can't slide sideways)
+              
+            You might disable lateral movement on rough surfaces where
+            mecanum wheels don't slide well, or for testing purposes.
+            """
             self.use_lateral_control = enabled
 
     class CoordinatedController:
@@ -1497,36 +1837,63 @@ class PIDControllers:
            - Prevents overshooting by counteracting rapid changes
            - Adds stability to the system
         
+        IMAGINE THIS: 🚗
+        --------------
+        Think of driving a car toward a parking spot:
+
+        - P term is like how hard you press the gas pedal based on distance
+          (farther away = press harder, closer = press lighter)
+          
+        - I term is like adjusting for a hill - if you're on an incline and not
+          moving despite pressing the gas, you gradually press harder until the
+          car starts moving
+          
+        - D term is like how you ease off the gas as you approach the spot
+          (slowing down to avoid overshooting your target)
+
         STANDARD PID VS. IMPROVED PID:
         ----------------------------
         A standard PID controller always uses fixed gains (kp, ki, kd).
         This advanced implementation adds:
         
-        - ADAPTIVE GAINS: Gains change based on the situation
-        - ANTI-WINDUP: Prevents integral term from growing too large
-        - ZERO-CROSSING HANDLING: Special care when passing the target
-        - GAIN SCHEDULING: Different gains for different controller types
+        - ADAPTIVE GAINS: Gains change based on the situation (like a driver
+          who becomes more cautious when approaching their destination)
+          
+        - ANTI-WINDUP: Prevents integral term from growing too large (like 
+          avoiding pressing the gas pedal to the floor when stuck in mud)
+          
+        - ZERO-CROSSING HANDLING: Special care when passing the target (like
+          special attention when you've just driven past your parking spot)
+          
+        - GAIN SCHEDULING: Different gains for different controller types (like
+          different driving styles for highways vs. city streets)
+          
         - TREND-BASED ADAPTATION: Adjusts control based on whether error is improving
+          (like easing off the gas when already slowing down at the right rate)
         
-        WHY THESE IMPROVEMENTS MATTER:
+        WHY THESE IMPROVEMENTS MATTER: 🎯
         ----------------------------
         These enhancements solve several common PID problems:
         
         1. OSCILLATION: Standard PIDs often oscillate around the target
+           (like a driver who keeps overshooting and backing up repeatedly)
            Our zero-crossing detection prevents this
         
         2. OVERSHOOTING: Standard PIDs often overshoot the target
+           (like driving past your parking spot before backing up)
            Our adaptive gains reduce this
         
         3. SLOW RESPONSE: Fixed gains must compromise between stability and speed
+           (like a driver who's either too cautious or too aggressive)
            Our adaptive approach can be both stable AND fast
         
         4. INTEGRATOR WINDUP: When the system can't reach the target, the 
-           integral term grows without limit
+           integral term grows without limit (like pressing the gas harder and
+           harder when stuck against a wall)
            Our anti-windup mechanisms prevent this
         
         The end result is a controller that creates smooth, natural movement
-        while adapting to different conditions.
+        while adapting to different conditions - just like an experienced driver!
         """
         # NOTE: Initialization errors should be raised explicitly and not masked, for consistency with the node's error handling policy.
         
@@ -1625,40 +1992,75 @@ class PIDControllers:
             This method implements the core PID computation with many advanced features.
             Understanding its operation requires following several key processes:
             
-            1. ERROR TREND ANALYSIS
+            IMAGINE THIS: 🧠
+            --------------
+            Think of this method as the "brain" of an experienced robot driver:
+            
+            1. ERROR TREND ANALYSIS 📈
                - Is the error getting better or worse?
                - Adjust gains accordingly (more aggressive when worsening)
                - Use gentle control when error is already improving
+               
+               Example: Like noticing "I'm already slowing down at the right rate, 
+               so I don't need to press the brake harder"
             
-            2. ZERO-CROSSING DETECTION
+            2. ZERO-CROSSING DETECTION 🎯
                - Detect when the error changes sign (crossed the target)
                - Apply special handling to prevent oscillation
                - Reduce integral term to prevent overshooting 
                
-            3. ADAPTIVE GAIN ADJUSTMENT
+               Example: Like realizing "I just drove past my parking spot! Let me
+               quickly adjust to avoid going too far in the wrong direction"
+               
+            3. ADAPTIVE GAIN ADJUSTMENT 🔄
                - For Linear X (forward): Prioritize smooth approach
                - For Linear Y (lateral): More aggressive damping
                - For Angular (rotation): Reduced integral gain
                - All controllers: Adjust gains based on error magnitude
                
-            4. INTELLIGENT INTEGRAL HANDLING
+               Example: Like naturally driving differently on highways (fast, stable)
+               versus in parking lots (slow, precise)
+               
+            4. INTELLIGENT INTEGRAL HANDLING 📊
                - Apply deadband (ignore tiny errors)
                - Use position-based decay for final approach
                - Reset integral when crossing zero
                - Anti-windup when output saturates
                
-            5. ENHANCED DERIVATIVE HANDLING
+               Example: Like not bothering to adjust your steering for a tiny
+               deviation, but making corrections for larger ones
+               
+            5. ENHANCED DERIVATIVE HANDLING 🛑
                - Amplify derivative during oscillations
                - Apply controller-specific adjustments
                - Protect against division by zero
+               
+               Example: Like applying extra braking when you notice you're swinging
+               back and forth between too fast and too slow
             
-            6. OUTPUT SMOOTHING
+            6. OUTPUT SMOOTHING 🧈
                - Detect and smooth out abrupt changes
                - Apply different smoothing based on controller type
                - Prevent jerky movements
                
+               Example: Like how you don't slam on brakes or gas pedal, but
+               apply them gradually for passenger comfort
+            
+            DAILY LIFE EXAMPLE: 🚶‍♀️
+            -------------------
+            Think about how you walk through a crowded mall to reach a specific store:
+            
+            - P term: You walk faster when far away, slower when close
+            - I term: If people keep blocking your path, you gradually find a more
+              open route
+            - D term: You slow down when approaching your destination
+            - Zero-crossing: If you walk past the store, you quickly turn around
+            - Adaptive gains: You move more carefully in crowded areas
+            - Output smoothing: You don't make jerky movements as you navigate
+            
             All these mechanisms work together to create a controller that produces
-            smooth, natural movement with minimal oscillation.
+            smooth, natural movement with minimal oscillation - just like how a skilled
+            human navigates complex environments!
             
             Args:
                 error: Current error value (target - current)

@@ -5,6 +5,78 @@ Time Handling Utilities
 ----------------------
 This module provides consistent time handling utilities for all nodes in the
 tennis ball tracking system, ensuring uniform timestamp processing.
+
+WHY DO WE NEED TIME UTILITIES? ⏰
+==============================
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                 TIME CHALLENGES IN ROBOTICS                              │
+└─────────────────────────────────────────────────────────────────────────┘
+
+    In robotics, dealing with time correctly is CRITICAL:
+
+    🔹 Different components use different time formats:
+       ┌───────────────────┐   ┌────────────────────┐   ┌────────────────┐
+       │ ROS TIME          │   │ UNIX TIME          │   │ OTHER FORMATS  │
+       │ sec: 1683142517   │   │ 1683142517.423     │   │ "15:45:17.423" │
+       │ nanosec: 423000000│   │ (float seconds)    │   │ (string)       │
+       └───────────────────┘   └────────────────────┘   └────────────────┘
+                        
+    🔹 We must be able to compare times and calculate differences:
+       
+       "Is this camera frame older than this sensor reading?"
+       "How much time has passed between these two events?"
+       
+    🔹 Time can sometimes jump backward due to system issues:
+    
+        TIME: 100.0s → 100.1s → 99.8s → 100.2s
+                                ↑ Backward jump!
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   HOW TIME UTILS HELPS                                   │
+└─────────────────────────────────────────────────────────────────────────┘
+
+    The TimeUtils class provides solutions for:
+    
+                            ┌───────────────────────────┐
+                            │     TIME CONVERSIONS      │
+                            └───────────────┬───────────┘
+                                            │
+                              ┌─────────────┴────────────┐
+                              │                          │
+     ┌────────────────────┐   │   ┌────────────────────┐ │  ┌────────────────────┐
+     │  ROS TIME          │◀──┼──▶│  FLOAT TIME        │◀┼─▶│ STRING TIME        │
+     │  sec: 1683142517   │   │   │  1683142517.423    │ │  │ "15:45:17.423"     │
+     │  nanosec: 423000000│   │   │                    │ │  │                    │
+     └────────────────────┘   │   └────────────────────┘ │  └────────────────────┘
+                              │                          │
+                              └──────────────────────────┘
+
+                            ┌───────────────────────────┐
+                            │     TIME SAFETY FEATURES  │
+                            └───────────────┬───────────┘
+                                            │
+                            ┌───────────────┴───────────┐
+                            │                           │
+               ┌────────────┴─────────┐   ┌─────────────┴────────────┐
+               │                      │   │                          │
+     ┌─────────┴─────────┐   ┌────────┴───┴───────┐    ┌─────────────┴────────┐
+     │  DETECT TIME JUMPS │   │ HANDLE BAD VALUES  │    │ FIND CLOSEST TIMES  │
+     │                    │   │                    │    │                      │
+     │  ✓ Backward jumps  │   │  ✓ Zero/negative   │    │  ✓ Match timestamps │
+     │  ✓ Clock resets    │   │  ✓ Very old times  │    │  ✓ Find best match  │
+     └────────────────────┘   └────────────────────┘    └──────────────────────┘
+
+EVERYDAY ANALOGY:
+===============
+
+Think of TimeUtils like a universal translator for different clock systems.
+Imagine your friend has a 24-hour military clock, another uses a 12-hour AM/PM 
+clock, and you need to coordinate a meeting. This class helps convert between 
+formats, check if times are valid, and handle problems like someone's watch 
+being set incorrectly.
+
+It's the time expert that makes sure everyone is talking about the same moment!
 """
 
 import time
@@ -22,12 +94,93 @@ class TimeUtils:
     - Converting between different time formats
     - Calculating time differences safely
     - Handling edge cases like backward time jumps
+    
+    IMAGINE THIS: 🕰️
+    ---------------
+    Think of TimeUtils as a highly skilled translator who helps people speaking
+    different "time languages" understand each other. Just like languages have
+    different words and grammar, different parts of a robot system use different
+    ways to represent time.
+    
+    HOW IT WORKS:
+    ------------
+    
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                         TIME CONVERSIONS                             │
+    └─────────────────────────────────────────────────────────────────────┘
+                                   │
+           ┌─────────────────────┬─┴─┬─────────────────────┐
+           │                     │   │                     │
+           ▼                     ▼   ▼                     ▼
+    ┌─────────────┐      ┌─────────────┐           ┌─────────────┐
+    │  ROS TIME   │      │   FLOAT     │           │   CHECK     │
+    │ CONVERSIONS │      │   TIME      │           │   AND FIX   │
+    └──────┬──────┘      └──────┬──────┘           └──────┬──────┘
+           │                    │                         │
+           ▼                    ▼                         ▼
+    ┌─────────────┐      ┌─────────────┐           ┌─────────────┐
+    │ros_time_to_ │      │get_time_    │           │handle_time_ │
+    │float()      │      │difference() │           │jump()       │
+    └─────────────┘      └─────────────┘           └─────────────┘
+    ┌─────────────┐      ┌─────────────┐           ┌─────────────┐
+    │float_to_ros_│      │find_closest_│           │is_timestamp_│
+    │time()       │      │timestamp()  │           │valid()      │
+    └─────────────┘      └─────────────┘           └─────────────┘
+    
+    EVERYDAY ANALOGY:
+    ---------------
+    In our daily lives, we have similar time conversion challenges:
+    
+    1. CONVERSION PROBLEMS:
+       - Converting between 24-hour and 12-hour time (3:30 PM vs. 15:30)
+       - Converting between time zones (8:00 AM EST vs. 5:00 AM PST)
+       - Converting between date formats (MM/DD/YY vs. DD/MM/YY)
+    
+    2. TIME DIFFERENCE PROBLEMS:
+       - "If one flight lands at 2:45 PM and another at 3:20 PM, how long
+         do I have between them?" (35 minutes)
+       - "How long ago did I send that message?" (calculating elapsed time)
+    
+    3. TIME VALIDATION PROBLEMS:
+       - Computer clock suddenly jumps backwards (daylight savings time)
+       - Setting a meeting for "February 30th" (invalid date)
+       - Computer showing year 1970 after a reboot (clock reset)
+    
+    TimeUtils solves all these types of problems for our robot system,
+    making sure all parts of the robot correctly understand when things happen.
     """
     
     @staticmethod
     def ros_time_to_float(ros_time: TimeMsg) -> float:
         """
         Convert a ROS Time message to a float seconds value.
+        
+        IMAGINE THIS: 🔄
+        ---------------
+        Think of this like converting currency. Just as you might convert euros 
+        to dollars, this method converts ROS's way of representing time into a 
+        simpler "universal" format (floating-point seconds).
+        
+        ROS Time looks like:   →  Float Time looks like:
+        sec: 1234567890           1234567890.123
+        nanosec: 123000000
+        
+        HOW IT WORKS:
+        ------------
+        This function:
+        1. Takes the "seconds" part as is
+        2. Converts "nanoseconds" to a fraction of a second (divides by a billion)
+        3. Adds them together to get a single number
+        
+        EXAMPLE:
+        -------
+        Input ROS Time: {sec: 10, nanosec: 500000000}
+        Float result: 10.5 seconds
+        
+        EVERYDAY ANALOGY:
+        ---------------
+        It's like converting feet and inches to just inches:
+        5 feet and 6 inches → 66 inches
         
         Args:
             ros_time: ROS Time message
@@ -86,6 +239,48 @@ class TimeUtils:
     def handle_time_jump(dt: float, default_dt: float = 0.033) -> float:
         """
         Handle common time jump issues in a consistent way.
+        
+        IMAGINE THIS: 🧙‍♂️
+        ---------------
+        Think of this method as a time detective that solves mysteries when the
+        clock behaves strangely. Sometimes computers hiccup and their clocks jump
+        backward (like going from 10:00 to 9:55) or jump too far forward
+        (from 10:00 to 11:30) when only a few seconds should have passed.
+        
+        HOW IT WORKS:
+        ------------
+        
+        ┌─────────────────────────────────────────────────────────┐
+        │                 TIME JUMP HANDLER                       │
+        └───────────────────────────┬─────────────────────────────┘
+                                    │
+                      ┌─────────────┴──────────────┐
+                      │                            │
+                      ▼                            ▼
+        ┌──────────────────────┐       ┌──────────────────────┐
+        │  BACKWARD JUMP?      │       │  FORWARD JUMP?       │
+        │                      │       │                      │
+        │  dt < 0             │       │  dt > 1.0            │
+        │  "Time went backward"│       │  "Time jumped way    │
+        │                      │       │   too far forward"   │
+        └──────────┬───────────┘       └──────────┬───────────┘
+                   │                               │
+                   ▼                               ▼
+        ┌──────────────────────┐       ┌──────────────────────┐
+        │  USE SAFE VALUE      │       │  USE SAFE VALUE      │
+        │                      │       │                      │
+        │  Return default_dt   │       │  Return default_dt   │
+        │  (typically 0.033s)  │       │  (typically 0.033s)  │
+        └──────────────────────┘       └──────────────────────┘
+        
+        EVERYDAY ANALOGY:
+        ---------------
+        It's like when your friend says, "I'll meet you in 5 minutes," but then
+        later claims, "I said that 2 minutes from now!" Their clock is clearly
+        wrong. Instead of accepting their bizarre time jump, you decide to use
+        your watch's reasonable time (like our default_dt) to keep things on track.
+        
+        Think of it as a "reality check" for time differences.
         
         Args:
             dt: Time difference that may contain jumps
@@ -160,6 +355,53 @@ class TimeUtils:
                               max_difference: float = 0.1) -> Tuple[int, float]:
         """
         Find the timestamp closest to a target time.
+        
+        IMAGINE THIS: 🔍
+        ---------------
+        Think of this like finding the person closest to your age at a party.
+        You're 25 years old and want to find someone similar in age. You check 
+        everyone's age: 18, 32, 24, 55, 40. The person who is 24 is closest to 
+        your age (just 1 year difference).
+        
+        In robotics, we do this with timestamps to match up sensor readings
+        that happened at nearly the same time.
+        
+        HOW IT WORKS:
+        ------------
+                      ┌───────────────────────────┐
+                      │   TARGET TIME: 10.5s      │
+                      └───────────────┬───────────┘
+                                      │
+                                      ▼
+        ┌─────────────────────────────────────────────────────┐
+        │                                                     │
+        │  AVAILABLE TIMESTAMPS:                              │
+        │                                                     │
+        │  [ 10.1s,   10.3s,   10.7s,   11.2s,   12.0s ]     │
+        │     |        |        |        |        |          │
+        │     |        |        |        |        |          │
+        │     |        |        |        |        |          │
+        │     ▼        ▼        ▼        ▼        ▼          │
+        │                                                     │
+        │  DIFFERENCES:                                       │
+        │                                                     │
+        │  [ 0.4s,    0.2s,    0.2s,    0.7s,    1.5s ]      │
+        │                                                     │
+        └────────────────────────┬────────────────────────────┘
+                                 │
+                                 ▼
+                      ┌───────────────────────────┐
+                      │   CLOSEST: 10.3s or 10.7s │
+                      │   (Both 0.2s away)        │
+                      │   Take the first one!     │
+                      └───────────────────────────┘
+        
+        EVERYDAY ANALOGY:
+        ---------------
+        It's like when you miss your favorite TV show that airs at 8:00 PM, but
+        there are reruns at 7:30 PM, 8:15 PM, 9:00 PM, and 11:00 PM. You want
+        to watch the rerun closest to the original time. This method would tell
+        you that the 8:15 PM showing is closest to your target of 8:00 PM.
         
         Args:
             target_time: The target time to match

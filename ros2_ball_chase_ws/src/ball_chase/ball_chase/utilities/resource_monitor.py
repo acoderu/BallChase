@@ -7,6 +7,100 @@ on Raspberry Pi hardware. It's designed to help track system performance
 while running computationally intensive robotics applications.
 
 Optimized for Raspberry Pi 5 with 16GB RAM.
+
+WHAT IS A RESOURCE MONITOR? 🖥️
+=============================
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   RESOURCE MONITOR EXPLAINED                             │
+└─────────────────────────────────────────────────────────────────────────┘
+
+   Think of a resource monitor like a car's dashboard:
+
+   +----------------------------+     +----------------------------+
+   |                            |     |                            |
+   |    CAR DASHBOARD           |     |    RESOURCE MONITOR        |
+   |                            |     |                            |
+   |  ┌──────────────────────┐ |     |  ┌──────────────────────┐  |
+   |  │  SPEED               │ |     |  │  CPU USAGE           │  |
+   |  │  65 mph              │ |     |  │  65%                 │  |
+   |  └──────────────────────┘ |     |  └──────────────────────┘  |
+   |                            |     |                            |
+   |  ┌──────────────────────┐ |     |  ┌──────────────────────┐  |
+   |  │  FUEL LEVEL          │ |     |  │  MEMORY USAGE        │  |
+   |  │  75% full            │ |     |  │  75% used            │  |
+   |  └──────────────────────┘ |     |  └──────────────────────┘  |
+   |                            |     |                            |
+   |  ┌──────────────────────┐ |     |  ┌──────────────────────┐  |
+   |  │  ENGINE TEMPERATURE  │ |     |  │  SYSTEM TEMPERATURE  │  |
+   |  │  Normal (190°F)      │ |     |  │  Normal (55°C)       │  |
+   |  └──────────────────────┘ |     |  └──────────────────────┘  |
+   |                            |     |                            |
+   +----------------------------+     +----------------------------+
+
+WHY IS THIS IMPORTANT FOR ROBOTS? 🤖
+=================================
+
+Just like you need to know if your car is overheating or running out of fuel,
+a robot needs to know if:
+
+1. CPU is getting overloaded (causing slow responses)
+2. Memory is running out (might crash programs)
+3. Temperature is too high (might damage hardware)
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   HOW THE RESOURCE MONITOR WORKS                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+                                ┌──────────────┐
+                                │  START       │
+                                └──────┬───────┘
+                                       │
+                                       ▼
+                 ┌─────────────────────────────────────────┐
+                 │  MONITOR THREAD                         │
+                 │  Runs in background                     │
+                 └───────────┬─────────────────────────────┘
+                             │
+                             ▼
+            ┌───────────────────────────────────────┐
+            │                                       │
+            │   ┌─────────┐    ┌─────────┐          │
+        ┌───┼──►│CPU Check│───►│Memory   │──────┐   │
+        │   │   │(Fast)   │    │Check    │      │   │
+        │   │   └─────────┘    └─────────┘      │   │
+        │   │                                    │   │
+        │   │   ┌─────────┐    ┌─────────┐      │   │
+        │   └──►│Temp     │◄───│Publish  │◄─────┘   │
+        │       │Check    │    │to ROS   │          │
+        │       └─────────┘    └─────────┘          │
+        │                                           │
+        └───────────────────────────────────────────┘
+                             │
+                             ▼
+      ┌───────────────────────────────────────────────────┐
+      │  PERFORMANCE MANAGEMENT                           │
+      │                                                   │
+      │  ┌─────────────┐     ┌─────────────┐             │
+      │  │ NORMAL MODE │────►│EFFICIENT MODE│────┐        │
+      │  │ All systems │     │Reduce usage  │    │        │
+      │  │   normal    │     │to save power │    │        │
+      │  └─────────────┘     └─────────────┘    │        │
+      │         ▲                                ▼        │
+      │         │            ┌─────────────┐             │
+      │         └────────────│CRITICAL MODE│             │
+      │                      │Emergency    │             │
+      │                      │power saving │             │
+      │                      └─────────────┘             │
+      └───────────────────────────────────────────────────┘
+
+EVERYDAY EXAMPLE:
+===============
+
+It's like your phone showing you the battery percentage and warning
+you when it's getting low. When your phone reaches 5% battery, it might
+switch to power saving mode automatically - our resource monitor does
+the same thing for robots, helping them manage their resources smartly!
 """
 
 import os
@@ -26,6 +120,59 @@ class ResourceMonitor:
     
     This is especially useful for Raspberry Pi applications where
     resource constraints can impact performance.
+    
+    IMAGINE THIS: 🏥
+    ---------------
+    The ResourceMonitor is like a doctor for your robot's computer. Just like how
+    a doctor checks your heart rate, blood pressure, and temperature during a 
+    check-up, this class regularly checks:
+    
+    1. CPU usage (how hard the brain is working)
+    2. Memory usage (how much information is being remembered)
+    3. Temperature (how hot the system is getting)
+    
+    HOW IT WORKS:
+    ------------
+                 MONITOR ROBOT'S "HEALTH"
+                          │
+                          ▼
+    ┌────────────────────────────────────────┐
+    │                                        │
+    │  ┌──────────┐      ┌──────────┐        │
+    │  │ MEASURE  │      │ ANALYZE  │        │
+    │  │ • CPU    │──────│ • Compare│        │
+    │  │ • Memory │      │   to safe│        │
+    │  │ • Temp   │      │   levels │        │
+    │  └──────────┘      └──────────┘        │
+    │          │               │             │
+    │          └───────┬───────┘             │
+    │                  │                     │
+    └──────────────────│─────────────────────┘
+                       │
+                       ▼
+    ┌────────────────────────────────────────┐
+    │                                        │
+    │  ┌──────────┐      ┌──────────┐        │
+    │  │ DETECT   │      │ RESPOND  │        │
+    │  │ Problems │──────│ • Alerts │        │
+    │  │ • High CPU│      │ • Slow   │        │
+    │  │ • Low Mem │      │   down   │        │
+    │  │ • Overheat│      │ • Adapt  │        │
+    │  └──────────┘      └──────────┘        │
+    │                                        │
+    └────────────────────────────────────────┘
+    
+    EVERYDAY ANALOGY:
+    ---------------
+    Think of it like the thermostat in your home that automatically adjusts 
+    your air conditioning when it gets too hot. This class:
+    
+    1. MEASURES - constantly checks CPU, memory and temperature
+    2. DETECTS - notices when something is too high
+    3. RESPONDS - can trigger alerts and change the robot's behavior
+    
+    If the robot is working too hard (CPU high) or getting too hot, it can 
+    automatically scale back intensive operations to prevent crashes or damage.
     """
     
     def __init__(self, 

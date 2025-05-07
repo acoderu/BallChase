@@ -17,6 +17,56 @@ it takes for each beam to bounce back. This gives us a "polar coordinate" measur
 The resulting data looks like a ring of points around the sensor. When a basketball is in view, 
 it appears as an arc or partial circle in this ring of points.
 
+LIDAR Fundamentals Visualization:
+
+          LaserScan message contains:
+          - angle_min (e.g., 0°)         - distances[] array
+          - angle_max (e.g., 359°)       - intensities[] array
+          - angle_increment               - time_increment
+          
+    θ = 270°                                                  θ = 90°
+        |                                                        |
+        |                                                        |
+        v                                                        v
+        
+        •                                                        •
+       /|\                                                      /|\
+      / | \                                                    / | \
+     /  |  \                                                  /  |  \
+    •   |   •            ┌─────────┐                        •   |   •
+        |                │  LIDAR  │                            |
+    ◦<--◦---------------◦----|----◦---------------◦------------>◦
+        |                └─────────┘                            |
+    •   |   •                                                •   |   •
+     \  |  /                      ^                          \  |  /
+      \ | /                       |                           \ | /
+       \|/                  θ = 0° (front)                     \|/
+        •                                                        •
+        
+        ^                                                        ^
+        |                                                        |
+        |                                                        |
+    θ = 180°                                                  θ = 0°
+
+     • = LIDAR points (reflections from objects)
+     ◦ = LIDAR beams (no reflection within range)
+
+When a basketball is detected in the scan:
+
+   Normal scan                  Basketball detected               Converted to Cartesian
+   
+   • • • • • • •                • • • • • • •                          y
+   •           •               •           •                          ^
+   •           •               •   . . .   •                          |
+   •           •               •  .     .  •                          |
+   •           •       →       • .       . •       →        ···········
+   •           •               • .       . •               ···       ···
+   •           •               •  .     .  •              ··           ··
+   •           •               •   . . .   •              ·             ·
+   • • • • • • •                • • • • • • •              ···············
+                                                                      → x
+      Raw scan                 Arc from ball                Fit circle to points
+
 Several algorithms could detect circles in this type of data:
 1. **Hough Transform** - A classic technique that can detect various shapes by transforming points 
    to a parameter space. It works well for complete circles but is computationally expensive and 
@@ -48,6 +98,44 @@ Instead of processing all LIDAR points (hundreds of them), we:
 3. Create a "detection cone" in that direction
 4. Filter LIDAR points to only those within this cone
 5. Run RANSAC on this much smaller set of points
+
+Search Cone Optimization Visualization:
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│                 Before Optimization                 After Optimization        │
+│                                                                              │
+│    ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ●      ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● │
+│   ●                               ●      ●                               ●    │
+│  ●                                 ●    ●                                 ●   │
+│  ●                                 ●    ●                                 ●   │
+│  ●                                 ●    ●             ┌───┐               ●   │
+│  ●                                 ●    ●            /     \              ●   │
+│  ●            LIDAR                ●    ●           /   •   \             ●   │
+│  ●                                 ●    ●          /  • • •  \            ●   │
+│  ●        Process all points       ●    ●         /  •  •  •  \           ●   │
+│  ●         (360° scan data)        ●    ●        |   •••••••   |          ●   │
+│  ●                                 ●    ●        |   •  •  •   |          ●   │
+│  ●                                 ●    ●        |   •••••••   |          ●   │
+│  ●                                 ●    ●         \           /           ●   │
+│  ●                                 ●    ●          \ Camera  /            ●   │
+│   ●                               ●      ●          \ cone  /            ●    │
+│    ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ●      ● ● ● ● ● ●\─────/● ● ● ● ● ● ● ●     │
+│                                                     │                         │
+│                                                     │                         │
+│                                                     ▼                         │
+│                                                                              │
+│    ┌─────────────┐                           ┌────────────────┐              │
+│    │ Process 500+│                           │ Process only   │              │
+│    │ LIDAR points│                           │ 20-30 points   │              │
+│    └─────────────┘                           └────────────────┘              │
+│                                                                              │
+│    - CPU: 100% usage                         - CPU: 15% usage                │
+│    - Memory: High                            - Memory: Low                   │
+│    - Speed: Slow                             - Speed: Fast                   │
+│    - Accuracy: Moderate (noisy)              - Accuracy: High (focused)      │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
 
 This approach is like narrowing your gaze to where you expect to find something, rather than 
 searching the entire room. It dramatically improves:
@@ -113,6 +201,40 @@ class ObjectPool:
     - Saves time: Creating new objects is slower than reusing existing ones.
     - Saves memory: We avoid memory fragmentation and reduce garbage collection.
     - Makes the program more efficient, especially on devices with limited resources (like Raspberry Pi).
+    
+    🔍 BEGINNER'S GUIDE: What Is Memory Allocation?
+    ----------------------------------------------
+    When you create a new object in Python (like a list or NumPy array), your computer needs to:
+    
+    1. Find enough free memory space to store the object
+    2. Mark that memory as "in use"
+    3. Set up the object with initial values
+    4. Return a reference (like an address) to that memory
+    
+    This process takes time and resources. Imagine if you needed to build a new house every time you
+    wanted to have dinner with friends instead of reusing your existing house!
+    
+    Example in Python:
+    ```python
+    # Creating new arrays repeatedly (inefficient)
+    for i in range(1000):
+        points = np.zeros((500, 3))  # Create a new array each time
+        # Do something with points
+        # Array gets discarded when loop finishes
+    
+    # Using object pooling (efficient)
+    pool = ObjectPool(lambda: np.zeros((500, 3)), initial_size=10)
+    for i in range(1000):
+        points = pool.get()  # Get an existing array from the pool
+        # Do something with points
+        pool.put(points)     # Return it to the pool when done
+    ```
+    
+    With the object pool approach, we might only create 10-15 arrays total instead of 1000!
+    
+    💡 Real-world analogy: Think of an object pool like a library. Instead of everyone buying 
+    new books (expensive and wasteful), people borrow books, read them, and return them for 
+    others to use.
     
     ---
     
@@ -223,6 +345,31 @@ class LightweightBuffer:
       - If it's full, we overwrite the oldest entry and move next_index
     - This creates a "sliding window" of the most recent N values
     
+    Circular Buffer Visualization (max_size=6):
+    
+    Initially (Empty)           After adding A,B,C           After adding D,E,F
+    
+    ┌───┬───┬───┬───┬───┬───┐  ┌───┬───┬───┬───┬───┬───┐  ┌───┬───┬───┬───┬───┬───┐
+    │   │   │   │   │   │   │  │ A │ B │ C │   │   │   │  │ A │ B │ C │ D │ E │ F │
+    └───┴───┴───┴───┴───┴───┘  └───┴───┴───┴───┴───┴───┘  └───┴───┴───┴───┴───┴───┘
+      ↑                           ↑                                               ↑
+    next_index = 0            next_index = 3                                next_index = 0
+    
+    After adding G             After adding H,I               Reading latest (I,H,G)
+    
+    ┌───┬───┬───┬───┬───┬───┐  ┌───┬───┬───┬───┬───┬───┐     ┌───┬───┬───┬───┬───┬───┐
+    │ G │ B │ C │ D │ E │ F │  │ G │ H │ I │ D │ E │ F │     │ G │ H │(I)│ D │ E │ F │
+    └───┴───┴───┴───┴───┴───┘  └───┴───┴───┴───┴───┴───┘     └───┴───┴───┴───┴───┴───┘
+          ↑                              ↑                       ↓   ↓   ↓
+    next_index = 1                  next_index = 3           3rd 2nd  1st (most recent)
+    
+    In this example:
+    • A,B,C,D,E,F fill the buffer
+    • G overwrites A (oldest value)
+    • H overwrites B, I overwrites C
+    • Next will overwrite D
+    • Reading latest 3 values returns [I,H,G] (newest to oldest)
+    
     Why is this important for robotics?
     - In basketball tracking, we need recent history data for:
       - Calculating velocities (requires position history)
@@ -325,6 +472,53 @@ class MotionStateManager:
       - Our threshold is 0.05 m/s
       - Without hysteresis: STATIONARY → MOVING → STATIONARY → MOVING...
       - With hysteresis: Stays STATIONARY until we get multiple readings above threshold
+    
+    Motion State Machine Visualization:
+    
+    ┌──────────────────────────────────────────────────────────────────┐
+    │                                                                  │
+    │   State Transition with Hysteresis                               │
+    │                                                                  │
+    │   Ball Velocity →                                                │
+    │   0     0.05     0.2      0.5    1.0 m/s                         │
+    │   │       │       │        │       │                             │
+    │   ├───────┼───────┼────────┼───────┤                             │
+    │   │       │       │        │       │                             │
+    │   ▼       ▼       ▼        ▼       ▼                             │
+    │                                                                  │
+    │   ┌───────────┐   ┌──────────┐   ┌────────┐                      │
+    │   │           │   │          │   │        │                      │
+    │   │STATIONARY │   │  SMALL   │   │MEDIUM/ │                      │
+    │   │           │   │MOVEMENT  │   │ FAST   │                      │
+    │   └─────┬─────┘   └────┬─────┘   └────────┘                      │
+    │         │              │                                         │
+    │         │   requires   │                                         │
+    │         │ 3+ readings  │                                         │
+    │         │    above     │                                         │
+    │   ┌─────▼─────┐   ┌────▼─────┐                                   │
+    │   │           │   │          │                                   │
+    │   │  >0.05?   │───►   >0.2?  │                                   │
+    │   │           │Yes │          │                                   │
+    │   └───────────┘   └──────────┘                                   │
+    │                                                                  │
+    └──────────────────────────────────────────────────────────────────┘
+    
+    Example of Hysteresis in Action:
+    
+    Velocity readings: [0.03, 0.04, 0.06, 0.07, 0.06, 0.07, 0.08, 0.03, 0.04]
+    Threshold: 0.05 m/s
+    Evidence needed: 3
+    
+    Without Hysteresis:
+    State: [STAT, STAT, MOVE, MOVE, MOVE, MOVE, MOVE, STAT, STAT]
+                      ↑     ↑                       ↑
+                   Changes immediately with each threshold crossing
+    
+    With Hysteresis:
+    Evidence: [0, 0, 1, 2, 3, -, -, 0, 0]
+    State:    [STAT, STAT, STAT, STAT, MOVE, MOVE, MOVE, MOVE, MOVE]
+                                    ↑                            
+                       Changes only after 3 consistent readings
     
     How does our hysteresis implementation work?
     - We maintain "evidence counters" for each state
@@ -755,6 +949,36 @@ class BasketballLidarDetector(Node):
         Cache static transforms with long TTL for the Raspberry Pi 5.
         Transforms are used to convert positions between different coordinate frames (like camera and LIDAR).
         By caching them, we avoid having to look them up every time, which saves time and CPU.
+        
+        🔍 BEGINNER'S GUIDE: Understanding Coordinate Transforms
+        -----------------------------------------------------
+        
+        What is a coordinate transform?
+        A coordinate transform is like a conversion formula between different measurement systems.
+        
+        Think about this: You have a map with a treasure marked at (5, 10) paces from a palm tree,
+        but your friend has a map showing the same treasure at (7, -2) paces from a rock.
+        A coordinate transform would help you convert between these two systems!
+        
+        In robotics, we have multiple sensors (LIDAR, cameras) that each have their own "view" of the world:
+        
+        | Camera Coordinates        | LIDAR Coordinates         | Base Coordinates          |
+        |---------------------------|---------------------------|---------------------------|
+        | Origin: Camera center     | Origin: LIDAR center      | Origin: Robot base center |
+        | Units: Pixels and meters  | Units: Meters             | Units: Meters             |
+        | X-axis: Right in image    | X-axis: Forward from LIDAR| X-axis: Forward from robot|
+        | Y-axis: Down in image     | Y-axis: Left from LIDAR   | Y-axis: Left from robot   |
+        | Z-axis: Forward from camera| Z-axis: Up from LIDAR    | Z-axis: Up from robot     |
+        
+        Why do we need transforms?
+        - The camera sees an object at position A in its coordinate system
+        - The LIDAR sees the same object at position B in its coordinate system
+        - We need to convert between these systems to know they're talking about the same object!
+        
+        💡 Real-world analogy: 
+        Imagine having separate maps of the same area - one in miles, one in kilometers, and one rotated 30 degrees. 
+        Transforms let you convert between these maps to understand that "Main Street" on one map is the 
+        same as "Oak Avenue" on another, just described differently.
         """
         # Destroy the timer once called
         timer_index_to_remove = None
@@ -1058,13 +1282,28 @@ class BasketballLidarDetector(Node):
         
         ---
         
-        What is adaptive performance and why is it important?
-        - Adaptive performance means the software changes its behavior based on system load
-        - Think of it like a car's automatic transmission - it shifts gears based on conditions
-        - For robotics on limited hardware (like Raspberry Pi), this is crucial:
-          - Too much CPU usage can cause thermal throttling or system lag
-          - Consistent performance is more important than maximum quality
-          - It needs to be responsive in all conditions, not just ideal ones
+        🔍 BEGINNER'S GUIDE: Adaptive Performance in Robotics
+        -------------------------------------------------
+        
+        What is adaptive performance?
+        Adaptive performance means the software changes how it works based on how busy your computer is.
+        
+        💡 Real-world analogy:
+        It's like how you'd drive a car differently in different situations:
+        - Open highway: You can drive fast and enjoy the radio (like high-quality processing)
+        - Heavy traffic: You slow down and focus more on the road (like efficient processing)
+        - Emergency situation: You turn off the radio, ignore the GPS, and just focus on avoiding accidents 
+          (like minimal processing mode)
+        
+        Why does a robot need to adapt?
+        - The Raspberry Pi (our robot's brain) has limited power
+        - If we try to do too much at once, it can overheat or slow down
+        - A slow robot can't track a moving basketball!
+        - We want consistent, reliable performance rather than perfect but inconsistent performance
+        
+        💡 Think about it like this:
+        It's better to have a robot that tracks a ball at 30fps consistently than one that
+        runs at 60fps for a minute and then overheats and drops to 5fps.
         
         How does our adaptive performance system work?
         - We define three performance modes based on CPU load:
@@ -1670,8 +1909,8 @@ class BasketballLidarDetector(Node):
         
         ---
         
-        LIDAR Scan Data Explained
-        ------------------------
+        🔍 BEGINNER'S GUIDE: LIDAR Scan Data Explained
+        --------------------------------------------
         A 2D LIDAR scan is like a radar sweep that gives us a "snapshot" of distances to all objects around 
         the robot. When it arrives at our node, it contains:
         
@@ -1686,6 +1925,15 @@ class BasketballLidarDetector(Node):
         angle_increment: 0.01 # Angular distance between measurements
         ranges: [1.2, 1.3, inf, 1.5, 0.8, ...] # Distances in meters, 'inf' = no return
         ```
+        
+        💡 Understanding Radians vs. Degrees:
+        Radians are a way to measure angles used in mathematics:
+        - Full circle = 2π radians = 360 degrees
+        - Half circle = π radians = 180 degrees 
+        - Quarter circle = π/2 radians = 90 degrees
+        
+        Why use radians? Mathematical operations are simpler with radians, and
+        computers often work with radians internally for calculations.
         
         The scan might look like this (top-down view):
             
@@ -1766,6 +2014,53 @@ class BasketballLidarDetector(Node):
             if self.adaptive_processing and self.performance_mode == "MINIMAL" and self.processed_scans % 2 != 0:
                 self.processing_skips += 1
                 return
+                
+            """
+            🔍 BEGINNER'S GUIDE: Converting Polar to Cartesian Coordinates
+            ----------------------------------------------------------
+            
+            LIDAR data comes in "polar coordinates" (angles and distances), but our algorithms
+            work better with "Cartesian coordinates" (x,y positions). Here's how we convert them:
+            
+            Polar Coordinates:
+            - Distance from center (r)
+            - Angle (θ) from reference direction
+            
+            Cartesian Coordinates:
+            - x = r * cos(θ) - horizontal position
+            - y = r * sin(θ) - vertical position
+            
+            Visual Example:
+                               
+                              ^ y-axis
+                              |
+                              |
+                          r   |
+                         /|   |
+                        / |   |
+                       /  |   |
+                      /   |   |
+                     /    |   |
+                    /     |   |
+                   /  θ   |   |
+                  L-------|-----> x-axis
+                  
+            Conversion Steps:
+            1. Get each angle: angle = angle_min + (index * angle_increment)
+            2. Get the distance at that angle: r = ranges[index]
+            3. Calculate x = r * cos(angle)
+            4. Calculate y = r * sin(angle)
+            5. Store as (x,y) point in our array
+            
+            Why do this conversion?
+            - It makes finding shapes like circles much easier
+            - It gives us actual physical positions in space
+            - It makes visualization and debugging easier
+            - Many algorithms (like RANSAC) expect Cartesian coordinates
+            
+            We optimize this by using NumPy's vectorized operations to convert all
+            points at once instead of using a loop!
+            """
             
             # Store scan metadata
             self.latest_scan = msg
@@ -2168,14 +2463,34 @@ class BasketballLidarDetector(Node):
         
         ---
         
-        This function uses a famous algorithm called RANSAC (Random Sample Consensus) to find circles in noisy data.
-        Imagine you have a bunch of points from a LIDAR scan, and you want to find which ones form a circle (the basketball).
-        But some points are just noise (not part of the ball). RANSAC helps us find the best circle by:
-        1. Randomly picking 3 points (since 3 points define a circle).
-        2. Fitting a circle through those 3 points.
-        3. Counting how many other points are close to that circle (these are called "inliers").
-        4. Repeating this many times, keeping the circle with the most inliers and best fit.
+        🔍 BEGINNER'S GUIDE: Finding a Basketball in LIDAR Data
+        ---------------------------------------------------
+        This function is the "detective" of our code - it searches through LIDAR data to find the basketball.
+        
+        The Challenge:
+        - We have hundreds of LIDAR points showing all objects around the robot
+        - We need to figure out which points (if any) come from the basketball
+        - The basketball appears as a partial circle in the data
+        - Other objects might look similar to parts of a circle
+        - We need to be fast and accurate
+        
+        Our Solution Strategy:
+        1. If possible, use a camera hint (narrow down search area)
+        2. Look for circle patterns using the RANSAC algorithm
+        3. Filter results based on what we know about basketballs (size, height)
+        4. Return the best match (or nothing if no good match is found)
+        
+        In Detail:
+        1. Randomly pick 3 points (since 3 points define a circle).
+        2. Fit a circle through those 3 points.
+        3. Count how many other points are close to that circle (these are called "inliers").
+        4. Repeat many times, keeping the circle with the most inliers and best fit.
         5. The best circle is our detected basketball!
+        
+        💡 Math Fact: Why do we need 3 points to define a circle?
+        - 1 point: Could be a circle of ANY size centered anywhere
+        - 2 points: Could be ANY circle passing through both points
+        - 3 points: Only ONE circle can pass through all three (as long as they're not in a straight line)
         
         Why do we use RANSAC? Because it's robust to outliers (bad points), so even if there is a lot of noise, it can still find the real circle.
         
@@ -2596,10 +2911,28 @@ class BasketballLidarDetector(Node):
         
         ---
         
-        RANSAC (Random Sample Consensus) is an algorithm for fitting models (like lines or circles) to data that may have lots of noise or outliers.
-        Here, we use it to fit a circle to 2D points from the LIDAR.
+        🔍 BEGINNER'S GUIDE: Understanding RANSAC
+        ---------------------------------------
+        RANSAC (Random Sample Consensus) is an algorithm for fitting shapes to data that contains errors and noise.
+        It's like finding the outline of a basketball in a messy pile of points, some of which aren't even part of the ball!
         
-        The steps are:
+        💡 Why is this important for robotics?
+        In the real world, sensor data is never perfect:
+        - Some LIDAR points might be from other objects (not our basketball)
+        - Some points might be slightly off due to sensor noise
+        - We might only see part of the ball (not a complete circle)
+        
+        RANSAC is powerful because it can ignore these problems and still find the basketball.
+        
+        How RANSAC Works (Simple Version):
+        1. Take a guess: Pick 3 random points and draw a circle through them
+        2. Check the guess: Count how many other points are near this circle
+        3. Repeat many times: Try different random sets of 3 points
+        4. Choose the winner: Use the circle that matches the most points
+        
+        It's like playing "connect the dots" when many of the dots don't belong to your picture!
+        
+        ⚙️ Technical Steps:
         1. Repeat for a number of iterations:
            a. Randomly pick 3 points from the data (since 3 points define a unique circle).
            b. Calculate the circle that passes through these 3 points (see fit_circle).
@@ -2608,45 +2941,81 @@ class BasketballLidarDetector(Node):
            e. If the fit is very good (enough inliers and high quality), stop early.
         2. After all iterations, return the best circle found.
         
-        Why is this useful? Because in real data, not all points are perfect. Some are noise. RANSAC helps us ignore the noise and find the real shape.
+        💡 Real-world analogy: RANSAC is like trying to find the shape of a lake when your map is smudged and has coffee stains. 
+        Instead of trusting every mark on the paper, you look for patterns that many points agree on, and ignore the outliers.
         
         Visual explanation of RANSAC (the core algorithm):
         
-            Iteration 1: Random sample → Poor model
-             ●         ◌
-              \\       /
-               \\     /
-            ◌   \\___/   ●    
-                /   \\
-               /     \\
-              /       \\
-             ●         ◌
-            Inliers: 3/8 = 37.5%
-            
-            Iteration 2: Random sample → Better model
-             ●         ◌
-              ○○○○○○○○○
-            ◌   ○   ○   ●    
-                ○   ○
-               ○     ○
-              ○       ○
-             ●         ◌
-            Inliers: 5/8 = 62.5%
-            
-            Iteration 3: Random sample → Best model
-             ○○○○○○○○○○○
-              ○       ○
-            ◌   ○   ○   ●    
-                ○   ○
-               ○     ○
-              ○       ○
-             ○○○○○○○○○○○
-            Inliers: 7/8 = 87.5%
-            
-        Legend:
-        ● = Points randomly picked for model fitting
-        ◌ = Other data points
-        ○ = Circle model being evaluated
+        ┌──────────────────────────────────────────────────────────────────────────────┐
+        │                                                                              │
+        │  RANSAC: Fitting a circle to noisy LIDAR points                              │
+        │                                                                              │
+        │  Iteration 1: Random sample → Poor model          Iteration 2: Better model  │
+        │                                                                              │
+        │    + + + + + +                                      + + + + + +              │
+        │   +           +                                    +           +             │
+        │  +             +                                  +             +            │
+        │  +      ●      +                                 +      ●      +             │
+        │  +     ╱│╲     +                                +      │      +             │
+        │  +    ╱ │ ╲    +                                +    ┌─┼─┐    +             │
+        │  +   ╱  │  ╲   +                                +    │ │ │    +             │
+        │  +  ╱   │   ╲  +                                +    │ │ │    +             │
+        │  + ╱    │    ╲ +                                +    │ │ │    +             │
+        │   ●─────┼─────●                                  +   └─┼─┘   +              │
+        │    ╲    │    ╱                                    +    │    +               │
+        │     ╲   │   ╱                                      +   ●   +                │
+        │      ╲  │  ╱                                        +     +                 │
+        │       ╲ │ ╱                                          + + +                  │
+        │        ╲│╱                                                                  │
+        │         ●                                                                   │
+        │                                                                              │
+        │  Points selected: [8, 3, 7]                     Points selected: [4, 0, 9]  │
+        │  Quality: Poor (misses many points)             Quality: Better (fits more) │
+        │  Inliers: 3 / 12 points (25%)                   Inliers: 8 / 12 points (67%)│
+        │                                                                              │
+        │                                                                              │
+        │                       Iteration 3: Best model                                │
+        │                                                                              │
+        │                            ● ● ● ●                                          │
+        │                         ●           ●                                        │
+        │                        ●             ●                                       │
+        │                       ●               ●                                      │
+        │                       ●               ●                                      │
+        │                       ●               ●                                      │
+        │                       ●               ●                                      │
+        │                       ●               ●                                      │
+        │                        ●             ●                                       │
+        │                         ●           ●                                        │
+        │                            ● ● ● ●                                          │
+        │                                                                              │
+        │                       Points selected: [2, 6, 10]                           │
+        │                       Quality: Best (perfect circle fit)                     │
+        │                       Inliers: 11 / 12 points (92%)                         │
+        │                                                                              │
+        │   Legend:                                                                    │
+        │   ● = Points from LIDAR scan           + = Attempted circle model           │
+        │   ○ = Points used for fitting          ● = Final circle model               │
+        │                                                                              │
+        └──────────────────────────────────────────────────────────────────────────────┘
+        
+        RANSAC Process for Circle Detection:
+        
+        ┌──────────────────────┐     ┌────────────────┐     ┌────────────────────┐
+        │ 1. Select 3 Random   │     │ 2. Fit Circle  │     │ 3. Count Inliers   │
+        │    Points from LIDAR │────►│    to 3 Points │────►│    (points near    │
+        │    Data              │     │                │     │     circle)         │
+        └──────────────────────┘     └────────────────┘     └──────────┬─────────┘
+                                                                        │
+                ┌───────────────────────────────────────────────────────┘
+                │
+                ▼
+        ┌──────────────────────┐     ┌────────────────┐     ┌────────────────────┐
+        │ 4. If Best So Far,   │     │ 5. Repeat for  │     │ 6. Return Circle   │
+        │    Save This Circle  │◄────┤    Multiple    │     │    with Most       │
+        │    as Best Model     │     │    Iterations  │     │    Inliers         │
+        └──────────────────────┘     └───────┬────────┘     └────────────────────┘
+                                             │                         ▲
+                                             └─────────────────────────┘
         
         How RANSAC makes circle detection robust:
         

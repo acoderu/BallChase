@@ -9,6 +9,73 @@ multiple sensors and helps find measurements that happened at approximately
 the same time, designed specifically for ROS2 Humble.
 
 This optimized version is intended to run efficiently on Raspberry Pi 5 hardware.
+
+WHAT IS A SENSOR SYNCHRONIZATION BUFFER? 📊
+=======================================
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│             THE SENSOR SYNCHRONIZATION PROBLEM                           │
+└─────────────────────────────────────────────────────────────────────────┘
+
+    On a robot, different sensors take measurements at different times:
+
+    TIME:  0.0s    0.1s    0.2s    0.3s    0.4s    0.5s    0.6s
+           ┌───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┐
+    CAMERA │   │ 📷 │   │ 📷 │   │ 📷 │   │ 📷 │   │ 📷 │   │  (10 Hz)
+           ├───┼───┼───┼───┼───┼───┼───┼───┼───┼───┼───┼───┤
+    LIDAR  │   │   │ 📡 │   │   │ 📡 │   │   │ 📡 │   │   │  (5 Hz) 
+           ├───┼───┼───┼───┼───┼───┼───┼───┼───┼───┼───┼───┤
+    GPS    │ 📍 │   │   │   │   │ 📍 │   │   │   │   │ 📍 │  (2 Hz)
+           └───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┘
+
+    PROBLEM: The sensors never take measurements at EXACTLY the same time!
+    But we need data from ALL sensors for the same moment to understand
+    the robot's complete situation.
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│             HOW THE SYNCHRONIZATION BUFFER SOLVES THIS                   │
+└─────────────────────────────────────────────────────────────────────────┘
+
+    1️⃣ STEP 1: STORE RECENT MEASUREMENTS FROM EACH SENSOR
+    
+        ┌──────────────────────────────────────┐
+        │ CAMERA BUFFER (newest at right)      │
+        │ 📷0.1s | 📷0.2s | 📷0.3s | 📷0.4s    │
+        └──────────────────────────────────────┘
+        
+        ┌──────────────────────────────────────┐
+        │ LIDAR BUFFER (newest at right)       │
+        │ 📡0.2s | 📡0.3s | 📡0.5s             │
+        └──────────────────────────────────────┘
+        
+        ┌──────────────────────────────────────┐
+        │ GPS BUFFER (newest at right)         │
+        │ 📍0.0s | 📍0.5s                      │
+        └──────────────────────────────────────┘
+    
+    2️⃣ STEP 2: FIND MEASUREMENTS CLOSEST IN TIME
+    
+        Say we want data at time 0.3s:
+        * Camera has data at exactly 0.3s ✓
+        * Lidar has data at exactly 0.3s ✓
+        * GPS has data at 0.5s (closest to 0.3s)
+    
+    3️⃣ STEP 3: CHECK IF CLOSE ENOUGH
+    
+        * Is 0.5s - 0.3s = 0.2s within our allowed time difference?
+        * If yes, use this data set
+        * If no, wait for more data
+
+EVERYDAY ANALOGY:
+===============
+
+It's like three friends trying to take photos of the same event, but they
+each snap pictures at different moments. Later, you want to combine their
+perspectives, so you look through all their photos and find the ones taken
+closest to the same time - maybe within a few seconds of each other.
+
+The SensorSyncBuffer is like having photo albums from each friend,
+and a helper who finds the most closely timed photos from each album!
 """
 
 from collections import deque  # Efficient for our buffer implementation
@@ -23,6 +90,63 @@ class SimpleSensorBuffer:
     helps find measurements that were taken at approximately the same time.
     
     This version is optimized for ROS2 Humble running on Raspberry Pi 5 hardware.
+    
+    IMAGINE THIS: 🧩
+    ---------------
+    Think of SimpleSensorBuffer like a puzzle master trying to create a complete
+    picture of the world at a specific moment in time, but with puzzle pieces
+    (sensor readings) that arrive at different times.
+    
+    HOW IT WORKS:
+    ------------
+    
+                          ┌───────────────────┐
+                          │   SENSOR DATA     │
+                          │   COLLECTION      │
+                          └─────────┬─────────┘
+                                    │
+                                    ▼
+     ┌─────────────────────────────────────────────────────────┐
+     │                                                         │
+     │   ┌───────────┐       ┌───────────┐      ┌───────────┐  │
+     │   │ CAMERA    │       │ LIDAR     │      │ OTHER     │  │
+     │   │ BUFFER    │       │ BUFFER    │      │ BUFFERS   │  │
+     │   │           │       │           │      │           │  │
+     │   │ 📷 t=1.0  │       │ 📡 t=0.9  │      │ 🔍 t=0.8  │  │
+     │   │ 📷 t=1.5  │       │ 📡 t=1.4  │      │ 🔍 t=1.3  │  │
+     │   │ 📷 t=2.0  │       │ 📡 t=1.9  │      │ 🔍 t=1.8  │  │
+     │   │ 📷 t=2.5  │       │ 📡 t=2.4  │      │ 🔍 t=2.3  │  │
+     │   └───────────┘       └───────────┘      └───────────┘  │
+     │                                                         │
+     └────────────────────────────┬────────────────────────────┘
+                                  │
+                                  ▼
+     ┌─────────────────────────────────────────────────────────┐
+     │                                                         │
+     │               SYNCHRONIZATION LOGIC                     │
+     │                                                         │
+     │  1. Find the newest measurement (t=2.5)                 │
+     │  2. Find closest readings from other sensors            │
+     │     (t=2.4 and t=2.3)                                  │
+     │  3. Check if they're close enough in time               │
+     │     (within max_time_diff=0.1s)                        │
+     │  4. Return complete set if within threshold             │
+     │                                                         │
+     └────────────────────────────┬────────────────────────────┘
+                                  │
+                                  ▼
+                           ┌────────────────┐
+                           │  SYNCHRONIZED  │
+                           │  DATA SET      │
+                           └────────────────┘
+    
+    EVERYDAY ANALOGY:
+    ---------------
+    It's like recording a basketball game with multiple cameras positioned around
+    the court. When analyzing a specific play, you want to see that exact moment
+    from all camera angles, even though each camera might have taken its frame
+    at slightly different milliseconds. This class finds the frames from each
+    camera that are closest in time to create a complete view of that moment.
     """
     
     def __init__(self, sensor_names: List[str], buffer_size: int = 20, max_time_diff: float = 0.1):

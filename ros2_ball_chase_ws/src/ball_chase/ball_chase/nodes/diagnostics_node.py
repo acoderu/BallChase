@@ -27,6 +27,123 @@ Features:
 
 Usage:
 ros2 run ball_chase diagnostic_node
+
+WHAT IS A DIAGNOSTIC NODE? 🩺
+===========================
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        THE ROBOT DOCTOR                                  │
+└─────────────────────────────────────────────────────────────────────────┘
+
+    Think of the diagnostic node as a doctor for your robot system!
+
+    Just like a doctor monitors your:               The diagnostic node monitors:
+    ┌───────────────────────┐                     ┌───────────────────────┐
+    │ • Heart rate          │                     │ • Node heartbeats     │
+    │ • Blood pressure      │                     │ • CPU & memory usage  │
+    │ • Temperature         │                     │ • Detection accuracy  │
+    │ • Reflexes            │                     │ • Response times      │
+    │ • Overall health      │                     │ • System state        │
+    └───────────────────────┘                     └───────────────────────┘
+
+    And when something is wrong, the diagnostic node:
+    
+    ┌─────────────┐      ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+    │  DETECTS    │ ---> │  LOGS THE   │ ---> │ CORRELATES  │ ---> │ HELPS WITH  │
+    │  PROBLEMS   │      │   ISSUE     │      │   EVENTS    │      │  RECOVERY   │
+    └─────────────┘      └─────────────┘      └─────────────┘      └─────────────┘
+
+HOW THE DIAGNOSTIC NODE WORKS 🔍
+=============================
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    DIAGNOSTIC NODE ARCHITECTURE                      │
+└─────────────────────────────────────────────────────────────────────┘
+
+                  Robot Nodes Send Status Updates
+                              │
+                              ▼
+     ┌───────────────────────────────────────────────────┐
+     │              DIAGNOSTIC NODE                       │
+     │                                                   │
+     │  ┌─────────────┐     ┌─────────────┐             │
+     │  │ STATUS      │     │ PIPELINE    │             │
+     │  │ TRACKING    │     │ MONITORING  │             │
+     │  └──────┬──────┘     └──────┬──────┘             │
+     │         │                   │                    │
+     │         └────────┬──────────┘                    │
+     │                  │                               │
+     │         ┌────────▼─────────┐                     │
+     │         │    ISSUE         │                     │
+     │         │   DETECTION      │                     │
+     │         └────────┬─────────┘                     │
+     │                  │                               │
+     │       ┌──────────┴──────────┐                    │
+     │       │                     │                    │
+     │  ┌────▼─────┐         ┌────▼─────┐              │
+     │  │ LOGGING  │         │ ALERTING │              │
+     │  └──────────┘         └──────────┘              │
+     └───────────────────────────────────────────────────┘
+                              │
+                              ▼
+                  Human-Readable Diagnostic Reports
+
+REAL-WORLD EXAMPLES 🌟
+===================
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    DIAGNOSTIC SCENARIOS                              │
+└─────────────────────────────────────────────────────────────────────┘
+
+  1️⃣ HEARTBEAT MONITORING           2️⃣ SENSOR CONSISTENCY CHECK
+  
+  ┌─────────────────────────┐      ┌─────────────────────────┐
+  │ YOLO Node               │      │ Position from LIDAR:    │
+  │ Last Update: 2.3s ago   │      │   (x=1.2, y=0.5, z=0.1) │
+  │ Status: ✅ OK           │      │                         │
+  │                         │      │ Position from YOLO:     │
+  │ LIDAR Node              │      │   (x=3.7, y=0.6, z=0.1) │
+  │ Last Update: 30.5s ago  │      │                         │
+  │ Status: ❌ MISSING      │      │ ⚠️ INCONSISTENCY!       │
+  │                         │      │ Distance: 2.5m          │
+  │ Fusion Node             │      │ (Threshold: 1.0m)       │
+  │ Last Update: 1.1s ago   │      │                         │
+  │ Status: ✅ OK           │      │ → Log warning           │
+  └─────────────────────────┘      └─────────────────────────┘
+  
+  3️⃣ SYSTEM RESOURCE MONITORING     4️⃣ EVENT CORRELATION
+  
+  ┌─────────────────────────┐      ┌─────────────────────────┐
+  │ CPU Usage: 87%          │      │ Recent Events:          │
+  │ Memory: 65%             │      │                         │
+  │ Temperature: 72°C       │      │ 1. LIDAR node missing   │
+  │                         │      │ 2. Position inconsistent│
+  │ ⚠️ HIGH CPU USAGE!      │      │ 3. Controller error     │
+  │                         │      │                         │
+  │ → Adjust detection      │      │ CORRELATION DETECTED!   │
+  │   processing rate       │      │ → Possibly related      │
+  └─────────────────────────┘      └─────────────────────────┘
+
+EVERYDAY ANALOGY 🏠
+================
+
+Think of your robot system like a car with multiple systems (engine, brakes, 
+steering, etc.). The diagnostic node is like the car's dashboard and computer 
+system that monitors everything and shows warning lights when something needs 
+attention.
+
+Just like your car dashboard might show:
+- Check engine light
+- Low fuel warning
+- High temperature alert
+
+The diagnostic node shows warnings about:
+- Disconnected sensors
+- Inconsistent readings
+- High CPU usage
+- System errors
+
+It helps you identify and fix problems before they cause bigger issues!
 """
 
 import rclpy
@@ -154,6 +271,67 @@ class EventLogger:
     """
     Efficient event logging with severity levels, throttling, 
     and robust resource management.
+    
+    IMAGINE THIS: 📝
+    ---------------
+    Think of EventLogger as a careful note-taker who writes down everything 
+    important that happens with your robot system. Just like a ship's captain keeps 
+    a logbook recording the journey, weather conditions, and any unusual events,
+    EventLogger keeps track of everything happening in your robot.
+    
+    HOW IT WORKS:
+    ------------
+    
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                      EVENT LOGGER SYSTEM                             │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+        ┌─────────────────┐            ┌─────────────────┐
+        │  EVENT HAPPENS  │            │ SEVERITY LEVELS │
+        │  IN THE SYSTEM  │            │                 │
+        │                 │            │  INFO           │ → "Battery at 90%"
+        │  • Node starts  │            │  WARNING        │ → "Battery below 20%"
+        │  • Error occurs │            │  ERROR          │ → "Connection lost"
+        │  • Warning      │            │  CRITICAL       │ → "System overheating"
+        │  • Status update│            │                 │
+        └────────┬────────┘            └────────┬────────┘
+                 │                              │
+                 └──────────────┬──────────────┘
+                                │
+                                ▼
+                      ┌─────────────────────┐
+                      │                     │
+                      │   THROTTLE CHECK    │  → Don't log the same warning
+                      │                     │    too many times
+                      └─────────┬───────────┘
+                                │
+                                ▼
+             ┌─────────────────────────────────────┐
+             │                                     │
+             │      LOG OUTPUTS                    │
+             │                                     │
+             │  ┌─────────────┐  ┌─────────────┐   │
+             │  │ COLORED     │  │ FILE        │   │
+             │  │ CONSOLE     │  │ STORAGE     │   │
+             │  │ OUTPUT      │  │             │   │
+             │  │             │  │ timestamp | │   │
+             │  │ [WARNING]   │  │ severity  | │   │
+             │  │ Battery low │  │ message   | │   │
+             │  │             │  │ data      | │   │
+             │  └─────────────┘  └─────────────┘   │
+             └─────────────────────────────────────┘
+    
+    EVERYDAY ANALOGY:
+    ---------------
+    It's like your phone keeping track of notifications. Some notifications are 
+    just for information (new email), some are warnings (low battery), and some 
+    are critical (emergency alerts). Your phone displays these messages with 
+    different colors and importance levels, and it doesn't keep showing you the 
+    same notification over and over.
+    
+    EventLogger works the same way - it organizes robot events by importance,
+    displays them appropriately, saves them for later review, and makes sure
+    you aren't overwhelmed with repeated messages about the same issue.
     """
     
     # Severity levels as class constants
@@ -767,6 +945,73 @@ class TimedRingBuffer:
     """
     Efficient fixed-size buffer with time-based indexing and improved edge case handling.
     Thread-safe and optimized for resource-constrained environments.
+    
+    IMAGINE THIS: 🔄
+    ---------------
+    Think of TimedRingBuffer like a small circular notebook where you write down
+    the last 10 things that happened, along with when they happened. Once the notebook
+    is full, you start writing over the oldest entries. This way, you always have
+    the most recent information, without using up endless paper.
+    
+    HOW IT WORKS:
+    ------------
+    
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                     TIMED RING BUFFER                                │
+    └─────────────────────────────────────────────────────────────────────┘
+    
+                                NEW DATA
+                                    │
+                                    ▼
+                            ┌───────────────┐
+                            │ TIME-STAMPED  │
+                            │ ENTRY         │
+                            └───────┬───────┘
+                                    │
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                                                                     │
+    │   ┌───┐   ┌───┐   ┌───┐   ┌───┐   ┌───┐   ┌───┐   ┌───┐   ┌───┐    │
+    │   │ 1 │   │ 2 │   │ 3 │   │ 4 │   │ 5 │   │ 6 │   │ 7 │   │ 8 │    │
+    │   └───┘   └───┘   └───┘   └───┘   └───┘   └───┘   └───┘   └───┘    │
+    │     ▲                                                               │
+    │     │                                                               │
+    │    Next                                                             │
+    │  Position                FIXED-SIZE RING BUFFER                     │
+    │     │                   (When full, overwrites                      │
+    │     │                     oldest entries)                           │
+    │     ▼                                                               │
+    │   ┌───┐   ┌───┐                                                     │
+    │   │ 9 │   │10 │                                                     │
+    │   └───┘   └───┘                                                     │
+    │                                                                     │
+    └─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │ RETRIEVAL FUNCTIONS  │
+                         │                      │
+                         │ • Latest entries     │
+                         │ • Entries by time    │
+                         │ • All entries        │
+                         └──────────────────────┘
+    
+    The "ring" in the name refers to how it wraps around back to the beginning
+    when it reaches the end. If your buffer size is 10 and you add an 11th item,
+    it replaces the first item, and so on.
+    
+    EVERYDAY ANALOGY:
+    ---------------
+    It's similar to your phone's call history, which might store your last 100 calls.
+    Once you make the 101st call, your oldest call drops off the list. Each call
+    is stored with a timestamp, and you can look through this history to find:
+    
+    - Your most recent calls
+    - Calls from a specific time period
+    - All calls in chronological order
+    
+    The TimedRingBuffer does this same job but for robot sensor data, events,
+    or any information that needs to be tracked with timestamps.
     """
     
     def __init__(self, max_size=10):
@@ -1229,6 +1474,39 @@ class SystemDiagnosticNode(Node):
     - Better resource management with improved cleanup
     - Self-monitoring capabilities and adaptive behavior
     - State machine for monitoring system integrity
+    
+    IMAGINE THIS: 🏥👨‍⚕️
+    ---------------
+    Think of the SystemDiagnosticNode as a doctor who's constantly monitoring a patient
+    (your robot system). The doctor regularly checks vital signs (CPU, memory), looks
+    for symptoms of problems (missing heartbeats, inconsistent sensor data), and
+    keeps detailed medical records (logs). If something goes wrong, the doctor can
+    diagnose the issue and suggest a treatment plan.
+    
+    HOW IT WORKS (BEGINNER'S GUIDE):
+    -------------------------------
+    1. The node SUBSCRIBES (listens) to messages from all other robot nodes
+       - This is like the doctor putting a stethoscope on different parts of the body
+       - Each message tells the doctor that a part of the system is still working
+    
+    2. The node runs regular CHECK-UPS (timer callbacks)
+       - Check if all nodes are still sending messages (heartbeats)
+       - Check if different sensors agree with each other (consistency)
+       - Check if the system has enough resources (CPU, memory)
+    
+    3. When problems are found, the node:
+       - LOGS the issue (writes it down in the medical chart)
+       - ANALYZES related issues (are multiple symptoms connected?)
+       - Sends ALERTS if needed (like a doctor calling for a nurse)
+    
+    4. The node maintains HISTORY of system behavior
+       - Keeps track of past issues (like medical history)
+       - Looks for patterns in problems (like recurring symptoms)
+       - Helps diagnose complex issues by connecting related events
+    
+    This diagnostic node helps keep your robot healthy and helps you understand
+    what's wrong when problems occur - just like how a good doctor helps keep
+    you healthy and diagnoses issues when you're sick!
     """
     
     # System states for the diagnostic node itself
@@ -3013,6 +3291,35 @@ class SystemDiagnosticNode(Node):
         """
         Check for consistency between position reports from different sensors.
         Uses configurable threshold for position differences.
+        
+        IMAGINE THIS: 🧩
+        ---------------
+        Imagine asking three friends to tell you where a basketball is on a court.
+        If two friends point to completely different places, you know one of them
+        must be wrong! This method does the same thing with the robot's sensors.
+        
+        The robot has multiple ways to detect the basketball (LIDAR, camera, etc.),
+        and they should all report similar positions. If not, something is wrong.
+        
+        HOW IT WORKS (STEP-BY-STEP):
+        ---------------------------
+        1. Collect the latest position data from each sensor
+           - Position from LIDAR: (x=1.2, y=0.5, z=0.1)
+           - Position from camera: (x=1.3, y=0.6, z=0.1)
+           - Position from fusion: (x=1.25, y=0.55, z=0.1)
+        
+        2. Compare the positions - are they close to each other?
+           - Calculate distance between positions
+           - If the distance is too large (e.g., > 1.0 meter), it's suspicious!
+        
+        3. Record and report inconsistencies
+           - Log warning message about the large difference
+           - Track the event for later analysis
+           - Try to correlate with other issues
+        
+        This is a critical check because big position differences usually mean
+        one of the sensors is giving bad data, which could make the robot behave
+        incorrectly - like trying to catch a basketball that isn't really there!
         """
         try:
             # Use lock manager for better deadlock prevention
@@ -3120,6 +3427,34 @@ class SystemDiagnosticNode(Node):
         """
         Correlate events to detect related issues.
         
+        IMAGINE THIS: 🕵️‍♀️
+        ---------------
+        Think of this like a detective connecting clues on a case board. When one
+        strange thing happens in your robot system, it might be connected to other
+        strange things that happened around the same time.
+        
+        For example, if the LIDAR sensor stops working AND the robot reports strange
+        position data within a few seconds, these problems are probably related rather
+        than separate coincidences!
+        
+        HOW IT WORKS (STEP-BY-STEP):
+        ---------------------------
+        1. When a new problem occurs (like a sensor error):
+           - Note the time it happened
+           - Create a unique ID for this problem
+        
+        2. Look for other recent problems (within 5 seconds)
+           - Check which types of problems might be related
+           - See if any recent problems match those types
+        
+        3. If related problems are found:
+           - Connect them in both directions (like drawing a line between clues)
+           - Log the connection so we know they might have the same root cause
+        
+        This is like how doctors look for patterns in symptoms to diagnose an illness.
+        Rather than treating each symptom separately, they look for the underlying cause
+        that explains multiple symptoms.
+        
         Args:
             event_id: ID of the current event
             event_type: Type of the current event
@@ -3164,6 +3499,31 @@ class SystemDiagnosticNode(Node):
     def _check_node_heartbeats(self):
         """
         Check for nodes that haven't reported recently with configurable thresholds.
+        
+        IMAGINE THIS: ❤️
+        ---------------
+        Think of this like checking if your friends are still active in a group chat.
+        If someone hasn't sent a message in a long time, you might wonder if they're
+        still there or if they've lost connection.
+        
+        This method checks if each part of the robot (like LIDAR, cameras, etc.) 
+        has "checked in" recently. If not, it marks them as "missing" - which might
+        mean they've crashed or are having problems.
+        
+        HOW IT WORKS (STEP-BY-STEP):
+        ---------------------------
+        1. Get current time (like looking at your watch)
+        2. For each robot component (node):
+           - Check when we last heard from it
+           - Compare with a timeout threshold (LIDAR: 5 seconds, Camera: 5 seconds, etc.)
+           - If it's been too long, add it to a "missing" list
+        
+        3. If nodes are missing:
+           - Log warnings so we know something's wrong
+           - Keep track of how long they've been missing
+           - Potentially change system state to "DEGRADED" if important nodes are missing
+        
+        It's like a roll call in school - we're checking who's present and who's absent!
         
         Returns:
             list: List of missing node names
@@ -3280,6 +3640,36 @@ class SystemDiagnosticNode(Node):
         """
         Run comprehensive system diagnostics with error isolation.
         Each check is run in a separate try-except block to isolate failures.
+        
+        IMAGINE THIS: 🔍
+        ---------------
+        Picture a thorough car inspection where a mechanic systematically checks
+        the engine, brakes, tires, lights, and fluids - one system at a time.
+        Even if there's a problem with the brakes, they still continue checking
+        everything else to give you a complete picture of your car's health.
+        
+        This method does a complete "inspection" of your robot system, checking
+        all the important components even if some checks fail.
+        
+        HOW IT WORKS (STEP-BY-STEP):
+        ---------------------------
+        1. Start a series of health checks:
+           - Pipeline check: Is data flowing correctly between components?
+           - Heartbeat check: Are all nodes actively running?
+           - Resource check: Is there enough CPU, memory, and other resources?
+        
+        2. For each check:
+           - Run it in a protected way (try-except) so one failure doesn't stop everything
+           - Record if it succeeded or failed
+           - Collect detailed results
+        
+        3. When all checks are done:
+           - Generate a complete system health report
+           - Log the results
+           - Track how long the checks took
+        
+        It's like getting a full physical exam at the doctor - multiple tests
+        that together give a complete picture of your health status!
         
         Returns:
             dict: Results of diagnostic checks with success/failure status

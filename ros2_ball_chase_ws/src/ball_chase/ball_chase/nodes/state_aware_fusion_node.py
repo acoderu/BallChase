@@ -34,6 +34,38 @@ strengths and weaknesses:
 By combining these sources intelligently, we get the benefits of each while minimizing their
 individual weaknesses.
 
+Sensor Fusion Visualization:
+┌───────────────────────────────────────────────────────────────────────┐
+│                                                                       │
+│  ┌──────────┐                                                         │
+│  │  LiDAR   │                                                         │
+│  │  Sensor  │                                                         │
+│  │          │     ┌─────────────┐                                     │
+│  │ Strength:├────►│             │                                     │
+│  │ Distance │     │             │                                     │
+│  │ Accuracy │     │             │                                     │
+│  └──────────┘     │             │                                     │
+│                   │             │                                     │
+│  ┌──────────┐     │   FUSION    │     ┌──────────────────────┐       │
+│  │  YOLO    │     │   ALGORITHM │     │                      │       │
+│  │ Detection│     │             ├────►│  COMBINED ESTIMATE   │       │
+│  │          │     │   • Weight  │     │                      │       │
+│  │ Strength:├────►│   • Filter  │     │ • More accurate      │       │
+│  │ Object   │     │   • Blend   │     │ • More reliable      │       │
+│  │ Identity │     │             │     │ • More robust        │       │
+│  └──────────┘     │             │     │                      │       │
+│                   │             │     └──────────────────────┘       │
+│  ┌──────────┐     │             │                                     │
+│  │  Depth   │     │             │                                     │
+│  │  Camera  │     │             │                                     │
+│  │          │     │             │                                     │
+│  │ Strength:├────►│             │                                     │
+│  │ 3D Info  │     └─────────────┘                                     │
+│  │          │                                                         │
+│  └──────────┘                                                         │
+│                                                                       │
+└───────────────────────────────────────────────────────────────────────┘
+
 # What is a Kalman Filter?
 A Kalman filter is a mathematical algorithm that estimates the state of a system (like the position
 and velocity of a ball) by combining predictions (from physics) and measurements (from sensors),
@@ -48,19 +80,96 @@ while keeping track of uncertainty. It works in two steps:
    * x̂ₖ = x̂ₖ⁻ + Kₖ(zₖ - Hₖx̂ₖ⁻) (state update)
    * Pₖ = (I - KₖHₖ)Pₖ⁻ (uncertainty update)
 
+Kalman Filter Visualization:
+┌───────────────────────────────────────────────────────────────────────┐
+│                                                                       │
+│               ┌─────────────┐                                         │
+│               │             │                                         │
+│               │ 1.PREDICTION│                                         │
+│   ┌───────┐   │   Step      │                                         │
+│   │Previous├──►             │    ┌──────────┐    ┌─────────────┐      │
+│   │State   │   │ • Physics  │    │Predicted │    │  2.UPDATE   │      │
+│   │x̂ₖ₋₁    │   │ • Motion   ├───►│State     ├───►│   Step      │      │
+│   └───────┘   │ • Dynamics  │    │x̂ₖ⁻       │    │             │      │
+│               │             │    └──────────┘    │ • Compare   │      │
+│               └─────────────┘         ▲          │ • Weight    │      │
+│                                       │          │ • Blend     │      │
+│             ┌─────────────────────────┘          │             │      │
+│             │                                    └──────┬──────┘      │
+│             │                                           │             │
+│             │                                           │             │
+│             │                                           ▼             │
+│             │                                    ┌──────────┐         │
+│             │                                    │ Updated  │         │
+│             │                                    │ State    │         │
+│             └────────────────────────────────────┤ x̂ₖ      │         │
+│                                                  └──────────┘         │
+│                     ┌────────────┐                    ▲               │
+│                     │            │                    │               │
+│                     │  Sensor    ├────────────────────┘               │
+│                     │  Readings  │                                    │
+│                     │            │                                    │
+│                     └────────────┘                                    │
+│                                                                       │
+└───────────────────────────────────────────────────────────────────────┘
+
 The filter also keeps track of how uncertain it is about its estimate, and this uncertainty
 changes as new data comes in.
 
-# What is State Management?
+# 🔍 BEGINNER'S GUIDE: What is State Management?
 State management here means keeping track of whether the ball is moving, stationary, or in between.
 This is important because we want to treat measurements differently depending on how the ball is
 behaving (for example, we can trust our estimate more if the ball is stationary). 
 
-Our state machine implements:
+## Real-World Comparison: State Management in Everyday Life
+
+Think about how you would catch a ball in different situations:
+
+1. **Stationary Ball** (like a golf ball sitting on grass)
+   - You can take your time and be very precise
+   - Your hand position barely changes as you approach it
+   - You can ignore small visual errors (like shadows or reflections)
+
+2. **Rolling Ball** (like a bowling ball moving slowly)
+   - You need to predict where it will be by the time your hand gets there
+   - You account for its direction and speed
+   - You might need to follow alongside it for a moment
+
+3. **Bouncing Ball** (like a basketball being dribbled)
+   - You must anticipate where it will be after each bounce
+   - You need to be ready to adjust quickly
+   - You can't be too rigid in your approach
+
+In our robot code, we do the same thing! We have different tracking strategies for:
+
+- For a stationary ball: We can be very confident about its position, use tighter filters, and be 
+  more suspicious of outlier measurements
+- For a rolling ball: We need to factor in momentum, expect gradual changes in direction, and 
+  anticipate some slowing due to friction
+- For a bouncing ball: We need looser filters, more prediction, and need to be prepared for 
+  sudden direction changes
+
+## How Our State Machine Works
+
+Our system implements:
 - Detection of stationary periods (when the ball isn't moving)
 - Recognition of small movements vs. rapid motion
-- Hysteresis to prevent rapid state flickering
+- Hysteresis to prevent rapid state flickering (avoiding flip-flopping between states)
 - Adaptive parameter tuning based on the current state
+
+🔹 **What is a state machine?**
+A state machine is like a flowchart that determines what "mode" the system is in at any moment.
+Think of it like different gears in a car (park, reverse, drive) where each state has different rules.
+
+🔹 **What is hysteresis?**
+Hysteresis means being "resistant to change" - like how a thermostat doesn't turn on instantly when
+the temperature drops 0.1 degrees below the setting. Instead, it waits until the change is significant
+and sustained. This prevents rapid on/off cycles that would wear out the system.
+
+State management is fundamental to creating robust real-world systems that can adapt to changing
+conditions. Rather than using a single, static set of parameters, state-aware systems dynamically
+adjust their behavior based on the current context, much like how humans change their approach
+depending on the situation.
 
 ---
 
@@ -120,16 +229,77 @@ class LightweightBuffer:
     recent data quickly.
     
     Key Features:
-    * O(1) insertion time (constant-time operations)
-    * Pre-allocated memory to prevent fragmentation
-    * Fast access to latest values
-    * Time-based querying (find values within time ranges)
-    * Memory-efficient for resource-constrained systems
+    * O(1) insertion time (constant-time operations) - adding data is always fast, regardless of buffer size
+    * Pre-allocated memory to prevent fragmentation - we reserve all the memory we need upfront
+    * Fast access to latest values - retrieving recent values is extremely efficient
+    * Time-based querying (find values within time ranges) - enables temporal data correlation
+    * Memory-efficient for resource-constrained systems - uses a fixed amount of memory
+    
+    Why Use a Circular Buffer Instead of a List?
+    -------------------------------------------
+    Regular Python lists have several disadvantages for our use case:
+    
+    1. Growing a list consumes more memory over time (unbounded growth)
+    2. When a list grows beyond its pre-allocated size, Python must:
+       - Allocate a new, larger block of memory
+       - Copy all elements to the new location
+       - Free the old memory
+       This causes memory fragmentation and performance spikes
+       
+    3. To maintain a fixed size with a regular list, you would need to:
+       - Append new elements: list.append(new_value)
+       - Remove old elements: list.pop(0)
+       But list.pop(0) is an O(n) operation because all remaining elements 
+       must be shifted left by one position
+       
+    In contrast, a circular buffer:
+    - Never grows beyond its initial size
+    - Overwrites old data in-place
+    - Maintains O(1) complexity for all operations
+    - Has predictable, consistent memory usage
+    
+    Real-World Analogy: 
+    Think of a circular buffer like a security camera system that records the last 24 hours. 
+    When the storage gets full, it automatically records over the oldest footage rather than 
+    needing more storage or deleting old files one by one.
     
     This is especially important in robotics since:
     1. We need to keep track of recent measurements without using too much memory
     2. We often need to sync up data from different sensors taken at slightly different times
     3. We need to quickly retrieve the most recent valid measurement
+    4. Memory allocation patterns must be predictable for real-time systems
+    5. Embedded systems and single-board computers (like Raspberry Pi) have limited memory
+    
+    Circular Buffer Operation Visualization:
+    
+           Initially (Empty)          After adding A,B,C           After adding D,E
+    
+    ┌───┬───┬───┬───┬───┐      ┌───┬───┬───┬───┬───┐      ┌───┬───┬───┬───┬───┐
+    │   │   │   │   │   │      │ A │ B │ C │   │   │      │ A │ B │ C │ D │ E │
+    └───┴───┴───┴───┴───┘      └───┴───┴───┴───┴───┘      └───┴───┴───┴───┴───┘
+      ↑                           ↑                                       ↑
+      │                           │                                       │
+    next_index = 0            next_index = 3                         next_index = 0
+    size = 0                  size = 3                               size = 5
+    
+           After adding F             After adding G,H
+    
+    ┌───┬───┬───┬───┬───┐      ┌───┬───┬───┬───┬───┐
+    │ F │ B │ C │ D │ E │      │ F │ G │ H │ D │ E │
+    └───┴───┴───┴───┴───┘      └───┴───┴───┴───┴───┘
+          ↑                                     ↑
+          │                                     │
+    next_index = 1                         next_index = 3
+    size = 5  (full)                       size = 5  (full)
+    
+    • A,B,C,D,E fill the buffer
+    • F overwrites A (oldest value)
+    • G overwrites B, H overwrites C
+    • Next will overwrite D
+    
+    Reading latest 3 values:
+    - From a full buffer with next_index=3: [H,D,E]
+    - Values wrap around the buffer end
     """
     
     def __init__(self, max_size=10):
@@ -190,6 +360,25 @@ class LightweightBuffer:
     def get_latest_before(self, timestamp, max_age=1.0):
         """
         Get the most recent value that was recorded before the given timestamp.
+        
+        🔍 BEGINNER'S GUIDE: Synchronizing Sensor Data
+        -------------------------------------------
+        
+        Imagine you're trying to match a sound with its source in a video. The sound might be
+        recorded at different times than the video frames. To figure out which frame belongs
+        with which sound, you need to find the frame that was captured closest to when the
+        sound was recorded.
+        
+        That's what this method does with our sensor data!
+        
+        **Real-world example:**
+        - LiDAR scans at: 1.0s, 1.1s, 1.2s, 1.3s...
+        - Camera captures at: 1.05s, 1.15s, 1.25s...
+        
+        If we have a LiDAR reading at 1.2s and want the closest camera capture:
+        - We'd call `camera_buffer.get_latest_before(1.2)`
+        - This would return the camera capture from 1.15s (just before 1.2s)
+        - We've now synchronized these two different sensors!
         
         This is extremely useful for synchronizing data from different sensors
         that report at different rates. For example, we might want the camera
@@ -280,6 +469,18 @@ class SensorManager:
     ------------------------------------------------------
     Central system for tracking the status, reliability, and data from multiple sensors.
     
+    🔍 BEGINNER'S GUIDE: What is a Sensor Manager?
+    -------------------------------------------
+    
+    The SensorManager is like a supervisor that keeps track of all our robot's sensors.
+    
+    **Real-world analogy:** Think of it like a hospital nurse who:
+    - Checks if all monitoring devices are working (active/inactive)
+    - Makes sure the readings from each device seem reasonable (health)
+    - Confirms each device is taking measurements regularly (frequency)
+    - Records and organizes all the readings in an efficient way (data storage)
+    - Can quickly tell doctors which devices to trust when they give different readings (reliability)
+    
     In a robotics system using multiple sensors, it's crucial to know which sensors are:
     - Currently providing data (active)
     - Providing reliable data (health)
@@ -289,12 +490,67 @@ class SensorManager:
     recent readings from each sensor. It enables the fusion system to adapt in real-time
     to changing sensor availability.
     
+    For example:
+    - If the LIDAR sensor stops working, we can switch to mainly using camera data
+    - If a sensor is updating very slowly, we might trust it less
+    - If all sensors are working well, we can combine their data for the best accuracy
+    
     Key Features:
     * Tracks which sensors are active/inactive
     * Monitors sensor update rates (frames per second)
     * Maintains recent data from each sensor
     * Provides diagnostics about sensor health
     * Uses adaptive thresholds for different sensor types
+    
+    Sensor Manager Architecture:
+    
+    ┌───────────────────────────────────────────────────────────────────────────────┐
+    │                                                                               │
+    │   ┌─────────────────────┐          ┌──────────────────────────────────────┐   │
+    │   │  INCOMING SENSOR    │          │  SENSOR STATUS TRACKING               │   │
+    │   │     READINGS        │          │                                      │   │
+    │   │                     │          │  ┌────────────┐   ┌────────────┐     │   │
+    │   │  ┌─────────────┐    │          │  │  Lidar     │   │   Active   │     │   │
+    │   │  │  Lidar Data │───────────────┼─►│ Status     ├──►│   Inactive │     │   │
+    │   │  └─────────────┘    │          │  └────────────┘   └────────────┘     │   │
+    │   │                     │          │                                      │   │
+    │   │  ┌─────────────┐    │          │  ┌────────────┐   ┌────────────┐     │   │
+    │   │  │  YOLO Data  │───────────────┼─►│  YOLO      │   │   Active   │     │   │
+    │   │  └─────────────┘    │          │  │ Status     ├──►│   Inactive │     │   │
+    │   │                     │          │  └────────────┘   └────────────┘     │   │
+    │   │  ┌─────────────┐    │          │                                      │   │
+    │   │  │ Depth Camera│───────────────┼─►       ...                          │   │
+    │   │  │    Data     │    │          │                                      │   │
+    │   │  └─────────────┘    │          │                                      │   │
+    │   └─────────────────────┘          └──────────────────────────────────────┘   │
+    │                                                       │                       │
+    │                                                       ▼                       │
+    │                           ┌───────────────────────────────────────────────┐   │
+    │                           │             DATA MANAGEMENT                   │   │
+    │                           │                                               │   │
+    │                           │  ┌────────────────────┐  ┌─────────────────┐  │   │
+    │                           │  │ Recent Measurements│  │  Gap Detection  │  │   │
+    │                           │  │ (Circular Buffers) │  │                 │  │   │
+    │                           │  └────────────────────┘  └─────────────────┘  │   │
+    │                           │                                               │   │
+    │                           │  ┌────────────────────┐  ┌─────────────────┐  │   │
+    │                           │  │    Health Metrics  │  │ FPS Monitoring  │  │   │
+    │                           │  │                    │  │                 │  │   │
+    │                           │  └────────────────────┘  └─────────────────┘  │   │
+    │                           └───────────────────────────────────────────────┘   │
+    │                                                                               │
+    │                                                                               │
+    │     ┌─────────────────────────────────────────────────────────────────────┐   │
+    │     │                API FOR FUSION ALGORITHM                             │   │
+    │     │                                                                     │   │
+    │     │  • get_latest(sensor_name) → most recent measurement                │   │
+    │     │  • get_health_metrics() → overall system status                     │   │
+    │     │  • is_active(sensor_name) → check individual sensor status          │   │
+    │     │  • get_active_count() → how many sensors are currently working      │   │
+    │     │  • check_sensor_gap() → detect temporal gaps in sensor data         │   │
+    │     └─────────────────────────────────────────────────────────────────────┘   │
+    │                                                                               │
+    └───────────────────────────────────────────────────────────────────────────────┘
     * Optimizes memory usage with different buffer sizes for different sensors
     """
     
@@ -338,6 +594,29 @@ class SensorManager:
     def add_measurement(self, sensor, timestamp, data):
         """
         Add a new measurement from a sensor.
+        
+        🔍 BEGINNER'S GUIDE: Tracking Sensor Health
+        ---------------------------------------
+        
+        This method does much more than just storing data - it also:
+        
+        1. Updates our record of when we last heard from this sensor
+        2. Calculates how fast the sensor is sending data (frames per second)
+        3. Marks the sensor as "active" (working properly)
+        4. Keeps track of how many measurements we've received in total
+        
+        **Why is this important?**
+        
+        Think of this like checking vital signs in a hospital:
+        - If a patient's heart monitor hasn't sent data for 30 seconds, that's a problem!
+        - If a temperature sensor normally updates every 5 minutes but suddenly starts
+          sending data every 1 second, something unusual might be happening
+        
+        By tracking these statistics, our robot can:
+        - Know when a sensor has stopped working
+        - Detect when a sensor is behaving unusually
+        - Adjust how much it trusts each sensor based on performance
+        - Gracefully handle sensor failures by relying more on the working sensors
         
         This updates all relevant statistics and marks the sensor as active.
         
@@ -519,11 +798,34 @@ class MotionStateManager:
     --------------------------------------------------------
     Advanced state machine for tracking whether the basketball is stationary or moving.
     
+    🔍 BEGINNER'S GUIDE: Understanding Motion Tracking
+    ----------------------------------------------
+    
+    The MotionStateManager is the part of our system that figures out if the basketball is:
+    - Standing completely still
+    - Moving slowly (like rolling)
+    - Moving quickly (like bouncing or being thrown)
+    
+    **Real-world analogy:** This is similar to how your brain keeps track of different kinds of motion:
+    - When watching a parked car, you expect it to stay still
+    - When watching a car moving at constant speed, you expect smooth continuous motion
+    - When watching a bouncing ball, you expect irregular changes in direction and speed
+    
+    In each case, your brain uses a different set of rules to predict what will happen next!
+    
+    ## Why Do We Need This?
+    
     This system answers the crucial question: "Is the ball moving right now?"
     
     The answer to this question fundamentally changes how we handle sensor data:
     - For stationary balls: We can use stronger filtering, trust position more, and apply less physics prediction
     - For moving balls: We need more physics prediction, trust velocity more, and use looser filtering
+    
+    For example:
+    - If a ball has been sitting still for 10 seconds and suddenly our sensor says it jumped 2 meters,
+      that's probably a sensor error rather than real movement
+    - But if a ball was already bouncing quickly and our sensor says it moved 2 meters,
+      that might be totally realistic and we should believe it
     
     ## States:
     - UNKNOWN: Initial state when we don't have enough information
@@ -531,6 +833,44 @@ class MotionStateManager:
     - LONG_STATIONARY: The ball has been still for a significant time period
     - SMALL_MOVEMENT: The ball is moving slowly (rolling or gentle toss)
     - MEDIUM_FAST: The ball is moving quickly (thrown or bouncing)
+    
+    Motion State Machine Visualization:
+    
+    ┌──────────────────────────────────────────────────────────────────────────┐
+    │                                                                          │
+    │                     ┌────────────┐                                       │
+    │           ┌─────────┤  UNKNOWN   ├──────────┐                            │
+    │           │         └────────────┘          │                            │
+    │           │               │                 │                            │
+    │           │  Not enough   │ First           │                            │
+    │           │    data       │ detection       │                            │
+    │           │               ▼                 │                            │
+    │           │         ┌────────────┐          │                            │
+    │           │         │ SMALL      │          │                            │
+    │           │         │ MOVEMENT   │          │                            │
+    │           │         └──────┬─────┘          │                            │
+    │           │                │                │                            │
+    │           │                │                │                            │
+    │           │     Velocity   │ Velocity near  │                            │
+    │           │    increasing  │     zero       │                            │
+    │           │                │                │                            │
+    │           ▼                ▼                ▼                            │
+    │     ┌────────────┐   ┌────────────┐   ┌────────────┐                     │
+    │     │ MEDIUM/    │   │            │   │            │                     │
+    │     │ FAST       │◄──┤ STATIONARY ├──►│ LONG       │                     │
+    │     │            │   │            │   │ STATIONARY │                     │
+    │     └────────────┘   └────────────┘   └────────────┘                     │
+    │           ▲                │                ▲                            │
+    │           │                │                │                            │
+    │           │              Small              │                            │
+    │           └──────────────movement───────────┘                            │
+    │                                                                          │
+    └──────────────────────────────────────────────────────────────────────────┘
+    
+    The state transitions are based on:
+    • Velocity magnitude (speed)
+    • Duration of consistent behavior
+    • Hysteresis to prevent oscillation
 
     ## Key Concepts:
     1. **State-based Parameter Tuning**: Different filtering parameters based on motion state
@@ -647,7 +987,46 @@ class MotionStateManager:
         - Sensors are noisy, so we don't want to switch states just because of a single odd measurement.
         - By requiring several consistent measurements, we make the system more robust.
         
-        Returns True if the state changed, False otherwise.
+        **Understanding State Transitions and Hysteresis**
+        We use a concept called "hysteresis" to prevent rapid flickering between states due to sensor noise.
+        
+        Hysteresis in Everyday Life:
+        Think about how a home thermostat works:
+        - If set to 72°F, it doesn't turn on exactly at 71.9°F and off at 72.1°F
+        - Instead, it might wait until 70°F to turn on and 74°F to turn off
+        - This gap prevents the heater from rapidly cycling on/off when temperature fluctuates slightly
+        
+        How Our Code Implements Hysteresis:
+        1. We use "evidence counters" that must reach a threshold before triggering a state change
+        2. Each consistent reading in favor of a new state increases its counter
+        3. Any contradictory reading resets that counter to zero
+        4. Only after seeing multiple consistent readings do we change state
+        
+        Example Scenario:
+        - Current state: STATIONARY
+        - Evidence threshold: 3
+        - Velocity readings: [0.03, 0.04, 0.15, 0.17, 0.19, 0.22, 0.21]
+        - State mapping: <0.05 = STATIONARY, 0.05-0.20 = SMALL_MOVEMENT, >0.20 = MEDIUM_FAST
+        - Evidence counts evolve as: 
+          * SMALL_MOVEMENT: [0→0, 0→0, 0→1, 1→2, 2→3, 3→0, 0→1] 
+          * MEDIUM_FAST: [0→0, 0→0, 0→0, 0→0, 0→0, 0→1, 1→0]
+        - After the 5th reading, SMALL_MOVEMENT has 3 counts, triggering a state change
+        - The 6th reading would trigger MEDIUM_FAST, but we just reset the counter rather than 
+          immediately changing state again
+        
+        This approach means:
+        1. Brief spikes in velocity don't cause state changes
+        2. Transition between states requires sustained evidence
+        3. Different transitions can have different thresholds (notice how LONG_STATIONARY needs more evidence to exit)
+        4. The system is robust against sensor noise while still responsive to real changes
+        
+        Parameters:
+            velocity (float): Current speed of the ball in m/s
+            position (numpy.ndarray, optional): Current position as [x, y] (not used in the basic implementation)
+            force_state (int, optional): If provided, forces the state to this value (for debugging/testing)
+            
+        Returns:
+            bool: True if the state changed, False otherwise
         """
         current_time = time.time()
         state_changed = False
@@ -755,6 +1134,48 @@ class MotionStateManager:
         """
         Returns a multiplier for how strict we should be when validating new measurements, depending on the current state.
         For example, if the ball is moving fast, we allow bigger changes; if it's stationary, we are more strict.
+        
+        **The Science Behind Dynamic Validation Thresholds**
+        
+        This method implements a key concept in robust sensor fusion: adaptive validation thresholds.
+        
+        Think about a baseball outfielder catching a fly ball:
+        
+        * When the ball is high in the air moving fast → The player allows for more uncertainty in where
+          it will land and keeps a wide stance ready to move quickly in any direction
+          
+        * When the ball is coming down and almost in their glove → The player narrows their focus
+          and makes only fine adjustments with their hand
+        
+        Our algorithm works the same way:
+        
+        1. For stationary balls (value 1.0):
+           - We expect minimal changes between measurements
+           - New measurements far from the current estimate are likely errors
+           - We use normal validation thresholds
+           
+        2. For long stationary balls (value 0.9):
+           - We are even more confident the ball won't move
+           - We're even stricter (10% stricter) about rejecting outliers
+           - This prevents spurious detections from triggering false movements
+           
+        3. For slow-moving balls (value 1.3):
+           - We allow 30% larger deviations in measurements
+           - This accounts for acceleration, changing directions, and higher uncertainty
+           
+        4. For fast-moving balls (value 1.5):
+           - We allow 50% larger deviations from predictions
+           - Fast movement means more potential for rapid changes in direction and velocity
+           - Wider acceptance region prevents valid measurements from being rejected
+        
+        These multipliers are applied to the validation threshold when determining if a new
+        measurement should be accepted or rejected, effectively creating dynamic validation
+        gates that adapt to the ball's behavior.
+        
+        Returns:
+            float: A multiplier value that will be applied to validation thresholds
+                  Lower values = stricter validation (fewer measurements accepted)
+                  Higher values = looser validation (more measurements accepted)
         """
         # Use direct return based on state for better performance
         if self.current_state == self.STATIONARY:
@@ -772,12 +1193,80 @@ class MotionStateManager:
         """
         Returns True if we recently changed state (within max_transition_time seconds).
         This helps us be more forgiving right after a state change.
+        
+        **Why Transitions Need Special Handling**
+        
+        During state transitions, measurements may temporarily appear inconsistent because:
+        
+        1. The physical world doesn't change instantly
+           - A ball doesn't go from completely stationary to rolling at constant speed in one instant
+           - There's always an acceleration/deceleration period
+           
+        2. Different sensors may detect changes at slightly different times
+           - Camera might detect movement a frame later than LiDAR
+           - This creates temporary disagreements between sensors
+        
+        3. Our filtering parameters change between states
+           - When we switch states, we also change how we process measurements
+           - This can create brief instability as the filter adapts
+        
+        **Solution: Transition Grace Periods**
+        
+        This method helps identify when we're in this unstable transition period, allowing the
+        rest of the system to:
+        
+        - Temporarily widen acceptance thresholds for measurements
+        - Gradually blend between filter parameters rather than switching instantly
+        - Be more tolerant of seemingly contradictory sensor readings
+        - Prevent oscillating back to the previous state due to noisy measurements
+        
+        Real-world analogy: When you switch from walking to running, there's a brief transition
+        period where your gait is neither a proper walk nor a proper run. During this time, 
+        you're less stable and balanced than when you're firmly in either state.
+        
+        Parameters:
+            max_transition_time (float): Maximum time in seconds to consider the system
+                                         in transition after a state change (default: 1.0)
+                                         
+        Returns:
+            bool: True if we're still in the transition period, False otherwise
         """
         return time.time() - self.last_state_change_time < max_transition_time
     
     def get_state_age(self):
         """
         Returns how long we've been in the current state (in seconds).
+        
+        **Why State Age Matters**
+        
+        The length of time a ball has been in a particular motion state provides valuable
+        contextual information that helps us:
+        
+        1. **Build Confidence** in our current state assessment
+           - The longer a ball has been stationary, the more confident we can be it's truly stationary
+           - This allows for more aggressive filtering and outlier rejection
+        
+        2. **Make Predictions** about likely future behavior
+           - A ball that's been stationary for 10 seconds is less likely to suddenly move
+             than one that just stopped 0.5 seconds ago
+           - We can tune our prediction models based on this historical stability
+        
+        3. **Optimize Resource Usage**
+           - For long-stationary objects, we can reduce update frequency to save CPU
+           - For newly moving objects, we can increase update frequency for better tracking
+        
+        4. **Enable State-Dependent Logic**
+           - Certain states like LONG_STATIONARY are explicitly time-dependent
+           - Other parts of the system can use state age to implement their own time-based logic
+        
+        Common Use Cases:
+        * Determining when a STATIONARY ball becomes LONG_STATIONARY (after 5 seconds)
+        * Adjusting measurement validation thresholds based on state stability
+        * Tuning Kalman filter parameters based on state duration
+        * Determining when to trigger recalibration of sensor offsets
+        
+        Returns:
+            float: The time in seconds since the last state change, or 0.0 if unknown
         """
         if self.last_state_change_time:
             return time.time() - self.last_state_change_time
@@ -787,15 +1276,38 @@ class MotionStateManager:
 class OptimizedFusionNode(LifecycleNode):
     """
     =============================
-    KALMAN FILTERS: THE MATHEMATICAL HEART OF SENSOR FUSION
+    🔍 BEGINNER'S GUIDE: SENSOR FUSION AND KALMAN FILTERS
     =============================
     
-    What is a Kalman Filter?
+    ## What is Sensor Fusion?
+    
+    Sensor fusion is like being a detective with multiple witnesses. If one witness says the
+    suspect was "tall with dark hair" and another says the suspect was "wearing a red hat and
+    had dark hair," you can combine these descriptions to know that the suspect had "dark hair,
+    was tall, and wore a red hat" - giving you a more complete picture than either witness alone!
+    
+    In our robot, we combine information from multiple sensors:
+    - LIDAR tells us distance to objects very precisely
+    - Cameras tell us what the objects are (basketball vs. something else)
+    - 3D depth cameras give us shape information
+    
+    By combining all these sources, we get a better understanding than any single sensor could provide.
+    
+    ## What is a Kalman Filter?
     -----------------------
     A Kalman filter is a mathematical algorithm that estimates the state of a system (like the position and velocity of a ball) by combining:
       - Predictions (from physics: e.g., if the ball is moving, where should it be next?)
       - Measurements (from sensors: e.g., where does LiDAR or a camera say the ball is?)
     It also keeps track of how uncertain it is about its estimate, and updates this uncertainty as new data comes in.
+    
+    **Real-world analogy:** Imagine you're trying to track your friend in a crowded mall:
+    - Prediction: Based on their walking speed and direction, you predict they'll be near the food court soon
+    - Measurement: You get a text saying they're actually at the shoe store
+    - Kalman filter: Your brain combines these two pieces of information, considering:
+      - How confident you were in your prediction (did they walk consistently or were they browsing randomly?)
+      - How reliable the text message is (does your friend usually give accurate locations?)
+    - You then update your belief about their location to somewhere between your prediction and the text message,
+      leaning toward whichever information source you trust more in this situation
     
     Why use a Kalman Filter?
     -----------------------
@@ -813,6 +1325,99 @@ class OptimizedFusionNode(LifecycleNode):
         - If the measurement is close to the prediction, trust it more; if it's far, trust it less (maybe it's an outlier).
         - Combine the prediction and measurement, weighted by their uncertainties, to get a new, improved estimate.
         - Reduce the uncertainty, because now we have more information.
+        
+    How to Understand the Math (For Beginners)
+    -----------------------------------------
+    The Kalman filter math looks complex, but it's actually doing something we do naturally:
+    
+    **Real World Analogy:** Imagine you're in a dark room trying to find a light switch on the wall:
+    
+    1. **Prior Belief (Initial State)**: You think the switch is at chest height on the wall near the door.
+       * In the filter: This is your initial state estimate x₀ with a high uncertainty P₀
+    
+    2. **Prediction Step**: You take a step forward with your hand out, expecting to get closer to the switch.
+       * In the filter: x̂ₖ⁻ = F·x̂ₖ₋₁ (move forward according to physics)
+       * Your uncertainty increases slightly because you're moving in the dark
+       * In the filter: P̂ₖ⁻ = F·P̂ₖ₋₁·Fᵀ + Q (uncertainty grows with motion)
+    
+    3. **Measurement Step**: Your hand touches the wall (that's a measurement!)
+       * In the filter: zₖ (new sensor reading comes in)
+    
+    4. **Update Step**: You now combine what you predicted with what you felt:
+       * If your hand hit the wall where expected, you're more confident
+       * If your hand hit the wall somewhere unexpected, you revise your belief
+       * In the filter: K = P̂ₖ⁻·Hᵀ·(H·P̂ₖ⁻·Hᵀ + R)⁻¹ (Kalman gain)
+       * In the filter: x̂ₖ = x̂ₖ⁻ + K·(zₖ - H·x̂ₖ⁻) (updated state)
+       * In the filter: P̂ₖ = (I - K·H)·P̂ₖ⁻ (updated uncertainty)
+    
+    5. **Repeat**: You continue moving and touching, gradually narrowing down the location.
+    
+    **Key Insight:** The Kalman filter mathematically balances:
+    1. How much to trust your prediction (based on physics)
+    2. How much to trust your new measurement (based on sensor reliability)
+    3. How to update your uncertainty (getting more confident as you get more data)
+        
+    Fusion Node Architecture:
+    
+    ┌──────────────────────────────────────────────────────────────────────────────┐
+    │                                                                              │
+    │                       OPTIMIZED FUSION NODE                                  │
+    │                                                                              │
+    │ ┌────────────────┐   ┌────────────────┐   ┌────────────────┐                │
+    │ │                │   │                │   │                │                │
+    │ │ SENSOR MANAGER │   │  MOTION STATE  │   │  KALMAN FILTER │                │
+    │ │                │   │    MANAGER     │   │                │                │
+    │ └────────┬───────┘   └───────┬────────┘   └────────┬───────┘                │
+    │          │                   │                     │                        │
+    │          │                   │                     │                        │
+    │          ▼                   ▼                     ▼                        │
+    │ ┌──────────────────────────────────────────────────────────────────┐        │
+    │ │                                                                  │        │
+    │ │                       MAIN FILTER LOOP                           │        │
+    │ │                                                                  │        │
+    │ │  ┌───────────────┐    ┌───────────────┐     ┌────────────────┐  │        │
+    │ │  │ 1. Process    │    │ 2. Prediction │     │ 3. Update      │  │        │
+    │ │  │    Sensor     │───►│    Step       │────►│    Step        │  │        │
+    │ │  │    Inputs     │    │               │     │                │  │        │
+    │ │  └───────────────┘    └───────────────┘     └────────────────┘  │        │
+    │ │                                                    │            │        │
+    │ │                                                    │            │        │
+    │ │                                                    ▼            │        │
+    │ │                               ┌────────────────────────────┐    │        │
+    │ │                               │ 4. Motion State &          │    │        │
+    │ │                               │    Uncertainty Updates     │    │        │
+    │ │                               └──────────────┬─────────────┘    │        │
+    │ │                                              │                  │        │
+    │ │                                              │                  │        │
+    │ │                                              ▼                  │        │
+    │ │  ┌───────────────┐                  ┌────────────────┐          │        │
+    │ │  │ 6. Diagnostic │◄─────────────────┤ 5. Publish     │          │        │
+    │ │  │    Updates    │                  │    Results     │          │        │
+    │ │  └───────────────┘                  └────────────────┘          │        │
+    │ │                                                                  │        │
+    │ └──────────────────────────────────────────────────────────────────┘        │
+    │                                                                              │
+    │                                                                              │
+    │ ┌──────────────────────────────────────────────────────────────────────────┐ │
+    │ │                           OUTPUT TOPICS                                  │ │
+    │ │                                                                          │ │
+    │ │  ┌───────────────┐   ┌───────────────┐   ┌────────────────┐             │ │
+    │ │  │ Position      │   │ Velocity      │   │ Uncertainty    │             │ │
+    │ │  │ /basketball/  │   │ /basketball/  │   │ /basketball/   │             │ │
+    │ │  │ fused/position│   │ fused/velocity│   │ fused/         │             │ │
+    │ │  └───────────────┘   └───────────────┘   │ uncertainty    │             │ │
+    │ │                                          └────────────────┘             │ │
+    │ │                                                                          │ │
+    │ │  ┌───────────────┐   ┌───────────────┐   ┌────────────────┐             │ │
+    │ │  │ Motion State  │   │ Tracking      │   │ Diagnostics    │             │ │
+    │ │  │ /basketball/  │   │ Status        │   │ /basketball/   │             │ │
+    │ │  │ fused/motion  │   │ /basketball/  │   │ fusion/        │             │ │
+    │ │  │ _state        │   │ fused/tracking│   │ diagnostics    │             │ │
+    │ │  └───────────────┘   └───────────────┘   └────────────────┘             │ │
+    │ │                                                                          │ │
+    │ └──────────────────────────────────────────────────────────────────────────┘ │
+    │                                                                              │
+    └──────────────────────────────────────────────────────────────────────────────┘
     
     Why is this appropriate for basketball tracking?
     -----------------------------------------------
@@ -2881,6 +3486,52 @@ class OptimizedFusionNode(LifecycleNode):
         2. Update: Use new sensor data to correct the prediction.
         It also updates the motion state, applies physical constraints, updates uncertainty, and tracking status.
         This loop is the heart of the sensor fusion process.
+        
+        Kalman Filter Update Loop Visualization:
+        
+        ┌─────────────────────────────────────────────────────────────────────────────┐
+        │                                                                             │
+        │  ┌─────────────┐         Motion Model         ┌─────────────────────────┐   │
+        │  │ Previous    │       (Physics Laws)         │ Predicted State         │   │
+        │  │ State (t-1) ├────────────────────────────► │ (Before Measurements)   │   │
+        │  │             │          x̂ₖ⁻ = Fₖx̂ₖ₋₁        │                         │   │
+        │  └─────────────┘                              └─────────────┬───────────┘   │
+        │                                                             │               │
+        │  ┌─────────────┐                                            │               │
+        │  │ Previous    │                                            │               │
+        │  │ Uncertainty ├────────────────────────────────────┐       │               │
+        │  │ Pₖ₋₁        │                                    │       │               │
+        │  └─────────────┘                                    ▼       ▼               │
+        │                                               ┌──────────────────────┐      │
+        │                                               │ Innovation:          │      │
+        │  ┌─────────────┐                              │ Compare Prediction   │      │
+        │  │ Lidar       │                              │ with Measurements    │      │
+        │  │ Measurement ├──┐                           │                      │      │
+        │  └─────────────┘  │   ┌─────────────┐         │ Calculate Kalman Gain│      │
+        │                   │   │ Measurement │         │ Kₖ = Pₖ⁻Hₖᵀ(HₖPₖ⁻Hₖᵀ + Rₖ)⁻¹│
+        │  ┌─────────────┐  └──►│ Fusion     ├────────►│                      │      │
+        │  │ YOLO        │      │ (Weighted) │         │ Update State:        │      │
+        │  │ Measurement ├─────►│            │         │ x̂ₖ = x̂ₖ⁻ + Kₖ(zₖ - Hₖx̂ₖ⁻)│      │
+        │  └─────────────┘      └─────────────┘         │                      │      │
+        │                                               │ Update Uncertainty:  │      │
+        │  ┌─────────────┐                              │ Pₖ = (I - KₖHₖ)Pₖ⁻    │      │
+        │  │ Depth Camera│                              │                      │      │
+        │  │ Measurement ├─────────────────────────────►│                      │      │
+        │  └─────────────┘                              └──────────┬───────────┘      │
+        │                                                          │                  │
+        │                                                          │                  │
+        │                                                          │                  │
+        │                                                          ▼                  │
+        │                                                ┌────────────────────┐       │
+        │                                                │ Final State        │       │
+        │                                                │ Estimate (t)       │       │
+        │                                                │                    │       │
+        │                                                │ Position           │       │
+        │                                                │ Velocity           │       │
+        │                                                │ Uncertainty        │       │
+        │                                                └────────────────────┘       │
+        │                                                                             │
+        └─────────────────────────────────────────────────────────────────────────────┘
         """
         if not self.is_activated:
             return

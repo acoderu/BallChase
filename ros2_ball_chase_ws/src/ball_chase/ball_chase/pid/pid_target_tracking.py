@@ -11,6 +11,23 @@ between perception (where is the ball?) and action (how should the robot move?),
 implementing sophisticated algorithms for target tracking, movement strategy
 selection, and velocity control.
 
+┌───────────────────────────────────────────────────────────────────────────┐
+│                   ROBOTICS PERCEPTION-ACTION PIPELINE                     │
+│                                                                           │
+│  ┌───────────┐     ┌────────────┐     ┌────────────┐     ┌────────────┐  │
+│  │ SENSORS   │     │ PERCEPTION │     │ PLANNING   │     │ ACTION     │  │
+│  │           │     │            │     │            │     │            │  │
+│  │ • Cameras │     │ • Filtering│     │ • Strategy │     │ • Motors   │  │
+│  │ • LIDAR   │ ──► │ • Tracking │ ──► │ • Decision │ ──► │ • Actuators│  │
+│  │ • Depth   │     │ • Fusion   │     │ • Prediction     │ • Feedback │  │
+│  │   Sensors │     │            │     │            │     │            │  │
+│  └───────────┘     └────────────┘     └────────────┘     └────────────┘  │
+│                                                                           │
+│  This module handles the critical middle components of this pipeline:     │
+│  turning raw perceptions into intelligent movement commands.              │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
 Key Concepts for Beginners:
 --------------------------
 
@@ -25,6 +42,29 @@ Key Concepts for Beginners:
    This modular design makes the system easier to understand, test, and improve.
    Each module can be enhanced independently without affecting the others.
 
+┌───────────────────────────────────────────────────────────────────────────┐
+│                        MODULAR SYSTEM ARCHITECTURE                        │
+│                                                                           │
+│   ┌───────────────────┐    ┌────────────────────┐   ┌──────────────────┐ │
+│   │TargetTrackingModule│   │MovementStrategyModule│  │VelocityControlModule│
+│   └─────────┬─────────┘    └──────────┬─────────┘   └────────┬─────────┘ │
+│             │                         │                      │           │
+│             ▼                         ▼                      ▼           │
+│   ┌───────────────────┐    ┌────────────────────┐   ┌──────────────────┐ │
+│   │• Filter raw data  │    │• Select strategy   │   │• Apply limits    │ │
+│   │• Handle sensor    │───►│• Plan movement     │──►│• Control accel.  │ │
+│   │  fusion           │    │• Coordinate axes   │   │• Ensure safety   │ │
+│   │• Predict movement │    │                    │   │                  │ │
+│   └───────────────────┘    └────────────────────┘   └──────────────────┘ │
+│             │                         │                      │           │
+│             │                         │                      │           │
+│             ▼                         ▼                      ▼           │
+│    Filtered Position        Movement Strategies        Safe Velocities   │
+│      Predictions              Blending Rules             Smoothing        │
+│    Quality Assessment      Context Awareness          Emergency Braking   │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
 2. ADAPTIVE TRACKING AND PREDICTION
 
    The robot doesn't just react to where the ball IS - it anticipates where it WILL BE:
@@ -36,6 +76,46 @@ Key Concepts for Beginners:
    
    These capabilities allow the robot to track the ball smoothly even when
    sensor data is delayed or inconsistent.
+
+┌───────────────────────────────────────────────────────────────────────────┐
+│                     ADAPTIVE TRACKING AND PREDICTION                       │
+│                                                                           │
+│  ┌───────────────────────────────────────────────────────────────────┐    │
+│  │                    PREDICTION VS. REACTION                        │    │
+│  │                                                                   │    │
+│  │  REACTIVE APPROACH         PREDICTIVE APPROACH                    │    │
+│  │  ┌─────────────────┐       ┌─────────────────────────────┐       │    │
+│  │  │                 │       │                             │       │    │
+│  │  │    Ball         │       │    Previous                 │       │    │
+│  │  │    Current      │       │    Positions    ┌────────┐  │       │    │
+│  │  │    Position     │       │       ┌─────────► Predict│  │       │    │
+│  │  │                 │       │       │         │ Future │  │       │    │
+│  │  │       │         │       │       │         │Position│  │       │    │
+│  │  │       │         │       │       │         └────────┘  │       │    │
+│  │  │       ▼         │       │       │              │      │       │    │
+│  │  │   Move Robot    │       │       │              │      │       │    │
+│  │  │   To Current    │       │       │              ▼      │       │    │
+│  │  │   Position      │       │  Move Robot to Predicted    │       │    │
+│  │  │                 │       │  Position                   │       │    │
+│  │  └─────────────────┘       └─────────────────────────────┘       │    │
+│  │                                                                   │    │
+│  └───────────────────────────────────────────────────────────────────┘    │
+│                                                                           │
+│  ADAPTIVE TECHNIQUES:                                                     │
+│                                                                           │
+│  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐│
+│  │ FUSION RATE         │  │ DATA FRESHNESS      │  │ MOVEMENT PATTERN    ││
+│  │ DETECTION           │  │ ANALYSIS            │  │ DETECTION           ││
+│  ├─────────────────────┤  ├─────────────────────┤  ├─────────────────────┤│
+│  │• Measures actual    │  │• Evaluates data age │  │• Identifies patterns││
+│  │  sensor update rate │  │• Graduated levels:  │  │• Detects:           ││
+│  │• Adapts system to   │  │  - Fresh            │  │  - Consistent motion││
+│  │  match real-world   │  │  - Stale            │  │  - Direction changes││
+│  │  conditions         │  │  - Critical         │  │  - Diagonal movement││
+│  │• Range: 0.5-10 Hz   │  │  - Invalid          │  │  - Erratic behavior ││
+│  └─────────────────────┘  └─────────────────────┘  └─────────────────────┘│
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
 
 3. STRATEGY-BASED MOVEMENT PLANNING
 
@@ -49,6 +129,48 @@ Key Concepts for Beginners:
    This approach creates much more natural and efficient movement than
    simple reactive control.
 
+┌───────────────────────────────────────────────────────────────────────────┐
+│                      STRATEGY-BASED MOVEMENT PLANNING                      │
+│                                                                           │
+│  TRADITIONAL PID                      STRATEGY-BASED APPROACH             │
+│  ┌────────────────────┐               ┌────────────────────────────┐      │
+│  │                    │               │                            │      │
+│  │      Error         │               │      Error Pattern         │      │
+│  │        │           │               │          │                 │      │
+│  │        ▼           │               │          ▼                 │      │
+│  │ ┌──────────────┐   │               │ ┌────────────────────┐    │      │
+│  │ │ PID Formula  │   │               │ │ Strategy Selection │    │      │
+│  │ └──────┬───────┘   │               │ └────────┬───────────┘    │      │
+│  │        │           │               │          │                 │      │
+│  │        ▼           │               │          ▼                 │      │
+│  │   Motor Commands   │               │ ┌────────────────────┐    │      │
+│  │                    │               │ │ Strategy Blending  │    │      │
+│  │                    │               │ └────────┬───────────┘    │      │
+│  │                    │               │          │                 │      │
+│  │                    │               │          ▼                 │      │
+│  │                    │               │ ┌────────────────────┐    │      │
+│  │                    │               │ │ Motor Coordination │    │      │
+│  │                    │               │ └────────┬───────────┘    │      │
+│  │                    │               │          │                 │      │
+│  │                    │               │          ▼                 │      │
+│  │                    │               │     Motor Commands         │      │
+│  └────────────────────┘               └────────────────────────────┘      │
+│                                                                           │
+│  STRATEGY EXAMPLES:                                                       │
+│                                                                           │
+│  ┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐  │
+│  │ DISTANCE PRIORITY  │  │ ANGULAR CORRECTION │  │ LATERAL ALIGNMENT  │  │
+│  ├────────────────────┤  ├────────────────────┤  ├────────────────────┤  │
+│  │• Used when ball is │  │• Used when ball is │  │• Used when offset  │  │
+│  │  far away          │  │  at an angle       │  │  to the side       │  │
+│  │• Prioritizes forward│  │• Rotate to face   │  │• Move sideways     │  │
+│  │  movement          │  │  the ball          │  │  first             │  │
+│  │• Rotates while     │  │• Forward movement  │  │• Then approach     │  │
+│  │  moving forward    │  │  secondary         │  │  forward           │  │
+│  └────────────────────┘  └────────────────────┘  └────────────────────┘  │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
 4. SAFETY AND PERFORMANCE OPTIMIZATION
 
    The system incorporates numerous features to ensure safe, efficient operation:
@@ -61,6 +183,43 @@ Key Concepts for Beginners:
    These optimizations are especially important for running on resource-constrained
    systems like the Raspberry Pi 5.
 
+┌───────────────────────────────────────────────────────────────────────────┐
+│                    SAFETY AND PERFORMANCE OPTIMIZATION                     │
+│                                                                           │
+│  SAFETY SYSTEMS:                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │                       VELOCITY SAFETY PIPELINE                     │   │
+│  │                                                                    │   │
+│  │    Raw        ┌─────────┐     ┌──────────┐      ┌──────────┐      │   │
+│  │  Velocity     │ Max Vel │     │Accel.    │      │ Proximity│      │   │
+│  │  Commands ───►│ Limiting│────►│Limiting  │─────►│ Scaling  │─────►│   │
+│  │               └─────────┘     └──────────┘      └──────────┘      │   │
+│  │                                                                    │   │
+│  │  Maximum allowed velocities:                                       │   │
+│  │  • Forward: 0.5 m/s (~1.1 mph)                                     │   │
+│  │  • Lateral: 0.4 m/s (~0.9 mph)                                     │   │
+│  │  • Rotation: 0.6 rad/s (~34° per second)                           │   │
+│  │                                                                    │   │
+│  │  Maximum acceleration limits:                                      │   │
+│  │  • Forward: 1.8 m/s² (0→0.5m/s in ~0.28s)                           │   │
+│  │  • Lateral: 1.5 m/s² (0→0.4m/s in ~0.27s)                           │   │
+│  │  • Rotation: 2.0 rad/s² (0→0.6rad/s in ~0.3s)                       │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                                                                           │
+│  PERFORMANCE ADAPTATION:                                                  │
+│  ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐│
+│  │ RESOURCE MONITORING │  │ ADAPTIVE CONTROL    │  │ FAIL-SAFE           ││
+│  ├─────────────────────┤  ├─────────────────────┤  ├─────────────────────┤│
+│  │• Monitors CPU usage │  │• Changes update     │  │• Graduated response ││
+│  │• Tracks memory      │  │  frequency based on │  │  to stale data      ││
+│  │  consumption        │  │  available resources│  │• Smooth deceleration││
+│  │• Detects processing │  │• Skips update cycles│  │  when data lost     ││
+│  │  bottlenecks        │  │  when CPU overloaded│  │• Safe recovery from ││
+│  │                     │  │                     │  │  sensor failures    ││
+│  └─────────────────────┘  └─────────────────────┘  └─────────────────────┘│
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
 Module Architecture:
 ------------------
 
@@ -71,13 +230,69 @@ Module Architecture:
 Together, these modules implement a sophisticated control pipeline that creates
 smooth, intelligent robot movement with minimal computational overhead.
 
+┌───────────────────────────────────────────────────────────────────────────┐
+│                      CONTROL PIPELINE DATA FLOW                            │
+│                                                                           │
+│  ┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐    │
+│  │  SENSOR DATA      │   │  MOVEMENT ERRORS  │   │  MOTOR VELOCITIES │    │
+│  │                   │   │                   │   │                   │    │
+│  │• Ball position    │   │• Distance error   │   │• Linear X (forward)    │
+│  │  (x, y, z)        │──►│• Lateral error    │──►│• Linear Y (lateral)    │
+│  │• Sensor frame     │   │• Angular error    │   │• Angular Z (rotation)  │
+│  │• Detection time   │   │                   │   │                   │    │
+│  └───────────────────┘   └───────────────────┘   └───────────────────┘    │
+│           │                       │                       │               │
+│           ▼                       ▼                       ▼               │
+│  ┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐    │
+│  │Target Tracking    │   │Movement Strategy  │   │Velocity Control   │    │
+│  │Module             │   │Module             │   │Module             │    │
+│  └───────────────────┘   └───────────────────┘   └───────────────────┘    │
+│           │                       │                       │               │
+│           ▼                       ▼                       ▼               │
+│  ┌───────────────────┐   ┌───────────────────┐   ┌───────────────────┐    │
+│  │• Position filtering│   │• Strategy selection│  │• Velocity limiting│    │
+│  │• Freshness analysis│   │• Error mapping    │   │• Accel. limiting  │    │
+│  │• Prediction       │   │• Movement planning │   │• Safety checks    │    │
+│  │• Sensor fusion    │   │• Directional biasing│  │• Smoothing        │    │
+│  └───────────────────┘   └───────────────────┘   └───────────────────┘    │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
+
 Performance Optimizations:
 ------------------------
-- ADAPTIVE PROCESSING: Matches control rate to actual fusion data rate (1-5Hz)
-- EFFICIENT MEMORY USAGE: Pre-allocates buffers and reuses objects
-- MINIMAL ALLOCATIONS: Avoids creating new objects during real-time processing
-- VECTORIZED OPERATIONS: Uses NumPy for efficient numerical operations
-- GRADUATED FRESHNESS: Smart handling of potentially stale data
+┌───────────────────────────────────────────────────────────────────────────┐
+│                        PERFORMANCE OPTIMIZATIONS                           │
+│                                                                           │
+│  ADAPTIVE PROCESSING                 MEMORY OPTIMIZATIONS                 │
+│  ┌────────────────────────┐          ┌────────────────────────┐          │
+│  │• Matches update rate to│          │• Pre-allocated buffers │          │
+│  │  actual fusion rate    │          │• Fixed-size arrays     │          │
+│  │• Adapts to 1-5Hz range │          │• Circular buffers      │          │
+│  │• Scales computation    │          │• Reused objects        │          │
+│  │  with data quality     │          │• Minimal allocations   │          │
+│  └────────────────────────┘          └────────────────────────┘          │
+│                                                                           │
+│  COMPUTATIONAL EFFICIENCY           FAILURE HANDLING                      │
+│  ┌────────────────────────┐          ┌────────────────────────┐          │
+│  │• Vectorized operations │          │• Graduated freshness   │          │
+│  │• NumPy for math        │          │  levels (fresh, stale) │          │
+│  │• Cached calculations   │          │• Safe fallbacks        │          │
+│  │• Small-angle approx.   │          │• Recovery strategies   │          │
+│  │• Lookup tables         │          │• Consistent behaviors  │          │
+│  └────────────────────────┘          └────────────────────────┘          │
+│                                                                           │
+│  PROCESSING PIPELINE OPTIMIZATION:                                        │
+│  ┌────────────────────────────────────────────────────────────────────┐   │
+│  │ 1. Minimized object creation in hot path                          │   │
+│  │ 2. Pre-allocated arrays for all numerical operations              │   │
+│  │ 3. Reused calculation buffers across processing steps             │   │
+│  │ 4. Batch computations using vectorized operations                 │   │
+│  │ 5. Early exits for common cases                                   │   │
+│  │ 6. CPU monitoring and cycle skipping under high load              │   │
+│  │ 7. Adaptive processing based on fusion data rates                 │   │
+│  └────────────────────────────────────────────────────────────────────┘   │
+│                                                                           │
+└───────────────────────────────────────────────────────────────────────────┘
 """
 
 import rclpy
@@ -113,6 +328,62 @@ class TargetTrackingModule:
     raw positional data from sensors and transforms it into reliable, predictive
     information about where the basketball is and where it's going.
     
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                 TARGET TRACKING MODULE ARCHITECTURE                        │
+    │                                                                           │
+    │  ┌───────────────────┐                                                    │
+    │  │   Sensor Data     │                                                    │
+    │  │                   │                                                    │
+    │  │ • Camera detection│                                                    │
+    │  │ • LIDAR points    │                                                    │
+    │  │ • Depth data      │                                                    │
+    │  └─────────┬─────────┘                                                    │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐      ┌────────────────────┐                       │
+    │  │ Target Processing │      │  Fusion Rate       │                       │
+    │  │                   │◄────►│  Detection         │                       │
+    │  │ • Noise filtering │      │                    │                       │
+    │  │ • Outlier removal │      │ • Measures update  │                       │
+    │  │ • Frame transforms│      │   frequency        │                       │
+    │  │ • Coordinate conv.│      │ • Adapts thresholds│                       │
+    │  └─────────┬─────────┘      └────────────────────┘                       │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐      ┌────────────────────┐                       │
+    │  │  Movement Pattern │      │ Data Freshness     │                       │
+    │  │  Detection        │◄────►│ Analysis           │                       │
+    │  │                   │      │                    │                       │
+    │  │ • Consistent      │      │ • Evaluates age    │                       │
+    │  │   motion detection│      │ • Graduated levels │                       │
+    │  │ • Direction change│      │ • Adaptive TTLs    │                       │
+    │  │ • Diagonal motion │      │ • Confidence score │                       │
+    │  └─────────┬─────────┘      └────────────────────┘                       │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐                                                    │
+    │  │  Position         │                                                    │
+    │  │  Prediction       │                                                    │
+    │  │                   │                                                    │
+    │  │ • Physics model   │                                                    │
+    │  │ • Future position │                                                    │
+    │  │ • Velocity vector │                                                    │
+    │  │ • Confidence level│                                                    │
+    │  └─────────┬─────────┘                                                    │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐                                                    │
+    │  │ Processed Target  │                                                    │
+    │  │ Information       │                                                    │
+    │  │                   │                                                    │
+    │  │ • Filtered position                                                    │
+    │  │ • Predicted position                                                   │
+    │  │ • Movement characteristics                                             │
+    │  │ • Data quality assessment                                              │
+    │  └───────────────────┘                                                    │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
+    
     KEY CAPABILITIES:
     ---------------
     
@@ -122,11 +393,75 @@ class TargetTrackingModule:
        - Allows smooth control even with imperfect sensors
        - Prevents the robot from reacting to sensor glitches
     
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                    NOISE FILTERING AND SMOOTHING                           │
+    │                                                                           │
+    │  RAW SENSOR DATA                         FILTERED DATA                    │
+    │                                                                           │
+    │     Ball Position                          Ball Position                  │
+    │         ^                                      ^                          │
+    │         │                                      │                          │
+    │         │   ●                                  │                          │
+    │         │      ●                               │                          │
+    │         │    ●   ●        FILTERING            │       ●                  │
+    │         │  ●       ●     ─────────►            │    ●─────●               │
+    │         │ ●                                    │  ●         ●             │
+    │         │●           ●                         │ ●           ●            │
+    │         │                                      │                          │
+    │         │                                      │                          │
+    │         └──────────────────►                   └──────────────────►       │
+    │                 Time                                  Time                │
+    │                                                                           │
+    │  • Moving average filter removes random fluctuations                      │
+    │  • Weighted filtering prioritizes more recent data                        │
+    │  • Adaptive filter parameters based on ball movement                      │
+    │  • Statistical outlier detection and rejection                           │
+    │  • Automatic sensor quality assessment                                    │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
+    
     2. MOVEMENT PREDICTION
        - Estimates where the ball will be in the near future (prediction_horizon)
        - Uses physics-based prediction for consistent movement
        - Applies special handling for diagonal movements
        - Allows the robot to anticipate the ball's path
+    
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                        MOVEMENT PREDICTION                                 │
+    │                                                                           │
+    │  ┌───────────────────────────────────────────────────────────────────┐    │
+    │  │                    PHYSICS-BASED PREDICTION                       │    │
+    │  │                                                                   │    │
+    │  │  Current Time (t)                 Future Time (t + horizon)       │    │
+    │  │                                                                   │    │
+    │  │  position = [x₀, y₀]              predicted_position = [x₁, y₁]   │    │
+    │  │  velocity = [vₓ, vᵧ]                                             │    │
+    │  │                                                                   │    │
+    │  │   Ball           velocity          Ball                           │    │
+    │  │    ●─────────────────►              ●                             │    │
+    │  │  position                       predicted_position                │    │
+    │  │                                                                   │    │
+    │  │  Simple Physics Model:                                            │    │
+    │  │  x₁ = x₀ + vₓ * horizon                                          │    │
+    │  │  y₁ = y₀ + vᵧ * horizon                                          │    │
+    │  │                                                                   │    │
+    │  └───────────────────────────────────────────────────────────────────┘    │
+    │                                                                           │
+    │  DIAGONAL MOVEMENT ENHANCEMENT:                                           │
+    │                                                                           │
+    │  ┌────────────────────────────┐    ┌───────────────────────────┐         │
+    │  │ Standard Prediction        │    │ Enhanced Prediction       │         │
+    │  │ (prediction weight = 0.5)  │    │ (prediction weight = 0.7) │         │
+    │  │                            │    │                           │         │
+    │  │ • 50% current position     │    │ • 30% current position    │         │
+    │  │ • 50% predicted position   │    │ • 70% predicted position  │         │
+    │  │ • Good for straight-line   │    │ • Better for diagonal and │         │
+    │  │   movements                │    │   curved movements        │         │
+    │  │                            │    │ • Compensates for sensing │         │
+    │  │                            │    │   delays better           │         │
+    │  └────────────────────────────┘    └───────────────────────────┘         │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
     
     3. FUSION RATE DETECTION
        - Automatically detects how frequently new sensor data arrives
@@ -134,11 +469,98 @@ class TargetTrackingModule:
        - Ensures control logic matches the system's capabilities
        - Provides crucial information for data freshness evaluation
     
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                       FUSION RATE DETECTION                               │
+    │                                                                           │
+    │  ADAPTIVE RATE CALCULATION:                                               │
+    │                                                                           │
+    │  ┌────────────────────────────────────────────────────────────────────┐   │
+    │  │     Updates                                                        │   │
+    │  │  ───────────►                                                      │   │
+    │  │                                                                    │   │
+    │  │  t₁    t₂    t₃    t₄    t₅    t₆    t₇    t₈    t₉    t₁₀        │   │
+    │  │  │     │     │     │     │     │     │     │     │     │           │   │
+    │  │  ●─────●─────●─────●─────●─────●─────●─────●─────●─────●─────►     │   │
+    │  │                                                          time      │   │
+    │  │                                                                    │   │
+    │  │  ◄──▶ Δt₁  ◄──▶ Δt₂  ◄──▶ Δt₃  ◄──▶ Δt₄  ◄──▶ Δt₅  ◄──▶ ...      │   │
+    │  │                                                                    │   │
+    │  │  Average interval = (Δt₁ + Δt₂ + ... + Δtₙ) / n                   │   │
+    │  │  Detected rate = 1.0 / average_interval                           │   │
+    │  │                                                                    │   │
+    │  │  • Store timestamps of last 10 updates                            │   │
+    │  │  • Calculate time intervals between updates                       │   │
+    │  │  • Discard outliers (large gaps > 2 seconds)                      │   │
+    │  │  • Compute average interval                                       │   │
+    │  │  • Convert to frequency (Hz)                                      │   │
+    │  │  • Bounds check: 0.5Hz ≤ rate ≤ 10Hz                              │   │
+    │  └────────────────────────────────────────────────────────────────────┘   │
+    │                                                                           │
+    │  SYSTEM ADAPTATION:                                                       │
+    │                                                                           │
+    │  ┌────────────────────────────────────────┐                              │
+    │  │ EFFECTS OF FUSION RATE DETECTION       │                              │
+    │  ├────────────────────┬───────────────────┤                              │
+    │  │ Parameter          │ Adaptation         │                              │
+    │  ├────────────────────┼───────────────────┤                              │
+    │  │ Freshness          │ Sets thresholds    │                              │
+    │  │ thresholds         │ relative to rate   │                              │
+    │  ├────────────────────┼───────────────────┤                              │
+    │  │ Target prediction  │ Adjusts prediction │                              │
+    │  │ horizon            │ time window        │                              │
+    │  ├────────────────────┼───────────────────┤                              │
+    │  │ Filter window      │ Changes filtering  │                              │
+    │  │ size               │ sensitivity        │                              │
+    │  ├────────────────────┼───────────────────┤                              │
+    │  │ Control loop       │ Matches control    │                              │
+    │  │ frequency          │ rate to data rate  │                              │
+    │  └────────────────────┴───────────────────┘                              │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
+    
     4. DATA FRESHNESS ANALYSIS
        - Determines if data is fresh enough to be reliable
        - Provides graduated freshness levels (fresh, stale, critical)
        - Adapts thresholds based on detected fusion rate
        - Enables graceful handling of sensor delays or failures
+    
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                       DATA FRESHNESS ANALYSIS                              │
+    │                                                                           │
+    │  GRADUATED FRESHNESS LEVELS:                                              │
+    │  ┌──────────────────────────────────────────────────────────────────┐     │
+    │  │                                                                  │     │
+    │  │  last_update                                            now      │     │
+    │  │     │                                                     │      │     │
+    │  │     ●─────────────────────────────────────────────────────●      │     │
+    │  │     │                       data_age                       │      │     │
+    │  │     │                                                      │      │     │
+    │  │     │◄─────────┬─────────┬─────────┬───────────────────────┤      │     │
+    │  │     │  FRESH   │  STALE  │ CRITICAL│      INVALID          │      │     │
+    │  │     │          │         │         │                       │      │     │
+    │  │  expected_     │expected_│expected_│                       │      │     │
+    │  │  interval*1.2  │interval*2.0     │interval*3.0           │      │     │
+    │  │                                                                  │     │
+    │  └──────────────────────────────────────────────────────────────────┘     │
+    │                                                                           │
+    │  FRESHNESS LEVEL RESPONSES:                                               │
+    │  ┌────────────────────────────────────────────────────────────┐          │
+    │  │ Level     │ Age Range              │ System Response        │          │
+    │  ├───────────┼───────────────────────┼─────────────────────────┤          │
+    │  │ FRESH     │ < 1.2× expected update │ Normal operation        │          │
+    │  │           │ interval              │ Full confidence         │          │
+    │  ├───────────┼───────────────────────┼─────────────────────────┤          │
+    │  │ STALE     │ 1.2× to 2.0× expected │ Reduced velocities (50%)│          │
+    │  │           │ interval              │ More prediction weight  │          │
+    │  ├───────────┼───────────────────────┼─────────────────────────┤          │
+    │  │ CRITICAL  │ 2.0× to 3.0× expected │ Final controlled stop   │          │
+    │  │           │ interval              │ Prepare for recovery    │          │
+    │  ├───────────┼───────────────────────┼─────────────────────────┤          │
+    │  │ INVALID   │ > 3.0× expected update│ Emergency stop          │          │
+    │  │           │ interval              │ Sensor reset procedure  │          │
+    │  └────────────────────────────────────────────────────────────┘          │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
     
     This module embodies the concept of "smart sensing" - going beyond
     raw data to create a higher-level understanding of the basketball's
@@ -605,13 +1027,100 @@ class TargetTrackingModule:
 
 class MovementStrategyModule:
     """
-    Strategic movement planning system that transforms errors into coordinated movement plans.
+    Plans how the robot should move to reach the ball.
     
-    EDUCATIONAL EXPLANATION:
-    -----------------------
-    The MovementStrategyModule serves as the robot's "thinking center" for movement
-    decisions. Rather than directly transforming errors into velocities (as simple PID
-    controllers do), this module uses a sophisticated strategy-based approach.
+    IMAGINE THIS: 🧠
+    ---------------
+    Think of this like the "thinking brain" of the robot - it decides HOW
+    to move based on WHERE the ball is. This is similar to how basketball
+    players make different movement decisions based on the situation:
+    
+    - When the ball is far away: run straight toward it
+    - When the ball is at an angle: turn to face it first
+    - When the ball is close but off to the side: side-step to align
+    
+    This module is what makes the robot's movements look intelligent rather 
+    than mechanical or robotic.
+    
+    HOW IT WORKS: 📊
+    -------------
+    Instead of using simple "if the ball is left, turn left" rules, the robot 
+    uses a sophisticated table of movement strategies:
+    
+    1. Categorize errors into meaningful groups:
+       - Distance: How far from the ball? (far, medium, close, etc.)
+       - Lateral: How far to the side? (left, right, centered)
+       - Angular: How much rotation needed? (facing wrong way, slightly off)
+       
+    2. Look up the best strategy in a strategy catalog:
+       - "ANGULAR_PRIMARY": Turn first, then move forward
+       - "DIAGONAL_MOVEMENT": Move forward and sideways at the same time
+       - "LATERAL_CORRECTION": Move sideways without changing angle
+       - Many more specialized strategies for different situations
+       
+    3. Blend strategies together for smooth transitions:
+       - Gradual shifts between strategies instead of abrupt changes
+       - No jerky movements when switching from one strategy to another
+       
+    REAL-WORLD ANALOGY: 🏀
+    -------------------
+    The MovementStrategyModule works like an experienced basketball player's
+    instincts - knowing exactly how to move in each situation to get to the
+    ball efficiently, naturally, and smoothly.
+    
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                    MOVEMENT STRATEGY MODULE ARCHITECTURE                   │
+    │                                                                           │
+    │  ┌───────────────────┐                                                    │
+    │  │   Position Errors │                                                    │
+    │  │                   │                                                    │
+    │  │ • Distance error  │                                                    │
+    │  │ • Lateral error   │                                                    │
+    │  │ • Angular error   │                                                    │
+    │  └─────────┬─────────┘                                                    │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐      ┌────────────────────┐                       │
+    │  │ Error Pattern     │      │  Strategy Database │                       │
+    │  │ Analysis          │◄────►│                    │                       │
+    │  │                   │      │ • Predefined       │                       │
+    │  │ • Categorize errors│      │   strategy catalog│                       │
+    │  │ • Identify patterns│      │ • Movement styles │                       │
+    │  │ • Determine context│      │ • Dimension scales│                       │
+    │  └─────────┬─────────┘      └────────────────────┘                       │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐      ┌────────────────────┐                       │
+    │  │ Strategy Selection│      │ History Tracking   │                       │
+    │  │                   │◄────►│                    │                       │
+    │  │ • Choose best     │      │ • Previous strategy│                       │
+    │  │   strategy        │      │ • Transition state │                       │
+    │  │ • Apply context   │      │ • Strategy changes │                       │
+    │  │   rules           │      │ • Change timestamps│                       │
+    │  └─────────┬─────────┘      └────────────────────┘                       │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐                                                    │
+    │  │ Strategy Blending │                                                    │
+    │  │                   │                                                    │
+    │  │ • Smooth strategy │                                                    │
+    │  │   transitions     │                                                    │
+    │  │ • Temporal blending│                                                   │
+    │  │ • Prevent jerky   │                                                    │
+    │  │   movement changes│                                                    │
+    │  └─────────┬─────────┘                                                    │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐                                                    │
+    │  │ Movement Plan     │                                                    │
+    │  │                   │                                                    │
+    │  │ • Dimension scales│                                                    │
+    │  │ • Coordinated     │                                                    │
+    │  │   movement params │                                                    │
+    │  │ • Movement style  │                                                    │
+    │  └───────────────────┘                                                    │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
     
     STRATEGY-BASED APPROACH:
     ----------------------
@@ -621,6 +1130,53 @@ class MovementStrategyModule:
     - When at an angle: Turn to face the ball first (ANGULAR_PRIMARY)
     - When aligned but offset: Move sideways to align (LATERAL_CORRECTION)
     - When approaching diagonally: Move forward and sideways together (DIAGONAL_MOVEMENT)
+    
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                    SITUATION-SPECIFIC MOVEMENT STRATEGIES                  │
+    │                                                                           │
+    │  ┌───────────────────────────────────────────────────────────────────┐    │
+    │  │                                                                   │    │
+    │  │       Far Distance            Medium Distance      Close Distance │    │
+    │  │       ┌──────────┐            ┌──────────┐         ┌──────────┐  │    │
+    │  │       │  Robot   │            │  Robot   │         │  Robot   │  │    │
+    │  │       │    ↑     │            │   ↗      │         │ ←        │  │    │
+    │  │       │    │     │            │          │         │          │  │    │
+    │  │       └────┼─────┘            └─────┬────┘         └────┬─────┘  │    │
+    │  │            │                        │                   │        │    │
+    │  │            │                        │                   │        │    │
+    │  │            │                        │                   │        │    │
+    │  │            │                        │                   ↓        │    │
+    │  │            ↓                        ↓                            │    │
+    │  │         ┌─────┐                  ┌─────┐                ┌─────┐  │    │
+    │  │         │Ball │                  │Ball │                │Ball │  │    │
+    │  │         └─────┘                  └─────┘                └─────┘  │    │
+    │  │                                                                   │    │
+    │  │    DISTANCE_PRIORITY         DIAGONAL_APPROACH     LATERAL_ALIGN  │    │
+    │  │    Forward: 1.0              Forward: 0.7          Forward: 0.1   │    │
+    │  │    Lateral: 0.3              Lateral: 0.7          Lateral: 1.0   │    │
+    │  │    Angular: 0.5              Angular: 0.4          Angular: 0.2   │    │
+    │  │                                                                   │    │
+    │  └───────────────────────────────────────────────────────────────────┘    │
+    │                                                                           │
+    │  STRATEGY DEFINITION STRUCTURE:                                           │
+    │  ┌────────────────────────────────────────────────┐                      │
+    │  │                                                │                      │
+    │  │  class MovementStrategy:                        │                      │
+    │  │      strategy_name = "DISTANCE_PRIORITY"        │                      │
+    │  │      description = "Prioritize forward movement"│                      │
+    │  │      forward_scale = 1.0   # Full forward       │                      │
+    │  │      lateral_scale = 0.3   # Some sideways      │                      │
+    │  │      angular_scale = 0.5   # Medium rotation    │                      │
+    │  │      transition_speed = 0.5 # Blend speed       │                      │
+    │  │      error_thresholds = {                       │                      │
+    │  │          "distance": {"small": 0.3, "large": 1.0},                    │
+    │  │          "lateral": {"small": 0.2, "large": 0.5},                     │
+    │  │          "angular": {"small": 15, "large": 45}  │                      │
+    │  │      }                                          │                      │
+    │  │                                                │                      │
+    │  └────────────────────────────────────────────────┘                      │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
     
     Rather than hardcoding these behaviors, the system selects from dozens of
     predefined strategies based on the current error pattern. Each strategy defines:
@@ -633,6 +1189,52 @@ class MovementStrategyModule:
     2. HOW STRONGLY TO USE EACH DIMENSION
        - Scaling factors (0.0-1.0) for each dimension
        - These create different movement "styles"
+    
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                  STRATEGY SELECTION AND BLENDING PROCESS                   │
+    │                                                                           │
+    │  STRATEGY SELECTION:                                                      │
+    │                                                                           │
+    │  ┌─────────────────────────────────────────────────────────────────┐      │
+    │  │ 1. Categorize errors:                                          │      │
+    │  │    - Distance: none/small/medium/large                         │      │
+    │  │    - Lateral: none/small/medium/large                          │      │
+    │  │    - Angular: none/small/medium/large                          │      │
+    │  │                                                               │      │
+    │  │ 2. Generate error pattern:                                     │      │
+    │  │    Example: (LARGE_DISTANCE, SMALL_LATERAL, MEDIUM_ANGULAR)    │      │
+    │  │                                                               │      │
+    │  │ 3. Look up matching strategy in strategy database:            │      │
+    │  │    Error Pattern → DISTANCE_PRIORITY strategy                  │      │
+    │  │                                                               │      │
+    │  │ 4. Apply context rules:                                       │      │
+    │  │    - Is the robot stopped? → Prefer orientation first         │      │
+    │  │    - Was a previous strategy working well? → Maintain it      │      │
+    │  │    - Special cases (diagonal movement detected)               │      │
+    │  │                                                               │      │
+    │  └─────────────────────────────────────────────────────────────────┘      │
+    │                                                                           │
+    │  STRATEGY BLENDING:                                                       │
+    │                                                                           │
+    │  ┌──────────────────────────────────────────────────────────────┐        │
+    │  │                                                             │        │
+    │  │  Previous Strategy    Current Strategy      Blended Result   │        │
+    │  │  ┌──────────────┐     ┌─────────────┐      ┌─────────────┐  │        │
+    │  │  │ANGULAR_PRIMARY│     │LATERAL_ALIGN│      │TRANSITION   │  │        │
+    │  │  │Fwd:  0.1     │     │Fwd:  0.2    │      │Fwd:  0.15   │  │        │
+    │  │  │Lat:  0.3     │  +  │Lat:  0.9    │  =   │Lat:  0.6    │  │        │
+    │  │  │Ang:  1.0     │     │Ang:  0.2    │      │Ang:  0.6    │  │        │
+    │  │  └──────────────┘     └─────────────┘      └─────────────┘  │        │
+    │  │                                                             │        │
+    │  │  • Blend factor based on time since strategy change         │        │
+    │  │  • Transition_speed controls blending duration             │        │
+    │  │  • Linear interpolation between parameter values            │        │
+    │  │  • Prevents sudden jerks when strategy changes              │        │
+    │  │  • Creates natural, fluid transitions in robot movement     │        │
+    │  │                                                             │        │
+    │  └──────────────────────────────────────────────────────────────┘        │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
     
     3. STRATEGY BLENDING
        - Smooth transitions between strategies
@@ -710,13 +1312,99 @@ class MovementStrategyModule:
 
 class VelocityControlModule:
     """
-    Advanced velocity control system that ensures safe, smooth robot movement.
+    Makes the robot move safely and smoothly like a professional driver.
     
-    EDUCATIONAL EXPLANATION:
-    -----------------------
-    The VelocityControlModule is the robot's "motor control center," converting
-    high-level movement commands into safe, smooth velocity commands for the motors.
-    This module addresses several critical challenges in robotics motion control:
+    IMAGINE THIS: 🚗
+    ---------------
+    Think of this like the difference between how a beginner drives a car
+    versus how a professional driver handles it:
+    
+    - Beginner driver: Jerky starts and stops, sudden acceleration, abrupt braking
+    - Professional driver: Smooth acceleration, gentle deceleration, no sudden movements
+    
+    The VelocityControlModule is like having a professional driver controlling
+    the robot's movement - it takes the raw commands ("go forward", "turn left")
+    and transforms them into smooth, natural-looking motion.
+    
+    HOW IT WORKS: 🛡️
+    -------------
+    1. SAFETY FIRST
+       - Prevents commands that would move too fast
+       - Makes sure the robot slows down when getting close to the target
+       - Reacts appropriately to stale or missing sensor data
+       
+    2. SMOOTH ACCELERATION
+       - Gradually builds up speed instead of jerky starts
+       - Limits how quickly velocity can change (just like a car can't go from
+         0 to 60 mph instantly)
+       - Makes movements look intentional and controlled
+       
+    3. INTELLIGENT BRAKING
+       - Starts slowing down at just the right distance from the target
+       - Uses quadratic deceleration curve for natural-feeling stops
+       - More aggressive braking when approaching at high speed
+       
+    4. MULTI-DIMENSIONAL COORDINATION
+       - Balances forward, sideways, and rotational movement
+       - Prevents instability from trying to do too much at once
+       - Creates proper proportions between different movement types
+    
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                    VELOCITY CONTROL MODULE ARCHITECTURE                    │
+    │                                                                           │
+    │  ┌───────────────────┐                                                    │
+    │  │  Target Velocities│                                                    │
+    │  │                   │                                                    │
+    │  │ • Forward (lin_x) │                                                    │
+    │  │ • Lateral (lin_y) │                                                    │
+    │  │ • Angular (ang_z) │                                                    │
+    │  └─────────┬─────────┘                                                    │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐      ┌────────────────────┐                       │
+    │  │ Maximum Velocity  │      │  Distance-Aware    │                       │
+    │  │ Limiting          │◄────►│  Approach Scaling  │                       │
+    │  │                   │      │                    │                       │
+    │  │ • Enforce safety  │      │ • Slow down when   │                       │
+    │  │   limits          │      │   approaching      │                       │
+    │  │ • Different limits│      │ • Prevent overshoot│                       │
+    │  │   per dimension   │      │ • Gentle final     │                       │
+    │  └─────────┬─────────┘      │   approach         │                       │
+    │            │                └────────────────────┘                       │
+    │            ▼                                                              │
+    │  ┌───────────────────┐      ┌────────────────────┐                       │
+    │  │ Acceleration      │      │ Direction Change   │                       │
+    │  │ Limiting          │◄────►│ Detection          │                       │
+    │  │                   │      │                    │                       │
+    │  │ • Smooth accel.   │      │ • Detect sudden    │                       │
+    │  │   and deceleration│      │   direction changes│                       │
+    │  │ • Natural motion  │      │ • Apply special    │                       │
+    │  │   profiles        │      │   handling         │                       │
+    │  └─────────┬─────────┘      └────────────────────┘                       │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐      ┌────────────────────┐                       │
+    │  │ Combined Movement │      │ Velocity History   │                       │
+    │  │ Optimization      │◄────►│ Tracking           │                       │
+    │  │                   │      │                    │                       │
+    │  │ • Balance movement│      │ • Track recent     │                       │
+    │  │   dimensions      │      │   velocity commands│                       │
+    │  │ • Prevent instable│      │ • Analyze movement │                       │
+    │  │   combinations    │      │   patterns         │                       │
+    │  └─────────┬─────────┘      └────────────────────┘                       │
+    │            │                                                              │
+    │            ▼                                                              │
+    │  ┌───────────────────┐                                                    │
+    │  │ Safe Velocity     │                                                    │
+    │  │ Commands          │                                                    │
+    │  │                   │                                                    │
+    │  │ • Optimized       │                                                    │
+    │  │ • Safety-checked  │                                                    │
+    │  │ • Smooth          │                                                    │
+    │  │ • Coordinated     │                                                    │
+    │  └───────────────────┘                                                    │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
     
     KEY CAPABILITIES:
     ---------------
@@ -727,11 +1415,101 @@ class VelocityControlModule:
        - Supports different limits for forward, lateral, and rotational movement
        - These limits protect the robot and environment from damage
     
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                      SAFE VELOCITY LIMITS SYSTEM                           │
+    │                                                                           │
+    │  ROBOT SAFETY SPEED ENVELOPE:                                             │
+    │  ┌──────────────────────────────────────────────────────────────┐        │
+    │  │                                                             │        │
+    │  │               Forward Speed (m/s)                           │        │
+    │  │                      ↑                                      │        │
+    │  │                      │                                      │        │
+    │  │                    0.5 ┌─────────────────────┐               │        │
+    │  │                      │ │                   │               │        │
+    │  │                      │ │     Safe Zone     │               │        │
+    │  │                      │ │                   │               │        │
+    │  │                      │ │                   │               │        │
+    │  │  Lateral    ◄────────┼─┼───────┼───────────┼──────────►    │        │
+    │  │  Speed (m/s)       -0.4│       0          │0.4           │        │
+    │  │                      │ │                   │               │        │
+    │  │                      │ │                   │               │        │
+    │  │                      │ │                   │               │        │
+    │  │                      │ └─────────────────────┘               │        │
+    │  │                   -0.5 │                                      │        │
+    │  │                      │                                      │        │
+    │  │                      ↓                                      │        │
+    │  │                                                             │        │
+    │  │  Angular Speed Limit: ±0.6 rad/s (~34° per second)          │        │
+    │  │                                                             │        │
+    │  └──────────────────────────────────────────────────────────────┘        │
+    │                                                                           │
+    │  IMPLEMENTATION:                                                          │
+    │  ┌────────────────────────────────────────────────────────────────┐      │
+    │  │                                                               │      │
+    │  │  # Apply maximum velocity limits using vectorized operation    │      │
+    │  │  np.clip(                                                     │      │
+    │  │    velocities,                                                │      │
+    │  │    -self.max_velocity_limits,                                 │      │
+    │  │    self.max_velocity_limits,                                  │      │
+    │  │    out=velocities                                             │      │
+    │  │  )                                                            │      │
+    │  │                                                               │      │
+    │  │  # Safety checks for combined movements                       │      │
+    │  │  if lateral_magnitude > 0.15 and angular_magnitude > 0.3:     │      │
+    │  │    velocities[1] *= 0.7  # reduce lateral by 30%             │      │
+    │  │                                                               │      │
+    │  └────────────────────────────────────────────────────────────────┘      │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
+    
     2. SMOOTH ACCELERATION CONTROL
        - Limits how quickly velocity can change (acceleration limits)
        - Prevents jarring starts, stops, and direction changes
        - Creates natural, smooth motion profiles
        - Reduces mechanical stress and improves tracking stability
+    
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                    SMOOTH ACCELERATION CONTROL SYSTEM                      │
+    │                                                                           │
+    │  ACCELERATION LIMITS:                                                     │
+    │                                                                           │
+    │  │  Target velocity: 0.5 m/s                                              │
+    │  │                                       ┌───────────                     │
+    │  │  Velocity                             │                                │
+    │  │    ↑                                  │                                │
+    │  │    │                                  │                                │
+    │  │    │                               ┌──┘                                │
+    │  │ 0.5├─ - - - - - - - - - - - - - - -┤                                   │
+    │  │    │                            ┌─┘                                    │
+    │  │    │                         ┌──┘                                      │
+    │  │    │                      ┌──┘                                         │
+    │  │    │                   ┌──┘                                            │
+    │  │    │                ┌──┘                                               │
+    │  │    │             ┌──┘                                                  │
+    │  │    │          ┌──┘                                                     │
+    │  │  0 └──────────┼──────────────────────────────────────────────►         │
+    │  │               0                          time                          │
+    │  │                                                                        │
+    │  │  Acceleration limits: 1.8 m/s² forward, 1.5 m/s² lateral              │
+    │  │  Time to reach 0.5 m/s from stop: ~0.28 seconds                        │
+    │  │                                                                        │
+    │  ACCELERATION LIMITING ALGORITHM:                                         │
+    │  ┌────────────────────────────────────────────────────────────────┐      │
+    │  │ 1. Calculate time elapsed since last update (dt)               │      │
+    │  │ 2. Compute maximum allowed velocity change for this cycle:      │      │
+    │  │    max_Δv = acceleration_limit * dt                            │      │
+    │  │    Example: 1.8 m/s² * 0.05s = 0.09 m/s maximum change         │      │
+    │  │ 3. Calculate actual requested velocity change:                  │      │
+    │  │    Δv = target_velocity - current_velocity                     │      │
+    │  │ 4. If |Δv| > max_Δv, limit the change:                         │      │
+    │  │    new_v = current_v + sign(Δv) * max_Δv                      │      │
+    │  │                                                               │      │
+    │  │ Special case: Starting movement                                │      │
+    │  │ • Apply boost factor (1.5-2.5×) when starting from stop       │      │
+    │  │ • Allows faster initial response while maintaining safety      │      │
+    │  └────────────────────────────────────────────────────────────────┘      │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
     
     3. PROXIMITY-BASED VELOCITY SCALING
        - Automatically slows down as the robot approaches the target
@@ -739,11 +1517,100 @@ class VelocityControlModule:
        - Prevents overshooting and oscillation around the target
        - Mimics how humans naturally slow down when approaching a destination
     
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                PROXIMITY-BASED VELOCITY SCALING SYSTEM                     │
+    │                                                                           │
+    │  DISTANCE-AWARE APPROACH:                                                 │
+    │  ┌────────────────────────────────────────────────────────────────────┐   │
+    │  │                                                                   │   │
+    │  │                                                                   │   │
+    │  │  Speed                                                            │   │
+    │  │    ↑                                                              │   │
+    │  │    │                                                              │   │
+    │  │ 1.0├───────────                                                   │   │
+    │  │    │           └───────────                                       │   │
+    │  │    │                       └───────────                           │   │
+    │  │    │                                   └───────────               │   │
+    │  │    │                                               └───────────   │   │
+    │  │    │                                                           └──│   │
+    │  │ 0.2├                                                              │   │
+    │  │    │                                                              │   │
+    │  │  0 └──────────┬─────────┬─────────┬─────────┬─────────┬──────────▶│   │
+    │  │              far        0.9m      0.6m      0.3m      0.15m   0m  │   │
+    │  │                                 Distance to target                │   │
+    │  │                                                                   │   │
+    │  │  • approach_distance = 0.3m (begin slowing at 0.9m)              │   │
+    │  │  • min_approach_factor = 0.2 (20% of full speed when very close) │   │
+    │  │  • Quadratic curve for natural deceleration profile              │   │
+    │  │  • Enhanced deceleration when approaching at high speed          │   │
+    │  └────────────────────────────────────────────────────────────────────┘   │
+    │                                                                           │
+    │  QUADRATIC SCALING FORMULA:                                               │
+    │  ┌────────────────────────────────────────────────────────────────┐      │
+    │  │                                                               │      │
+    │  │  normalized_distance = distance_error / approach_distance      │      │
+    │  │                                                               │      │
+    │  │  approach_factor = max(min_approach_factor,                   │      │
+    │  │                       normalized_distance²)                    │      │
+    │  │                                                               │      │
+    │  │  # Further reduce when very close (within half approach distance)  │      │
+    │  │  if distance_error < approach_distance * 0.5:                  │      │
+    │  │      approach_factor *= 0.5                                   │      │
+    │  │                                                               │      │
+    │  │  # Apply the scaling to forward velocity                       │      │
+    │  │  scaled_velocity = linear_x * approach_factor                 │      │
+    │  │                                                               │      │
+    │  └────────────────────────────────────────────────────────────────┘      │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
+    
     4. MULTI-DIMENSIONAL COORDINATION
        - Handles forward, lateral, and rotational movements simultaneously
        - Ensures coordinated motion across all dimensions
        - Maintains proper velocity ratios for the selected strategy
        - Creates natural, efficient movement patterns
+    
+    ┌───────────────────────────────────────────────────────────────────────────┐
+    │                  MULTI-DIMENSIONAL MOVEMENT COORDINATION                   │
+    │                                                                           │
+    │  BALANCING DIMENSIONS:                                                    │
+    │  ┌────────────────────────────────────────────────────────────┐          │
+    │  │                                                           │          │
+    │  │  UNBALANCED MOVEMENT             BALANCED MOVEMENT        │          │
+    │  │  ┌────────────────────┐          ┌────────────────────┐   │          │
+    │  │  │ Linear X: 0.5 m/s  │          │ Linear X: 0.4 m/s  │   │          │
+    │  │  │ Linear Y: 0.05 m/s │    →     │ Linear Y: 0.2 m/s  │   │          │
+    │  │  │ Angular: 0.2 rad/s │          │ Angular: 0.2 rad/s │   │          │
+    │  │  └────────────────────┘          └────────────────────┘   │          │
+    │  │                                                           │          │
+    │  │  Problem:                       Solution:                 │          │
+    │  │  Forward movement               Redistribution creates    │          │
+    │  │  dominates, making              better balance between    │          │
+    │  │  lateral adjustment too         motion dimensions         │          │
+    │  │  slow and ineffective                                     │          │
+    │  │                                                           │          │
+    │  └────────────────────────────────────────────────────────────┘          │
+    │                                                                           │
+    │  COMBINED MOVEMENT SAFETY:                                                │
+    │  ┌────────────────────────────────────────────────────────────┐          │
+    │  │                                                           │          │
+    │  │  COMBINED MOVEMENT PHYSICS:                               │          │
+    │  │                                                           │          │
+    │  │  • Simultaneous large lateral movement and rotation       │          │
+    │  │    creates centrifugal forces                             │          │
+    │  │  • This can cause tipping or slipping in wheeled robots   │          │
+    │  │  • Solution: Automatically reduce lateral velocity when   │          │
+    │  │    combined with significant rotation                     │          │
+    │  │                                                           │          │
+    │  │  IMPLEMENTATION:                                          │          │
+    │  │  # Check for potentially unstable combinations            │          │
+    │  │  if lateral_magnitude > 0.2 and angular_magnitude > 0.4:  │          │
+    │  │    # Apply 70% reduction to lateral velocity              │          │
+    │  │    velocities[1] *= 0.7                                  │          │
+    │  │                                                           │          │
+    │  └────────────────────────────────────────────────────────────┘          │
+    │                                                                           │
+    └───────────────────────────────────────────────────────────────────────────┘
     
     The result is a robot that moves smoothly and naturally, with acceleration
     and deceleration profiles that appear intentional and controlled, rather
@@ -925,63 +1792,61 @@ class VelocityControlModule:
     
     def process_velocities(self, linear_x, linear_y, angular_z, filtered_distance, desired_distance, freshness_level='fresh'):
         """
-        Process raw velocity commands into safe, smooth movement instructions.
+        Transforms raw movement commands into smooth, natural robot motion.
         
-        EDUCATIONAL EXPLANATION:
-        -----------------------
-        This method is the core of the robot's motion control system, transforming
-        raw velocity commands from the PID controllers into smooth, safe, natural-looking
-        movement. Think of it as converting "what the robot wants to do" into "how the
-        robot should actually move" to achieve its goal effectively.
+        IMAGINE THIS: 🎮
+        ---------------
+        Imagine the difference between a racing game with basic controls vs. 
+        one with advanced physics:
         
-        THE VELOCITY PIPELINE:
-        -------------------
-        Raw velocity commands pass through a sophisticated multi-stage processing pipeline:
+        - Basic game: Press forward = instant full speed, release = instant stop
+        - Advanced game: Gradual acceleration, momentum, natural braking, etc.
         
-        1. DATA FRESHNESS HANDLING
-           - Reduces velocities when working with stale sensor data
-           - More conservative movement when uncertainty is higher
-           - Prevents unsafe movements based on outdated information
+        This method transforms those simple "move forward/turn left" commands
+        into the realistic physics-based motion that makes the robot's movement
+        look smooth and natural.
         
-        2. DISTANCE-AWARE APPROACH
-           - Automatically slows forward movement as robot approaches target
-           - Creates a gentle, controlled final approach
-           - Different scaling for different distances, like a car slowing near destination
+        THE PROCESS: 🔄
+        -----------
+        Your robot movement request goes through these enhancement steps:
         
-        3. PREDICTIVE BRAKING
-           - Looks ahead to anticipate stopping needs
-           - Starts slowing down before reaching the target
-           - Creates smooth deceleration profiles
-        
-        4. DIRECTION CHANGE DETECTION
-           - Identifies when movement direction changes significantly
-           - Applies special handling to prevent jerky transitions
-           - Makes turns and reverses appear smooth and intentional
-        
-        5. ACCELERATION LIMITING
-           - Restricts how quickly velocities can change
-           - Prevents jarring starts, stops, and transitions
-           - Maintains momentum for natural-looking motion
-        
-        6. ADDITIONAL REFINEMENTS
-           - Progressive velocity ramping for smooth transitions
-           - Minimum velocity thresholds to prevent stuttering
-           - Combined movement limitation to prevent instability
-           - Velocity distribution balancing for optimal performance
-        
-        This sophisticated pipeline is what transforms jerky, robotic motion into
-        smooth, natural movement that appears intelligent and deliberate.
+        1. FRESHNESS CHECK 👁️
+           "How recent is our sensor data? If it's old, let's move more cautiously."
+           
+        2. APPROACH CONTROL 🛑
+           "We're getting close to the target - let's start slowing down
+           gradually so we don't overshoot."
+           
+        3. PREDICTIVE BRAKING 🧠
+           "At this speed, we need to start braking now to stop at the
+           right place. Let's look ahead and plan our deceleration."
+           
+        4. DIRECTION CHANGES 🔄
+           "We're changing direction from forward to right - let's make
+           that transition feel smooth rather than jerky."
+           
+        5. ACCELERATION PHYSICS 📈
+           "Real objects can't instantly change speed - let's apply
+           natural acceleration and deceleration limits."
+           
+        6. FINAL REFINEMENTS ✨
+           "Let's add those little details that make movement feel natural:
+           minimum speed thresholds, balance between rotation and translation,
+           and intelligent distribution between different movement directions."
+            
+        This is what transforms simple movement commands into motion that
+        looks intelligent, smooth, and intentional instead of robotic.
         
         Args:
-            linear_x: Forward/backward velocity command (m/s, positive = forward)
-            linear_y: Lateral velocity command (m/s, positive = left)
-            angular_z: Rotational velocity command (rad/s, positive = counterclockwise)
-            filtered_distance: Current filtered distance to target (meters)
-            desired_distance: Target distance to maintain (meters)
-            freshness_level: Data quality indicator ('fresh', 'stale', 'critical')
+            linear_x: Forward/backward speed request
+            linear_y: Left/right speed request
+            angular_z: Rotation speed request
+            filtered_distance: How far from target we are
+            desired_distance: How far we want to be
+            freshness_level: How recent our sensor data is
             
         Returns:
-            tuple: Safe, limited velocity commands (linear_x, linear_y, angular_z)
+            Three refined velocity values that create smooth, natural movement
         """
         try:
             # Validate inputs
@@ -1141,23 +2006,44 @@ class VelocityControlModule:
     
     def _apply_approach_scaling(self, linear_x, filtered_distance, desired_distance):
         """
-        Apply distance-based scaling to forward velocity during approach.
+        Makes the robot slow down naturally as it gets closer to the target.
         
-        This method implements a distance-aware velocity scaling that:
-        1. Gradually reduces forward speed as the robot approaches the target
-        2. Applies emergency braking if too close to target
-        3. Considers current speed when determining deceleration rate
+        IMAGINE THIS: 🛑
+        ---------------
+        Think about how you would drive a car when approaching a stop sign:
         
-        The goal is to create a natural deceleration curve that feels smooth
-        and predictable, similar to how a human would approach a target.
+        - When far away (100+ feet): Drive at normal speed
+        - When getting closer (50-100 feet): Start gently slowing down
+        - When very close (10-20 feet): Slow down more aggressively
+        - If you overshoot: Quickly back up to the right position
+        
+        This method creates that same natural braking behavior for the robot,
+        making it look smooth and intentional rather than jerky or robotic.
+        
+        HOW IT WORKS: 📉
+        -------------
+        1. GENTLE DECELERATION CURVE
+           Instead of suddenly slowing down at a fixed distance, the robot
+           gradually reduces speed using a special curve (quadratic) that
+           feels natural - just like how humans naturally slow down.
+        
+        2. EMERGENCY BRAKING
+           If the robot gets too close to the target (overshoots), it
+           rapidly slows down or even backs up - similar to how you'd
+           quickly brake if you rolled past a stop sign.
+           
+        3. ADAPTIVE TO CURRENT SPEED
+           Just like you'd brake harder when traveling at high speed,
+           the robot adjusts its deceleration based on how fast it's
+           currently moving.
         
         Args:
-            linear_x: Current forward velocity command (m/s)
-            filtered_distance: Current distance to target (meters)
-            desired_distance: Target distance to maintain (meters)
+            linear_x: How fast the robot wants to go forward (meters/second)
+            filtered_distance: How far the robot is from the target (meters)
+            desired_distance: How far the robot should stop from target (meters)
             
         Returns:
-            float: Scaled forward velocity
+            A new forward speed that creates natural, smooth braking
         """
         try:
             # Calculate distance error (negative means robot is too close to target)

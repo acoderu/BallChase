@@ -58,117 +58,339 @@ Key Concepts for Beginners:
 
 1. SENSE-THINK-ACT LOOP
 
-   All robots operate on a fundamental cycle:
-   - SENSE: Get data from sensors (YOLO camera, LIDAR, 3D depth camera, IMU)
-   - THINK: Process data and make decisions (our controller does this)
-   - ACT: Control motors to move the robot
-
-   This controller runs this loop many times per second (10-40Hz).
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                     THE ROBOTICS CONTROL CYCLE                           │
+   └───────────────────────────────────────────────────────────────────────────┘
+                                     │
+          ┌─────────────────────────┼─────────────────────────┐
+          │                         │                         │
+          ▼                         ▼                         ▼
+    ┌────────────┐           ┌────────────┐           ┌────────────┐
+    │   SENSE    │           │   THINK    │           │    ACT     │
+    └──────┬─────┘           └──────┬─────┘           └──────┬─────┘
+           │                        │                        │
+           ▼                        ▼                        ▼
+    ┌────────────┐           ┌────────────┐           ┌────────────┐
+    │ Get data   │           │ Process    │           │ Send       │
+    │ from       │───────────│ data and   │───────────│ commands   │
+    │ sensors    │           │ make       │           │ to motors  │
+    └────────────┘           │ decisions  │           └────────────┘
+    • Camera                 └────────────┘           • Forward/back
+    • LIDAR                  • Filter data            • Side-to-side
+    • Depth                  • Calculate errors       • Rotation
+    • IMU                    • Choose strategy
+                            • Compute velocities
+    
+   This controller runs this loop 10-40 times per second!
 
 2. WHAT IS PID CONTROL?
 
-   PID stands for Proportional-Integral-Derivative - three ways to respond to errors:
-   
-   - Proportional (P): "How far am I from the target right now?"
-     Like pulling with a spring - the further away, the stronger the pull
-   
-   - Integral (I): "Have I been stuck away from the target for a while?"
-     Gradually increases force if the error persists over time
-     Helps overcome friction or other obstacles
-   
-   - Derivative (D): "Am I approaching the target too quickly?"
-     Acts as a brake when you're moving too fast toward the target
-     Prevents overshooting and oscillation
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                 PID CONTROL: THREE WAYS TO RESPOND                       │
+   └───────────────────────────────────────────────────────────────────────────┘
+    
+    Target Position                                 Current Position
+         ┌───┐                                           ┌───┐
+         │ T │                                           │ R │
+         └───┘                                           └───┘
+           │                                               │
+           └───────────────────┬───────────────────────────┘
+                               │
+                               ▼
+                            ERROR
+    
+    ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+    │ P: Proportional │   │  I: Integral    │   │  D: Derivative  │
+    └────────┬────────┘   └────────┬────────┘   └────────┬────────┘
+             │                     │                     │
+             ▼                     ▼                     ▼
+    ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+    │"How far am I    │   │"Have I been     │   │"Am I approaching│
+    │ from target     │   │ stuck away from │   │ the target too  │
+    │ right now?"     │   │ target too long?│   │ quickly?"       │
+    └────────┬────────┘   └────────┬────────┘   └────────┬────────┘
+             │                     │                     │
+             ▼                     ▼                     ▼
+    ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+    │Like a spring:   │   │Gradually builds │   │Acts as a brake: │
+    │The further away,│   │force if error   │   │Slows down as you│
+    │the stronger     │   │persists, helping│   │approach to      │
+    │the pull         │   │overcome friction│   │prevent overshoot│
+    └────────┬────────┘   └────────┬────────┘   └────────┬────────┘
+             │                     │                     │
+             └───────────────────┬─────────────────────┬┘
+                                 │                     │
+                                 ▼                     ▼
+                        ┌─────────────────────────────────┐
+                        │           COMBINED              │
+                        │      OUTPUT = P + I + D        │
+                        └─────────────────────────────────┘
 
-   These three terms are combined to produce smooth, accurate movement.
+   These three terms are combined with specific "gains" (multiplication factors)
+   to produce smooth, accurate movement.
 
 3. WORKING WITH MULTIPLE DIMENSIONS
 
-   Our robot can move in three ways simultaneously:
-   - Forward/backward (linear X)
-   - Side-to-side (linear Y) - unique to mecanum wheels
-   - Rotation (angular Z)
-   
-   We use separate PID controllers for each dimension but coordinate them
-   to produce smooth, natural movements.
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                      MECANUM WHEEL ROBOT MOVEMENT                        │
+   └───────────────────────────────────────────────────────────────────────────┘
+    
+    Our robot has 3 movement dimensions with special "mecanum wheels":
+    
+    ┌────────────────────────┐      ┌────────────────────────┐
+    │  LINEAR X (FORWARD)    │      │    LINEAR Y (SIDE)     │
+    │                        │      │                        │
+    │      ┌───────┐         │      │      ┌───────┐         │
+    │     ↑│ ROBOT │         │      │      │ ROBOT │→        │
+    │      └───────┘         │      │      └───────┘         │
+    │                        │      │                        │
+    └────────────────────────┘      └────────────────────────┘
+    
+                      ┌────────────────────────┐
+                      │    ANGULAR Z (TURN)    │
+                      │                        │
+                      │      ┌───────┐         │
+                      │      │ ROBOT │↻        │
+                      │      └───────┘         │
+                      │                        │
+                      └────────────────────────┘
+    
+    Each dimension has its own PID controller, but they work together!
+    
+    • Forward/backward controller helps get proper distance to ball
+    • Side-to-side controller keeps ball centered in front of robot
+    • Rotational controller helps robot face directly toward ball
 
-4. DATA FLOW THROUGH THE SYSTEM
+4. ERROR CALCULATION VISUALIZATION
 
-   a) Data Sources:
-      - YOLO Camera Node: Detects the basketball in 2D image space
-      - LIDAR Node: Provides range and bearing to the basketball
-      - 3D Depth Camera Node: Combines 2D YOLO data with depth information to determine
-        accurate 3D position of the basketball
-      - Fusion Node: Integrates data from multiple sensors for robust tracking
-   
-   b) Target Tracking Module:
-      - Receives position data from fusion node and depth camera
-      - Filters out noise and small fluctuations
-      - Predicts where the ball will be in the near future
-      - Calculates velocity and acceleration of the ball
-   
-   b) Error Calculation:
-      - Distance error: How far from desired distance to the ball
-      - Lateral error: How far left/right from ball's center
-      - Angular error: How far rotated from facing the ball
-   
-   c) Strategy Selection:
-      - Based on the pattern and magnitude of errors
-      - Different strategies prioritize different movement types
-      - Examples: Angular-first, Diagonal approach, Pure lateral
-   
-   d) PID Computation:
-      - Each dimension's error processed by its PID controller
-      - Controllers consider error history and trends
-      - Outputs raw velocity commands
-   
-   e) Coordination and Safety:
-      - Coordinates the three dimensions for natural movement
-      - Applies safety limits and smoothing
-      - Adapts to CPU load and data freshness
-      - Publishes final velocity commands
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                    THE THREE TRACKING ERRORS                            │
+   └───────────────────────────────────────────────────────────────────────────┘
+    
+    TOP VIEW:                                  Desired position
+                                                    ●
+                                                    │
+    Angular                                         │
+    Error       ╲                                   │
+      ╲         ╲                                   │
+       ╲ θ       ╲                                  │
+        ╲         ╲   Distance                      │
+         ╲         ╲   Error                        │
+          ╲         ╲                               │
+           ▼          ╲                             │
+        ┌─────┐        ╲                           ╱│╲ Lateral
+        │Robot│─────────●                         ╱ │ ╲ Error
+        └─────┘          Basketball               ╱  │  ╲
+    
+    • Distance Error: How far from desired distance to the ball
+      (wants to be at a specific distance - not too close, not too far)
+    
+    • Lateral Error: How far left/right from being centered with the ball
+      (wants the ball to be directly in front)
+    
+    • Angular Error: How far rotated from facing directly at the ball
+      (wants to be pointed straight at the ball)
 
-5. STATE MANAGEMENT
+5. STRATEGY SELECTION LOGIC
 
-   The robot operates in different states:
-   - Initializing: Setting up components
-   - Searching: Looking for the ball
-   - Tracking: Following the ball's movement
-   - Stopped: At desired position, not moving
-   - Recovery: Handling error conditions
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                    CHOOSING THE RIGHT STRATEGY                           │
+   └───────────────────────────────────────────────────────────────────────────┘
+    
+          ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+          │ Distance     │    │ Lateral      │    │ Angular      │
+          │ Error        │    │ Error        │    │ Error        │
+          └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
+                 │                   │                   │
+                 ▼                   ▼                   ▼
+          ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+          │ Categorize:  │    │ Categorize:  │    │ Categorize:  │
+          │ none         │    │ none         │    │ none         │
+          │ very_small   │    │ very_small   │    │ very_small   │
+          │ small        │    │ small        │    │ small        │
+          │ medium       │    │ medium       │    │ medium       │
+          │ large        │    │ large        │    │ large        │
+          │ very_large   │    │ very_large   │    │ very_large   │
+          └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
+                 │                   │                   │
+                 └───────────┬───────┴───────────┬───────┘
+                             │                   │
+                             ▼                   ▼
+                      ┌─────────────────────────────────┐
+                      │        Strategy Lookup          │
+                      │                                 │
+                      │ ("large", "*", "small")  →     │
+                      │    APPROACH_WITH_ALIGNMENT      │
+                      │                                 │
+                      │ ("*", "large", "*")  →         │
+                      │    LATERAL_PRIORITY             │
+                      │                                 │
+                      │ ("*", "*", "large")  →         │
+                      │    ANGULAR_PRIORITY             │
+                      └─────────────┬───────────────────┘
+                                    │
+                                    │
+                                    ▼
+                      ┌─────────────────────────────────┐
+                      │        Selected Strategy        │
+                      │                                 │
+                      │  ✓ Use forward?    True         │
+                      │  ✓ Use lateral?    True         │
+                      │  ✓ Use angular?    True         │
+                      │                                 │
+                      │  ✓ Forward scale:  0.7          │
+                      │  ✓ Lateral scale:  0.9          │
+                      │  ✓ Angular scale:  0.4          │
+                      └─────────────────────────────────┘
 
-6. DATA FRESHNESS AND SAFETY
+6. COORDINATED CONTROL VISUALIZATION
 
-   The controller constantly monitors how recent the sensor data is:
-   - Fresh: Recent data, full-speed operation
-   - Stale: Older data, reduced speed
-   - Critical: Very old data, robot stops for safety
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │              COORDINATED MOVEMENT: WORKING TOGETHER                      │
+   └───────────────────────────────────────────────────────────────────────────┘
+    
+    Instead of treating each movement independently (which can look robotic),
+    our controller coordinates them - just like how humans naturally move!
+    
+    SCENARIO: Basketball is ahead and to the right
+    
+    UNCOORDINATED:                      COORDINATED:
+    ┌─────────────────────┐            ┌─────────────────────┐
+    │                     │            │                     │
+    │        Ball         │            │        Ball         │
+    │         ●           │            │         ●           │
+    │                     │            │                     │
+    │                     │            │         ↗           │
+    │                     │            │        /            │
+    │  ┌───┐    →         │            │  ┌───┐              │
+    │  │ R │              │            │  │ R │              │
+    │  └───┘              │            │  └───┘              │
+    │    ↑                │            │                     │
+    │    |                │            │                     │
+    └─────────────────────┘            └─────────────────────┘
+    Robot tries to move forward,       Robot creates a smooth diagonal
+    sideways, and turn all at          path, reducing forward speed
+    once - jerky movement!             during turning - natural movement!
+    
+    COORDINATED CONTROL BENEFITS:
+    • More efficient paths to target
+    • Smoother, more natural movement
+    • Reduced mechanical stress
+    • Lower energy consumption
+    • Better tracking performance
 
-7. MOVEMENT STRATEGIES
+7. DATA FRESHNESS AND SAFETY SYSTEM
 
-   The system uses table-driven strategy selection to choose how to move:
-   - Angular-first: Prioritize facing the ball before moving toward it
-   - Distance-priority: Focus on getting to the correct distance
-   - Lateral-priority: Focus on side-to-side alignment
-   - Balanced: Equal priority to all dimensions
-   - Position-only: Move without rotation
-   - Deceleration: Slow, careful approach when close
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                  DATA FRESHNESS SAFETY SYSTEM                           │
+   └───────────────────────────────────────────────────────────────────────────┘
+    
+                           ┌──────────────────┐
+                           │   Last Update    │◀───── New sensor data
+                           │   Timestamp      │       arrives
+                           └────────┬─────────┘
+                                    │
+                                    ▼
+                           ┌──────────────────┐
+                           │ Calculate data   │
+                           │ age = current    │
+                           │ time - timestamp │
+                           └────────┬─────────┘
+                                    │
+                                    ▼
+                    ┌──────────────────────────────────┐
+                    │       How old is the data?       │
+                    └──────────────────────────────────┘
+                      /            │             \
+                     /             │              \
+                    ▼              ▼               ▼
+           ┌────────────┐  ┌────────────┐  ┌────────────┐
+           │   FRESH    │  │   STALE    │  │  CRITICAL  │
+           │  (< 0.7s)  │  │(0.7s-1.0s) │  │  (> 1.0s)  │
+           └──────┬─────┘  └──────┬─────┘  └──────┬─────┘
+                  │               │               │
+                  ▼               ▼               ▼
+         ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+         │ Normal      │  │ Reduce      │  │ STOP        │
+         │ operation   │  │ speed to    │  │ completely  │
+         │             │  │ 50%         │  │ for safety  │
+         └─────────────┘  └─────────────┘  └─────────────┘
+    
+    This is essential for safety - if we haven't received sensor data recently,
+    we don't really know where the ball is, so we slow down or stop!
 
-8. COORDINATED CONTROL
+8. STATE MANAGEMENT DIAGRAM
 
-   Instead of treating each movement dimension separately, the system coordinates them:
-   - When turning and moving sideways, movements are balanced
-   - Rotational movements can reduce lateral movements when needed
-   - Forward speed is reduced during sharp turns
-   - Creates natural, efficient paths to the target
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                      ROBOT STATE MACHINE                                 │
+   └───────────────────────────────────────────────────────────────────────────┘
+    
+                         ┌───────────────┐
+                 ┌───────│ INITIALIZING  │
+                 │       └───────┬───────┘
+                 │               │ Components ready
+                 │               ▼
+                 │       ┌───────────────┐  No ball found
+                 │       │  SEARCHING    │◀────────────┐
+                 │       └───────┬───────┘             │
+                 │               │ Ball found          │
+                 │               ▼                     │
+    Error        │       ┌───────────────┐             │
+    detected     │       │   TRACKING    │─────────────┘
+    ┌────────────┼───────┤               │   Ball lost
+    │            │       └───────┬───────┘
+    │            │               │ At target position
+    │            │               ▼
+    │            │       ┌───────────────┐
+    │            └───────┤    STOPPED    │
+    │                    └───────┬───────┘
+    │                            │
+    │                            │ Critical error
+    ▼                            ▼
+    ┌───────────────┐     ┌───────────────┐
+    │   RECOVERY    │     │   EMERGENCY   │
+    │               │     │     STOP      │
+    └───────────────┘     └───────────────┘
+    
+    Each state has specific behaviors and transitions, allowing the robot
+    to react appropriately to different situations.
 
 9. PERFORMANCE OPTIMIZATION
 
-   The system adapts to available computing resources:
-   - Adjusts control frequency based on CPU load
-   - Uses simplified calculations when precision isn't critical
-   - Employs object pooling to reduce memory allocations
-   - Skips processing cycles when CPU is overloaded
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │                 ADAPTIVE PERFORMANCE MANAGEMENT                          │
+   └───────────────────────────────────────────────────────────────────────────┘
+    
+    On resource-constrained platforms like Raspberry Pi, the system automatically 
+    adjusts to available resources:
+    
+    ┌───────────────────┐     ┌───────────────────┐     ┌───────────────────┐
+    │     CPU USAGE     │     │ CONTROL FREQUENCY │     │ CONTROL METHOD    │
+    │                   │     │                   │     │                   │
+    │  ┌───┬───┬───┬───┤     │    Updates/sec    │     │  ┌───────────┐    │
+    │  │███│███│   │   │     │      ┌────┐       │     │  │SIMPLIFIED │    │
+    │  │███│███│   │   │     │      │    │       │     │  └───────────┘    │
+    │  │███│███│   │   │     │   ┌──┘    └──┐    │     │  ┌───────────┐    │
+    │  │███│███│   │   │     │   │         │    │     │  │FULL PID    │    │
+    │  └───┴───┴───┴───┘     │   └─────────┘    │     │  └───────────┘    │
+    │   25% 50% 75% 100%     │    1  2  4  8    │     │  Simple  Complex  │
+    └───────┬───────────┘     └───────┬───────────┘     └───────┬───────────┘
+            │                         │                         │
+            └─────────────────────────┼─────────────────────────┘
+                                      │
+                               ┌──────▼──────┐
+                               │             │
+                               │  ADAPTIVE   │
+                               │  CONTROL    │
+                               │             │
+                               └─────────────┘
+    
+    • High CPU usage → Lower control frequency, simpler calculations
+    • Low CPU usage → Higher control frequency, more sophisticated control
+    • Control rate detection → Synchronizes with sensor fusion rate
+    • Memory optimization → Object pools, pre-allocation
+    
+    This maintains reliable operation even under system load!
 
 Key Features:
 -----------
