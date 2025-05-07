@@ -1,0 +1,177 @@
+# Raspberry Pi 5 Memory & Performance Optimization Summary
+
+This document summarizes all optimizations implemented for your Raspberry Pi 5 running a real-time robotics platform in a Docker container.
+
+## 1. RAM Disk Creation
+
+### Commands:
+```bash
+sudo mkdir -p /mnt/ramdisk
+sudo mount -t tmpfs -o size=4G tmpfs /mnt/ramdisk
+echo "tmpfs /mnt/ramdisk tmpfs size=4G,mode=1777 0 0" | sudo tee -a /etc/fstab
+```
+
+### Purpose:
+Creates a 4GB filesystem that exists entirely in RAM rather than on disk. This provides ultra-fast storage for temporary files with microsecond access times rather than millisecond access times of SD cards or SSDs. The entry in `/etc/fstab` ensures this RAM disk is recreated on system boot.
+
+## 2. RAM-Based Logging
+
+### Commands:
+```bash
+sudo mkdir -p /var/log/ramlogs
+sudo mount -t tmpfs -o size=1G tmpfs /var/log/ramlogs
+echo "tmpfs /var/log/ramlogs tmpfs size=1G,mode=0755 0 0" | sudo tee -a /etc/fstab
+```
+
+### Purpose:
+Creates a 1GB RAM-based filesystem specifically for logs. This eliminates SD card wear from frequent log writes and removes I/O-related jitter that could affect real-time performance. Since robotics applications often generate significant logs, this prevents disk I/O from introducing timing inconsistencies.
+
+## 3. System Memory Parameter Optimizations
+
+### Commands:
+```bash
+sudo sysctl -w vm.swappiness=1
+sudo sysctl -w vm.vfs_cache_pressure=50
+sudo sysctl -w vm.dirty_ratio=60
+sudo sysctl -w vm.dirty_background_ratio=30
+sudo sysctl -w vm.overcommit_memory=1
+
+echo "vm.swappiness=1" | sudo tee -a /etc/sysctl.conf
+echo "vm.vfs_cache_pressure=50" | sudo tee -a /etc/sysctl.conf
+echo "vm.dirty_ratio=60" | sudo tee -a /etc/sysctl.conf
+echo "vm.dirty_background_ratio=30" | sudo tee -a /etc/sysctl.conf
+echo "vm.overcommit_memory=1" | sudo tee -a /etc/sysctl.conf
+
+sudo sysctl -p
+```
+
+### Purpose:
+- `vm.swappiness=1`: Tells the kernel to avoid swapping to disk unless absolutely necessary
+- `vm.vfs_cache_pressure=50`: Encourages the kernel to keep directory and inode information in memory
+- `vm.dirty_ratio=60`: Allows more dirty pages (modified data) to stay in memory
+- `vm.dirty_background_ratio=30`: Sets a higher threshold before background writeback begins
+- `vm.overcommit_memory=1`: Always allows memory allocation requests, beneficial for RAM-heavy applications
+- Adding to `/etc/sysctl.conf` makes these changes persist across reboots
+
+## 4. Huge Pages Configuration
+
+### Commands:
+```bash
+echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+echo always | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
+
+echo 'echo always > /sys/kernel/mm/transparent_hugepage/enabled' | sudo tee -a /etc/rc.local
+echo 'echo always > /sys/kernel/mm/transparent_hugepage/defrag' | sudo tee -a /etc/rc.local
+sudo chmod +x /etc/rc.local
+```
+
+### Purpose:
+Enables transparent huge pages which reduce TLB (Translation Lookaside Buffer) misses and improve memory access performance. When enabled, the system uses larger memory pages (2MB instead of 4KB), reducing overhead for memory-intensive applications. The changes to `/etc/rc.local` ensure these settings persist across reboots.
+
+## 5. Creating Optimized Docker Container
+
+### Commands:
+```bash
+sudo docker stop MentorPi
+sudo docker commit MentorPi mentorpi_realtime_backup:v1_ram_optimized
+sudo docker run -d \
+  --name MentorPi_RAM \
+  --privileged \
+  --network host \
+  --cap-add CAP_SYS_NICE \
+  -v /dev:/dev \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v /home/pi/docker/tmp:/home/ubuntu/shared \
+  -v /home/pi/dev:/home/ubuntu/dev \
+  -v /mnt/ramdisk:/mnt/ramdisk \
+  -v /var/log/ramlogs:/var/log/robot_logs \
+  --security-opt label=disable \
+  --ulimit memlock=-1:-1 \
+  --ulimit rtprio=99:99 \
+  --shm-size=2g \
+  -e DISPLAY=:0 \
+  --user ubuntu \
+  --restart always \
+  mentorpi_realtime_backup:v1_ram_optimized \
+  tail -f /dev/null
+```
+
+### Purpose:
+Creates an optimized container with:
+- RAM disk mounts for fast storage and logging
+- Unlimited locked memory (`memlock=-1:-1`) for real-time applications
+- High real-time priority capabilities (`rtprio=99:99`)
+- Increased shared memory size (`shm-size=2g`) for inter-process communication
+- All the existing mounts and capabilities needed for your robotics application
+
+
+sudo bash -c 'cat > /opt/ros/humble/setup.bash << EOF
+#!/bin/bash
+
+# Set ROS 2 memory optimization environment variables
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI="<CycloneDDS><Domain><General><SharedMemory>true</SharedMemory><NetworkInterfaceAddress>lo</NetworkInterfaceAddress></General></Domain></CycloneDDS>"
+export RMW_IMPLEMENTATION_SETTINGS="-DCycloneDDS_IDLC_USE_ZEROCOPY=ON"
+export CYCLONEDDS_RT="LIFO,BATCH"
+export TMPDIR="/mnt/ramdisk/robot_temp"
+export ROS_LOG_DIR="/var/log/robot_logs/robot"
+
+# Create necessary directories
+mkdir -p /mnt/ramdisk/robot_temp
+mkdir -p /var/log/robot_logs/robot
+
+# source setup.sh from same directory as this file
+AMENT_SHELL=bash
+AMENT_CURRENT_PREFIX=\$(builtin cd "\`dirname "\${BASH_SOURCE[0]}"\`" && pwd)
+# trace output
+if [ -n "\$AMENT_TRACE_SETUP_FILES" ]; then
+  echo "# . \\"\$AMENT_CURRENT_PREFIX/setup.sh\\""
+fi
+. "\$AMENT_CURRENT_PREFIX/setup.sh"
+EOF'
+
+exit
+sudo docker commit MentorPi mentorpi_realtime_backup:v1_ram_ros_optimized
+sudo docker restart MentorPi
+```
+
+### Purpose:
+Modifies the ROS 2 Humble setup file to add memory optimizations that benefit all ROS nodes:
+- `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`: Uses CycloneDDS middleware which is more memory-efficient than the default
+- `CYCLONEDDS_URI`: Configures CycloneDDS to use shared memory transport and loopback interface only
+- `RMW_IMPLEMENTATION_SETTINGS`: Enables zero-copy optimization to reduce memory copying overhead
+- `CYCLONEDDS_RT`: Prioritizes deterministic communication over throughput
+- Also sets temporary and log directories to use RAM
+
+## 9. Monitoring Tools
+
+### Commands:
+```bash
+# Install monitoring tools
+sudo apt install htop sysstat
+
+# Monitor temperature
+vcgencmd measure_temp
+watch -n 1 vcgencmd measure_temp
+
+# Monitor throttling
+vcgencmd get_throttled
+
+# Monitor memory usage
+watch -n 1 free -m
+watch -n 5 "cat /proc/meminfo | grep -E 'Cache|Dirty|PageTables|AnonPages'"
+
+# Monitor RAM disk usage
+watch -n 5 "df -h | grep tmpfs"
+
+# Monitor I/O operations
+iostat -x 5
+```
+
+### Purpose:
+These commands help monitor system performance and ensure optimizations are working as expected:
+- Temperature monitoring to ensure the Raspberry Pi 5 stays below the 80°C throttling threshold
+- Memory usage monitoring to verify RAM utilization
+- RAM disk usage monitoring to ensure they don't fill up
+- I/O monitoring to verify reduced disk activity
+
