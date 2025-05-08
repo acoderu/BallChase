@@ -205,19 +205,76 @@ def extract_points_from_scan(scan):
 
 When visualized, LIDAR data appears as a collection of points in a circular pattern around the sensor. Objects in the environment appear as clusters or patterns within this point cloud.
 
+# Sample 2D LIDAR Data Visualization
+
+## Mermaid Diagram
+
+# Sample 2D LIDAR Data Visualization
+
+## Mermaid Diagram
+
 ```mermaid
 %%{init: {"theme": "neutral", "themeVariables": {"primaryColor": "#00758f", "primaryTextColor": "#ffffff", "primaryBorderColor": "#00758f", "lineColor": "#555555", "secondaryColor": "#006100", "tertiaryColor": "#fff8dc", "fontSize": "14px"}}}%%
-xychart-beta
-    title "Sample 2D LIDAR Data Visualization"
-    x-axis "X Distance (meters)" 
-    y-axis "Y Distance (meters)"
-    line [0, 0, 0, 0, 0, 0, 0, 0, 0]
-    scatter [1.0, 1.2, 1.1, 1.3, 1.2, 1.0, 0.9, 1.1, 1.2, 2.0, 0.8, -0.9, -2.1, -2.0, -1.8, -1.0, 0.5, 1.8]
+graph LR
+    subgraph VizTitle["Sample 2D LIDAR Data Visualization"]
+        Origin((LIDAR<br>Origin))
+        
+        %% Scatter points with data labels
+        P1([+1.0, +0.0])
+        P2([+1.2, +0.0])
+        P3([+1.1, +0.0])
+        P4([+1.3, +0.0])
+        P5([+1.2, +0.0])
+        P6([+1.0, +0.0])
+        P7([+0.9, +0.0])
+        P8([+1.1, +0.0])
+        P9([+1.2, +0.0])
+        P10([+2.0, +0.0])
+        P11([+0.8, +0.0])
+        P12([-0.9, +0.0])
+        P13([-2.1, +0.0])
+        P14([-2.0, +0.0])
+        P15([-1.8, +0.0])
+        P16([-1.0, +0.0])
+        P17([+0.5, +0.0])
+        P18([+1.8, +0.0])
+        
+        %% Connect points to origin to show radial nature
+        Origin --- P1
+        Origin --- P2
+        Origin --- P3
+        Origin --- P4
+        Origin --- P5
+        Origin --- P6
+        Origin --- P7
+        Origin --- P8
+        Origin --- P9
+        Origin --- P10
+        Origin --- P11
+        Origin --- P12
+        Origin --- P13
+        Origin --- P14
+        Origin --- P15
+        Origin --- P16
+        Origin --- P17
+        Origin --- P18
+    end
+    
+    %% Style nodes to make them look like scatter points
+    classDef origin fill:#00758f,stroke:#00758f,color:#ffffff,stroke-width:2px
+    classDef point fill:#006100,stroke:#006100,color:#ffffff,stroke-width:1px,radius:5px
+    
+    class Origin origin
+    class P1,P2,P3,P4,P5,P6,P7,P8,P9,P10,P11,P12,P13,P14,P15,P16,P17,P18 point
 ```
 
-<div style="text-align: center; margin-top: 10px; margin-bottom: 20px;">
-<b>Figure 1:</b> LIDAR scan visualization showing scatter points. The LIDAR sensor is at origin (0,0), and points represent detected objects at various distances and angles. Note the circular pattern typical of 2D LIDAR data.
-</div>
+## Figure Description
+
+This diagram shows a 2D LIDAR scan visualization. The LIDAR sensor is positioned at the origin (0,0), and each point represents a detected object at various distances and angles. The points are connected to the origin with lines to illustrate the radial nature of LIDAR measurements.
+
+Points with positive x-values (P1-P11, P17-P18) are in front of the sensor, while negative x-values (P12-P16) are behind it. The radial pattern is typical of 2D LIDAR data, with the sensor emitting laser beams in different directions and measuring the distance to detected objects.
+
+In a real application, these points would represent surfaces of objects in the environment. The clustering and patterns in these points would be analyzed to identify objects like walls, corners, or in this case, potentially a basketball.
 
 ### 1.4 How a Basketball Appears in LIDAR Data
 
