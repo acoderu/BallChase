@@ -469,19 +469,54 @@ After each change, we recorded new data and analyzed the results.
 #### Step 6: Analyze Results and Implement Solution
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "14px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff", "primaryBorderColor": "#f44336", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#4caf50", "tertiaryTextColor": "#ffffff", "tertiaryBorderColor": "#4caf50", "lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000"}}}%%
-xychart-beta
-    title "Effect of Individual Solutions"
-    x-axis "Time (s)" [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
-    y-axis "Angular Error (degrees)" [-10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10]
-    line [0, -4, -8, -3, 4, 7, 3, -5, -8, -4, 5, 7, 3, -4, -8, -3, 5, 7] "Original Problem"
-    line [0, -3, -7, -2, 2, 5, 2, -4, -6, -3, 3, 5, 2, -3, -6, -2, 4, 5] "Increased Kd"
-    line [0, -2, -3, -1, 1, 2, 0, -1, -2, 0, 1, 1, 0, -1, -1, 0, 1, 0] "Combined Solution"
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff", "primaryBorderColor": "#f44336", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#4caf50", "tertiaryTextColor": "#ffffff", "tertiaryBorderColor": "#4caf50", "lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000"}}}%%
+graph TD
+    Title["Effect of Individual Solutions on Angular Error"]
+    
+    subgraph ErrorRanges["Angular Error Ranges (Target = 0°)"]
+        direction LR
+        Plus10["+10°"] --- Plus5["+5°"] --- Target["0° (Target)"] --- Minus5["-5°"] --- Minus10["-10°"]
+    end
+    
+    subgraph Solutions["Solutions and Their Oscillation Patterns"]
+        Original["Original Problem<br>Large oscillations between -8° and +7°<br>Never settles at target angle"]
+        Increased["Increased Kd Solution<br>Moderate oscillations between -7° and +5°<br>Reduced amplitude but still unstable"]
+        Combined["Combined Solution<br>Minimal oscillations between -3° and +2°<br>Quickly settles near target angle"]
+    end
+    
+    %% Styling
+    classDef titleStyle fill:#e0e0e0,stroke:#424242,stroke-width:2px,color:#212121,font-weight:bold,font-size:18px
+    classDef rangeStyle fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#212121
+    classDef targetStyle fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20,font-weight:bold
+    classDef originalStyle fill:#f44336,stroke:#c62828,stroke-width:2px,color:#ffffff
+    classDef increasedStyle fill:#ff9800,stroke:#ef6c00,stroke-width:2px,color:#ffffff
+    classDef combinedStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff
+    
+    %% Apply styles
+    class Title titleStyle
+    class Plus10,Plus5,Minus5,Minus10 rangeStyle
+    class Target targetStyle
+    class Original originalStyle
+    class Increased increasedStyle
+    class Combined combinedStyle
 ```
 
-<div style="font-style: italic; margin-top: -10px;">
-Comparing solutions: Original Problem (top line with largest oscillations), Solution 1: Increased Kd (middle line with reduced oscillations), and Combined Solution (bottom line showing minimal error). The target angle is at zero.
-</div>
+**Visual Comparison of PID Angular Control Solutions**
+
+The diagram above illustrates how three different control approaches affect the angular error oscillation when the robot attempts to maintain a specific angle:
+
+| Solution | Error Range | Key Characteristics | Result |
+|----------|-------------|---------------------|--------|
+| **Original Problem** | -8° to +7° | High proportional gain, insufficient derivative action | System continually oscillates, never settling at target |
+| **Increased Kd** | -7° to +5° | Higher derivative gain for better damping | Reduced oscillation amplitude but still unstable |
+| **Combined Solution** | -3° to +2° | Balanced Kd increase, reduced Kp & Ki, plus other enhancements | Minimal oscillation with quick settling at target angle |
+
+**Time-based Error Comparison:**
+- At 4s: Original: -8°, Increased Kd: -7°, Combined: -3°
+- At 10s: Original: +7°, Increased Kd: +5°, Combined: +2°
+- At 20s: Original: still oscillating at +7°, Increased Kd: +5°, Combined: nearly stable at +1°
+
+The combined solution demonstrates the effectiveness of a comprehensive approach to PID tuning rather than adjusting individual parameters in isolation. By implementing multiple enhancements together (increased damping, reduced gains, zero-crossing detection, and deadband), the system achieves stable control with minimal oscillation around the target angle.
 
 **Solution Results**:
 
@@ -609,31 +644,165 @@ Remember that most issues can be solved by methodically adjusting parameters and
 
 Beyond basic parameter tuning, these advanced techniques can help diagnose and resolve complex PID issues:
 
+
+Beyond basic parameter tuning, these advanced techniques can help diagnose and resolve complex PID issues:
+
 #### 1. Step Response Analysis
 
-Create a step input and analyze the system's response to extract critical information:
+Step response analysis helps understand how a system responds to sudden changes, revealing critical information for PID tuning. Let's break this down into manageable concepts:
+
+### 1. What is a Step Input?
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "14px", "primaryColor": "#673ab7", "primaryTextColor": "#ffffff", "primaryBorderColor": "#673ab7", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#f8f9fa", "lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000"}}}%%
-xychart-beta
-    title "Step Response Analysis Parameters"
-    x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7]
-    y-axis "Response (normalized)" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
-    line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0] "Reference Step Input"
-    line [0, 0, 0.2, 0.65, 1.15, 0.95, 1.03, 0.98, 1.0] "System Response"
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff", "secondaryColor": "#f8f9fa"}}}%%
+flowchart LR
+    subgraph StepInput["Step Input Explained"]
+        direction TB
+        Before["Before Step<br>(Value = 0)"] --> Step["Sudden Change"] --> After["After Step<br>(Value = 1.0)"]
+    end
+    
+    classDef stepStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Before,Step,After stepStyle
 ```
 
-<div style="font-style: italic; margin-top: -10px;">
-Step response analysis showing key parameters: Step Input (0.75, 0.5), Rise Time (0.8, 0.35), Peak Time (3.2, 1.15), Overshoot (3.75, 1.1), Settling Time (6.5, 1.05), and Steady-State (6.5, 0.95).
-</div>
+A step input is a sudden change in the target value (setpoint). For example, instantly changing the target angle from 0° to 90°. This helps us see how the system responds to abrupt changes.
 
-From this analysis, calculate:
-- **Rise Time**: Indicates whether Kp is appropriate
-- **Overshoot Percentage**: Indicates whether Kd is sufficient
-- **Settling Time**: Indicates overall controller performance
-- **Steady-State Error**: Indicates whether Ki is sufficient
+### 2. Basic System Response Pattern
 
-We've developed a utility in `src/ball_chase/ball_chase/pid/response_analyzer.py` that automatically performs this analysis:
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph ResponseGraph["Typical System Response"]
+        direction TB
+        Target["Target Value (1.0)"]
+        ResponseCurve["System Response"]
+        Pattern["The system typically:<br>1. Rises toward target<br>2. Overshoots<br>3. Oscillates<br>4. Eventually settles"]
+    end
+    
+    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef responseStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class Target targetStyle
+    class ResponseCurve,Pattern responseStyle
+```
+
+When given a step input, most control systems follow a characteristic response pattern. The system initially rises toward the target value, often overshoots it, oscillates back and forth with decreasing amplitude, and eventually settles at or near the target value. This pattern reveals key information about the system's performance and helps guide PID tuning.
+
+### 3. Key Measurement: Rise Time
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph RiseTime["Rise Time"]
+        direction TB
+        Definition["The time it takes to rise from<br>10% to 90% of the target value"]
+        Meaning["Indicates how quickly the<br>system responds to changes"]
+        Tuning["Primarily affected by Kp<br>(↑ Kp = ↓ Rise Time)"]
+    end
+    
+    classDef riseTimeStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Meaning,Tuning riseTimeStyle
+```
+
+Rise time shows how quickly your system responds to changes. A fast rise time means the system reacts quickly to new inputs. In our basketball tracking robot example, this would be how quickly the robot starts moving toward the new ball position.
+
+### 4. Key Measurement: Overshoot
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph Overshoot["Overshoot"]
+        direction TB
+        Definition["How much the response exceeds<br>the target value"]
+        Meaning["Indicates damping characteristics<br>of the system"]
+        Tuning["Primarily affected by Kd<br>(↑ Kd = ↓ Overshoot)"]
+    end
+    
+    classDef overshootStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Meaning,Tuning overshootStyle
+```
+
+Overshoot occurs when the system goes beyond the target value. For the basketball tracking robot, this would be like the robot rotating past the ball and then having to correct back. High overshoot indicates insufficient damping, which can be improved by increasing the derivative gain (Kd).
+
+### 5. Key Measurement: Settling Time
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph SettlingTime["Settling Time"]
+        direction TB
+        Definition["Time for oscillations to fall within<br>±5% of the final value"]
+        Meaning["Indicates how quickly the system<br>stabilizes after a change"]
+        Tuning["Affected by all PID terms<br>but strongly by Kd"]
+    end
+    
+    classDef settlingStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Meaning,Tuning settlingStyle
+```
+
+Settling time measures how long it takes for the system to stabilize. For our robot, this would be how long before it stops making adjustments and smoothly tracks the ball. A long settling time means the system continues to oscillate or make corrections for too long.
+
+### 6. Key Measurement: Steady-State Error
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph SteadyStateError["Steady-State Error"]
+        direction TB
+        Definition["Difference between final stabilized<br>value and the target value"]
+        Meaning["Indicates the accuracy of<br>the system's final position"]
+        Tuning["Primarily affected by Ki<br>(↑ Ki = ↓ Steady-State Error)"]
+    end
+    
+    classDef steadyStateStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Meaning,Tuning steadyStateStyle
+```
+
+Steady-state error is any remaining difference between the target and actual position after the system stabilizes. For the basketball tracking robot, this would be a constant offset between where the robot aims and where the ball actually is. Increasing the integral gain (Ki) helps eliminate this error.
+
+### 7. Using Step Response Analysis for Tuning
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#607d8b", "primaryTextColor": "#ffffff"}}}%%
+flowchart TB
+    subgraph Tuning["Step Response-Based Tuning"]
+        direction LR
+        HighOv["High Overshoot<br>+ Fast Rise Time"] --> RedP["⬇️ Kp or ⬆️ Kd"]
+        SlowRise["Slow Rise Time<br>+ Low Overshoot"] --> IncP["⬆️ Kp"]
+        SteadyErr["Persistent<br>Steady-State Error"] --> IncI["⬆️ Ki"]
+        LongSettle["Long Settling Time"] --> IncD["Adjust Kd"]
+    end
+    
+    classDef tuningStyle fill:#607d8b,stroke:#263238,stroke-width:2px,color:#ffffff,font-weight:bold
+    class HighOv,SlowRise,SteadyErr,LongSettle,RedP,IncP,IncI,IncD tuningStyle
+```
+
+By analyzing step response, you can diagnose specific issues with your PID controller and make targeted adjustments:
+
+- **If you see high overshoot with fast rise time**: Reduce Kp or increase Kd
+- **If you see slow rise time with low overshoot**: Increase Kp
+- **If there's persistent steady-state error**: Increase Ki
+- **If settling time is too long**: Fine-tune Kd
+
+For a basketball tracking robot, optimal step response would show moderate rise time (for responsive tracking), minimal overshoot (to prevent "hunting" behavior), and short settling time (for stable following).
+
+**Analyzing The Step Response:**
+
+From the step response, you can extract valuable information to tune your PID controller:
+
+1. **High Overshoot + Fast Rise Time**: Indicates high Kp, low Kd - reduce Kp or increase Kd
+2. **Slow Rise Time + Low Overshoot**: Indicates low Kp - increase Kp
+3. **Persistent Steady-State Error**: Indicates insufficient Ki - increase Ki
+4. **Long Settling Time**: Indicates poor damping - adjust Kd
+
+For the basketball tracking robot, optimal step response characteristics would show moderate rise time (not too aggressive), minimal overshoot (to prevent oscillation), and short settling time (for responsive tracking).
+
+- **Rise time**: Primarily affected by proportional gain (Kp)
+- **Overshoot**: Affected by derivative gain (Kd) - higher Kd reduces overshoot
+- **Settling time**: Affected by all three terms (P, I, D)
+- **Steady-state error**: Primarily eliminated by integral gain (Ki)
+
+By analyzing these parameters, we can systematically adjust PID gains to achieve the desired control behavior. For the basketball tracking robot, we typically aim for minimal overshoot and fast settling time to ensure smooth tracking.
 
 ```python
 # Excerpt from response_analyzer.py
@@ -806,24 +975,125 @@ To fully understand the strengths and limitations of PID control, it's valuable 
 
 ### Response Comparison: Step Input
 
-The following graphs compare how different control methods respond to a simple step input (the target suddenly changes position):
+Let's examine how different control methods respond to a simple step input (when the target suddenly changes position).
+
+#### 1. Understanding the Step Input
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px"}}}%%
-xychart-beta
-    title "Response to Step Input"
-    x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position (meters)" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
-    line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] "Target"
-    line [0, 0, 0.42, 0.9, 1.18, 1.08, 1.02, 1.0, 1.0] "Strategy A"
-    line [0, 0, 0.22, 0.58, 0.82, 0.94, 0.98, 1.0, 1.0] "Strategy B"
-    line [0, 0, 0.3, 0.68, 0.88, 0.94, 0.98, 1.0, 1.0] "Strategy C"
-    line [0, 0, 0.52, 0.78, 0.88, 0.92, 0.94, 0.96, 0.96] "Strategy D"
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph StepInputGraph["The Step Input"]
+        direction TB
+        Before["Before t=2s:<br>Target = 0.0m"] --> Change["At t=2s:<br>Sudden change"] --> After["After t=2s:<br>Target = 1.0m"]
+    end
+    
+    classDef stepStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Before,Change,After stepStyle
 ```
 
-<div style="font-style: italic; margin-top: -10px;">
-Response of different controllers to a step change in target position: Setpoint (Target), PID Controller, MPC, LQR, Fuzzy Logic, and Pure P.
-</div>
+At t=2s, the target position suddenly changes from 0.0m to 1.0m. This step input tests how different controllers respond to abrupt changes.
+
+#### 2. PID Controller Response
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph PIDResponse["PID Controller Response"]
+        direction TB
+        Behavior["Behavior:<br>Fast rise, significant overshoot,<br>eventually settles at target"]
+        Values["Key Values:<br>t=4s: 1.18m (18% overshoot)<br>t=6s: 1.02m<br>t=8s: 1.00m (fully settled)"]
+    end
+    
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Behavior,Values pidStyle
+```
+
+The PID controller responds quickly with a fast rise time but overshoots the target by 18%. After some oscillation, it settles precisely at the target position by t=8s.
+
+#### 3. Model Predictive Control (MPC) Response
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph MPCResponse["Model Predictive Control Response"]
+        direction TB
+        Behavior["Behavior:<br>Slower, smoother rise<br>minimal overshoot"]
+        Values["Key Values:<br>t=4s: 0.82m (no overshoot)<br>t=6s: 0.98m<br>t=8s: 1.00m (fully settled)"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Behavior,Values mpcStyle
+```
+
+MPC takes a more conservative approach with a slower rise time but almost no overshoot. It gradually approaches the target and settles precisely by t=8s.
+
+#### 4. Linear Quadratic Regulator (LQR) Response
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph LQRResponse["Linear Quadratic Regulator Response"]
+        direction TB
+        Behavior["Behavior:<br>Balanced approach with<br>moderate rise and overshoot"]
+        Values["Key Values:<br>t=4s: 0.88m (slight overshoot)<br>t=6s: 0.98m<br>t=8s: 1.00m (fully settled)"]
+    end
+    
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Behavior,Values lqrStyle
+```
+
+LQR provides a balanced response with moderate rise time and slight overshoot. It finds a middle ground between speed and stability.
+
+#### 5. Fuzzy Logic Controller Response
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph FuzzyResponse["Fuzzy Logic Controller Response"]
+        direction TB
+        Behavior["Behavior:<br>Quick initial response but<br>never fully reaches target"]
+        Values["Key Values:<br>t=4s: 0.88m (no overshoot)<br>t=6s: 0.94m<br>t=8s: 0.96m (steady-state error)"]
+    end
+    
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Behavior,Values fuzzyStyle
+```
+
+Fuzzy Logic responds quickly at first but exhibits steady-state error, never quite reaching the target position. At t=8s, it settles at 0.96m, 4% below the target.
+
+#### 6. Controller Comparison Summary
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph ComparisonSummary["Controller Comparison Summary"]
+        direction TB
+        PID["PID: Fast with overshoot<br>Best for general applications"]
+        MPC["MPC: Smooth with minimal overshoot<br>Best for constrained systems"]
+        LQR["LQR: Balanced performance<br>Best for well-modeled systems"]
+        Fuzzy["Fuzzy Logic: Fast initial response<br>Best for handling nonlinearities"]
+    end
+    
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class PID pidStyle
+    class MPC mpcStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+```
+
+**Choosing a Controller:**
+
+For the basketball tracking robot, the choice depends on your priorities:
+- For responsive tracking with acceptable overshoot → **PID Controller**
+- For smooth approach with minimal overshoot → **Model Predictive Control**
+- For balanced performance with known system model → **Linear Quadratic Regulator**
+- For handling nonlinear behavior with expert knowledge → **Fuzzy Logic Controller**
+
+The optimal choice for most tracking applications is typically a well-tuned PID controller or MPC system, depending on computational resources available.
 
 <em>Response of different controllers to a step change in target position</em>
 
@@ -836,55 +1106,304 @@ Response of different controllers to a step change in target position: Setpoint 
 
 ### Response Comparison: Tracking Moving Target
 
-The second comparison shows how different controllers perform when tracking a continuously moving target (like our basketball):
+Let's examine how different controllers perform when tracking a continuously moving target, like a basketball in motion.
+
+#### 1. Understanding the Target Motion Pattern
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px"}}}%%
-xychart-beta
-    title "Tracking a Moving Target"
-    x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position (meters)" [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
-    line [0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.6, 0.8] "Target"
-    line [0.4, 0.55, 0.75, 0.95, 0.82, 0.65, 0.45, 0.58, 0.75] "Controller A"
-    line [0.4, 0.52, 0.72, 0.94, 0.79, 0.62, 0.42, 0.58, 0.76] "Controller B"
-    line [0.4, 0.5, 0.68, 0.88, 0.74, 0.6, 0.48, 0.55, 0.72] "Controller C"
-    line [0.4, 0.45, 0.6, 0.75, 0.65, 0.55, 0.45, 0.51, 0.65] "Controller D"
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph TargetMotion["Target Motion Pattern"]
+        direction TB
+        Phase1["Phase 1<br>Rising<br>(0.4m → 1.0m)<br>t=0s to t=3s"] --> 
+        Phase2["Phase 2<br>Falling<br>(1.0m → 0.4m)<br>t=3s to t=6s"] --> 
+        Phase3["Phase 3<br>Rising Again<br>(0.4m → 0.8m)<br>t=6s to t=8s"]
+    end
+    
+    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Phase1,Phase2,Phase3 targetStyle
 ```
 
-<div style="font-style: italic; margin-top: -10px;">
-Tracking performance with a continuously moving target. Top line shows Target Position, with MPC, PID Controller, LQR, Fuzzy Logic, and Pure P controllers showing varying degrees of tracking ability.
-</div>
+The target follows a continuous motion pattern with three distinct phases: first rising, then falling, then rising again. This tests how well each controller can adapt to changing directions.
 
-<em>Tracking performance with a continuously moving target</em>
+#### 2. Model Predictive Control (MPC) Performance
 
-**Key Observations:**
-1. **PID Controller**: Good tracking with small lag, some oscillation during direction changes
-2. **Model Predictive Control (MPC)**: Excellent tracking with minimal lag due to prediction capabilities
-3. **Linear Quadratic Regulator (LQR)**: Consistent tracking with moderate lag
-4. **Fuzzy Logic Controller**: Smooth following but larger tracking lag
-5. **Pure P Controller**: Significant lag and never catches up to target with constant velocity
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph MPCPerformance["Model Predictive Control Performance"]
+        direction TB
+        Tracking["Tracking Performance:<br>Excellent (avg. error: 0.05m)"]
+        Behavior["Key Behavior:<br>Anticipates target movement<br>Minimal lag even during direction changes"]
+        Values["Key Position Values:<br>t=2s: 0.75m (target: 0.8m)<br>t=4s: 0.82m (target: 0.8m)<br>t=6s: 0.45m (target: 0.4m)"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Tracking,Behavior,Values mpcStyle
+```
+
+MPC shows excellent tracking performance because it predicts the target's future position based on its trajectory model. It stays consistently close to the target, even during direction changes.
+
+#### 3. PID Controller Performance
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph PIDPerformance["PID Controller Performance"]
+        direction TB
+        Tracking["Tracking Performance:<br>Good (avg. error: 0.08m)"]
+        Behavior["Key Behavior:<br>Responsive but follows rather than predicts<br>Small but consistent lag"]
+        Values["Key Position Values:<br>t=2s: 0.72m (target: 0.8m)<br>t=4s: 0.79m (target: 0.8m)<br>t=6s: 0.42m (target: 0.4m)"]
+    end
+    
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Tracking,Behavior,Values pidStyle
+```
+
+The PID controller shows good tracking performance with a slight lag. It reacts to errors effectively but follows rather than predicts movement, resulting in a small delay especially during direction changes.
+
+#### 4. Linear Quadratic Regulator (LQR) Performance
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph LQRPerformance["Linear Quadratic Regulator Performance"]
+        direction TB
+        Tracking["Tracking Performance:<br>Moderate (avg. error: 0.12m)"]
+        Behavior["Key Behavior:<br>Balanced performance<br>Moderate lag during direction changes"]
+        Values["Key Position Values:<br>t=2s: 0.68m (target: 0.8m)<br>t=4s: 0.74m (target: 0.8m)<br>t=6s: 0.48m (target: 0.4m)"]
+    end
+    
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Tracking,Behavior,Values lqrStyle
+```
+
+LQR offers moderate tracking performance with balanced responsiveness. It shows more lag than MPC or PID, especially during rapid direction changes.
+
+#### 5. Fuzzy Logic Controller Performance
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph FuzzyPerformance["Fuzzy Logic Controller Performance"]
+        direction TB
+        Tracking["Tracking Performance:<br>Fair (avg. error: 0.2m)"]
+        Behavior["Key Behavior:<br>Significant lag<br>Struggles with rapid direction changes"]
+        Values["Key Position Values:<br>t=2s: 0.6m (target: 0.8m)<br>t=4s: 0.65m (target: 0.8m)<br>t=6s: 0.45m (target: 0.4m)"]
+    end
+    
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Tracking,Behavior,Values fuzzyStyle
+```
+
+The Fuzzy Logic controller shows the largest tracking error, with significant lag especially during direction changes. It struggles to keep up with the target's movement.
+
+#### 6. Controller Comparison Summary
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph Comparison["Tracking Performance Comparison"]
+        direction LR
+        MPC["MPC:<br>Best overall<br>Anticipates movement"]
+        PID["PID:<br>Good tracking<br>Small consistent lag"]
+        LQR["LQR:<br>Moderate tracking<br>Balanced performance"]
+        Fuzzy["Fuzzy Logic:<br>Largest lag<br>Direction change issues"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class MPC mpcStyle
+    class PID pidStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+```
+
+**Practical Application for Basketball Tracking:**
+
+For a basketball tracking robot, the choice of controller depends on your priorities:
+
+1. **If computational resources allow** → Choose **Model Predictive Control (MPC)** for best tracking performance, especially when the ball makes unpredictable movements
+
+2. **For a good balance of performance and simplicity** → Use a well-tuned **PID Controller** that can effectively track with minimal lag
+
+3. **When working with a well-understood system model** → **Linear Quadratic Regulator (LQR)** provides reliable performance
+
+4. **When dealing with highly nonlinear dynamics** → **Fuzzy Logic** may be appropriate, but expect more tracking lag
+
+The performance gap between controllers becomes most apparent during rapid direction changes, which are common in basketball movement.
 
 ### Disturbance Rejection Comparison
 
-This comparison shows how different controllers handle external disturbances:
+Let's examine how different controllers respond when faced with external disturbances.
+
+#### 1. Understanding Disturbances in Control Systems
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px"}}}%%
-xychart-beta
-    title "Disturbance Rejection Comparison"
-    x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position (meters)" [0.6, 0.7, 0.8, 0.9, 1.0, 1.1]
-    line [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] "Desired"
-    line [1.0, 1.0, 0.7, 0.85, 1.05, 0.8, 0.9, 0.97, 1.0] "Controller A"
-    line [1.0, 1.0, 0.8, 0.92, 0.98, 0.85, 0.92, 0.97, 0.99] "Controller B"
-    line [1.0, 1.0, 0.75, 0.85, 0.95, 0.8, 0.88, 0.94, 0.98] "Controller C"
-    line [1.0, 1.0, 0.85, 0.88, 0.92, 0.75, 0.82, 0.87, 0.91] "Controller D"
-    line [1.0, 1.0, 0.75, 0.82, 0.86, 0.7, 0.75, 0.78, 0.8] "Controller E"
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph DisturbanceExplained["What Are External Disturbances?"]
+        direction TB
+        Definition["Unexpected forces that<br>push system away from target"]
+        Examples["Examples:<br>• Physical bump to robot<br>• Wind/air resistance<br>• Surface friction changes<br>• Sensor errors"]
+        DistEvents["In this test:<br>• First disturbance at t=2s<br>• Second disturbance at t=5s"]
+    end
+    
+    classDef distStyle fill:#607d8b,stroke:#263238,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Examples,DistEvents distStyle
 ```
 
-<div style="font-style: italic; margin-top: -10px;">
-Comparison of different controllers handling disturbances at t=2s and t=5s: Setpoint, MPC, PID Controller, LQR, Fuzzy Logic, and Pure P.
-</div>
+External disturbances are unexpected forces that push the system away from its target position. For a basketball tracking robot, this could be bumping into an obstacle, wheel slippage, or the ball being knocked away.
+
+#### 2. Target Position (Desired State)
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph TargetState["Target Position"]
+        direction TB
+        Description["Desired position remains<br>constant at 1.0 meters"]
+        Ideal["Ideal controller would:<br>• Maintain this position<br>• Quickly return after disturbance<br>• Minimize oscillation"]
+    end
+    
+    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Description,Ideal targetStyle
+```
+
+The target position remains constant at 1.0 meters throughout the test. The goal of each controller is to maintain this position despite disturbances.
+
+#### 3. Response to First Disturbance (t=2s)
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph FirstDisturbance["Response to First Disturbance at t=2s"]
+        direction LR
+        MPC["MPC:<br>Drops to 0.8m<br>Recovers by t=4s"]
+        PID["PID Controller:<br>Drops to 0.7m<br>Overshoots to 1.05m"]
+        LQR["LQR:<br>Drops to 0.75m<br>Recovers smoothly"]
+        Fuzzy["Fuzzy Logic:<br>Drops to 0.85m<br>Slow recovery"]
+        PureP["Pure P Controller:<br>Drops to 0.75m<br>Never fully recovers"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pureStyle fill:#795548,stroke:#3e2723,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class MPC mpcStyle
+    class PID pidStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+    class PureP pureStyle
+```
+
+After the first disturbance at t=2s, each controller responds differently. The MPC and PID controllers recover most completely, while the Pure P controller never fully returns to the target position.
+
+#### 4. Response to Second Disturbance (t=5s)
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph SecondDisturbance["Response to Second Disturbance at t=5s"]
+        direction LR
+        MPC["MPC:<br>Drops to 0.85m<br>Recovers to 0.99m"]
+        PID["PID Controller:<br>Drops to 0.8m<br>Recovers to 1.0m"]
+        LQR["LQR:<br>Drops to 0.8m<br>Recovers to 0.98m"]
+        Fuzzy["Fuzzy Logic:<br>Drops to 0.75m<br>Recovers to 0.91m"]
+        PureP["Pure P Controller:<br>Drops to 0.7m<br>Settles at 0.8m"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pureStyle fill:#795548,stroke:#3e2723,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class MPC mpcStyle
+    class PID pidStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+    class PureP pureStyle
+```
+
+The second disturbance at t=5s reveals more about each controller's recovery capabilities. The PID controller achieves the most complete recovery, while the Pure P controller exhibits significant steady-state error.
+
+#### 5. Recovery Time Comparison
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart LR
+    subgraph RecoveryTime["Time to Recover Within 95% of Target"]
+        direction TB
+        MPC["MPC: 2.0s"]
+        PID["PID: 2.5s"]
+        LQR["LQR: 2.2s"]
+        Fuzzy["Fuzzy Logic: 3.0s"]
+        PureP["Pure P: Never fully recovers"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pureStyle fill:#795548,stroke:#3e2723,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class MPC mpcStyle
+    class PID pidStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+    class PureP pureStyle
+```
+
+This diagram shows how quickly each controller returns to within 95% of the target position after a disturbance. MPC has the fastest recovery time, while Pure P never fully recovers.
+
+#### 6. Overall Disturbance Rejection Capability
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph OverallRanking["Disturbance Rejection Ranking"]
+        direction TB
+        Rank1["1. PID Controller:<br>Best combination of<br>recovery completeness<br>and stability"]
+        Rank2["2. MPC:<br>Fast recovery with<br>minimal oscillation"]
+        Rank3["3. LQR:<br>Good balance of<br>stability and recovery"]
+        Rank4["4. Fuzzy Logic:<br>Moderate recovery<br>with residual error"]
+        Rank5["5. Pure P:<br>Poor recovery with<br>permanent offset"]
+    end
+    
+    classDef rankStyle fill:#673ab7,stroke:#311b92,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Rank1,Rank2,Rank3,Rank4,Rank5 rankStyle
+```
+
+**Position Values for Each Controller (meters):**
+
+| Time | Target | MPC | PID | LQR | Fuzzy | Pure P |
+|------|--------|-----|-----|-----|-------|--------|
+| 0s   | 1.0    | 1.0 | 1.0 | 1.0 | 1.0   | 1.0    |
+| 2s   | 1.0    | 0.8 | 0.7 | 0.75| 0.85  | 0.75   |
+| 3s   | 1.0    | 0.92| 0.85| 0.85| 0.88  | 0.82   |
+| 4s   | 1.0    | 0.98| 1.05| 0.95| 0.92  | 0.86   |
+| 5s   | 1.0    | 0.85| 0.8 | 0.8 | 0.75  | 0.7    |
+| 6s   | 1.0    | 0.92| 0.9 | 0.88| 0.82  | 0.75   |
+| 7s   | 1.0    | 0.97| 0.97| 0.94| 0.87  | 0.78   |
+| 8s   | 1.0    | 0.99| 1.0 | 0.98| 0.91  | 0.8    |
+
+**Implications for Basketball Tracking Robot:**
+
+For a basketball tracking robot that might encounter disturbances (like bumping into players or the ball being knocked away):
+
+1. **PID Controller** offers the best overall disturbance rejection, recovering completely with acceptable oscillation
+2. **MPC** provides fast recovery with minimal oscillation but at higher computational cost
+3. **LQR** gives good balanced performance with predictable behavior
+4. **Fuzzy Logic** may be suitable when some position error is acceptable
+5. **Pure P Controller** should be avoided when disturbance rejection is important
+
+The integral component (I) of the PID controller is especially important for eliminating steady-state error after disturbances, which explains why the Pure P controller (lacking this component) performs poorly in this test.
 
 <em>Response to external disturbances at t=2s and t=5s</em>
 
@@ -1490,29 +2009,140 @@ The effectiveness of a PID controller depends heavily on tuning the Kp, Ki, and 
 
 #### 3.2.2 PID Effects Visualization
 
-The following diagram illustrates how each PID component contributes to the control response:
+Understanding how each PID component (Proportional, Integral, Derivative) affects system response is crucial for effective tuning. Let's visualize these effects with simple diagrams.
+
+### 1. The Reference Input
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#fff", "primaryBorderColor": "#1976d2", "lineColor": "#1976d2", "tertiaryColor": "#f8f9fa"}}}%%
-xychart-beta
-    title "PID Component Effects on System Response"
-    x-axis "Time (s)" [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    y-axis "Position (normalized)" [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
-    line [0, 0, 0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0] "Reference"
-    line [0, 0, 0.5, 1.1, 0.9, 1.05, 0.95, 1.0, 1.0] "High P" 
-    line [0, 0, 0.4, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0] "Balanced"
-    line [0, 0, 0.3, 0.85, 0.9, 0.95, 1.0, 1.0, 1.0] "High I"
-    line [0, 0, 0.45, 0.95, 0.98, 1.0, 1.0, 1.0, 1.0] "High D"
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph ReferenceInput["The Reference Input (Target)"]
+        direction TB
+        Description["Step change at t=2s<br>Target value changes from 0 to 1.0"]
+        Ideal["Ideal response would<br>immediately match this change"]
+    end
+    
+    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Description,Ideal targetStyle
 ```
 
-<div style="font-style: italic; margin-top: -10px;">
-Comparison of different controller types: Setpoint (Target), P-only (Steady-State Error), PI Control (No Damping), PID Control (Balanced), and Step Change Input.
-</div>
+The reference input is a step change at t=2s, where the target value instantly changes from 0 to 1.0. This helps us visualize how different PID configurations respond to sudden changes.
 
-**Component Effects:**
-- **P (Proportional)**: Provides quick initial response but may cause oscillation
-- **I (Integral)**: Eliminates steady-state error but can cause overshoot
-- **D (Derivative)**: Reduces overshoot and oscillation, providing damping
+### 2. High Proportional Gain (P) Effect
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph HighP["High Proportional Gain (P)"]
+        direction TB
+        Characteristics["Key Characteristics:<br>• Fast initial response<br>• Significant overshoot<br>• Oscillation around target"]
+        Values["Response Values:<br>t=2s: 0.0<br>t=3s: 0.5 (fast rise)<br>t=4s: 1.1 (overshoot)<br>t=5s: 0.9 (undershoot)<br>t=6s: 1.05 (oscillation)"]
+    end
+    
+    classDef pStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Characteristics,Values pStyle
+```
+
+With high proportional gain, the system responds quickly but tends to overshoot and oscillate. Think of it like a car with an aggressive accelerator - it responds quickly but can easily overshoot the target.
+
+### 3. Balanced PID Configuration
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph Balanced["Balanced PID Configuration"]
+        direction TB
+        Characteristics["Key Characteristics:<br>• Moderate rise time<br>• Minimal overshoot<br>• Quick settling"]
+        Values["Response Values:<br>t=2s: 0.0<br>t=3s: 0.4 (moderate rise)<br>t=4s: 0.9 (approaching target)<br>t=5s: 1.0 (settled)<br>t=6s: 1.0 (stable)"]
+    end
+    
+    classDef balancedStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Characteristics,Values balancedStyle
+```
+
+A balanced PID configuration offers the best compromise between response speed and stability. It rises at a moderate rate, has minimal overshoot, and settles quickly at the target value.
+
+### 4. High Integral Gain (I) Effect
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph HighI["High Integral Gain (I)"]
+        direction TB
+        Characteristics["Key Characteristics:<br>• Slower initial response<br>• Gradual approach to target<br>• No steady-state error<br>• Potential for integral windup"]
+        Values["Response Values:<br>t=2s: 0.0<br>t=3s: 0.3 (slower rise)<br>t=4s: 0.85 (still rising)<br>t=5s: 0.9 (approaching)<br>t=7s: 1.0 (eventually reaches target)"]
+    end
+    
+    classDef iStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Characteristics,Values iStyle
+```
+
+With high integral gain, the system is slower to respond initially but eventually eliminates any steady-state error. It's like a persistent correction that keeps building until the target is reached exactly.
+
+### 5. High Derivative Gain (D) Effect
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph HighD["High Derivative Gain (D)"]
+        direction TB
+        Characteristics["Key Characteristics:<br>• Moderate rise time<br>• Reduced overshoot<br>• Fast settling<br>• Dampens oscillations"]
+        Values["Response Values:<br>t=2s: 0.0<br>t=3s: 0.45 (moderate rise)<br>t=4s: 0.95 (approaches target)<br>t=5s: 0.98 (minimal overshoot)<br>t=6s: 1.0 (settled)"]
+    end
+    
+    classDef dStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Characteristics,Values dStyle
+```
+
+High derivative gain acts like a brake, reducing overshoot and dampening oscillations. It predicts where the system is heading based on the rate of change and applies corrective action before overshoot occurs.
+
+### 6. Comparison of PID Component Effects
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph Comparison["PID Component Effects Summary"]
+        direction LR
+        P["P (Proportional):<br>• ↑ Speed<br>• ↑ Overshoot<br>• ↑ Oscillation"]
+        I["I (Integral):<br>• ↓ Steady-state error<br>• ↑ Settling time<br>• ↑ Overshoot"]
+        D["D (Derivative):<br>• ↓ Overshoot<br>• ↓ Oscillation<br>• ↑ Stability"]
+    end
+    
+    classDef pStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef iStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef dStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class P pStyle
+    class I iStyle
+    class D dStyle
+```
+
+**Response Value Comparison Table:**
+
+| Time | Reference | High P | Balanced PID | High I | High D |
+|------|-----------|--------|--------------|--------|--------|
+| 0s   | 0.0       | 0.0    | 0.0          | 0.0    | 0.0    |
+| 2s   | 1.0       | 0.0    | 0.0          | 0.0    | 0.0    |
+| 3s   | 1.0       | 0.5    | 0.4          | 0.3    | 0.45   |
+| 4s   | 1.0       | 1.1    | 0.9          | 0.85   | 0.95   |
+| 5s   | 1.0       | 0.9    | 1.0          | 0.9    | 0.98   |
+| 6s   | 1.0       | 1.05   | 1.0          | 0.95   | 1.0    |
+| 7s   | 1.0       | 0.95   | 1.0          | 1.0    | 1.0    |
+| 8s   | 1.0       | 1.0    | 1.0          | 1.0    | 1.0    |
+
+**Practical Tuning Guidelines:**
+
+For a basketball tracking robot, these PID effects translate to practical behaviors:
+
+1. **Increasing P gain**: Makes the robot respond more quickly to ball movement, but may cause overshooting (robot moves past the ball)
+
+2. **Increasing I gain**: Ensures the robot eventually aligns precisely with the ball, eliminating any persistent offset
+
+3. **Increasing D gain**: Reduces overshoot and oscillation, making tracking smoother when the ball changes direction
+
+4. **Balanced PID**: Provides the best overall tracking performance with quick response and minimal overshoot
+
+The ideal configuration for most tracking applications combines moderate P gain for responsiveness, small I gain to eliminate steady-state error, and sufficient D gain to prevent overshoot and oscillation.
 
 **Component Effects:**
 - **P (Proportional)**: Provides quick initial response but may cause oscillation
@@ -1832,23 +2462,135 @@ A critical enhancement in our PID implementation is specialized handling of zero
 
 #### 3.3.1 The Zero-Crossing Problem
 
-Zero-crossings are challenging for traditional PID controllers because:
+Zero-crossings present a challenging scenario for traditional PID controllers because:
 - They represent the moment when the system passes the target value
 - The controller needs to switch from acceleration to deceleration (or vice versa)
 - Without special handling, the system often overshoots and oscillates around the target
 
+### Understanding Zero-Crossing in PID Control
+
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff", "primaryBorderColor": "#1976d2", "secondaryColor": "#ff5722", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff5722", "tertiaryColor": "#f8f9fa", "lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000"}}}%%
-xychart-beta
-    title "The Zero-Crossing Problem"
-    x-axis "Time (seconds)" [0, 2, 4, 6, 8, 10, 12, 14, 16]
-    y-axis "Error (distance from target)" [-1, -0.5, 0, 0.5, 1]
-    line [0, 0, 0.8, 0.4, 0, -0.4, -0.8, -0.5, 0, 0.5, 0.3, 0, -0.3, -0.1, 0, 0.1, 0] "System Response"
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff"}}}%%
+flowchart TB
+    subgraph ZeroCrossing["What is a Zero-Crossing?"]
+        direction TB
+        Definition["Zero-crossing occurs when<br>error changes sign (+ to - or - to +)"]
+        Example["Example: Robot moves from<br>being in front of target to<br>being behind target"]
+        Problem["Without special handling,<br>controller's momentum carries it<br>past the target repeatedly"]
+    end
+    
+    classDef zcStyle fill:#1976d2,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Example,Problem zcStyle
 ```
 
-<div style="font-style: italic; margin-top: -10px;">
-Target position is at zero error. The system oscillates around the target, crossing zero multiple times with gradually decreasing amplitude.
-</div>
+### The Oscillation Pattern
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph OscillationPattern["System Oscillation Around Target"]
+        direction TB
+        First["First Overshoot:<br>Error reaches +0.8<br>(t=2s)"]
+        Second["First Zero-Crossing:<br>Error passes through 0<br>(t=4s)"]
+        Third["Second Overshoot:<br>Error reaches -0.8<br>(t=6s)"]
+        Fourth["Second Zero-Crossing:<br>Error passes through 0<br>(t=8s)"]
+        Continuing["Oscillation continues<br>with decreasing amplitude"]
+    end
+    
+    classDef oscStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class First,Second,Third,Fourth,Continuing oscStyle
+```
+
+### Visualizing the System Response
+
+```
+Error
+ +1.0 |
+      |
+ +0.8 |    *
+      |
+ +0.5 |         *           *
+      |                         *
+ +0.0 |--*----------*-----------*-----------*-----> Time
+      |         *           *           *
+ -0.5 |              *
+      |
+ -0.8 |         *
+      |
+ -1.0 |
+       0   2   4   6   8  10  12  14  16
+```
+
+**Zero-Crossings Occur at:**
+- t=4s (positive to negative)
+- t=8s (negative to positive)
+- t=12s (positive to negative)
+- t=16s (negative to positive)
+
+### What Happens at Each Zero-Crossing?
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
+flowchart TB
+    subgraph ZeroCrossingEvents["Events at Each Zero-Crossing"]
+        direction LR
+        
+        Before["Before Zero-Crossing:<br>• Error is decreasing<br>• Controller is applying corrective force<br>• System has momentum"]
+        
+        At["At Zero-Crossing:<br>• Error momentarily equals zero<br>• P term becomes zero<br>• I term maintains previous accumulation<br>• D term is strongly active"]
+        
+        After["After Zero-Crossing:<br>• Error changes sign<br>• P term reverses direction<br>• System needs to overcome momentum<br>• Overshoot occurs"]
+        
+        Before --> At --> After
+    end
+    
+    classDef eventStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Before,At,After eventStyle
+```
+
+### The Problem in Numbers
+
+| Time (s) | Error Value | Description | Problem |
+|----------|-------------|-------------|---------|
+| 0        | 0.0         | Starting at target | - |
+| 2        | +0.8        | First overshoot | System moves away from target |
+| 4        | 0.0         | First zero-crossing | Momentum carries system through target |
+| 6        | -0.8        | Second overshoot | System overshoots in opposite direction |
+| 8        | 0.0         | Second zero-crossing | Momentum again carries system through |
+| 10       | +0.5        | Third overshoot | Oscillation continues |
+| 12       | 0.0         | Third zero-crossing | Pattern continues |
+| 14       | -0.3        | Fourth overshoot | Amplitude decreasing |
+| 16       | 0.0         | Fourth zero-crossing | Still oscillating |
+
+### Why Standard PID Struggles with Zero-Crossings
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph StandardPIDIssues["PID Controller Issues at Zero-Crossing"]
+        direction TB
+        
+        P["Proportional Term Issue:<br>P changes direction abruptly<br>but can't overcome momentum"]
+        
+        I["Integral Term Issue:<br>I has accumulated history<br>that doesn't immediately reset"]
+        
+        D["Derivative Term Issue:<br>D may cause sudden spike<br>when error changes sign"]
+    end
+    
+    classDef issueStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class P,I,D issueStyle
+```
+
+### Solution: Zero-Crossing Handling
+
+To address the zero-crossing problem in our basketball tracking robot, we implemented special handling that:
+
+1. **Detects sign changes** in the error value
+2. **Reduces the integral term** significantly at zero-crossings (by 80-95%)
+3. **Applies extra damping** through the derivative term during zero-crossings
+4. **Tracks oscillation frequency** to adapt control parameters
+
+This specialized handling results in much smoother tracking with minimal oscillation around the target position, improving the robot's ability to track the basketball accurately.
 
 #### 3.3.2 Zero-Crossing Handling
 
@@ -2892,19 +3634,129 @@ def _smoothstep(self, x):
     return x * x * (3.0 - 2.0 * x)
 ```
 
-This function transforms a linear blend factor into a smooth S-curve, creating natural acceleration and deceleration:
+This function transforms a linear blend factor into a smooth S-curve, creating natural acceleration and deceleration.
+
+### What is a Smoothstep Function?
 
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff", "primaryBorderColor": "#2196f3", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#f8f9fa"}}}%%
-xychart-beta
-    title "Smoothstep vs Linear Blending"
-    x-axis "Time (normalized)" [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-    y-axis "Blend Factor (0-1)" [0, 0.2, 0.4, 0.6, 0.8, 1.0]
-    line [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0] "Linear"
-    line [0, 0.03, 0.1, 0.21, 0.35, 0.5, 0.65, 0.79, 0.9, 0.97, 1.0] "Smoothstep"
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph SmoothstepExplained["Smoothstep Function Explained"]
+        direction TB
+        Purpose["Purpose:<br>Transforms linear input into<br>smooth S-curve output"]
+        Formula["Formula:<br>f(x) = 3x² - 2x³<br>for x in range [0,1]"]
+        Benefits["Benefits:<br>• Gradual start (ease-in)<br>• Gradual end (ease-out)<br>• Smooth acceleration/deceleration"]
+    end
+    
+    classDef smoothStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Purpose,Formula,Benefits smoothStyle
 ```
 
-<div style="font-style: italic; margin-bottom: 10px; margin-top: -10px;">Linear blend (constant rate) vs. Smoothstep (gradual start/end) transition</div>
+### Linear vs. Smoothstep Transition: Key Points
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph Comparison["Transition Comparison"]
+        direction LR
+        Linear["Linear Transition:<br>• Constant rate of change<br>• Abrupt start and stop<br>• Mechanical-looking motion"]
+        Smoothstep["Smoothstep Transition:<br>• Variable rate of change<br>• Gentle start and finish<br>• Natural-looking motion"]
+    end
+    
+    classDef linearStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef smoothstepStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class Linear linearStyle
+    class Smoothstep smoothstepStyle
+```
+
+### Numerical Comparison of Values
+
+Here's how the linear and smoothstep functions compare at different input values:
+
+| Input (x) | Linear Output | Smoothstep Output | Difference |
+|-----------|---------------|-------------------|------------|
+| 0.0       | 0.00          | 0.00              | 0.00       |
+| 0.1       | 0.10          | 0.03              | -0.07      |
+| 0.2       | 0.20          | 0.10              | -0.10      |
+| 0.3       | 0.30          | 0.21              | -0.09      |
+| 0.4       | 0.40          | 0.35              | -0.05      |
+| 0.5       | 0.50          | 0.50              | 0.00       |
+| 0.6       | 0.60          | 0.65              | +0.05      |
+| 0.7       | 0.70          | 0.79              | +0.09      |
+| 0.8       | 0.80          | 0.90              | +0.10      |
+| 0.9       | 0.90          | 0.97              | +0.07      |
+| 1.0       | 1.00          | 1.00              | 0.00       |
+
+### Visual Representation of Curves
+
+```
+Blend
+Factor
+1.0 |                                   *-*
+    |                               *--'    Linear: ----
+0.8 |                           *--'        Smoothstep: ****
+    |                       *--'
+0.6 |                    *-'
+    |                 *-'
+0.4 |              *-'
+    |           *-'
+0.2 |       *--'
+    |   *--'
+0.0 *--'
+    +---+---+---+---+---+---+---+---+---+---+
+      0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0
+                       Time (normalized)
+```
+
+### Application in Strategy Blending
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#673ab7", "primaryTextColor": "#ffffff"}}}%%
+flowchart TB
+    subgraph StrategyBlending["Using Smoothstep in Strategy Blending"]
+        direction TB
+        
+        Input["Input: Linear time progress<br>(0.0 to 1.0)"]
+        Process["Process: Apply smoothstep function<br>to transform linear progress"]
+        Output["Output: S-curve blend factor<br>for smoother strategy transitions"]
+        
+        Example["Example:<br>When transitioning from forward<br>to rotation strategy, motion will<br>start and end smoothly rather than abruptly"]
+        
+        Input --> Process --> Output --> Example
+    end
+    
+    classDef blendingStyle fill:#673ab7,stroke:#311b92,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Input,Process,Output,Example blendingStyle
+```
+
+### Real-World Impact on Robot Movement
+
+The smoothstep function has a significant impact on how the basketball tracking robot moves:
+
+1. **Without Smoothstep**: Strategy transitions would look mechanical and jerky. When switching from moving forward to rotating, the robot would abruptly decelerate one motion and accelerate the other.
+
+2. **With Smoothstep**: Transitions appear natural and fluid. The robot gently eases out of forward motion while simultaneously easing into rotation, creating smooth, natural-looking movement.
+
+This small mathematical function significantly improves the perceived quality of motion, making the robot's tracking behavior more predictable and aesthetically pleasing.
+
+Here's how the smoothstep function works in the blending process:
+
+```python
+def get_current_strategy(self, current_time):
+    """Get the current strategy, which might be a blend of two strategies."""
+    if not self.blending_active:
+        return self.current_strategy
+        
+    # Calculate blend factor
+    elapsed_time = current_time - self.blend_start_time
+    linear_blend = min(1.0, elapsed_time / self.blend_duration)
+    
+    # Transform linear blend to smooth blend using smoothstep
+    blend_factor = self._smoothstep(linear_blend)
+    
+    # [... blend strategy properties using blend_factor ...]
+```
 
 #### 6.3.5 Direction Change Adaptation
 
