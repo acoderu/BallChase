@@ -835,49 +835,55 @@ def analyze_step_response(time_values, response_values, setpoint=1.0):
     return results
 ```
 
-#### 2. Frequency Response Analysis
+## Frequency Response Analysis: Understanding Your System's Behavior
 
-For more complex issues, analyzing the frequency response can reveal deeper insights:
+### What Is Frequency Response Analysis?
 
-1. **Generate a Frequency Sweep**: Apply sinusoidal inputs of varying frequencies
-2. **Plot Bode Diagrams**: Visualize magnitude and phase across frequencies
-3. **Identify Resonances**: Look for peaks in magnitude response
-4. **Check Phase Margins**: Ensure sufficient phase margin for stability (>45°)
+Frequency response analysis examines how your control system responds to inputs at different frequencies. It reveals important characteristics about system stability and responsiveness that aren't obvious from just looking at step responses.
 
-```python
-# Example of measuring frequency response using sine waves
-def measure_frequency_response(controller, frequencies, amplitude=0.5, cycles=3):
-    """Measure system response to different frequency sine waves."""
-    results = []
-    
-    for freq in frequencies:
-        # Generate sine wave input
-        period = 1.0 / freq
-        total_time = cycles * period
-        time_points = np.linspace(0, total_time, int(total_time / 0.01))
-        inputs = amplitude * np.sin(2 * np.pi * freq * time_points)
-        
-        # Measure system response
-        response = []
-        for input_val in inputs:
-            output = controller.compute(setpoint=input_val, measured=current_position)
-            response.append(output)
-            # Wait for system to respond
-            time.sleep(0.01)
-            
-        # Calculate gain and phase
-        input_fft = np.fft.fft(inputs)
-        output_fft = np.fft.fft(response)
-        
-        # Find magnitude at the input frequency
-        idx = np.argmax(np.abs(input_fft))
-        gain = np.abs(output_fft[idx]) / np.abs(input_fft[idx])
-        phase = np.angle(output_fft[idx]) - np.angle(input_fft[idx])
-        
-        results.append((freq, gain, phase))
-    
-    return results
-```
+### Why Is This Important?
+
+This analysis provides several key insights:
+
+- **Identifies Resonance Points**: Shows where your system might amplify inputs, potentially causing oscillations
+- **Reveals Response Limits**: Determines how fast your system can accurately respond to changes
+- **Assesses Stability**: Measures how close your system is to becoming unstable
+- **Guides Controller Tuning**: Provides clear metrics for adjusting PID parameters effectively
+
+### How It Works
+
+1. **Apply Sine Wave Inputs**: Test the system with smooth sinusoidal commands at various frequencies (from slow to fast)
+
+2. **Measure Response Characteristics**: For each frequency, measure:
+   - **Gain**: The ratio of output amplitude to input amplitude
+   - **Phase Shift**: The time delay between input and output (expressed in degrees)
+
+3. **Create Bode Plots**: Graph both gain and phase shift versus frequency to visualize the system's response patterns
+
+4. **Analyze Key Indicators**:
+   - **Resonance**: Frequencies where gain increases (peaks in the gain plot)
+   - **Bandwidth**: The frequency range where the system responds effectively
+   - **Phase Margin**: How much stability buffer the system has (higher is better)
+
+### Technical Implementation
+
+You can write code to:
+
+1. Generating sine waves at different frequencies as test inputs
+2. Recording how the system responds to each input frequency
+3. Using Fourier transforms to calculate precise gain and phase values
+4. Building a complete frequency response profile from these measurements
+
+### Interpreting The Results
+
+From the frequency response data, you can determine:
+
+- Frequencies where gain exceeds 1.0, indicating potential instability
+- The phase margin, which should typically be at least 45° for good stability
+- The system's bandwidth, which sets the limit for tracking speed
+- Any resonant frequencies that might require additional damping
+
+For a basketball tracking robot, this analysis tells you whether your controller can track quick movements and direction changes without oscillating or lagging too far behind. It helps determine the optimal PID settings that balance responsiveness with stability.
 
 #### 3. Disturbance Response Testing
 
@@ -1364,21 +1370,32 @@ This diagram shows how quickly each controller returns to within 95% of the targ
 
 #### 6. Overall Disturbance Rejection Capability
 
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
-flowchart TB
-    subgraph OverallRanking["Disturbance Rejection Ranking"]
-        direction TB
-        Rank1["1. PID Controller:<br>Best combination of<br>recovery completeness<br>and stability"]
-        Rank2["2. MPC:<br>Fast recovery with<br>minimal oscillation"]
-        Rank3["3. LQR:<br>Good balance of<br>stability and recovery"]
-        Rank4["4. Fuzzy Logic:<br>Moderate recovery<br>with residual error"]
-        Rank5["5. Pure P:<br>Poor recovery with<br>permanent offset"]
-    end
-    
-    classDef rankStyle fill:#673ab7,stroke:#311b92,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Rank1,Rank2,Rank3,Rank4,Rank5 rankStyle
-```
+### Recovery Time Comparison
+
+The following diagram compares how quickly different controllers recover from disturbances:
+
+**Controller Recovery Performance:**
+
+| Controller Type | Recovery Time | Key Characteristics |
+|-----------------|---------------|---------------------|
+| **Model Predictive Control (MPC)** | 2.0 seconds | Fastest recovery due to predictive capabilities |
+| **Linear Quadratic Regulator (LQR)** | 2.2 seconds | Quick recovery with optimized control effort |
+| **PID Controller** | 2.5 seconds | Solid recovery with some oscillation |
+| **Fuzzy Logic Controller** | 3.0 seconds | Slower recovery but smooth approach |
+| **Pure P Controller** | Never fully recovers | Maintains permanent offset from target |
+
+The recovery time measures how long it takes for each controller to return within 95% of the target position after experiencing a disturbance. This is a critical metric for robots that need to maintain precise positioning despite external forces.
+
+For a basketball tracking robot, faster recovery times translate to more reliable tracking when the robot encounters obstacles or when the ball trajectory changes unexpectedly.
+
+
+PID Controller - Ranked first for its excellent combination of recovery completeness and stability
+Model Predictive Control (MPC) - Second place with fast recovery and minimal oscillation
+Linear Quadratic Regulator (LQR) - Third place with a good balance of stability and recovery
+Fuzzy Logic - Fourth place with moderate recovery but some residual error
+Pure P Controller - Ranked last due to poor recovery with permanent offset from the target
+
+Each controller is represented in a purple box with white text, ordered vertically to show their ranking from best (top) to worst (bottom).
 
 **Position Values for Each Controller (meters):**
 
