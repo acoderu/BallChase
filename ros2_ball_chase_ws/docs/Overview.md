@@ -1,6 +1,6 @@
 <!-- Badges -->
 <p align="center">
-  <img src="https://img.shields.io/badge/ROS2-Foxglove-blue?logo=ros&logoColor=white" alt="ROS2 Badge"/>
+  <img src="https://img.shields.io/badge/ROS2-Humble-blue?logo=ros&logoColor=white" alt="ROS2 Badge"/>
   <img src="https://img.shields.io/badge/Raspberry%20Pi%205-Ready-brightgreen" alt="Raspberry Pi Badge"/>
   <img src="https://img.shields.io/badge/Linux-Real%20Time%20Kernel-yellow?logo=linux&logoColor=white" alt="Linux RT Badge"/>
   <img src="https://img.shields.io/badge/C++-17-blue?logo=c%2B%2B&logoColor=white" alt="C++ Badge"/>
@@ -22,67 +22,30 @@
 3. [Introduction](#introduction)
 4. [Part I: Computer Systems Fundamentals for Robotics](#part-i)
    1. [OS Scheduler Mechanics: From General-Purpose to Real-Time](#os-scheduler-mechanics)
-      1. [General-Purpose OS Schedulers: The Fairness Problem](#general-purpose-os-schedulers)
-      2. [Real-Time Schedulers: Predictability Over Fairness](#real-time-schedulers)
-      3. [Implementing Real-Time Scheduling for Robotics](#implementing-rt-scheduling)
    2. [The Hidden Costs of Context Switching](#hidden-costs-context-switching)
-      1. [Memory Hierarchy and Cache Effects: An Intuitive Guide](#memory-hierarchy)
-      2. [Real-World Quantification](#real-world-quantification)
    3. [Multi-Core Architecture and Core Dedication](#multi-core-architecture)
-      1. [CPU Core Allocation Theory](#cpu-core-allocation)
-      2. [Interrupt Handling Architecture](#interrupt-handling)
 5. [Part II: System-Level Optimizations](#part-ii)
    1. [Kernel Preemption Models In-Depth](#kernel-preemption)
-      1. [Kernel Preemption Architecture](#kernel-preemption-architecture)
-      2. [Priority Inversion Problem and Solutions](#priority-inversion)
    2. [Memory Management Architecture for Determinism](#memory-management)
-      1. [Memory Hierarchy and Determinism Challenges](#memory-hierarchy-determinism)
-      2. [Implementing Deterministic Memory Management](#deterministic-memory)
    3. [CPU Frequency, Thermal Management, and Microarchitectural Considerations](#cpu-thermal)
-      1. [Dynamic Frequency/Voltage Scaling Effects](#dvfs-effects)
-      2. [Thermal Throttling: The Silent Performance Killer](#thermal-throttling)
 6. [Part III: ROS2 Architecture and Communication Framework](#part-iii)
    1. [ROS2 Framework Architecture: Beyond Just Middleware](#ros2-framework)
-      1. [ROS2 Architectural Overview: A Complete Robotics Platform](#ros2-architectural-overview)
-      2. [ROS2 as a Comprehensive Robotics Framework](#ros2-comprehensive-framework)
-      3. [Real-World Examples: What ROS2 Handles vs. What You Build](#ros2-real-world-examples)
-      4. [Key Challenges in Learning and Using ROS2](#ros2-key-challenges)
-      5. [ROS2 Communication Model: DDS and Alternatives](#ros2-communication-model)
-      6. [Conclusion: ROS2 as an Enabling Framework for Real-Time Robotics](#ros2-conclusion)
    2. [Container Networking Architecture](#container-networking)
-      1. [Container Network Models and Performance Impact](#container-network-models)
-      2. [Multicast and Discovery Optimization](#multicast-discovery)
 7. [Part IV: Process Prioritization and Scheduling for Robotics Systems](#part-iv)
    1. [Process Prioritization in Real-Time Systems: Why It Matters](#process-prioritization)
-      1. [The Critical Role of Prioritization in Real-Time Systems](#prioritization-critical-role)
-      2. [Starvation Problems and Solutions](#starvation-problems)
-      3. [Priority Assignment Methodology for Robotics](#priority-assignment)
-      4. [Dynamic Priority Adjustment and Adaptation](#dynamic-priority)
-      5. [Measuring and Validating Priority Effectiveness](#measuring-priority)
    2. [CPU Affinity and Cache Coherency](#cpu-affinity)
-      1. [Processor Affinity: Keeping Processes at Home](#processor-affinity)
-      2. [NUMA and Multi-Core Memory Architecture: The Distance Penalty](#numa-architecture)
 8. [Part V: Application-Specific Architecture for Real-Time Robotics](#part-v)
    1. [Computer Vision Pipeline Architecture for Real-Time Robotics](#vision-pipeline)
-      1. [Understanding Modern Computer Vision Pipelines: From Pixels to Decisions](#vision-pipelines)
-      2. [YOLO Architecture and Real-Time Considerations: Deep Dive](#yolo-architecture)
-      3. [Vision Pipeline Optimization Strategies for Real-Time Robotics](#vision-optimization)
-      4. [Balancing Vision Processing with Control Loops: The Integration Challenge](#vision-control-balance)
-      5. [Real-World Vision Architecture for Ball Tracking Robot](#vision-ball-tracking)
    2. [Sensor Fusion and State Estimation Architecture](#sensor-fusion)
-      1. [Understanding Sensor Fusion: Why No Single Sensor Is Enough](#sensor-fusion-understanding)
-      2. [Multi-Rate Sensor Fusion: Handling Different Sensor Timescales](#multi-rate-sensor-fusion)
 9. [Part VI: Verification and Performance Analysis](#part-vi)
    1. [Latency Testing and Analysis](#latency-testing)
-      1. [Cyclictest and RT Testing Framework](#cyclictest)
-      2. [Tracing and Performance Analysis](#tracing-performance)
 10. [Conclusion: Holistic System Design for Real-Time Robotics](#conclusion)
 11. [Next Steps in the Ball-Tracking Robot Curriculum](#next-steps)
 
 <a name="course-overview"></a>
 ## 1. Course Overview: The Ball-Tracking Robot Curriculum
 
-Welcome to the first module in our comprehensive curriculum on real-time robotics using ROS2. This course uses a functional ball-tracking robot as a learning platform to explore various aspects of modern robotics systems. Each module builds upon existing working code, allowing you to focus on understanding concepts and experimenting with algorithmic modifications rather than building systems from scratch.
+Welcome to the first module in our comprehensive curriculum on real-time robotics using ROS2 Humble. This course uses a functional ball-tracking robot as a learning platform to explore various aspects of modern robotics systems. Each module builds upon existing working code, allowing you to focus on understanding concepts and experimenting with algorithmic modifications rather than building systems from scratch.
 
 <a name="curriculum-structure"></a>
 ### 1.1 Curriculum Structure
@@ -90,7 +53,7 @@ Welcome to the first module in our comprehensive curriculum on real-time robotic
 This document is the foundational module that explores the computer systems engineering principles necessary for real-time robotics. Subsequent modules will dive deeper into specialized topics:
 
 1. **Core Systems Engineering (This Document)**: Operating system optimization, real-time principles, and system architecture
-2. **YOLO Computer Vision**: Deep learning object detection and real-time performance optimization
+2. **YOLO Computer Vision**: Deep learning object detection and real-time performance optimization with YOLOv12
 3. **LiDAR Sensing and Processing**: Point cloud processing, object detection, and environment mapping
 4. **3D Depth Camera Integration**: Structured light and time-of-flight sensing technologies
 5. **Sensor Fusion Techniques**: Multi-sensor integration, Kalman filtering, and state estimation
@@ -135,7 +98,10 @@ The basketball tracking robot is an autonomous system designed to track and foll
 #### Sensor System
 The robot employs a multi-sensor approach combining:
 
-- **YOLO-based camera detection** for 2D visual tracking
+- **YOLOv12-based camera detection** for 2D visual tracking
+  - Optimized for edge devices with reduced parameter count
+  - Efficient 320x320 input resolution for real-time processing on Raspberry Pi 5
+  - Capable of 200ms inference time with medium precision settings
 - **LiDAR** for precise distance and position measurements
 - **3D depth camera** for enhanced spatial awareness
 
@@ -177,7 +143,8 @@ A comprehensive monitoring system ensures reliability:
 - **Adaptive Performance**: The system adjusts processing rates and computational complexity based on available resources.
 - **Resilience**: Implements graceful degradation under challenging conditions with sensor gap tolerance.
 - **Motion Intelligence**: Adapts tracking parameters based on ball movement characteristics.
-- **Resource Optimization**: Employs memory-efficient data structures and prioritized processing.
+- **Resource Optimization**: Employs memory-efficient data structures, RAM disks for temporary storage, and prioritized processing.
+- **Memory Optimizations**: Utilizes RAM disks for logs and temporary files, huge pages for efficient memory access, and tuned kernel memory parameters to minimize paging and optimize caching behavior.
 
 The entire system is designed for real-time operation on resource-constrained hardware while maintaining reliable tracking performance.
 
@@ -187,7 +154,7 @@ The entire system is designed for real-time operation on resource-constrained ha
 ```mermaid
 flowchart TD
     subgraph Sensors["Sensor Nodes"]
-        YOLO["YOLO 2D Detection Node
+        YOLO["YOLO v12 2D Detection Node
         - Processes camera images with optimized ML model
         - Detects basketball position in 2D image space
         - Publishes coordinates and bounding box dimensions
@@ -303,7 +270,7 @@ flowchart TD
         - Implements adaptive diagnostics frequency"]
         
         LOG["Diagnostic Logger
-        - Maintains structured log files
+        - Maintains structured log files in RAM disk
         - Implements log rotation and management
         - Provides configurable verbosity levels
         - Generates periodic system summaries"]
@@ -370,7 +337,7 @@ flowchart TD
 <a name="introduction"></a>
 ## 3. Introduction
 
-This document explores the fundamental computer science and engineering principles behind optimizing operating systems for real-time robotics applications. Using a Raspberry Pi running ROS2 as our case study, we'll examine how operating system design choices impact the deterministic behavior required for robotics. By understanding these principles, you'll gain insight into the critical relationship between system-level software architecture and the physical constraints of robotics applications.
+This document explores the fundamental computer science and engineering principles behind optimizing operating systems for real-time robotics applications. Using a Raspberry Pi 5 running ROS2 Humble as our case study, we'll examine how operating system design choices impact the deterministic behavior required for robotics. By understanding these principles, you'll gain insight into the critical relationship between system-level software architecture and the physical constraints of robotics applications.
 
 ```
 ┌─────────────────────────────────── Robotics System Architecture ───────────────────────────────────┐
@@ -401,7 +368,15 @@ This document explores the fundamental computer science and engineering principl
 
 Real-time robotics represents a unique intersection of digital computing and physical systems, where timing is as crucial as logical correctness. Unlike traditional software systems that prioritize overall throughput or average performance, robotics systems must guarantee consistent timing to interact safely and effectively with the physical world.
 
-This document provides a comprehensive exploration of the systems engineering principles that enable deterministic, real-time performance on resource-constrained platforms like the Raspberry Pi. We'll move systematically from fundamental concepts to advanced optimizations, with a focus on practical implementation.
+This document provides a comprehensive exploration of the systems engineering principles that enable deterministic, real-time performance on resource-constrained platforms like the Raspberry Pi 5. We'll move systematically from fundamental concepts to advanced optimizations, with a focus on practical implementation.
+
+To optimize our robotics platform, we'll employ several key strategies:
+
+1. **Real-time kernel configuration** to minimize scheduling latency
+2. **Memory optimization techniques** including RAM disks, huge pages, and kernel parameter tuning
+3. **CPU isolation and affinity** to dedicate cores to critical tasks
+4. **ROS2 middleware optimization** using CycloneDDS and shared memory transport
+5. **Container-based deployment** with proper resource allocation and privileges
 
 The principles covered here form the foundation for all subsequent modules in this curriculum. By establishing a solid understanding of real-time systems engineering, you'll be prepared to implement and optimize the specialized components that make up a complete robotics system, from computer vision to motor control.
 
@@ -672,7 +647,7 @@ The PREEMPT_RT patch transforms the Linux kernel into a real-time capable system
 - Implementing priority inheritance for locks
 - Reducing sources of non-determinism
 
-Installing this on a Raspberry Pi:
+Installing this on a Raspberry Pi 5:
 ```bash
 sudo apt-get install linux-image-rt-arm64
 ```
@@ -742,7 +717,7 @@ taskset -c 2 chrt -f 80 ./my_sensor_process
 │                                          │
 └──────────────────────────────────────────┘
 ```
-*Figure 7: Visual representation of CPU core allocation strategy for a real-time robotics system on Raspberry Pi.*
+*Figure 7: Visual representation of CPU core allocation strategy for a real-time robotics system on Raspberry Pi 5.*
 
 With this complete configuration, we've created an environment where:
 - Critical processes run at predictable times
@@ -956,7 +931,7 @@ By isolating cores and preventing unnecessary context switches, we effectively g
 <a name="cpu-core-allocation"></a>
 ### 4.3.1 CPU Core Allocation Theory
 
-Modern SoCs (including Raspberry Pi) have heterogeneous multi-core architectures that we can exploit:
+Modern SoCs (including Raspberry Pi 5) have heterogeneous multi-core architectures that we can exploit:
 
 **Core Specialization Patterns:**
 - Core 0: Often handles interrupts, scheduler decisions, and general system tasks
@@ -989,6 +964,8 @@ Modern SoCs (including Raspberry Pi) have heterogeneous multi-core architectures
 - Shared Last-Level Cache (LLC) means cores still contend for cache space
 - Memory controller access patterns can still cause interference
 - NUMA (Non-Uniform Memory Access) considerations on larger systems
+
+On the Raspberry Pi 5, we have four Cortex-A76 cores with a relatively simple cache architecture. The CPU cores share a unified L3 cache but have dedicated L1 and L2 caches. This architecture is ideal for our core specialization approach.
 
 <a name="interrupt-handling"></a>
 ### 4.3.2 Interrupt Handling Architecture
@@ -1047,6 +1024,19 @@ These create a clear separation in function:
 └─────────────────────────────────────────┘
 ```
 *Figure 13: Comparison of interrupt handling with and without core isolation, showing how isolation protects real-time processes from interrupt disruption.*
+
+For the Raspberry Pi 5, we can take this a step further by configuring specific core affinity for hardware interrupts. This ensures that all interrupts are directed to core 0, leaving the other cores completely free for real-time tasks:
+
+```bash
+# Direct all IRQs to core 0
+echo 1 | sudo tee /proc/irq/default_smp_affinity
+
+# For each interrupt, force it to core 0
+for IRQ in $(ls /proc/irq/ | grep -E '^[0-9]+$')
+do
+  echo 1 | sudo tee /proc/irq/$IRQ/smp_affinity
+done
+```
 
 > **Key Takeaway**: Multi-core architectures allow us to create specialized execution environments with different characteristics. By dedicating specific cores to real-time tasks and configuring interrupt handling to route all interrupts to a designated system core, we create isolated, deterministic execution environments for critical robotics processes, dramatically improving timing predictability.
 
@@ -1108,6 +1098,24 @@ The Linux kernel offers different preemption models, progressively increasing re
 
 From a computer engineering perspective, PREEMPT_RT achieves this by transforming asynchronous interrupts into schedulable threads, bringing nearly all sources of non-determinism under scheduler control.
 
+For the Raspberry Pi 5, we can install the PREEMPT_RT kernel using specific packages:
+
+```bash
+# Update package information
+sudo apt update
+
+# Install the real-time kernel for Raspberry Pi 5
+sudo apt install linux-image-rt-arm64
+
+# Verify installation
+uname -a
+
+# Check preemption model
+cat /sys/kernel/debug/sched/preemption
+```
+
+After installation, you'll need to reboot your Raspberry Pi. The real-time kernel will be listed in the bootloader, and you can verify it's running by checking for "PREEMPT RT" in the kernel name with `uname -a`.
+
 <a name="priority-inversion"></a>
 ### 5.1.2 Priority Inversion Problem and Solutions
 
@@ -1145,6 +1153,20 @@ This isn't just theoretical—it caused the Mars Pathfinder mission to fail repe
 - Mutexes with PI (Priority Inheritance) replace spinlocks
 - Makes lock acquisition time bounded and predictable
 
+To see these mechanisms in action on a Raspberry Pi 5 with PREEMPT_RT:
+
+```bash
+# Check if priority inheritance is enabled
+cat /sys/kernel/debug/sched/pi
+
+# Check for any priority inheritance events
+grep -i "pi boost" /var/log/kern.log
+
+# Test priority inheritance with a tool from rt-tests
+sudo apt install rt-tests
+sudo pi_stress -p 90,80,70 -l 10000
+```
+
 > **Key Takeaway**: The PREEMPT_RT kernel patch transforms Linux into a real-time operating system by making nearly all kernel code preemptible, converting asynchronous interrupts into schedulable threads, and implementing priority inheritance to prevent priority inversion problems. These changes reduce latency from tens of milliseconds to hundreds of microseconds, making it suitable for real-time robotics applications.
 
 <a name="memory-management"></a>
@@ -1170,26 +1192,26 @@ Modern computer memory systems present several challenges to deterministic execu
 │                                             │
 │  Time (µs)                                  │
 │  ^                                          │
-│  |                                          │
-│  |     ▲                                    │
-│  |     │                                    │
-│  |     │        ▲                          │
-│  |     │        │      ▲                   │
-│  |     │        │      │        ▲          │
-│  |     │        │      │        │     ▲    │
-│  |  ▲  │     ▲  │   ▲  │     ▲  │  ▲  │    │
-│  | _│__│_____|__|___|__|_____|__|__|__|___ │
-│  |  1  2  3  4  5  6  7  8  9  10 11 12    │
-│  |                                          │
-│  |              Allocation #                │
-│  |                                          │
-│  | Same size allocations have highly        │
-│  | variable execution times due to:         │
-│  | - Memory fragmentation                   │
-│  | - Page faults                            │
-│  | - Cache misses                           │
-│  | - TLB misses                             │
-│  |                                          │
+│  │                                          │
+│  │     ▲                                    │
+│  │     │                                    │
+│  │     │        ▲                          │
+│  │     │        │      ▲                   │
+│  │     │        │      │        ▲          │
+│  │     │        │      │        │     ▲    │
+│  │  ▲  │     ▲  │   ▲  │     ▲  │  ▲  │    │
+│  │ _│__│_____|__|___|__|_____|__|__|__|___ │
+│  │  1  2  3  4  5  6  7  8  9  10 11 12    │
+│  │                                          │
+│  │              Allocation #                │
+│  │                                          │
+│  │ Same size allocations have highly        │
+│  │ variable execution times due to:         │
+│  │ - Memory fragmentation                   │
+│  │ - Page faults                            │
+│  │ - Cache misses                           │
+│  │ - TLB misses                             │
+│  │                                          │
 └─────────────────────────────────────────────┘
 ```
 *Figure 16: Graph showing variation in memory allocation timing over multiple allocations, highlighting the non-deterministic nature of standard memory management.*
@@ -1200,31 +1222,109 @@ Modern computer memory systems present several challenges to deterministic execu
 - Pre-allocation patterns: Allocate all needed memory during initialization
 - Memory pool allocators with deterministic allocation times
 
+On the Raspberry Pi 5, these issues are particularly important to address because:
+1. The system has limited RAM (4GB or 8GB depending on model)
+2. The default setup uses SD card or SSD for swap, which is extremely slow
+3. ARM architecture TLB misses can be more costly than on some other architectures
+
 <a name="deterministic-memory"></a>
 ### 5.2.2 Implementing Deterministic Memory Management
 
-In our Raspberry Pi configuration, we implement:
+In our Raspberry Pi 5 configuration, we implement several memory optimizations:
 
-1. **Disabling Swap Completely:**
+1. **Creating RAM Disks for Temporary Storage**
+   ```bash
+   # Create a 4GB RAM disk for temporary storage
+   sudo mkdir -p /mnt/ramdisk
+   sudo mount -t tmpfs -o size=4G tmpfs /mnt/ramdisk
+   
+   # Make it persistent across reboots
+   echo "tmpfs /mnt/ramdisk tmpfs size=4G,mode=1777 0 0" | sudo tee -a /etc/fstab
+   ```
+
+2. **RAM-Based Logging**
+   ```bash
+   # Create a 1GB RAM disk for logs
+   sudo mkdir -p /var/log/ramlogs
+   sudo mount -t tmpfs -o size=1G tmpfs /var/log/ramlogs
+   
+   # Make it persistent
+   echo "tmpfs /var/log/ramlogs tmpfs size=1G,mode=0755 0 0" | sudo tee -a /etc/fstab
+   ```
+
+3. **Disabling Swap Completely:**
    ```bash
    sudo swapoff -a
    sudo systemctl disable dphys-swapfile
    ```
 
-2. **Allowing Memory Locking for Real-Time Processes:**
-   ```
-   @realtime soft memlock unlimited
-   @realtime hard memlock unlimited
+4. **System Memory Parameter Optimizations**
+   ```bash
+   # Apply memory optimizations
+   sudo sysctl -w vm.swappiness=1
+   sudo sysctl -w vm.vfs_cache_pressure=50
+   sudo sysctl -w vm.dirty_ratio=60
+   sudo sysctl -w vm.dirty_background_ratio=30
+   sudo sysctl -w vm.overcommit_memory=1
+   
+   # Make them persistent
+   echo "vm.swappiness=1" | sudo tee -a /etc/sysctl.conf
+   echo "vm.vfs_cache_pressure=50" | sudo tee -a /etc/sysctl.conf
+   echo "vm.dirty_ratio=60" | sudo tee -a /etc/sysctl.conf
+   echo "vm.dirty_background_ratio=30" | sudo tee -a /etc/sysctl.conf
+   echo "vm.overcommit_memory=1" | sudo tee -a /etc/sysctl.conf
    ```
 
-3. **Docker Container Memory Lock Permissions:**
+5. **Huge Pages Configuration**
+   ```bash
+   # Enable transparent huge pages
+   echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+   echo always | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
+   
+   # Make them persistent
+   echo 'echo always > /sys/kernel/mm/transparent_hugepage/enabled' | sudo tee -a /etc/rc.local
+   echo 'echo always > /sys/kernel/mm/transparent_hugepage/defrag' | sudo tee -a /etc/rc.local
+   sudo chmod +x /etc/rc.local
    ```
-   --ulimit memlock=-1
+
+6. **Allowing Memory Locking for Real-Time Processes:**
+   ```bash
+   # Add real-time group
+   sudo groupadd realtime
+   sudo usermod -aG realtime $USER
+   
+   # Configure limits
+   echo "@realtime soft memlock unlimited" | sudo tee -a /etc/security/limits.conf
+   echo "@realtime hard memlock unlimited" | sudo tee -a /etc/security/limits.conf
    ```
+
+7. **Docker Container Memory Optimization**
+   ```bash
+   # Run the container with memory optimizations
+   sudo docker run -d \
+     --name RobotContainer \
+     --privileged \
+     --network host \
+     --cap-add CAP_SYS_NICE \
+     -v /dev:/dev \
+     -v /mnt/ramdisk:/mnt/ramdisk \
+     -v /var/log/ramlogs:/var/log/robot_logs \
+     --ulimit memlock=-1:-1 \
+     --ulimit rtprio=99:99 \
+     --shm-size=2g \
+     your_robot_image:latest
+   ```
+
+These optimizations collectively eliminate many sources of non-determinism in memory management:
+- RAM disks prevent disk I/O for temporary files and logs
+- Disabling swap ensures all memory accesses stay in RAM
+- Huge pages reduce TLB misses by using 2MB pages instead of 4KB pages
+- Memory locking prevents page faults by keeping memory resident
+- Container configuration ensures these benefits extend to containerized applications
 
 From an engineering perspective, these configurations make a profound difference because they eliminate the possibility of page faults causing multi-millisecond pauses during critical operations.
 
-> **Key Takeaway**: Virtual memory and dynamic memory allocation introduce unpredictable timing variations that can disrupt real-time performance. By disabling swap, locking memory pages in RAM, pre-faulting pages, and using careful memory allocation strategies, we can eliminate major sources of timing jitter and ensure more deterministic behavior for robotics applications.
+> **Key Takeaway**: Virtual memory and dynamic memory allocation introduce unpredictable timing variations that can disrupt real-time performance. By implementing RAM disks, disabling swap, configuring huge pages, locking memory pages in RAM, and tuning kernel memory parameters, we can eliminate major sources of timing jitter and ensure more deterministic behavior for robotics applications.
 
 <a name="cpu-thermal"></a>
 ## 5.3 CPU Frequency, Thermal Management, and Microarchitectural Considerations
@@ -1273,7 +1373,33 @@ Modern CPUs dynamically adjust frequency and voltage to save power:
 ```
 *Figure 17: Visualization of CPU P-states (performance states) and C-states (idle states) showing transitions and latency impacts.*
 
-For real-time systems, these energy-saving features introduce unacceptable non-determinism. By setting the CPU governor to `performance` mode, we force the CPU to remain in its highest P-state (P0) and avoid deeper C-states, enabling consistent instruction execution timing.
+For real-time systems, these energy-saving features introduce unacceptable non-determinism. The Raspberry Pi 5 is particularly susceptible to frequency scaling, as it has a wide operating range from 600MHz to 2.4GHz.
+
+By setting the CPU governor to `performance` mode, we force the CPU to remain in its highest P-state (P0) and avoid deeper C-states, enabling consistent instruction execution timing:
+
+```bash
+# Set the CPU governor to performance
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+
+# Make this persistent across reboots
+echo 'GOVERNOR="performance"' | sudo tee -a /etc/default/cpufrequtils
+
+# Disable automatic CPU frequency scaling
+sudo apt install cpufrequtils
+sudo systemctl disable ondemand
+```
+
+To verify this is working correctly:
+
+```bash
+# Check the current CPU frequencies
+cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq
+
+# Verify the governor setting
+cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+```
+
+You should see all cores showing `performance` as the governor and running at their maximum frequency.
 
 <a name="thermal-throttling"></a>
 ### 5.3.2 Thermal Throttling: The Silent Performance Killer
@@ -1284,7 +1410,7 @@ Thermal throttling is a critical protective mechanism in modern processors that 
 
 **The Thermal Protection Mechanism**
 
-All modern CPUs, including those in Raspberry Pi, implement multi-stage thermal protection:
+All modern CPUs, including those in Raspberry Pi 5, implement multi-stage thermal protection:
 
 1. **Active Cooling Stage**: Fans speed up (if present)
 2. **Frequency Reduction Stage**: CPU clock frequency is progressively lowered
@@ -1296,13 +1422,13 @@ All modern CPUs, including those in Raspberry Pi, implement multi-stage thermal 
 ┌───── Thermal Throttling Impact on Performance ─────┐
 │                                                    │
 │  Temperature (°C)       Frequency (MHz)            │
-│  55 │                   ██████████████ 1800         │
-│  60 │                   ████████████   1700         │
-│  65 │                   ██████████     1500         │
-│  70 │                   ████████       1300         │
-│  75 │                   █████          1000         │
-│  80 │                   ██             700          │
-│  85 │                   █              500          │
+│  55 │                   ██████████████ 2400         │
+│  60 │                   ████████████   2200         │
+│  65 │                   ██████████     2000         │
+│  70 │                   ████████       1800         │
+│  75 │                   █████          1500         │
+│  80 │                   ██             1000         │
+│  85 │                   █              700          │
 │                                                    │
 │  As temperature rises, CPU frequency drops to      │
 │  protect the processor, causing irregular          │
@@ -1347,7 +1473,7 @@ This pattern often indicates thermal throttling is occurring.
 
 **Measuring and Detecting Thermal Throttling**
 
-You can monitor thermal conditions on a Raspberry Pi using:
+You can monitor thermal conditions on a Raspberry Pi 5 using:
 
 ```bash
 # View current CPU temperature
@@ -1375,12 +1501,13 @@ A non-zero value indicates current or past throttling events.
 
 **Thermal Solutions for Real-Time Robotics**
 
-Several strategies can mitigate thermal throttling issues:
+Several strategies can mitigate thermal throttling issues on the Raspberry Pi 5:
 
 1. **Improved Physical Cooling**:
-   - Add heatsinks to the CPU and RAM
+   - Use the official Raspberry Pi 5 Active Cooler
+   - Install larger heatsinks on the CPU, RAM, and power chip
    - Ensure proper airflow in enclosures
-   - Consider active cooling (fans) for demanding applications
+   - Consider active cooling (40mm fans) for demanding applications
    - Design cases with thermal management in mind
 
 2. **Thermal Load Management**:
@@ -1392,7 +1519,7 @@ Several strategies can mitigate thermal throttling issues:
 3. **Conservative Performance Settings**:
    - Slightly underclock the CPU from maximum
    - Set sustainable performance levels rather than maximum
-   - For example, cap at 1.5GHz instead of 1.8GHz to create thermal headroom
+   - For example, cap at 2.0GHz instead of 2.4GHz to create thermal headroom
 
 4. **Environmental Considerations**:
    - Account for ambient temperature in deployments
@@ -1448,9 +1575,9 @@ Rather than always using maximum performance, a more nuanced approach uses a sus
 # View available frequencies
 cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies
 
-# Set a specific sustainable frequency (e.g., 1500MHz instead of 1800MHz)
-echo 1500000 | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq
-echo 1500000 | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq
+# Set a specific sustainable frequency (e.g., 2000MHz instead of 2400MHz)
+echo 2000000 | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq
+echo 2000000 | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq
 
 # Then ensure performance governor is still used
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -1460,7 +1587,7 @@ This configuration gives you both the predictable timing of a fixed frequency wh
 
 **Monitoring in Production**
 
-For deployed robots, it's valuable to implement continuous temperature and throttling monitoring:
+For deployed robots, it's valuable to implement continuous temperature and throttling monitoring as part of the diagnostics system:
 
 ```python
 # Example Python monitoring code
@@ -1516,7 +1643,7 @@ By understanding and proactively managing thermal effects, you can ensure your r
 
 **What Makes ROS2 Different from ROS1**
 
-ROS2 (Robot Operating System 2) represents a complete redesign from its predecessor, addressing fundamental limitations while preserving the modular philosophy that made ROS1 successful.
+ROS2 Humble (Robot Operating System 2) represents a complete redesign from its predecessor, addressing fundamental limitations while preserving the modular philosophy that made ROS1 successful.
 
 **Core Architectural Components of ROS2:**
 
@@ -2062,12 +2189,34 @@ ROS2 also supports alternative communication methods:
    </profiles>
    ```
 
+**ROS2 Humble Memory Optimization for Raspberry Pi 5**
+
+For the Raspberry Pi 5 specifically, we can optimize ROS2 Humble's memory usage by configuring our environment as follows:
+
+```bash
+# Add to ~/.bashrc or similar
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI="<CycloneDDS><Domain><General><SharedMemory>true</SharedMemory><NetworkInterfaceAddress>lo</NetworkInterfaceAddress></General></Domain></CycloneDDS>"
+export RMW_IMPLEMENTATION_SETTINGS="-DCycloneDDS_IDLC_USE_ZEROCOPY=ON"
+export CYCLONEDDS_RT="LIFO,BATCH"
+export TMPDIR="/mnt/ramdisk/robot_temp" 
+export ROS_LOG_DIR="/var/log/ramlogs/robot"
+```
+
+These settings:
+1. Use CycloneDDS middleware for better performance
+2. Enable shared memory transport for zero-copy local communication
+3. Use only the loopback interface for improved determinism
+4. Enable zero-copy optimization
+5. Configure real-time scheduling settings for the middleware
+6. Redirect temporary and log files to RAM disks for better determinism
+
 <a name="ros2-conclusion"></a>
 ### 6.1.6 Conclusion: ROS2 as an Enabling Framework for Real-Time Robotics
 
 ROS2 represents a significant advancement in robotics software architecture, particularly for real-time applications. By providing both high-level abstractions and low-level control, it allows developers to focus on their specific robotics challenges rather than rebuilding common infrastructure.
 
-For real-time performance, the key is understanding both the ROS2 framework and the underlying system optimizations covered throughout this document. When properly configured, ROS2 on an optimized Raspberry Pi can provide the deterministic performance needed for complex robotics applications, from simple motor control to sophisticated sensor fusion and autonomous navigation.
+For real-time performance, the key is understanding both the ROS2 framework and the underlying system optimizations covered throughout this document. When properly configured, ROS2 Humble on an optimized Raspberry Pi 5 can provide the deterministic performance needed for complex robotics applications, from simple motor control to sophisticated sensor fusion and autonomous navigation.
 
 > **Key Takeaway**: ROS2 provides a comprehensive ecosystem for robotics development, handling common infrastructure needs while allowing developers to focus on unique aspects of their robot. Its layered architecture, flexible execution models, and quality of service controls make it suitable for real-time applications when properly configured, significantly accelerating development compared to building similar capabilities from scratch.
 
@@ -2145,6 +2294,32 @@ Docker offers multiple networking models, each with different performance charac
 **Engineering tradeoff analysis:**
 The `--net=host` flag eliminates a layer of network virtualization, saving both latency and CPU overhead. While this reduces isolation, the performance benefit is significant for real-time distributed systems like ROS2.
 
+**Optimized Docker Network Configuration**
+
+For our ball-tracking robot, we use host networking with additional configuration to optimize ROS2 communications:
+
+```bash
+# Run container with optimized networking
+sudo docker run -d \
+  --name RobotContainer \
+  --net=host \
+  --privileged \
+  --cap-add=NET_ADMIN \
+  -v /dev:/dev \
+  -v /mnt/ramdisk:/mnt/ramdisk \
+  -v /var/log/ramlogs:/var/log/robot_logs \
+  -e RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
+  -e CYCLONEDDS_URI="<CycloneDDS><Domain><General><SharedMemory>true</SharedMemory><NetworkInterfaceAddress>lo</NetworkInterfaceAddress></General></Domain></CycloneDDS>" \
+  your_robot_image:latest
+```
+
+This configuration:
+1. Uses host networking for minimal latency
+2. Provides privileges needed for real-time networking
+3. Mounts RAM disks for temporary data
+4. Configures ROS2 to use CycloneDDS with shared memory transport
+5. Restricts DDS communication to the loopback interface for determinism
+
 <a name="multicast-discovery"></a>
 ### 6.2.2 Multicast and Discovery Optimization
 
@@ -2159,9 +2334,21 @@ ROS2 node discovery relies heavily on multicast:
 - Ensure multicast routing enabled: `sudo sysctl net.ipv4.conf.all.forwarding=1`
 - Set appropriate multicast time-to-live: `ROS_MULTICAST_TTL=4`
 
-These settings are crucial for ensuring reliable node discovery in complex robot architectures spanning multiple network segments.
+For improved determinism on the Raspberry Pi 5, we configure our ROS2 system to use the loopback interface only, eliminating network variability entirely:
 
-> **Key Takeaway**: Container networking choices have significant implications for real-time performance. Using host networking (`--net=host`) eliminates virtualization overhead critical for low-latency communications in robotics applications. Proper multicast configuration is equally important for reliable ROS2 node discovery across network segments.
+```bash
+# Configure network interface for ROS2
+echo "net.ipv4.conf.lo.forwarding=1" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+
+# In Docker container environment setup
+echo "export CYCLONEDDS_URI='<CycloneDDS><Domain><General><NetworkInterfaceAddress>lo</NetworkInterfaceAddress></General></Domain></CycloneDDS>'" >> ~/.bashrc
+echo "export ROS_LOCALHOST_ONLY=1" >> ~/.bashrc
+```
+
+This configuration ensures that all ROS2 communication remains on the local machine, reducing latency and eliminating network-related jitter.
+
+> **Key Takeaway**: Container networking choices have significant implications for real-time performance. Using host networking (`--net=host`) eliminates virtualization overhead critical for low-latency communications in robotics applications. Proper multicast configuration and interface selection are equally important for reliable ROS2 node discovery and deterministic communication.
 
 <a name="part-iv"></a>
 # 7. Part IV: Process Prioritization and Scheduling for Robotics Systems
@@ -2420,7 +2607,7 @@ Priority assignment isn't arbitrary—it follows established principles from rea
 
 **Concrete Priority Assignment for Your Ball-Tracking Robot**
 
-For your specific ball-tracking robot with YOLO, LiDAR, and PID control, here's a detailed priority breakdown with rationale:
+For your specific ball-tracking robot with YOLOv12, LiDAR, and PID control, here's a detailed priority breakdown with rationale:
 
 **Highest Priority Tasks (RT Priority 90-99)**:
 - **Motor Safety Monitoring (99)**: Safety-critical function that can shut down motors in emergency
@@ -2435,7 +2622,7 @@ For your specific ball-tracking robot with YOLO, LiDAR, and PID control, here's 
 
 **Medium Priority Tasks (RT Priority 50-69)**:
 - **Path Planning (65)**: Computes future trajectories; can tolerate some delay
-- **YOLO Processing (60)**: Computer vision is computationally intensive but can run at lower frequency (typically 10-30Hz)
+- **YOLOv12 Processing (60)**: Computer vision is computationally intensive but can run at lower frequency (typically 10-30Hz)
 - **Map Building (55)**: Updates environmental maps based on sensor data
 - **Behavior Decision Making (50)**: High-level robot decision making
 
@@ -2694,7 +2881,7 @@ After implementing priority assignments, it's crucial to verify they're working 
 1. Run your robot system with instrumentation
 2. Collect timing data:
    ```bash
-   trace-cmd record -e sched -e irq -e gpio -e timer
+   trace-cmd record -e sched_switch -e sched_wakeup -e irq -e timer
    ```
 
 3. Analyze scheduling behavior:
@@ -2749,6 +2936,10 @@ By properly configuring process priorities and verifying their effectiveness, yo
 
 <a name="cpu-affinity"></a>
 ## 7.2 CPU Affinity and Cache Coherency
+
+
+
+
 
 <a name="processor-affinity"></a>
 ### 7.2.1 Processor Affinity: Keeping Processes at Home
@@ -2842,7 +3033,7 @@ These effects translate to significant performance benefits:
 │                                      │
 └──────────────────────────────────────┘
 ```
-*Figure 31: Visualization of cache hit rates with and without CPU affinity, showing the dramatic performance improvement with consistent core assignment.*
+*Figure 31: Visualization of cache state before and after a context switch, showing how much of the data needs to be reloaded.*
 
 Imagine a robot's PID controller that needs to run every 5ms. With consistent CPU affinity:
 - First run: 100μs (cold caches)
@@ -2862,6 +3053,49 @@ taskset -c 1 ./my_sensor_process
 taskset -c 2,3 ./my_vision_process
 ```
 
+For our ball-tracking robot on the Raspberry Pi 5, we implement the following affinity settings:
+
+```bash
+# Real-time control loop on core 1
+taskset -c 1 chrt -f 99 ./control_loop
+
+# Sensor fusion on core 2
+taskset -c 2 chrt -f 80 ./sensor_fusion
+
+# YOLOv12 vision processing on core 3
+taskset -c 3 chrt -f 60 ./yolo_vision
+
+# System tasks remain on core 0 by default
+```
+
+On the Raspberry Pi 5, these configurations can be combined with the core isolation parameters discussed earlier to create a complete CPU partitioning strategy:
+
+```
+# In /boot/cmdline.txt
+isolcpus=1,2,3 nohz_full=1,2,3 rcu_nocbs=1,2,3
+```
+
+This configuration ensures:
+1. Cores 1, 2, and 3 are isolated from the standard scheduler
+2. Core 0 handles all interrupts and system tasks
+3. Critical real-time processes can run undisturbed with warm caches
+4. System processes and background tasks don't interfere with real-time operation
+
+For Docker-based deployments, CPU affinity can be specified at container startup:
+
+```bash
+# Run container with specific CPU bindings
+sudo docker run --cpuset-cpus=1 -it my_control_container
+
+# Or in docker-compose.yml
+services:
+  control:
+    image: my_control_container
+    cpuset: "1"
+```
+
+By properly configuring CPU affinity, we can drastically improve the deterministic behavior of our robotics system, ensuring that time-critical processes run with consistent timing and maximum efficiency.
+
 <a name="numa-architecture"></a>
 ### 7.2.2 NUMA and Multi-Core Memory Architecture: The Distance Penalty
 
@@ -2869,7 +3103,7 @@ taskset -c 2,3 ./my_vision_process
 
 NUMA (Non-Uniform Memory Access) is a computer architecture where memory access time depends on the memory location relative to the processor. In simple terms: some memory is closer to certain cores than others.
 
-Even on smaller systems like the Raspberry Pi, memory access patterns can show NUMA-like effects: accessing memory that "belongs" to another core is slower than accessing local memory.
+Even on smaller systems like the Raspberry Pi 5, memory access patterns can show NUMA-like effects: accessing memory that "belongs" to another core is slower than accessing local memory.
 
 **Visualizing NUMA Effects**
 
@@ -2991,7 +3225,7 @@ While invisible to your code, this protocol creates significant overhead:
 
 **Practical Solutions for Real-Time Systems**
 
-To minimize these effects in your robotics application:
+To minimize these effects in your ball-tracking robot:
 
 1. **Minimize sharing between real-time processes**:
    - Give each process its own copy of frequently accessed data
@@ -3015,7 +3249,7 @@ To minimize these effects in your robotics application:
    } core_private_data[NUM_CORES];
    ```
 
-By understanding these hardware realities, you can design your real-time robotics software to work with the CPU architecture rather than fighting against it, resulting in more deterministic timing behavior.
+For the Raspberry Pi 5, these optimizations can be particularly effective due to its four-core architecture. By implementing proper CPU affinity and minimizing data sharing, we can achieve much more predictable timing behavior.
 
 > **Key Takeaway**: CPU affinity and memory access patterns significantly impact real-time performance. Setting process affinity ensures cache efficiency by keeping processes on the same cores, while careful attention to data sharing patterns reduces cache coherency overhead. These optimizations are essential for achieving consistent, low-latency execution in robotics applications.
 
@@ -3033,7 +3267,7 @@ By understanding these hardware realities, you can design your real-time robotic
 
 **The Challenge of Real-Time Vision**
 
-Computer vision in robotics presents a fundamental challenge: it's both computationally expensive and critical for timely decision-making. Your ball-tracking robot needs to see the ball quickly enough to react to its movements, yet the computational load of modern vision algorithms can easily overwhelm a Raspberry Pi.
+Computer vision in robotics presents a fundamental challenge: it's both computationally expensive and critical for timely decision-making. Your ball-tracking robot needs to see the ball quickly enough to react to its movements, yet the computational load of modern vision algorithms can easily overwhelm a Raspberry Pi 5.
 
 **A Complete Computer Vision Pipeline: Breaking Down the Steps**
 
@@ -3136,9 +3370,7 @@ Let's examine the entire vision pipeline to understand where bottlenecks occur a
 | Tracking         | ▓▓░░░░░░░░        | ▓░░░░░░░░░        | ~2-4ms            |
 | Integration      | ▓░░░░░░░░░        | ▓░░░░░░░░░        | ~1ms              |
 
-**Visualizing the Pipeline's Computational Profile**
-
-Let's look at the computational load profile for each stage on a typical Raspberry Pi tracking a ball at 30fps:
+Let's look at the computational load profile for each stage on a typical Raspberry Pi 5 tracking a ball at 30fps:
 
 ```
                 CPU Usage  |  Memory Usage  |  Typical Latency
@@ -3170,7 +3402,7 @@ YOLO (You Only Look Once) revolutionized object detection by using a single neur
 │  Input Image                │
 │  ┌───────────────┐          │
 │  │               │          │
-│  │     416x416   │          │
+│  │     320x320   │          │
 │  │               │          │
 │  └───────┬───────┘          │
 │          │                  │
@@ -3178,7 +3410,7 @@ YOLO (You Only Look Once) revolutionized object detection by using a single neur
 │  ┌───────────────┐          │
 │  │  Convolutional│          │
 │  │    Backbone   │          │
-│  │  (DarkNet-53) │          │
+│  │               │          │
 │  └┬──────┬──────┬┘          │
 │   │      │      │           │
 │   ▼      ▼      ▼           │
@@ -3197,11 +3429,8 @@ YOLO (You Only Look Once) revolutionized object detection by using a single neur
 │          ▼                  │
 │  ┌───────────────┐          │
 │  │  Detections   │          │
-│  │ ┌─────┐┌─────┐│          │
-│  │ │Ball ││Person││         │
-│  │ └─────┘└─────┘│          │
 │  │ ┌─────┐       │          │
-│  │ │Chair │       │          │
+│  │ │Ball │       │          │
 │  │ └─────┘       │          │
 │  └───────────────┘          │
 │                             │
@@ -3214,10 +3443,10 @@ YOLO (You Only Look Once) revolutionized object detection by using a single neur
 To fully understand YOLO's computational demands and optimization opportunities, we need to examine its architecture in detail:
 
 1. **Input Processing Stage**: 
-   - Image is resized to a fixed dimension (typically 416×416 or 608×608 pixels)
+   - Image is resized to a fixed dimension (320×320 pixels for YOLOv12s on Raspberry Pi 5)
    - Pixel values normalized to range [0,1]
    - Data organization optimized for GPU processing (NCHW format)
-   - Memory requirements: ~1-2MB for input tensor
+   - Memory requirements: ~0.5-1MB for input tensor
    - Operations: ~500K (primarily memory transfers and basic arithmetic)
 
 2. **Feature Extraction Backbone**:
@@ -3228,6 +3457,7 @@ To fully understand YOLO's computational demands and optimization opportunities,
      - YOLOv4: CSPDarknet-53 (modified Darknet with Cross-Stage Partial connections)
      - YOLOv5: Custom CSP-based architecture with focus on efficiency
      - YOLOv8: Advanced backbone with improved parameter efficiency
+     - YOLOv12: Highly optimized architecture designed specifically for edge devices
    
    - **Residual Connections**: Allow deeper networks by providing gradient shortcuts
    
@@ -3238,14 +3468,6 @@ To fully understand YOLO's computational demands and optimization opportunities,
        - Large scale features (small stride): Detect small objects
        - Medium scale features (medium stride): Detect medium objects
        - Small scale features (large stride): Detect large objects
-   
-   - **Computational Profile**:
-     - Parameters: 
-       - YOLOv3-tiny: ~8.7 million parameters
-       - YOLOv3: ~61.5 million parameters
-     - Operations: ~5-40 billion multiply-accumulate operations (MACs)
-     - Memory footprint: ~20-250MB depending on variant
-     - Dominant computation: 3x3 convolutions with hundreds of channels
 
 3. **Detection Heads**:
    - Separate detector heads for different object scales
@@ -3257,18 +3479,12 @@ To fully understand YOLO's computational demands and optimization opportunities,
    - **Anchor Boxes**:
      - Predefined box shapes that predictions are made relative to
      - Improves detection of objects with consistent aspect ratios
-     - Typically 3 anchors per scale, 9 total anchors
+     - YOLOv12 uses advanced anchor-free detection for simpler computation
    
    - **Grid-Based Prediction**:
-     - Image divided into grid cells (e.g., 13x13, 26x26, 52x52)
-     - Each grid cell predicts multiple bounding boxes
-     - Total predictions: anchors × grid size² (e.g., 3×13²+3×26²+3×52² = 10,647 boxes)
-   
-   - **Output Encoding**:
-     - Box center coordinates (tx, ty): Relative to grid cell
-     - Box dimensions (tw, th): Log-scale offsets from anchor dimensions
-     - Objectness score (to): Confidence in object presence
-     - Class probabilities (c1...cn): Softmax or sigmoid across classes
+     - Image divided into grid cells
+     - Each grid cell predicts potential objects
+     - Multiple prediction layers at different scales
 
 4. **Non-Maximum Suppression (NMS)**:
    - Purpose: Remove duplicate detections of the same object
@@ -3286,44 +3502,43 @@ To fully understand YOLO's computational demands and optimization opportunities,
 
 **Detailed Computational Profile**
 
-On a Raspberry Pi 4, the computational breakdown for different YOLO variants reveals why optimization is critical:
+On a Raspberry Pi 5, the computational breakdown for different YOLO variants reveals why optimization is critical:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│              Computational Profile on Raspberry Pi                  │
+│              Computational Profile on Raspberry Pi 5                │
 ├────────────────┬───────────┬────────────┬───────────┬───────────────┤
 │ YOLO Variant   │ Parameters│ Operations │ Memory    │ Inference Time│
 ├────────────────┼───────────┼────────────┼───────────┼───────────────┤
-│ YOLOv3-tiny    │   8.7M    │   5.6G     │   23MB    │  300-500ms    │
+│ YOLOv3-tiny    │   8.7M    │   5.6G     │   23MB    │  150-250ms    │
 ├────────────────┼───────────┼────────────┼───────────┼───────────────┤
-│ YOLOv3         │  61.5M    │  65.9G     │  236MB    │ 1500-2500ms   │
+│ YOLOv3         │  61.5M    │  65.9G     │  236MB    │ 800-1200ms    │
 ├────────────────┼───────────┼────────────┼───────────┼───────────────┤
-│ YOLOv4-tiny    │  6.06M    │   6.9G     │   24MB    │  250-450ms    │
+│ YOLOv4-tiny    │  6.06M    │   6.9G     │   24MB    │  120-200ms    │
 ├────────────────┼───────────┼────────────┼───────────┼───────────────┤
-│ YOLOv5s        │   7.2M    │  16.5G     │   29MB    │  400-700ms    │
+│ YOLOv5s        │   7.2M    │  16.5G     │   29MB    │  200-350ms    │
 ├────────────────┼───────────┼────────────┼───────────┼───────────────┤
-│ YOLOv8n        │   3.2M    │   8.7G     │   13MB    │  300-500ms    │
+│ YOLOv8n        │   3.2M    │   8.7G     │   13MB    │  150-250ms    │
 ├────────────────┼───────────┼────────────┼───────────┼───────────────┤
-│ YOLOv12s       │   ~5M     │   ~4G      │   ~10MB   │  200ms*       │
+│ YOLOv12s       │   ~2M     │   ~2G      │   ~8MB    │  80-120ms     │
 │ (320x320)      │           │            │           │               │
 └────────────────┴───────────┴────────────┴───────────┴───────────────┘
-* On Raspberry Pi 5 with medium precision level
 ```
 
-For our ball-tracking robot on Raspberry Pi, the computational breakdown for different YOLO variants shows where the time is spent:
+For our ball-tracking robot on Raspberry Pi 5, the computational breakdown for YOLOv12s shows where the time is spent:
 
 ```
-YOLO Stage               | Operations | Memory Access | Typical Time (YOLOv3-tiny) | Typical Time (YOLOv12s)
--------------------------|------------|---------------|----------------------------|------------------------
-Input Processing         | ~500K      | ~1-2MB        | ~2-5ms                     | ~1-3ms
-Convolutional Backbone   | ~2-5.6G    | ~10-30MB      | ~300-400ms                 | ~150-180ms
-Detection Heads          | ~50-100M   | ~2-3MB        | ~30-50ms                   | ~15-20ms
-Non-Maximum Suppression  | ~10-50K    | ~100-500KB    | ~5-20ms                    | ~3-10ms
+YOLOv12s Stage          | Operations | Memory Access | Typical Time
+------------------------|------------|---------------|-------------
+Input Processing         | ~200K      | ~0.5MB        | ~1-2ms
+Convolutional Backbone   | ~1.8G      | ~6MB          | ~60-80ms
+Detection Heads          | ~30M       | ~1MB          | ~10-15ms
+Non-Maximum Suppression  | ~5-20K     | ~100KB        | ~2-5ms
 ```
 
-The newer YOLOv12s with a 320x320 input resolution demonstrates significant performance improvements, particularly on the Raspberry Pi 5. This makes it a more suitable option for real-time applications on resource-constrained devices.
+The newest YOLOv12s with a 320x320 input resolution demonstrates significant performance improvements, particularly on the Raspberry Pi 5. This makes it an ideal option for real-time applications on resource-constrained devices.
 
-The convolutional backbone dominates computation time, performing billions of multiply-accumulate operations to extract features from the image. This is why hardware acceleration (like OpenCL, NEON SIMD, or external accelerators) can dramatically improve performance.
+The convolutional backbone still dominates computation time, performing billions of multiply-accumulate operations to extract features from the image. This is why hardware acceleration (like OpenCL, NEON SIMD, or external accelerators) can dramatically improve performance.
 
 **Memory Access Patterns and Optimization Opportunities**
 
@@ -3367,132 +3582,39 @@ The memory access patterns in YOLO are particularly important for optimization:
 ```
 *Figure 36: Memory access patterns in YOLO showing how convolutional operations access non-contiguous memory, leading to cache inefficiency.*
 
-**Architecture Variants and Performance/Accuracy Tradeoffs**
+**YOLOv12 Implementation on Raspberry Pi 5: Practical Considerations**
 
-YOLO offers several architectural variants optimized for different performance targets:
+For the ball-tracking robot, we optimize YOLOv12 for maximum performance:
 
-1. **Full-Scale Models** (YOLOv3, YOLOv4, YOLOv5m/l/x):
-   - High parameter count (30M-140M)
-   - Excellent detection accuracy (mAP 40-55%)
-   - Suitable for GPU acceleration
-   - Too slow for real-time on Raspberry Pi (1-3 seconds per frame)
-
-2. **Medium-Scale Models** (YOLOv5s, YOLOv8s):
-   - Moderate parameter count (7-14M)
-   - Good detection accuracy (mAP 35-45%)
-   - Real-time capable on desktop GPUs
-   - Borderline real-time on Raspberry Pi (400-700ms per frame)
-
-3. **Tiny Models** (YOLOv3-tiny, YOLOv4-tiny, YOLOv5n, YOLOv8n):
-   - Low parameter count (3-9M)
-   - Reduced accuracy (mAP 25-35%)
-   - Real-time capable on embedded GPUs
-   - Near real-time on Raspberry Pi (250-500ms per frame)
-
-4. **Specialized Models** (YOLO-Fastest, YOLOX-Nano):
-   - Ultra-low parameter count (0.5-2M)
-   - Further reduced accuracy (mAP 20-25%)
-   - Designed specifically for edge devices
-   - Real-time on Raspberry Pi (100-200ms per frame)
-
-**Implementation on Raspberry Pi: Practical Considerations**
-
-For the ball-tracking robot, several specialized implementations can significantly improve performance:
-
-1. **Framework-Specific Optimizations**:
-   - **TensorFlow Lite**: 
-     - 8-bit quantization for 3-4x speedup
-     - GPU delegate for 2x additional speedup
-   - **ONNX Runtime**: 
-     - Accelerated kernels for ARM CPUs
-     - Graph optimizations for 1.5-2x speedup
-   - **OpenCV DNN**: 
-     - Integrated with other vision processing
-     - NEON SIMD acceleration for key operations
-   - **MNN (Alibaba Mobile Neural Network)** (In this project we used MNN):
+1. **Framework Optimization**: 
+   - **MNN (Alibaba Mobile Neural Network)**:
      - Highly optimized for ARM CPUs, including Raspberry Pi 5
      - Supports int8 quantization and Winograd convolution for faster inference
      - Efficient multi-threading and NEON acceleration
-     - Demonstrated to run YOLO models significantly faster than many other frameworks on ARM SBCs
-     - Lightweight and easy to deploy for edge AI scenarios
+     - Demonstrated to run YOLO models significantly faster than other frameworks
 
-2. **Task-Specific Model Pruning**:
-   - Remove classes not needed for ball detection
-   - Prune channels with minimal contribution to accuracy
-   - Specialize the model for specific ball appearances
-   - Expected improvement: 30-50% speedup with minimal accuracy loss
+2. **Single-Class Optimization**:
+   - Remove unnecessary class outputs (only need "basketball")
+   - Reduce detection head size by ~80%
+   - Focus object detection on spherical objects
 
 3. **Resolution and Precision Adaptation**:
-   - Dynamic input resolution based on estimated ball distance
-   - Mixed precision (fp16 for convolutional layers, int8 for others)
-   - Single-class confidence threshold optimization
-   - Expected improvement: 40-60% speedup with minimal detection loss
+   - Use 320x320 input resolution for optimal speed/accuracy tradeoff
+   - Employ int8 quantization to reduce memory bandwidth
+   - Implement dynamic input scaling based on ball proximity
 
-**The "Cold Start" Problem in Vision Systems**
+Example YOLOv12 quantization and optimization for Raspberry Pi 5:
 
-For real-time robotics, the first frame processed by YOLO is particularly problematic:
+```bash
+# Convert to MNN with optimization
+python3 -m mnnconvert -f ONNX --modelFile yolov12s.onnx --MNNModel yolov12s_optimized.mnn \
+  --fp16 --bizCode MNN --optimize MEMORY --targetVersion 1.8
 
-1. **Cache Initialization Overhead**:
-   - Initial cache state is empty ("cold")
-   - Loading weights and tensor data causes cache misses
-   - Subsequent frames benefit from warmed caches
-   - First frame typically 2-3x slower than steady state
-
-2. **Memory Management Overhead**:
-   - Memory allocation for tensors and intermediate buffers
-   - GPU/accelerator initialization and buffer setup
-   - Graph optimization and compilation (for some frameworks)
-   - JIT (Just-In-Time) compilation for specialized kernels
-
-3. **Scheduling and Prediction Limitations**:
-   - Initial performance difficult to predict precisely
-   - Can cause deadline misses or system instability
-   - Particularly problematic for intermittent processing
-
-**Mitigating Cold Start Effects**:
-
-1. **Prewarming Strategy**:
-   - Run inference on dummy frame during initialization
-   - Preload weights into CPU cache and GPU memory
-   - Pre-allocate and touch all required memory pages
-   - Expected improvement: 70-90% reduction in first-frame latency
-
-2. **Persistent Processes**:
-   - Keep inference engine active rather than restarting
-   - Maintain warmed caches across detection requests
-   - Use thread pooling for worker threads
-   - Expected improvement: Near-elimination of cold start overhead
-
-3. **Progressive Refinement**:
-   - Start with very low resolution for first frame
-   - Progressively increase resolution as system stabilizes
-   - Expected improvement: More consistent initial response time
-
-**Architectural Integration with Control and Sensor Fusion**
-
-Integrating YOLO detection with the broader robotics system requires careful architectural design:
-
-1. **Multi-Threaded Pipeline**:
-   ```
-   Thread 1: Image Acquisition → Pre-processing → Queue
-   Thread 2: Dequeue → YOLO Inference → Detection Post-processing
-   Thread 3: Tracking → Sensor Fusion Integration
-   ```
-
-2. **Temporal Integration**:
-   - Detection timestamps synchronized with control system
-   - Prediction-based tracking between detections
-   - Late detection handling through retroactive state correction
-
-3. **Failure Resilience**:
-   - Graceful degradation if detection fails or slows
-   - Fall back to simpler algorithms if thermal throttling occurs
-   - Detection confidence thresholds adapted to current needs
-
-By understanding these detailed architectural aspects of YOLO, you can make informed decisions about model selection, optimization approaches, and system integration for your ball-tracking robot.
-
-> **Looking Ahead to Module 2: YOLO Computer Vision**  
-> We'll explore these YOLO architectural concepts in much greater depth in Module 2, including techniques for model optimization, quantization, and hardware acceleration. You'll have the opportunity to modify the YOLO configuration and observe how different architectural choices affect detection accuracy and speed.
+# Apply basketball-specific quantization
+python3 -m mnnquant --model yolov12s_optimized.mnn --quan QUANTIZE_FLOAT_TO_INT8 \
+  --quanWeightBits 8 --quanFeatureBits 8 --quanImageBits 8 \
+  --dataset basketball_dataset/ --outputModel yolov12s_quant.mnn
+```
 
 <a name="vision-optimization"></a>
 ### 8.1.3 Vision Pipeline Optimization Strategies for Real-Time Robotics
@@ -3586,10 +3708,10 @@ Several strategies can reduce the computational load:
    - Dynamically adjust resolution based on object distance
    - Computation scales quadratically with resolution reduction
 
-4. **Model Pruning and Quantization**:
-   - Use smaller variants of YOLO (tiny, nano)
-   - Reduce precision (use int8 instead of float32)
-   - Can reduce computation by 50-90% with acceptable accuracy loss
+4. **Early Termination**:
+   - Stop processing when confidence exceeds threshold
+   - Particularly effective for single-object detection (basketball)
+   - Can save 20-40% computation in favorable conditions
 
 **Parallelization Strategies: Using All Available Resources**
 
@@ -3609,10 +3731,10 @@ Several strategies can reduce the computational load:
    - Each core processes a different region
    - Reduces latency but requires careful synchronization
 
-3. **GPU Offloading**:
-   - Use the Raspberry Pi's GPU for certain operations
-   - OpenCL or similar frameworks needed
-   - Challenging to implement but offers significant speedup
+3. **Hardware Acceleration**:
+   - Use the Raspberry Pi 5's GPU for certain operations
+   - Leverage OpenCL and VideoCore for parallel image processing
+   - Take advantage of NEON SIMD instructions for vectorization
 
 **Memory Optimization: Reducing the Bottleneck**
 
@@ -3641,10 +3763,10 @@ Several strategies can reduce the computational load:
    - Avoid dynamic allocation during processing
    - Reduces jitter and improves cache behavior
 
-4. **Cache-Conscious Algorithm Design**:
-   - Process data in small, cache-fitting blocks
-   - Organize computations to maximize spatial and temporal locality
-   - Can improve performance by 20-40% on cache-limited systems
+4. **RAM Disk for Temporary Storage**:
+   - Use RAM disk for temporary image data (as configured earlier)
+   - Prevents disk I/O affecting vision processing timing
+   - Reduces jitter and improves determinism
 
 ```
 ┌───── Memory Optimization Techniques ─────┐
@@ -3694,7 +3816,7 @@ A fundamental challenge in vision-guided robotics is balancing two competing tim
    - Control parameters are tuned assuming consistent timing
 
 2. **Vision Processing Realities**:
-   - Full YOLO processing takes 50-100ms on a Raspberry Pi (10-20Hz)
+   - YOLOv12 processing takes 80-120ms on a Raspberry Pi 5 (8-12Hz)
    - Processing time varies based on image complexity
    - Vision algorithms frequently suffer from jitter
 
@@ -3712,7 +3834,7 @@ Loop:
 ```
 
 This creates several problems:
-- Control rate is limited by vision processing (10-20Hz)
+- Control rate is limited by vision processing (8-12Hz)
 - Unpredictable vision processing time causes control jitter
 - If vision fails or stalls, the entire system freezes
 
@@ -3757,7 +3879,7 @@ Control Thread (high priority real-time):
 │  │ │Shared State │ │◄───────►│ │to Motors     │ │  │
 │  │ └─────────────┘ │         │ └───────┬──────┘ │  │
 │  │                 │         │         │        │  │
-│  │ 10-20 Hz        │         │ ┌───────▼──────┐ │  │
+│  │ 8-12 Hz         │         │ ┌───────▼──────┐ │  │
 │  │                 │         │ │Wait for Next │ │  │
 │  │                 │         │ │Control Cycle │ │  │
 │  │                 │         │ └──────────────┘ │  │
@@ -3799,7 +3921,7 @@ To handle the timing mismatch between vision (slow) and control (fast), we imple
    ```
 
 2. **Multi-rate Fusion**:
-   - Vision system: Provides accurate but delayed updates (10-20Hz)
+   - Vision system: Provides accurate but delayed updates (8-12Hz)
    - IMU/encoders: Provide fast but drift-prone updates (1000Hz+)
    - Fusion algorithm combines both for accurate, high-frequency estimation
 
@@ -3862,7 +3984,7 @@ Managing the data flow between vision and control is critical:
 <a name="vision-ball-tracking"></a>
 ### 8.1.5 Real-World Vision Architecture for Ball Tracking Robot
 
-Let's put these concepts together for your specific ball-tracking robot with YOLO, LiDAR, and 3D sensors:
+Let's put these concepts together for your specific ball-tracking robot with YOLOv12, LiDAR, and 3D sensors:
 
 **Hardware Resources Allocation**:
 
@@ -3908,7 +4030,7 @@ Core 3: YOLO vision processing
    - Frame capture with accurate timestamping
    - Resolution scaling based on last known ball distance
    - ROI selection around predicted ball position
-   - YOLO processing at adaptive frequency (5-15Hz)
+   - YOLOv12 processing at adaptive frequency (8-12Hz)
    - Lightweight tracking between YOLO frames
    - Results published to shared state
 
@@ -3951,9 +4073,9 @@ The system continuously monitors and adapts:
    - ROI size changes based on tracking confidence
    - Control gains adapt to vision update rate
 
-This architecture balances the computational demands of computer vision with the strict timing requirements of robot control, allowing your ball-tracking robot to respond quickly and accurately despite the limited resources of a Raspberry Pi.
+This architecture balances the computational demands of computer vision with the strict timing requirements of robot control, allowing your ball-tracking robot to respond quickly and accurately despite the limited resources of a Raspberry Pi 5.
 
-> **Key Takeaway**: Effective real-time vision processing requires careful architectural design to balance computational demands with timing requirements. By using optimization techniques like ROI processing, frame decimation, and asynchronous architectures, combined with appropriate hardware resource allocation, it's possible to achieve reliable performance even on resource-constrained platforms like the Raspberry Pi.
+> **Key Takeaway**: Effective real-time vision processing requires careful architectural design to balance computational demands with timing requirements. By using optimization techniques like ROI processing, frame decimation, and asynchronous architectures, combined with appropriate hardware resource allocation, it's possible to achieve reliable performance even on resource-constrained platforms like the Raspberry Pi 5.
 
 > **Looking Ahead to Module 2: YOLO Computer Vision and Module 3: LiDAR Sensing**  
 > The vision architecture principles covered here will be expanded in both Module 2 (YOLO Computer Vision) and Module 3 (LiDAR Sensing). You'll learn how to implement and optimize these perceptual systems individually, and then in Module 5 (Sensor Fusion) you'll integrate them into a unified perception system.
@@ -4085,110 +4207,7 @@ State estimation is the process of inferring these variables from sensor measure
 *Figure 42: The state estimation problem visualized, showing how incomplete and imperfect sensor data must be combined to infer the true state of the system.*
 
 <a name="multi-rate-sensor-fusion"></a>
-### 8.2.2 Multi-Rate Sensor Fusion: Handling Different Sensor Timescales
-
-**The Timing Challenge in Real-World Robotics**
-
-In your ball-tracking robot, different sensors operate at fundamentally different rates:
-
-```
-Sensor        │ Update Rate │ Processing Delay│ Reliability
-──────────────┼─────────────┼────────────────┼───────────────
-IMU           │ 1000 Hz     │ 0.1 ms         │ Drifts over time
-Wheel Encoders│ 100-500 Hz  │ 0.5 ms         │ Accurate short-term
-LIDAR         │ 5-40 Hz     │ 5-20 ms        │ Very accurate but sparse
-Camera/YOLO   │ 10-30 Hz    │ 50-100 ms      │ Rich but noisy and delayed
-```
-
-This creates a complex integration challenge: some data arrives frequently but drifts (IMU), while other data is accurate but delayed and infrequent (vision).
-
-**Visualizing Asynchronous Sensor Data**
-
-Imagine the timeline of sensor updates for tracking a moving ball:
-
-```
-Time (ms)  │ 0  │ 10 │ 20 │ 30 │ 40 │ 50 │ 60 │ 70 │ 80 │ 90 │ 100│
-───────────┼────┼────┼────┼────┼────┼────┼────┼────┼────┼────┼────┤
-IMU        │ ✓  │ ✓  │ ✓  │ ✓  │ ✓  │ ✓  │ ✓  │ ✓  │ ✓  │ ✓  │ ✓  │
-Encoders   │ ✓  │    │ ✓  │    │ ✓  │    │ ✓  │    │ ✓  │    │ ✓  │
-LIDAR      │    │    │    │    │ ✓  │    │    │    │    │    │ ✓  │
-Camera     │ ✓  │    │    │    │    │    │    │    │ ✓  │    │    │
-───────────┼────┼────┼────┼────┼────┼────┼────┼────┼────┼────┼────┤
-Control    │ ?  │ ?  │ ?  │ ?  │ ?  │ ?  │ ?  │ ?  │ ?  │ ?  │ ?  │
-Loop Needs │    │    │    │    │    │    │    │    │    │    │    │
-```
-
-The control system needs consistent state updates (typically at 100-200Hz), but sensors provide fragmented, asynchronous information.
-
-```
-┌───── Asynchronous Sensor Update Timeline ─────┐
-│                                               │
-│  Sensor    │     Updates (Hz)                 │
-│  ──────────┼──────────────────────────────────│
-│  IMU       │ ││││││││││││││││││││││││││││││││ │
-│            │ 1000 Hz                          │
-│  ──────────┼──────────────────────────────────│
-│  Encoders  │ │  │  │  │  │  │  │  │  │  │  │  │
-│            │ 200 Hz                           │
-│  ──────────┼──────────────────────────────────│
-│  LIDAR     │    │         │         │         │
-│            │ 30 Hz                            │
-│  ──────────┼──────────────────────────────────│
-│  Camera    │      │                 │         │
-│            │ 15 Hz                            │
-│  ──────────┼──────────────────────────────────│
-│  Control   │ ││││││││││││││││││││││││││││││││ │
-│  Needs     │ 200 Hz                           │
-│                                               │
-│  Timeline  │────────────────────────────────▶ │
-│                                               │
-└───────────────────────────────────────────────┘
-```
-*Figure 43: Timeline visualization of asynchronous sensor updates showing how different sensors provide information at different rates and with different delays.*
-
-**The Extended Kalman Filter (EKF): The Integration Engine**
-
-The Extended Kalman Filter is the workhorse of sensor fusion, particularly well-suited for robotics because it:
-
-1. **Maintains a unified state representation**
-2. **Updates with any sensor at any time**
-3. **Weights measurements based on their uncertainty**
-4. **Predicts forward between measurements**
-5. **Handles non-linear relationships between variables**
-
-**Kalman Filter Fundamentals**
-
-The Kalman filter provides an optimal solution for state estimation under certain conditions. It operates on these key principles:
-
-1. **Probabilistic State Representation**: 
-   - State is represented as a probability distribution (typically Gaussian)
-   - Characterized by a mean vector (x̂) and covariance matrix (P)
-   - The mean represents our best estimate
-   - The covariance represents our uncertainty
-
-2. **Linear System Model**:
-   - In the standard Kalman filter:
-     - State transition: xₖ = Fₖ·xₖ₋₁ + Bₖ·uₖ + wₖ
-     - Measurement model: zₖ = Hₖ·xₖ + vₖ
-   - Where:
-     - xₖ is the state at time k
-     - Fₖ is the state transition matrix
-     - Bₖ is the control input matrix
-     - uₖ is the control input
-     - wₖ is the process noise (Gaussian with covariance Q)
-     - zₖ is the measurement
-     - Hₖ is the measurement matrix
-     - vₖ is the measurement noise (Gaussian with covariance R)
-
-3. **Extended Kalman Filter for Nonlinear Systems**:
-   - For robotics, we usually need to handle nonlinearities
-   - EKF uses linearization through Jacobian matrices:
-     - State transition: xₖ = f(xₖ₋₁, uₖ) + wₖ
-     - Measurement model: zₖ = h(xₖ) + vₖ
-   - Jacobians Fₖ and Hₖ are computed as the derivatives of f and h
-
-> **Note: Detailed Kalman Filter Theory**  
-> This is a simplified introduction to the Kalman filter. In Module 5: Sensor Fusion Techniques, we'll dive much deeper into the mathematical foundations, implementation details, and practical tuning of Kalman filters for robotics applications. We'll also cover extensions like the Unscented Kalman Filter (UKF) and particle filters for highly nonlinear systems.
+### 8.2.2 Multi-Rate Sensor Fusion: Handling Different Sensor Timescales (continued)
 
 **How EKF Works: An Intuitive Explanation**
 
@@ -4218,7 +4237,237 @@ The filter operates in two alternating steps:
      - x̂ₖ|ₖ = x̂ₖ|ₖ₋₁ + Kₖỹₖ
      - Pₖ|ₖ = (I - KₖHₖ)Pₖ|ₖ₋₁
 
+```
+┌───── Kalman Filter Operation ─────┐
+│                                   │
+│ Prediction Step                   │
+│ ┌───────────────────────────────┐ │
+│ │                               │ │
+│ │ State    ┌─────┐              │ │
+│ │ Estimate │     │              │ │
+│ │ x̂ₖ₋₁     │  f  │──────┬──────►│ │
+│ │          │     │      │       │ │
+│ │          └─────┘      │       │ │
+│ │                     x̂ₖ|ₖ₋₁    │ │
+│ │ Uncertainty         │       │ │
+│ │ Estimate            │       │ │
+│ │ Pₖ₋₁    ┌─────┐     │       │ │
+│ │         │     │     │       │ │
+│ │ ────────►  F  │─────┼──────►│ │
+│ │         │     │     │       │ │
+│ │         └─────┘     │       │ │
+│ │                    Pₖ|ₖ₋₁   │ │
+│ │                      │       │ │
+│ └──────────────────────┼───────┘ │
+│                        │         │
+│                        ▼         │
+│ Update Step (when measurement arrives)
+│ ┌────────────────────┬─┬─────────┐ │
+│ │                    │ │         │ │
+│ │ Measurement ┌─────┐│ │Pred.    │ │
+│ │ zₖ          │     ││ │Meas.    │ │
+│ │ ────────────► h   │┴─► x̂ₖ|ₖ₋₁   │ │
+│ │             │     │  │         │ │
+│ │             └─────┘  │         │ │
+│ │                      │         │ │
+│ │                    ┌─▼─┐       │ │
+│ │                    │   │       │ │
+│ │                    │ - │       │ │
+│ │                    │   │       │ │
+│ │                    └─┬─┘       │ │
+│ │                      │         │ │
+│ │                      │Innovation│
+│ │                      │ỹₖ       │ │
+│ │                      │         │ │
+│ │                    ┌─▼─┐       │ │
+│ │                    │   │       │ │
+│ │                    │ K │       │ │
+│ │                    │   │       │ │
+│ │                    └─┬─┘       │ │
+│ │                      │         │ │
+│ │                      │         │ │
+│ │ x̂ₖ|ₖ₋₁              ┌─▼─┐       │ │
+│ │ ──────────────────►│   │       │ │
+│ │                    │ + │       │ │
+│ │                    │   │       │ │
+│ │                    └─┬─┘       │ │
+│ │                      │         │ │
+│ │                      │Updated  │ │
+│ │                      │Estimate │ │
+│ │                      │x̂ₖ|ₖ     │ │
+│ │                      ▼         │ │
+│ └──────────────────────────────────┘ │
+│                                     │
+└─────────────────────────────────────┘
+```
+*Figure 44: Detailed visualization of Kalman filter operation showing prediction and update steps with corresponding equations.*
+
+**Implementing Multi-Rate Fusion for Ball Tracking**
+
+For our ball-tracking robot, we implement a multi-rate sensor fusion system using the Extended Kalman Filter:
+
+1. **State Vector Definition**:
+   ```
+   x = [ball_x, ball_y, ball_z, ball_vx, ball_vy, ball_vz]ᵀ
+   ```
+   
+   This state vector includes both position and velocity components of the ball.
+
+2. **Physics-Based Motion Model**:
+   ```cpp
+   // Simple physics model for ball motion (constant velocity with gravity)
+   void predict_state(float dt) {
+       // Position updated by velocity
+       state.x += state.vx * dt;
+       state.y += state.vy * dt;
+       state.z += state.vz * dt;
+       
+       // Velocity updated only by gravity
+       state.vz += GRAVITY * dt;
+       
+       // Increase uncertainty based on time elapsed
+       increase_covariance(dt);
+   }
+   ```
+
+3. **Measurement Handling**:
+   ```cpp
+   // Camera measurement update
+   void update_from_camera(const CameraDetection& detection) {
+       // Convert pixel coordinates to 3D bearing
+       Vector3 ray = pixel_to_ray(detection.pixel_x, detection.pixel_y);
+       
+       // Create measurement model for bearing-only observation
+       Vector3 predicted_ray = normalize(Vector3(
+           state.x - camera_pos.x,
+           state.y - camera_pos.y,
+           state.z - camera_pos.z
+       ));
+       
+       // Compare and update state
+       // (simplified - actual EKF would use proper matrix operations)
+       update_state_from_bearing(ray, predicted_ray);
+   }
+   
+   // LiDAR measurement update
+   void update_from_lidar(const LidarDetection& detection) {
+       // Direct 3D position measurement
+       Vector3 measured_position = detection.position;
+       
+       // Create measurement model (direct observation of position)
+       Vector3 predicted_position(state.x, state.y, state.z);
+       
+       // Compare and update state
+       update_state_from_position(measured_position, predicted_position);
+   }
+   ```
+
+4. **Asynchronous Sensor Integration**:
+   ```cpp
+   // Main fusion loop
+   void fusion_thread() {
+       const float dt = 0.005;  // 200Hz prediction rate
+       
+       while (running) {
+           // Mutex for thread-safe access
+           std::lock_guard<std::mutex> lock(state_mutex);
+           
+           // Always predict forward
+           predict_state(dt);
+           
+           // Check for new sensor data (non-blocking)
+           if (camera_queue.has_new_data()) {
+               CameraDetection detection = camera_queue.get_latest();
+               update_from_camera(detection);
+           }
+           
+           if (lidar_queue.has_new_data()) {
+               LidarDetection detection = lidar_queue.get_latest();
+               update_from_lidar(detection);
+           }
+           
+           // Publish current best estimate
+           publish_state();
+           
+           // Precise timing for next cycle
+           sleep_until_next_cycle();
+       }
+   }
+   ```
+
+**Handling Measurement Delays**
+
+One of the biggest challenges in sensor fusion is dealing with processing delays. For example, YOLOv12 vision processing might add 80-120ms of delay to each frame. To handle this:
+
+1. **Timestamp All Measurements**:
+   ```cpp
+   struct CameraDetection {
+       double timestamp;  // When image was CAPTURED (not when processing completed)
+       double pixel_x;
+       double pixel_y;
+       double confidence;
+   };
+   ```
+
+2. **State History Buffer**:
+   ```cpp
+   // Keep a history of states and covariances
+   std::map<double, State> state_history;
+   std::map<double, Covariance> covariance_history;
+   
+   // When a delayed measurement arrives
+   void process_delayed_measurement(const Measurement& m) {
+       // Find closest state before measurement time
+       auto it = state_history.lower_bound(m.timestamp);
+       if (it != state_history.begin()) {
+           --it;  // Get state just before measurement
+           
+           // 1. Rewind state to that point
+           State old_state = it->second;
+           Covariance old_covariance = covariance_history[it->first];
+           
+           // 2. Apply measurement to old state
+           update_measurement(old_state, old_covariance, m);
+           
+           // 3. Fast-forward by re-applying all predictions and measurements
+           replay_history_after(m.timestamp);
+       }
+   }
+   ```
+
+**Uncertainty Management and Fault Detection**
+
+A robust fusion system must handle sensor failures and inconsistent measurements:
+
+1. **Adaptive Measurement Covariance**:
+   ```cpp
+   // Adjust measurement weight based on confidence
+   void update_from_camera(const CameraDetection& detection) {
+       // Scale measurement covariance inversely with confidence
+       // Lower confidence = higher covariance = lower weight in fusion
+       Matrix3 R = base_camera_covariance * (1.0 / detection.confidence);
+       
+       // Use adjusted covariance in EKF update
+       ekf_update(detection, R);
+   }
+   ```
+
+2. **Outlier Rejection**:
+   ```cpp
+   // Reject inconsistent measurements
+   bool is_outlier(const Measurement& m) {
+       // Compute Mahalanobis distance between measurement and prediction
+       double distance = mahalanobis_distance(m, predicted_measurement, S);
+       
+       // Reject if exceeds threshold (gate)
+       return distance > OUTLIER_THRESHOLD;
+   }
+   ```
+
 > **Key Takeaway**: Sensor fusion is essential in robotics because no single sensor provides complete or perfect information. The Extended Kalman Filter offers a powerful framework for combining asynchronous, multi-rate sensor data with varying degrees of accuracy and latency. By maintaining a probabilistic state estimate that's continuously updated and predicted forward in time, the EKF provides a consistent, real-time representation of the robot and its environment that's more accurate than any individual sensor.
+
+> **Looking Ahead to Module 5: Sensor Fusion Techniques**  
+> In Module 5, we'll dive deeper into the mathematics and implementation details of sensor fusion, including advanced approaches like Unscented Kalman Filters and Particle Filters. You'll learn how to tune these filters for optimal performance and how to handle more complex sensor fusion scenarios.
 
 <a name="part-vi"></a>
 # 9. Part VI: Verification and Performance Analysis
@@ -4298,26 +4547,23 @@ This output shows:
 │  Frequency                                │
 │  ^                                        │
 │  │                                        │
-│  │  ┌───┐                                 │
-│  │  │   │                                 │
-│  │  │   │                                 │
-│  │  │   │                                 │
-│  │  │   │                                 │
-│  │  │   │                                 │
-│  │  │   │    ┌───┐                        │
-│  │  │   │    │   │                        │
-│  │  │   │    │   │    ┌───┐     ┌───┐     │
-│  │  │   │    │   │    │   │     │   │     │
-│  └──┴───┴────┴───┴────┴───┴─────┴───┴──►  │
-│     10µs   20µs   30µs   40µs    >50µs    │
-│                                           │
-│  Standard Kernel:    Max Latency: 235µs   │
-│  PREEMPT Kernel:     Max Latency: 122µs   │
-│  PREEMPT_RT Kernel:  Max Latency:  42µs   │
-│                                           │
-│  RT Kernel provides significantly         │
-│  lower and more consistent latency        │
-│                                           │
+│  │     ▲                                  │
+│  │     │                                  │
+│  │     │        ▲                        │
+│  │     │        │      ▲                 │
+│  │     │        │      │        ▲        │
+│  │     │        │      │        │     ▲  │
+│  │  ▲  │     ▲  │   ▲  │     ▲  │  ▲  │  │
+│  │ _│__│_____|__|___|__|_____|__|__|__|_ │
+│  │  10µs   20µs   30µs   40µs    >50µs  │
+│  │                                        │
+│  │  Standard Kernel:    Max Latency: 235µs│
+│  │  PREEMPT Kernel:     Max Latency: 122µs│
+│  │  PREEMPT_RT Kernel:  Max Latency:  42µs│
+│  │                                        │
+│  │  RT Kernel provides significantly      │
+│  │  lower and more consistent latency     │
+│  │                                        │
 └───────────────────────────────────────────┘
 ```
 *Figure 52: Example cyclictest results showing latency distribution with different kernel configurations, highlighting the benefits of real-time optimizations.*
@@ -4327,7 +4573,7 @@ This output shows:
 
 **Result Analysis and Benchmarks:**
 
-For real-time robotics on Raspberry Pi, these are the expected latency ranges:
+For real-time robotics on Raspberry Pi 5, these are the expected latency ranges:
 
 | Kernel Type | Typical Max Latency | Acceptable for | Not Suitable for |
 |-------------|---------------------|----------------|------------------|
@@ -4779,7 +5025,20 @@ Creating an effective real-time robotics system requires deep understanding acro
 ```
 *Figure 55: Holistic system design showing the integration of various disciplines into a complete real-time robotics platform.*
 
-The Raspberry Pi setup described in this document applies these principles to create a platform capable of deterministic operation for complex robotics tasks. By optimizing each layer of the system—from kernel to application—we create an integrated environment where the digital control system can reliably interface with the physical world.
+The Raspberry Pi 5 setup described in this document applies these principles to create a platform capable of deterministic operation for complex robotics tasks. By optimizing each layer of the system—from kernel to application—we create an integrated environment where the digital control system can reliably interface with the physical world.
+
+Key optimizations implemented for this platform include:
+
+1. **Real-time kernel configuration** with PREEMPT_RT for minimal scheduling latency
+2. **Memory optimization techniques** including RAM disks, huge pages, and kernel parameter tuning
+3. **CPU isolation and affinity** to dedicate cores to critical tasks
+4. **ROS2 middleware optimization** using CycloneDDS and shared memory transport
+5. **Thermal management** to maintain consistent performance over extended operation
+6. **Process prioritization** based on scientific scheduling theory
+7. **Cache-conscious programming** to minimize memory access overhead
+8. **Asynchronous architecture** to separate time-critical control from compute-intensive vision
+9. **Multi-rate sensor fusion** to integrate data from different sensor timescales
+10. **Comprehensive performance testing** to validate system behavior
 
 This integration of computer science theory with practical engineering is what makes modern robotics systems possible, enabling applications from precision manufacturing to autonomous vehicles.
 
@@ -4790,7 +5049,7 @@ This integration of computer science theory with practical engineering is what m
 
 This foundational module has established the core operating system and architectural principles for your ball-tracking robot. In the upcoming modules, you'll build on this foundation to implement specialized components:
 
-1. **Module 2: YOLO Computer Vision** - Implement and optimize real-time object detection
+1. **Module 2: YOLO Computer Vision** - Implement and optimize real-time object detection with YOLOv12
 2. **Module 3: LiDAR Sensing and Processing** - Extract meaningful spatial information from point clouds
 3. **Module 4: 3D Depth Camera Integration** - Add accurate depth perception to your visual system
 4. **Module 5: Sensor Fusion Techniques** - Combine sensor data for robust state estimation
