@@ -496,14 +496,48 @@ When one sensor fails or provides poor data, others can compensate:
 The chart below shows tracking success rates with different sensor combinations:
 
 ```mermaid
-xychart-beta
-  title "Tracking Success Rate by Sensor Combination"
-  x-axis ["Normal", "Low Light", "Fast Motion", "Occlusion"]
-  y-axis 0 --> 100
-  bar [95, 60, 70, 45] "LiDAR Only"
-  bar [90, 30, 85, 65] "Camera Only"
-  bar [95, 40, 65, 60] "Depth Only" 
-  bar [99, 85, 93, 82] "All Sensors"
+graph TD
+    subgraph Success_Rates[Tracking Success Rates]
+        direction LR
+        
+        subgraph Normal[Normal Conditions]
+            n1[LiDAR Only: 95%]
+            n2[Camera Only: 90%]
+            n3[Depth Only: 95%]
+            n4[All Sensors: 99%]
+        end
+
+        subgraph LowLight[Low Light]
+            l1[LiDAR Only: 60%]
+            l2[Camera Only: 30%]
+            l3[Depth Only: 40%]
+            l4[All Sensors: 85%]
+        end
+
+        subgraph FastMotion[Fast Motion]
+            f1[LiDAR Only: 70%]
+            f2[Camera Only: 85%]
+            f3[Depth Only: 65%]
+            f4[All Sensors: 93%]
+        end
+
+        subgraph Occlusion[Occlusion]
+            o1[LiDAR Only: 45%]
+            o2[Camera Only: 65%]
+            o3[Depth Only: 60%]
+            o4[All Sensors: 82%]
+        end
+    end
+
+    classDef lidar fill:#FF6B6B,stroke:#333,stroke-width:1px
+    classDef camera fill:#4ECDC4,stroke:#333,stroke-width:1px
+    classDef depth fill:#FFE66D,stroke:#333,stroke-width:1px
+    classDef all fill:#1A535C,stroke:#333,stroke-width:1px,color:white
+    
+    class n1,l1,f1,o1 lidar
+    class n2,l2,f2,o2 camera
+    class n3,l3,f3,o3 depth
+    class n4,l4,f4,o4 all
 ```
 
 *Figure 4.2: Comparison of tracking success rates across different scenarios. The chart demonstrates how using all sensors together (bottom bar in each group) provides significantly better performance in challenging conditions compared to any single sensor.*
