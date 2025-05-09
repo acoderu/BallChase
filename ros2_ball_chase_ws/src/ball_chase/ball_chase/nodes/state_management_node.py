@@ -927,7 +927,7 @@ Mathematical approach:
 # ----- OPTIMIZED VECTOR OPERATIONS -----
 
 def vec3_distance(pos1, pos2=None):
-        """Calculate Euclidean distance with optimized operations."""
+    """Calculate Euclidean distance with optimized operations."""
     if pos2 is None:
         # Distance from origin (0,0,0)
         return math.sqrt(pos1[0]**2 + pos1[1]**2 + pos1[2]**2)
@@ -939,7 +939,7 @@ def vec3_distance(pos1, pos2=None):
         return math.sqrt(dx**2 + dy**2 + dz**2)
 
 def vec2_distance(pos):
-        """Calculate XY-plane distance from origin with optimized operations."""
+    """Calculate XY-plane distance from origin with optimized operations."""
     return math.sqrt(pos[0]**2 + pos[1]**2)
 
 
@@ -1369,7 +1369,7 @@ class OptimizedBallChaseStateManager(Node):
         self.get_logger().info("Timers set up with optimized frequencies for Raspberry Pi")
     
     def tracking_status_callback(self, msg):
-    """Process tracking reliability flag with reduced logging.
+        """Process tracking reliability flag with reduced logging.
         
         This method is called automatically by the ROS 2 framework when new messages arrive.
         It processes the incoming data and updates the node's internal state accordingly."""
@@ -1391,7 +1391,7 @@ class OptimizedBallChaseStateManager(Node):
             self.get_logger().info(f"Fusion tracking status: reliable={self.tracking_reliable}")
     
     def uncertainty_callback(self, msg):
-    """Process and analyze position uncertainty data to inform adaptive tracking behavior.
+        """Process and analyze position uncertainty data to inform adaptive tracking behavior.
         
         This method receives and processes uncertainty values from the fusion node, which 
         represent the estimated error margins in the ball's position. These uncertainty 
@@ -1467,7 +1467,7 @@ class OptimizedBallChaseStateManager(Node):
             )
     
     def position_callback(self, msg):
-    """Process incoming basketball position information and calculate distance metrics.
+        """Process incoming basketball position information and calculate distance metrics.
         
         Concept:
         - Converts the incoming ROS PointStamped message to a tuple for fast processing.
@@ -1636,7 +1636,7 @@ class OptimizedBallChaseStateManager(Node):
 
     
     def update_ball_stationary_status(self):
-    """Check if the ball is stationary with optimized calculations.
+        """Check if the ball is stationary with optimized calculations.
         
         Concept:
         - Looks at the recent position history to see if the ball has moved more than a threshold.
@@ -1721,7 +1721,7 @@ class OptimizedBallChaseStateManager(Node):
             self.last_stationary_status = self.is_ball_stationary
     
     def handle_position_based_transitions(self, current_time):
-    """Handle state transitions with early-exit optimizations.
+        """Handle state transitions with early-exit optimizations.
         
         Concept:
         - Decides when to transition between states based on position updates and time in state.
@@ -1752,7 +1752,7 @@ class OptimizedBallChaseStateManager(Node):
             self._handle_stopped_transitions()
     
     def _handle_initializing_transitions(self, time_in_state):
-    """Handle transitions from INITIALIZING state with optimized checks.
+        """Handle transitions from INITIALIZING state with optimized checks.
         
         Returns:
             bool: True if a state transition occurred, False otherwise"""
@@ -1777,7 +1777,7 @@ class OptimizedBallChaseStateManager(Node):
             self.transition_to_state(RobotState.TRACKING)
     
     def _handle_lost_ball_transitions(self, time_in_state):
-    """Handle transitions from LOST_BALL state with optimized checks.
+        """Handle transitions from LOST_BALL state with optimized checks.
         
         Returns:
             bool: True if a state transition occurred, False otherwise"""
@@ -1816,7 +1816,7 @@ class OptimizedBallChaseStateManager(Node):
             return
     
     def _handle_recovery_transitions(self, time_in_state):
-    """Handle transitions from RECOVERY state with optimized checks.
+        """Handle transitions from RECOVERY state with optimized checks.
         
         Returns:
             bool: True if a state transition occurred, False otherwise"""
@@ -1847,7 +1847,7 @@ class OptimizedBallChaseStateManager(Node):
             return
     
     def _handle_searching_transitions(self, time_in_state):
-    """Handle transitions from SEARCHING state with optimized checks.
+        """Handle transitions from SEARCHING state with optimized checks.
         
         Returns:
             bool: True if a state transition occurred, False otherwise"""
@@ -1862,7 +1862,7 @@ class OptimizedBallChaseStateManager(Node):
             return
     
     def _handle_tracking_transitions(self, time_in_state, current_time):
-    """Handle transitions from TRACKING state with optimized checks.
+        """Handle transitions from TRACKING state with optimized checks.
         
         🔍 BEGINNER'S GUIDE: How Our Robot Decides When to Stop
         ---------------------------------------------------
@@ -1927,7 +1927,7 @@ class OptimizedBallChaseStateManager(Node):
             self.stationary_start_time = None
     
     def _handle_stopped_transitions(self):
-    """Handle transitions from STOPPED state with optimized checks.
+        """Handle transitions from STOPPED state with optimized checks.
         
         Returns:
             bool: True if a state transition occurred, False otherwise"""
@@ -1939,7 +1939,7 @@ class OptimizedBallChaseStateManager(Node):
             return
     
     def evaluate_uncertainty_recovery(self):
-    """Evaluate if we should enter recovery mode based on uncertainty trends.
+        """Evaluate if we should enter recovery mode based on uncertainty trends.
         
         Concept:
         - Monitors the trend of position uncertainty to decide if the robot should enter recovery mode.
@@ -1980,7 +1980,7 @@ class OptimizedBallChaseStateManager(Node):
                 return
     
     def motion_state_callback(self, msg):
-    """Process ball motion state classifications to adapt robot tracking behavior.
+        """Process ball motion state classifications to adapt robot tracking behavior.
         
         This method receives ball motion state information from the fusion node, which
         classifies the ball's movement pattern (e.g., "moving", "stationary"). This
@@ -2047,7 +2047,7 @@ class OptimizedBallChaseStateManager(Node):
             self.get_logger().info(f"Current motion state: {self.motion_state}")
     
     def adapt_parameters_to_motion_state(self):
-    """Adapt tracking parameters with optimized update frequency.
+        """Adapt tracking parameters with optimized update frequency.
         
         Concept:
         - Adjusts thresholds and timeouts based on the current motion state of the ball.
@@ -2099,7 +2099,7 @@ class OptimizedBallChaseStateManager(Node):
         )
     
     def tracking_confidence_callback(self, msg):
-    """Process confidence values with reduced logging.
+        """Process confidence values with reduced logging.
         
         This method is called automatically by the ROS 2 framework when new messages arrive.
         It processes the incoming data and updates the node's internal state accordingly."""
@@ -2150,7 +2150,7 @@ class OptimizedBallChaseStateManager(Node):
             self.get_logger().info(f"Tracking confidence: {self.tracking_confidence:.2f}")
     
     def sensor_gap_callback(self, msg):
-    """Process sensor gap information with optimized handling.
+        """Process sensor gap information with optimized handling.
         
         This method is called automatically by the ROS 2 framework when new messages arrive.
         It processes the incoming data and updates the node's internal state accordingly."""
@@ -2189,7 +2189,7 @@ class OptimizedBallChaseStateManager(Node):
         self.handle_sensor_gap()
     
     def handle_sensor_gap(self):
-    """Handle sensor gaps with early-exit optimization.
+        """Handle sensor gaps with early-exit optimization.
         
         Concept:
         - Decides how to handle sensor gaps based on the current state and motion state.
@@ -2228,7 +2228,7 @@ class OptimizedBallChaseStateManager(Node):
             self._handle_stopped_gap(gap_duration, tolerance_time, current_time)
     
     def _handle_tracking_gap(self, gap_duration, tolerance_time, current_time):
-    """Handle sensor gap in TRACKING state."""
+        """Handle sensor gap in TRACKING state."""
         # Stay in TRACKING during short gaps with adaptive tolerance
         if gap_duration < tolerance_time:
             # Temporarily override the timeout logic
@@ -2261,7 +2261,7 @@ class OptimizedBallChaseStateManager(Node):
                 self.transition_to_state(RobotState.RECOVERY)
     
     def _handle_stopped_gap(self, gap_duration, tolerance_time, current_time):
-    """Handle sensor gap in STOPPED state."""
+        """Handle sensor gap in STOPPED state."""
         # Special protection for STOPPED state during gap
         if hasattr(self, 'motion_state') and self.motion_state in ["stationary", "long_stationary"]:
             # For stationary balls, stay in STOPPED state longer
@@ -2277,7 +2277,7 @@ class OptimizedBallChaseStateManager(Node):
                 self.last_detection_time = current_time
     
     def fusion_diagnostics_callback(self, msg):
-    """Process fusion node diagnostics with reduced parsing overhead.
+        """Process fusion node diagnostics with reduced parsing overhead.
         
         This method is called automatically by the ROS 2 framework when new messages arrive.
         It processes the incoming data and updates the node's internal state accordingly."""
@@ -2310,7 +2310,7 @@ class OptimizedBallChaseStateManager(Node):
             self.get_logger().error(f"Error processing fusion diagnostics: {str(e)}")
     
     def state_manager_callback(self):
-    """Main control loop executed periodically (5Hz) to manage the robot's operational state.
+        """Main control loop executed periodically (5Hz) to manage the robot's operational state.
         
         This callback serves as the central orchestration point for the entire state machine,
         coordinating all aspects of the robot's behavior. It performs a systematic sequence
@@ -2446,7 +2446,7 @@ class OptimizedBallChaseStateManager(Node):
         getattr(self, f'_handle_{self.current_state.lower()}_state')(current_time, time_since_detection)
     
     def _handle_initializing_state(self, current_time, time_since_detection):
-    """Handle behavior in INITIALIZING state."""
+        """Handle behavior in INITIALIZING state."""
         # Check if we should timeout initialization
         time_in_state = current_time - self.state_start_time
         if time_in_state > 5.0:  # 5 seconds to initialize
@@ -2460,7 +2460,7 @@ class OptimizedBallChaseStateManager(Node):
                 self.transition_to_state(RobotState.LOST_BALL)
     
     def _handle_tracking_state(self, current_time, time_since_detection):
-    """Handle behavior in TRACKING state."""
+        """Handle behavior in TRACKING state."""
         # STEP 1: Evaluate if tracking is still reliable
         # This checks if we should continue trying to track the ball or give up
         # Think of this as asking "Do we still have a good idea where the ball is?"
@@ -2498,14 +2498,14 @@ class OptimizedBallChaseStateManager(Node):
             self.transition_to_state(RobotState.LOST_BALL)
     
     def _handle_lost_ball_state(self, current_time, time_since_detection):
-    """Handle behavior in LOST_BALL state."""
+        """Handle behavior in LOST_BALL state."""
         # Already handled transitions in position_callback
         # Just stay in LOST_BALL state - we don't search for the ball
         # Keep the robot stationary during LOST_BALL
         self.stop_robot()
     
     def _handle_searching_state(self, current_time, time_since_detection):
-    """Handle behavior in SEARCHING state."""
+        """Handle behavior in SEARCHING state."""
         # Execute search pattern
         self.execute_search_rotation()
         
@@ -2516,7 +2516,7 @@ class OptimizedBallChaseStateManager(Node):
             self.transition_to_state(RobotState.LOST_BALL)
     
     def _handle_recovery_state(self, current_time, time_since_detection):
-    """Handle behavior in RECOVERY state."""
+        """Handle behavior in RECOVERY state."""
         # Check timeout
         time_in_state = current_time - self.state_start_time
         if time_in_state > self.max_recovery_time:
@@ -2557,14 +2557,14 @@ class OptimizedBallChaseStateManager(Node):
             )
     
     def _handle_stopped_state(self, current_time, time_since_detection):
-    """Handle behavior in STOPPED state."""
+        """Handle behavior in STOPPED state."""
         # Already handling transitions in position_callback
         # Just ensure we're stopped
         if self.state_manager_call_count % 10 == 0:  # Only check periodically to reduce CPU
             self.stop_robot()
     
     def evaluate_tracking_reliability(self, time_since_detection):
-    """Evaluate tracking reliability with optimized early-exit checks.
+        """Evaluate tracking reliability with optimized early-exit checks.
         
         Args:
             time_since_detection (float): Time since last detection
@@ -2611,7 +2611,7 @@ class OptimizedBallChaseStateManager(Node):
         return False
     
     def execute_search_rotation(self):
-    """Execute an optimized search rotation to find the ball."""
+        """Execute an optimized search rotation to find the ball."""
         # Initialize search start time if needed
         if self.search_rotation_start_time is None:
             self.search_rotation_start_time = time.time()
@@ -2638,7 +2638,7 @@ class OptimizedBallChaseStateManager(Node):
         self.cmd_vel_publisher.publish(self._search_twist)
     
     def transition_to_state(self, new_state):
-    """Handle state transitions with optimized protection logic.
+        """Handle state transitions with optimized protection logic.
         
         🔍 BEGINNER'S GUIDE: How State Transitions Work
         -------------------------------------------
@@ -2859,7 +2859,7 @@ class OptimizedBallChaseStateManager(Node):
         self.publish_state()
     
     def apply_state_protection(self, proposed_state):
-    """Apply optimized protection against rapid state oscillations.
+        """Apply optimized protection against rapid state oscillations.
         
         Concept:
         - Checks if enough time has passed in the current state before allowing a transition.
@@ -2958,7 +2958,7 @@ class OptimizedBallChaseStateManager(Node):
         return proposed_state
     
     def stop_robot(self):
-    """Send command to stop all robot motion with reduced overhead.
+        """Send command to stop all robot motion with reduced overhead.
         
         Concept:
         - Publishes a zero-velocity command to stop the robot.
@@ -2969,7 +2969,7 @@ class OptimizedBallChaseStateManager(Node):
         self.cmd_vel_publisher.publish(self._stop_twist)
     
     def publish_state(self):
-    """Publish current robot state for other nodes to consume.
+        """Publish current robot state for other nodes to consume.
         
         Concept:
         - Publishes the current state as a message so other parts of the system can react.
@@ -2981,7 +2981,7 @@ class OptimizedBallChaseStateManager(Node):
         self.state_publisher.publish(self._state_msg)
     
     def health_check_callback(self):
-    """Perform periodic health checks with reduced computational overhead.
+        """Perform periodic health checks with reduced computational overhead.
         
         Concept:
         - Evaluates the health of the system and logs warnings if needed.
@@ -3034,7 +3034,7 @@ class OptimizedBallChaseStateManager(Node):
         self.health_publisher.publish(self._health_msg)
     
     def publish_diagnostics(self):
-    """Publish diagnostics with optimized JSON serialization and reduced content.
+        """Publish diagnostics with optimized JSON serialization and reduced content.
         
         Concept:
         - Publishes a summary of the robot's state, tracking, and health for monitoring and debugging.

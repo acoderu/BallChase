@@ -13,6 +13,7 @@ ros2 lifecycle set /optimized_fusion_node activate
 taskset -c 1 ros2 run ball_chase yolo_ball_node
 taskset -c 2 ros2 run ball_chase lidar_node
 taskset -c 2 ros2 run ball_chase state_fusion_node
+
 taskset -c 3 ros2 run ball_chase state_management_node
 taskset -c 3 python3 pid_controller_node.py --ros-args -p debug_level:=3
 
