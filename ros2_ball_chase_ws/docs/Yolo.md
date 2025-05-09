@@ -99,7 +99,7 @@ Don't have all these prerequisites? That's okay! We'll introduce key concepts al
 - [Appendix B: Mathematical Notation Reference](#17-appendix-b-mathematical-notation-reference)
 - [Glossary](#18-glossary)
 - [Quick Reference](#19-quick-reference)
-- [Advanced Mathematical Topics](#20-advanced-math)
+- [Advanced Mathematical Topics](#20-advanced-mathematical-topics)
 
 # YOLO Neural Network for Basketball Detection
 
