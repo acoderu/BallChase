@@ -575,22 +575,12 @@ Using homogeneous coordinates, we can combine both operations into a single matr
 Recall our homogeneous representation for rotation and translation:
 
 Rotation matrix:
-$$
-\begin{bmatrix} 
-\cos(\phi) & -\sin(\phi) & 0 \\
-\sin(\phi) & \cos(\phi) & 0 \\
-0 & 0 & 1 
-\end{bmatrix}
-$$
+$$\begin{bmatrix} \cos(\phi) & -\sin(\phi) & 0 \\ \sin(\phi) & \cos(\phi) & 0 \\ 0 & 0 & 1 \end{bmatrix}$$
+
+
 
 Translation matrix:
-$$
-\begin{bmatrix} 
-1 & 0 & t_x \\
-0 & 1 & t_y \\
-0 & 0 & 1 
-\end{bmatrix}
-$$
+$$\begin{bmatrix} 1 & 0 & t_x \\ 0 & 1 & t_y \\ 0 & 0 & 1 \end{bmatrix}$$
 
 To apply rotation followed by translation, we multiply these matrices:
 
