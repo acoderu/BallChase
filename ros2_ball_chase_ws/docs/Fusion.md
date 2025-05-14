@@ -1166,30 +1166,7 @@ In Kalman filtering, we make two key assumptions that transform this abstract ru
 
 When both assumptions hold, we can represent our belief about the state using just two parameters: a mean vector and a covariance matrix. This is incredibly efficient compared to tracking entire probability distributions.
 
-```mermaid
-graph TD
-    subgraph GaussianVisualization["2D Gaussian Distribution"]
-        direction LR
-        
-        subgraph TopView["Top View"]
-            T1[Mean<br>Position] --- T2[Contour<br>Lines]
-            
-            style T1 fill:#FF5733,stroke:#333,stroke-width:2px
-            style T2 fill:#FFC300,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5
-        end
-        
-        subgraph SideView["Cross-Section View"]
-            S1["Highest<br>Probability"] --- S2["Bell<br>Curve"]
-            
-            style S1 fill:#FF5733,stroke:#333,stroke-width:2px
-            style S2 fill:#DAF7A6,stroke:#333,stroke-width:2px
-        end
-        
-        Description["The 2D Gaussian forms a bell-shaped<br>surface with highest probability at the mean<br>and decreasing probability as distance<br>from the mean increases."]
-        
-        style Description fill:white,stroke:#333,stroke-width:1px
-    end
-```
+![2D Gaussian Distribution](./images/gaussian_curve.svg)
 
 *Figure 7.1: Visual representation of a 2D Gaussian distribution. The top view shows contour lines of equal probability surrounding the mean position (highest probability point). The side view shows the characteristic bell curve shape along any cross-section through the mean. This distribution represents our belief about the basketball's position, with the peak at the most likely position and probability decreasing as we move away from the mean.*
 

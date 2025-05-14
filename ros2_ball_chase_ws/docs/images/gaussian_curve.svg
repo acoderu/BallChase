@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 600 450" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="600" height="450" fill="#f9f9f9"/>
+  
+  <!-- Title -->
+  <text x="300" y="30" font-family="Arial" font-size="18" text-anchor="middle" font-weight="bold">2D Gaussian Distribution</text>
+  
+  <!-- Top View (Contour Plot) -->
+  <g transform="translate(120, 180)">
+    <!-- Background for top view -->
+    <rect x="0" y="0" width="260" height="260" fill="#f0f0f0" rx="5" ry="5"/>
+    
+    <!-- Contour lines - concentric ellipses -->
+    <ellipse cx="130" cy="130" rx="120" ry="120" fill="none" stroke="#9370db" stroke-width="1.5" opacity="0.3"/>
+    <ellipse cx="130" cy="130" rx="100" ry="100" fill="none" stroke="#9370db" stroke-width="1.5" opacity="0.4"/>
+    <ellipse cx="130" cy="130" rx="80" ry="80" fill="none" stroke="#9370db" stroke-width="1.5" opacity="0.5"/>
+    <ellipse cx="130" cy="130" rx="60" ry="60" fill="none" stroke="#9370db" stroke-width="1.5" opacity="0.6"/>
+    <ellipse cx="130" cy="130" rx="40" ry="40" fill="none" stroke="#9370db" stroke-width="1.5" opacity="0.7"/>
+    <ellipse cx="130" cy="130" rx="20" ry="20" fill="none" stroke="#9370db" stroke-width="1.5" opacity="0.8"/>
+    
+    <!-- Gradient fill for 2D Gaussian -->
+    <defs>
+      <radialGradient id="gaussianGradient" cx="50%" cy="50%" r="60%" fx="50%" fy="50%">
+        <stop offset="0%" stop-color="#9370db" stop-opacity="0.9"/>
+        <stop offset="20%" stop-color="#9370db" stop-opacity="0.7"/>
+        <stop offset="40%" stop-color="#9370db" stop-opacity="0.5"/>
+        <stop offset="60%" stop-color="#9370db" stop-opacity="0.3"/>
+        <stop offset="80%" stop-color="#9370db" stop-opacity="0.1"/>
+        <stop offset="100%" stop-color="#9370db" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    
+    <!-- Filled gradient circle to represent the density -->
+    <circle cx="130" cy="130" r="120" fill="url(#gaussianGradient)"/>
+    
+    <!-- Mean point (peak of distribution) -->
+    <circle cx="130" cy="130" r="5" fill="#d63384"/>
+    
+    <!-- Coordinate axes -->
+    <line x1="10" y1="130" x2="250" y2="130" stroke="black" stroke-width="1"/>
+    <line x1="130" y1="10" x2="130" y2="250" stroke="black" stroke-width="1"/>
+    
+    <!-- Axis labels -->
+    <text x="250" y="145" font-family="Arial" font-size="12" text-anchor="end">x</text>
+    <text x="145" y="20" font-family="Arial" font-size="12" text-anchor="start">y</text>
+    
+    <!-- Top view label -->
+    <text x="130" y="280" font-family="Arial" font-size="14" text-anchor="middle" font-weight="bold">Top View (Contour Lines)</text>
+  </g>
+  
+  <!-- Side View (Bell Curve) -->
+  <g transform="translate(390, 180)">
+    <!-- Background for side view -->
+    <rect x="0" y="0" width="200" height="260" fill="#f0f0f0" rx="5" ry="5"/>
+    
+    <!-- Bell curve path -->
+    <path d="M 10 250 
+             C 10 250, 20 250, 30 249
+             C 40 248, 50 245, 60 240
+             C 70 235, 80 225, 90 210
+             C 100 180, 110 140, 120 130
+             C 130 140, 140 180, 150 210
+             C 160 225, 170 235, 180 240
+             C 190 245, 200, 248, 200 249" 
+          fill="none" stroke="#9370db" stroke-width="3"/>
+    
+    <!-- Filled bell curve -->
+    <path d="M 10 250 
+             C 10 250, 20 250, 30 249
+             C 40 248, 50 245, 60 240
+             C 70 235, 80 225, 90 210
+             C 100 180, 110 140, 120 130
+             C 130 140, 140 180, 150 210
+             C 160 225, 170 235, 180 240
+             C 190 245, 200, 248, 200 249
+             L 200 250 L 10 250 Z" 
+          fill="#9370db" fill-opacity="0.3"/>
+    
+    <!-- Vertical line at mean -->
+    <line x1="120" y1="130" x2="120" y2="250" stroke="#d63384" stroke-width="1" stroke-dasharray="5,3"/>
+    
+    <!-- Mean point -->
+    <circle cx="120" cy="130" r="5" fill="#d63384"/>
+    
+    <!-- Coordinate axes -->
+    <line x1="10" y1="250" x2="190" y2="250" stroke="black" stroke-width="1"/>
+    <line x1="10" y1="250" x2="10" y2="110" stroke="black" stroke-width="1"/>
+    
+    <!-- Axis labels -->
+    <text x="190" y="265" font-family="Arial" font-size="12" text-anchor="end">position</text>
+    <text x="25" y="115" font-family="Arial" font-size="12" text-anchor="start">probability</text>
+    
+    <!-- Side view label -->
+    <text x="100" y="280" font-family="Arial" font-size="14" text-anchor="middle" font-weight="bold">Side View (Bell Curve)</text>
+  </g>
+  
+  <!-- Labels -->
+  <text x="250" y="130" font-family="Arial" font-size="12" text-anchor="middle" font-style="italic">Highest probability at mean</text>
+  <text x="390" y="145" font-family="Arial" font-size="12" text-anchor="middle" font-style="italic">Probability decreases with</text>
+  <text x="390" y="160" font-family="Arial" font-size="12" text-anchor="middle" font-style="italic">distance from mean</text>
+  
+  <!-- Legend -->
+  <g transform="translate(120, 60)">
+    <rect width="360" height="30" fill="#f0f0f0" rx="5" ry="5"/>
+    <circle cx="30" cy="15" r="5" fill="#d63384"/>
+    <text x="45" y="20" font-family="Arial" font-size="12">Mean position (highest probability)</text>
+    <line x1="240" y1="15" x2="270" y2="15" stroke="#9370db" stroke-width="2"/>
+    <text x="280" y="20" font-family="Arial" font-size="12">Probability density</text>
+  </g>
+  
+  <!-- Caption -->
+  <text x="300" y="420" font-family="Arial" font-size="12" text-anchor="middle" font-style="italic">
+    Figure 7.1: Visual representation of a 2D Gaussian distribution showing both top and side views.
+  </text>
+</svg>
