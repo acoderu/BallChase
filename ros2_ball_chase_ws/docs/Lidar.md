@@ -1697,37 +1697,14 @@ sequenceDiagram
 
 #### 3D Visualization of the Sensor Fusion Process
 
-The image below illustrates the spatial relationship between the camera detection cone (blue), LIDAR scan plane (gray), and basketball detection (orange):
+![Lidar Image ](images/basketball_camera_lidar.png)
 
-```
-                    Z-axis
-                      ↑
-                      │                   ● Basketball
-                      │                  /
-                      │                 /
-    Camera            │                /
-    ┌───────┐         │               /
-    │       │         │              /
-    │ [CAM] │         │             /
-    │       │━━━━━━━━━┿━━━━━━━━━━━╱ Detection
-    └───────┘         │         ╱   Cone
-                      │        ╱     
-                      O───────────────────→ Y-axis
-                     /│                   
-                    / │                   
-                   /  │                   
-                  /   │                   
-           X-axis↙    │   ┌─────────────────────────┐
-                      │   │                         │
-                      │   │      LIDAR Scan         │
-                      │   │       Plane             │
-                      │   │                         │
-                      │   │                         │
-                      │   └─────────────────────────┘
-```
 
 <div style="text-align: center; margin-top: 10px; margin-bottom: 20px;">
-<b>Figure 4:</b> 3D visualization of the sensor fusion setup showing the spatial relationships between components. The diagram illustrates: (1) The camera on the left side, emitting a detection cone that extends toward the basketball; (2) The coordinate system with origin O at the intersection of X, Y, and Z axes; (3) The LIDAR scan plane at the bottom which is a 2D horizontal plane perpendicular to the Z-axis; (4) The basketball target in the upper right. This visualization demonstrates how the camera and LIDAR work together - the camera provides the detection cone direction to narrow LIDAR's search space, while LIDAR provides precise distance measurements within its scan plane.
+<b>Figure 4:</b> 2‑D LIDAR (small grey sensor) sits beside the camera and scans a horizontal plane above ground.
+LIDAR rays (grey dots) show the full point‑cloud it normally gathers.
+Green cone originates at the LIDAR and narrows toward the basketball, highlighting the Region of Interest—only points inside this cone are forwarded to the fusion node.
+Camera (YOLO) detects the ball first and passes its approximate direction/angle to the LIDAR filter node, which creates that green cone..
 </div>
 
 ```mermaid
