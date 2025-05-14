@@ -412,7 +412,8 @@ def convert_scan_to_cartesian(scan):
 **Why This Matters:**
 In our system, when the camera detects a basketball, we need to transform its coordinates to the LIDAR frame to create a detection cone in the right direction. Similarly, when we detect a basketball with the LIDAR, we often want to express its position in a common reference frame (like the robot's base).
 
-**Coordinate Frame Transformations**
+<a name="coordinate-frames"></a>
+#### 2.1.2 Coordinate Frame Transformations
 
 # Intuition: What Happens When You Rotate a Point?
 
