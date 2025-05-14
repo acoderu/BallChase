@@ -74,7 +74,6 @@ What makes BallChase exceptional is how it achieves professional-grade performan
 - **Comprehensive Diagnostics:** Real-time health monitoring with event correlation and intelligent troubleshooting
 
 BallChase combines theoretical foundations with practical implementation, making it perfect for:
-- 🎓 **College Applications:** Demonstrates mastery of complex STEM concepts
 - 🔬 **Competition Robotics:** Provides a versatile sensing and actuation framework
 - 📊 **Research Projects:** Offers a platform for experimenting with sensor fusion and control
 - 📚 **Educational Environments:** Serves as a teaching tool with clear learning progression
@@ -142,7 +141,7 @@ The BallChase Vision System uses a highly-optimized YOLOv12 neural network imple
 
 - **Model Optimization:** The YOLOv12 network has been pruned and quantized to reduce computational requirements while maintaining high detection accuracy. This includes 8-bit integer quantization, channel pruning, and layer fusion.
 
-- **Edge Acceleration:** The vision system leverages the Raspberry Pi's GPU through OpenGL ES compute shaders and utilizes ARM NEON SIMD instructions for optimized CPU processing. This multi-acceleration approach achieves 3-4 Hz inference rates on Raspberry Pi 5 hardware.
+- **Edge Acceleration:** Edge Acceleration: The vision system utilizes a highly optimized MNN library that is specifically tailored for CPU performance on Raspberry Pi hardware, delivering efficient neural network inference with minimal resource consumption while still achieving 3-4 Hz inference rates on Raspberry Pi 5.
 
 - **Dynamic Confidence Thresholding:** Instead of using fixed detection thresholds, the system implements an adaptive confidence mechanism that adjusts based on lighting conditions, detection history, and sensor fusion feedback. This prevents false positives while maintaining high recall rates in challenging conditions.
 

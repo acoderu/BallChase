@@ -285,36 +285,18 @@ A basketball will appear as an arc or partial circle in the LIDAR data. The exac
 3. **Scan resolution** - Higher resolution LIDARs will capture more points on the ball
 4. **Ball size** - A standard basketball (9-inch/23cm diameter) produces a distinct arc at typical ranges
 
-```
-    ┌─────── LIDAR Environment ───────┐
-    │                                 │
-    │    ·   ·   ·   ·   ·   ·   ·   │
-    │     ·                       ·   │
-    │      ·                     ·    │
-    │       ·     ╭─────────╮   ·     │
-    │        ·    │         │  ·      │
-    │         ·   │ BASKET  │ ·       │
-    │          ·  │  BALL   │·        │
-    │  LIDAR    · │         │         │
-    │   ●────────┼─┤         │         │
-    │  Origin    ·│         │·        │
-    │         ·   │         │ ·       │
-    │        ·    │         │  ·      │
-    │       ·     ╰─────────╯   ·     │
-    │      ·                     ·    │
-    │     ·                       ·   │
-    │    ·   ·   ·   ·   ·   ·   ·   │
-    └─────────────────────────────────┘
-```
+
+![Lidar Image ](images/basketball_lidar1.png)
 
 <div style="text-align: center; margin-top: 10px; margin-bottom: 20px;">
-<b>Figure 2:</b> Top-down (bird's eye) view of a typical LIDAR environment showing how a 2D LIDAR sensor detects a basketball.
+<b>Figure 2:</b> View of a typical LIDAR environment showing how a 2D LIDAR sensor detects a basketball.
+LIDAR	Sensor origin; sends narrow beams in a flat (2‑D) plane
+Beams (black lines)	Each ray is one scan angle; only the near side of the ball is struck
+Return points (red dots)	Where those beams first touch the curved surface and reflect back
+Invisible zone (gray dashed arc)	Area the LIDAR cannot see because the ball blocks further beams
 
-The LIDAR sensor is positioned at the "Origin" point on the left side of the diagram, and sends out laser beams in all directions (represented by the dots arranged in a radial pattern). When these beams hit objects, they reflect back to the sensor, providing distance measurements at different angles.
+Those red points form a partial arc. Your detection algorithm fits a circle (~23 cm radius) to that arc to confirm, “Yes, that’s a basketball.””
 
-The basketball is shown in the center-right area as a rectangular outline labeled "BASKET BALL". The horizontal line extending from the LIDAR to the basketball represents the direct line of sight, showing how the laser beams interact with the ball's surface.
-
-This 2D top-down view helps visualize how LIDAR perceives objects in its environment - as a collection of distance points at various angles. When processing these points, algorithms like RANSAC can identify circular patterns that correspond to the basketball's shape, even though the LIDAR only sees the portion of the ball facing the sensor (appearing as an arc rather than a complete circle).
 </div>
 
 <div style="display: flex; justify-content: space-between; margin: 20px 0; padding: 10px; background-color: #f8f9fa; border-radius: 4px;">
@@ -425,100 +407,234 @@ def convert_scan_to_cartesian(scan):
 ```
 
 **Visual Explanation:**
-Here's how to visualize the conversion from polar to Cartesian coordinates:
 
-```
-    ┌── Cartesian (x,y) ───┐      ┌── Polar (r,θ) ────────┐
-    │       y              │      │           r           │
-    │       ↑              │      │           ↑           │
-    │       │              │      │           │           │
-    │       │   P(x,y)     │      │           │   P(r,θ)  │
-    │       │  ●           │      │           │  ●        │
-    │       │ /│           │      │           │ /         │
-    │       │/ │           │      │           │/          │
-    │       │  │           │      │           │           │
-    │       │  │           │      │           │           │
-    │       │  │           │      │           │           │
-    │       │  │           │      │           │           │
-    │  ─────┼──┼──────→ x  │      │  ─────────┼──────→ θ  │
-    │      O│              │      │          O│           │
-    │    Origin            │      │        Origin         │
-    └────────────────────┘       └──────────────────────┘
-```
-
-<div style="text-align: center; margin-top: 10px; margin-bottom: 20px;">
-<b>Figure 3:</b> Side-by-side comparison of Cartesian (left) and Polar (right) coordinate systems, both representing the same point P.
-
-Left panel (Cartesian): Shows the (x,y) coordinate system where position is specified using horizontal (x) and vertical (y) distances from the origin O. The point P is represented by its x and y components, shown by the right angle formed between the origin and P. This coordinate system is preferable for mathematical operations in circle detection algorithms.
-
-Right panel (Polar): Shows the (r,θ) coordinate system where position is specified using distance (r) from the origin and angle (θ) from the horizontal axis. The point P is represented by its radius and angle components. This is how LIDAR naturally measures data - it determines distance and angle to each detected object.
-
-The diagram illustrates why coordinate conversion is necessary in LIDAR processing: data comes in as polar coordinates (distance and angle measurements), but most algorithms (especially RANSAC for circle detection) work more efficiently with Cartesian (x,y) coordinates.
-</div>
-
-When we convert a full LIDAR scan, we get a point cloud that represents the environment around the sensor.
-
-<a name="coordinate-frames"></a>
-#### 2.1.2 Coordinate Frame Transformations
-
-In robotics, different sensors have their own coordinate frames. For example, the LIDAR might be mounted at one position on the robot, while the camera is at another. To combine their data, we need to transform between these coordinate frames.
-
-**Intuitive Understanding:**
-Imagine holding a basketball. You see it from your perspective, but someone standing in a different position and orientation would see it differently. Coordinate transforms let us convert between these different viewpoints.
-
-**Homogeneous Transformations:**
-We use 4×4 matrices to represent both rotation and translation in 3D:
-
-$$\begin{bmatrix} x' \\ y' \\ z' \\ 1 \end{bmatrix} = \begin{bmatrix} R_{3×3} & T_{3×1} \\ 0_{1×3} & 1 \end{bmatrix} \begin{bmatrix} x \\ y \\ z \\ 1 \end{bmatrix}$$
-
-Where:
-- $R_{3×3}$ is the 3×3 rotation matrix
-- $T_{3×1}$ is the 3×1 translation vector
-- $(x, y, z)$ are coordinates in the original frame
-- $(x', y', z')$ are coordinates in the new frame
-
-**Simplified 2D Case:**
-For our basketball detection, we often work in 2D and the transformation simplifies to:
-
-$$\begin{bmatrix} x' \\ y' \\ 1 \end{bmatrix} = \begin{bmatrix} \cos(\phi) & -\sin(\phi) & t_x \\ \sin(\phi) & \cos(\phi) & t_y \\ 0 & 0 & 1 \end{bmatrix} \begin{bmatrix} x \\ y \\ 1 \end{bmatrix}$$
-
-Where:
-- $\phi$ is the rotation angle
-- $(t_x, t_y)$ is the translation vector
-
-**Concrete Example:**
-Suppose the camera is mounted 0.3 meters forward and 0.2 meters to the left of the LIDAR, and rotated 15 degrees (0.26 radians) to the right:
-
-```
-# Transformation from LIDAR to camera frame
-phi = 0.26  # 15 degrees in radians
-tx = 0.3    # 0.3 meters forward
-ty = -0.2   # 0.2 meters to the left (negative y-direction)
-
-# Transformation matrix
-T_lidar_to_camera = np.array([
-    [math.cos(phi), -math.sin(phi), tx],
-    [math.sin(phi),  math.cos(phi), ty],
-    [0,             0,             1]
-])
-
-# If the LIDAR detects a basketball at (2.0, 1.0) in the LIDAR frame
-basketball_lidar = np.array([2.0, 1.0, 1.0])  # Homogeneous coordinates
-
-# Transform to camera frame
-basketball_camera = T_lidar_to_camera @ basketball_lidar
-print(f"Basketball in camera frame: ({basketball_camera[0]:.2f}, {basketball_camera[1]:.2f})")
-```
-
-This would output something like:
-```
-Basketball in camera frame: (2.14, 0.66)
-```
-
-This means that the same basketball appears at a different position from the camera's perspective.
 
 **Why This Matters:**
 In our system, when the camera detects a basketball, we need to transform its coordinates to the LIDAR frame to create a detection cone in the right direction. Similarly, when we detect a basketball with the LIDAR, we often want to express its position in a common reference frame (like the robot's base).
+
+**Coordinate Frame Transformations**
+
+# Intuition: What Happens When You Rotate a Point?
+
+Say you have a point $P = (x, y)$ in 2D, and you want to **rotate** it by an angle $\phi$ **counterclockwise** around the origin $(0, 0)$. You want the new point $P' = (x', y')$.
+
+## 🔍 Step 1: Represent the Point in Polar Form
+
+We can write any point $(x, y)$ in terms of:
+* Distance from origin $r = \sqrt{x^2 + y^2}$
+* Angle $\theta$ it makes with the x-axis (its direction)
+
+So:
+$$x = r \cos(\theta), \quad y = r \sin(\theta)$$
+
+## 🔄 Step 2: Rotate the Angle
+
+When you rotate the point by angle $\phi$, you **add** $\phi$ to the original angle:
+
+$$x' = r \cos(\theta + \phi), \quad y' = r \sin(\theta + \phi)$$
+
+Now apply the **angle addition identities**:
+
+$$\cos(\theta + \phi) = \cos(\theta)\cos(\phi) - \sin(\theta)\sin(\phi)$$
+$$\sin(\theta + \phi) = \sin(\theta)\cos(\phi) + \cos(\theta)\sin(\phi)$$
+
+Substitute:
+
+$$x' = r [\cos(\theta)\cos(\phi) - \sin(\theta)\sin(\phi)] = x \cos(\phi) - y \sin(\phi)$$
+$$y' = r [\sin(\theta)\cos(\phi) + \cos(\theta)\sin(\phi)] = x \sin(\phi) + y \cos(\phi)$$
+
+## 🧮 Step 3: Express as a Matrix
+
+So the new coordinates are:
+
+$$x' = x \cos(\phi) - y \sin(\phi)$$
+$$y' = x \sin(\phi) + y \cos(\phi)$$
+
+Written in matrix form:
+
+$$\begin{bmatrix} x' \\ y' \end{bmatrix} = \begin{bmatrix} \cos(\phi) & -\sin(\phi) \\ \sin(\phi) & \cos(\phi) \end{bmatrix} \cdot \begin{bmatrix} x \\ y \end{bmatrix}$$
+
+## 🔁 Why the Rotation Matrix Works
+
+* It **preserves distance** (no scaling, just rotation)
+* It **preserves angles** (pure rotation)
+* It can be **chained** with other transformations (like translation)
+
+## ✅ Example of Rotation
+
+Rotate point $(1, 0)$ by 90° ($\pi/2$ radians):
+
+$$\phi = \frac{\pi}{2} \Rightarrow \cos(\phi) = 0, \sin(\phi) = 1$$
+
+$$\begin{bmatrix} x' \\ y' \end{bmatrix} = \begin{bmatrix} 0 & -1 \\ 1 & 0 \end{bmatrix} \cdot \begin{bmatrix} 1 \\ 0 \end{bmatrix} = \begin{bmatrix} 0 \\ 1 \end{bmatrix}$$
+
+So $(1, 0)$ becomes $(0, 1)$, as expected — rotated 90° counterclockwise.
+
+# Intuition: What Happens When You Translate a Point?
+
+Now let's understand what happens when you **translate** (shift) a point in 2D space without rotation.
+
+## 📏 What is Translation?
+
+Translation is the simplest transformation: it just **shifts** a point by a certain distance in a certain direction.
+
+Say you have a point $P = (x, y)$ and you want to translate it by a vector $(t_x, t_y)$ to get a new point $P' = (x', y')$.
+
+## ➕ Step 1: Basic Translation Equation
+
+The equation for translation is straightforward:
+
+$$x' = x + t_x$$
+$$y' = y + t_y$$
+
+You simply **add** the translation components to the original coordinates.
+
+## 🔢 Step 2: Matrix Representation (Challenge)
+
+Unlike rotation, it's not possible to express translation using a $2 \times 2$ matrix multiplication with the original coordinates:
+
+$$\begin{bmatrix} x' \\ y' \end{bmatrix} = \begin{bmatrix} ? & ? \\ ? & ? \end{bmatrix} \cdot \begin{bmatrix} x \\ y \end{bmatrix} + \begin{bmatrix} t_x \\ t_y \end{bmatrix}$$
+
+The problem is that a $2 \times 2$ matrix can only perform linear transformations (scaling, rotation, shearing), and translation is an **affine transformation** (it doesn't preserve the origin).
+
+This means that with standard $2 \times 2$ matrices, we can't express translation as a single matrix operation—we need the additional vector addition.
+
+## 🧠 Step 3: Homogeneous Coordinates Solution
+
+To solve this limitation, we introduce **homogeneous coordinates**, a powerful mathematical trick that lets us represent translation as a matrix multiplication.
+
+We extend our 2D point $(x, y)$ to a 3D vector $(x, y, 1)$ by adding a third component with value 1.
+
+Then, translation can be expressed as:
+
+$$\begin{bmatrix} x' \\ y' \\ 1 \end{bmatrix} = \begin{bmatrix} 1 & 0 & t_x \\ 0 & 1 & t_y \\ 0 & 0 & 1 \end{bmatrix} \cdot \begin{bmatrix} x \\ y \\ 1 \end{bmatrix}$$
+
+Let's verify this works by expanding the multiplication:
+
+$$x' = 1 \cdot x + 0 \cdot y + t_x \cdot 1 = x + t_x$$
+$$y' = 0 \cdot x + 1 \cdot y + t_y \cdot 1 = y + t_y$$
+$$1 = 0 \cdot x + 0 \cdot y + 1 \cdot 1 = 1$$
+
+This matches our original translation equations exactly!
+
+## 🔍 Understanding the Translation Matrix
+
+The $3 \times 3$ translation matrix can be understood as:
+
+$$\begin{bmatrix} 1 & 0 & t_x \\ 0 & 1 & t_y \\ 0 & 0 & 1 \end{bmatrix} = \begin{bmatrix} \text{Identity (2×2)} & \text{Translation} \\ \text{Zeros} & \text{1} \end{bmatrix}$$
+
+* The **top-left $2 \times 2$ block** is the identity matrix (no rotation or scaling)
+* The **rightmost column** $[t_x, t_y, 1]^T$ specifies the translation
+* The **bottom row** $[0, 0, 1]$ ensures the homogeneous coordinate remains 1
+
+## ✏️ Example of Translation
+
+Translate the point $(3, 2)$ by the vector $(4, -1)$:
+
+$$\begin{bmatrix} x' \\ y' \\ 1 \end{bmatrix} = \begin{bmatrix} 1 & 0 & 4 \\ 0 & 1 & -1 \\ 0 & 0 & 1 \end{bmatrix} \cdot \begin{bmatrix} 3 \\ 2 \\ 1 \end{bmatrix} = \begin{bmatrix} 3 + 4 \\ 2 + (-1) \\ 1 \end{bmatrix} = \begin{bmatrix} 7 \\ 1 \\ 1 \end{bmatrix}$$
+
+So, the point $(3, 2)$ becomes $(7, 1)$ after translation.
+
+## 🎯 Properties of Translation
+
+1. **Direction Preservation**: Translation doesn't change the orientation of objects
+2. **Distance Preservation**: The distance between any two points stays the same
+3. **No Fixed Point**: Unlike rotation (which has the origin as a fixed point), translation moves every point
+4. **Commutative**: Multiple translations can be applied in any order with the same result
+
+# Combined Transformation: Rotation and Translation
+
+Now that we understand both rotation and translation separately, let's see how they can be combined to transform points between different coordinate frames.
+
+## 🎯 Goal: Transform a point $(x,y)$ between different coordinate frames
+
+Often, we need to transform a point $(x,y)$ in one 2D frame (like LIDAR) into another (like camera) that is:
+* **Rotated** by an angle $\phi$
+* **Translated** by a vector $(t_x, t_y)$
+
+Let's understand this transformation step by step.
+
+## 🔄 Step 1: Applying Rotation Then Translation Separately
+
+One way to perform the combined transformation is to apply each step sequentially:
+
+1. First, rotate the point around the origin:
+   $$\begin{bmatrix} x_r \\ y_r \end{bmatrix} = \begin{bmatrix} \cos(\phi) & -\sin(\phi) \\ \sin(\phi) & \cos(\phi) \end{bmatrix} \cdot \begin{bmatrix} x \\ y \end{bmatrix}$$
+
+2. Then, translate the rotated point:
+   $$\begin{bmatrix} x' \\ y' \end{bmatrix} = \begin{bmatrix} x_r \\ y_r \end{bmatrix} + \begin{bmatrix} t_x \\ t_y \end{bmatrix}$$
+
+This gives us:
+$$x' = \cos(\phi) x - \sin(\phi) y + t_x$$
+$$y' = \sin(\phi) x + \cos(\phi) y + t_y$$
+
+While this works correctly, it requires two separate steps.
+
+## ➕ Step 2: Unifying with Homogeneous Coordinates
+
+Using homogeneous coordinates, we can combine both operations into a single matrix multiplication.
+
+Recall our homogeneous representation for rotation and translation:
+
+Rotation matrix:
+$$\begin{bmatrix} \cos(\phi) & -\sin(\phi) & 0 \\ \sin(\phi) & \cos(\phi) & 0 \\ 0 & 0 & 1 \end{bmatrix}$$
+
+Translation matrix:
+$$\begin{bmatrix} 1 & 0 & t_x \\ 0 & 1 & t_y \\ 0 & 0 & 1 \end{bmatrix}$$
+
+To apply rotation followed by translation, we multiply these matrices:
+
+$$\begin{bmatrix} 1 & 0 & t_x \\ 0 & 1 & t_y \\ 0 & 0 & 1 \end{bmatrix} \cdot \begin{bmatrix} \cos(\phi) & -\sin(\phi) & 0 \\ \sin(\phi) & \cos(\phi) & 0 \\ 0 & 0 & 1 \end{bmatrix} = \begin{bmatrix} \cos(\phi) & -\sin(\phi) & t_x \\ \sin(\phi) & \cos(\phi) & t_y \\ 0 & 0 & 1 \end{bmatrix}$$
+
+This gives us the combined transformation matrix:
+
+$$\begin{bmatrix} x' \\ y' \\ 1 \end{bmatrix} = \begin{bmatrix} \cos(\phi) & -\sin(\phi) & t_x \\ \sin(\phi) & \cos(\phi) & t_y \\ 0 & 0 & 1 \end{bmatrix} \cdot \begin{bmatrix} x \\ y \\ 1 \end{bmatrix}$$
+
+Let's expand this multiplication to verify it works:
+
+$$x' = \cos(\phi) \cdot x + (-\sin(\phi)) \cdot y + t_x \cdot 1 = \cos(\phi)x - \sin(\phi)y + t_x$$
+$$y' = \sin(\phi) \cdot x + \cos(\phi) \cdot y + t_y \cdot 1 = \sin(\phi)x + \cos(\phi)y + t_y$$
+$$1 = 0 \cdot x + 0 \cdot y + 1 \cdot 1 = 1$$
+
+This matches our step 1 equations exactly!
+
+## 🧠 Understanding the Combined Transformation Matrix
+
+The $3 \times 3$ matrix can be understood in blocks:
+
+$$\begin{bmatrix} \cos(\phi) & -\sin(\phi) & t_x \\ \sin(\phi) & \cos(\phi) & t_y \\ 0 & 0 & 1 \end{bmatrix} = \begin{bmatrix} \text{Rotation (2×2)} & \text{Translation} \\ \text{Perspective (0)} & \text{Scale (1)} \end{bmatrix}$$
+
+* The **top-left $2 \times 2$ block** handles rotation
+* The **rightmost column** $[t_x, t_y, 1]^T$ handles translation
+* The **bottom row** $[0, 0, 1]$ ensures the homogeneous coordinate remains 1
+
+## 🔀 Properties of This Transformation
+
+1. **Composition**: Multiple transformations can be combined by multiplying their matrices
+2. **Order Matters**: Rotation followed by translation is different from translation followed by rotation
+3. **Invertibility**: The transformation can be inverted to go back to the original frame
+4. **Efficiency**: One matrix multiplication handles both rotation and translation
+
+## ✏️ Example: Rotate by 45° and Translate by (2,3)
+
+Let's transform the point $(1,0)$:
+
+$$\phi = 45° = \frac{\pi}{4}, \quad \cos(\phi) = \frac{\sqrt{2}}{2}, \quad \sin(\phi) = \frac{\sqrt{2}}{2}$$
+$$t_x = 2, \quad t_y = 3$$
+
+$$\begin{bmatrix} x' \\ y' \\ 1 \end{bmatrix} = \begin{bmatrix} \frac{\sqrt{2}}{2} & -\frac{\sqrt{2}}{2} & 2 \\ \frac{\sqrt{2}}{2} & \frac{\sqrt{2}}{2} & 3 \\ 0 & 0 & 1 \end{bmatrix} \cdot \begin{bmatrix} 1 \\ 0 \\ 1 \end{bmatrix} = \begin{bmatrix} \frac{\sqrt{2}}{2} + 2 \\ \frac{\sqrt{2}}{2} + 3 \\ 1 \end{bmatrix} \approx \begin{bmatrix} 2.71 \\ 3.71 \\ 1 \end{bmatrix}$$
+
+So the point $(1,0)$ becomes approximately $(2.71, 3.71)$ after rotation by 45° and translation by $(2,3)$.
+
+## 🌟 Applications
+
+This combined transformation is essential in:
+* **Robotics**: Converting between robot and world coordinates
+* **Computer Vision**: Aligning different camera views
+* **Graphics**: Positioning objects in a scene
+* **SLAM** (Simultaneous Localization and Mapping): Relating sensor data to maps
+
+The beauty of this approach is that by adding just one more dimension (the homogeneous coordinate), we gain the ability to represent both linear transformations (like rotation) and affine transformations (like translation) in a single matrix operation.
 
 <a name="circle-math"></a>
 ### 2.2 Circle Mathematics
