@@ -1,0 +1,48 @@
+<svg viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background frame -->
+  <rect x="50" y="50" width="700" height="400" fill="white" stroke="#333" stroke-width="2" rx="5" />
+  
+  <!-- Title -->
+  <text x="400" y="80" text-anchor="middle" font-family="Arial" font-size="20" font-weight="bold">Detection Cone Visualization</text>
+  
+  <!-- Detection cone -->
+  <path d="M200,250 L500,150 L500,350 Z" fill="#e6f7ff" fill-opacity="0.6" stroke="#1890ff" stroke-width="2" />
+  
+  <!-- LIDAR Origin -->
+  <circle cx="200" cy="250" r="15" fill="#4dabf7" stroke="#333" stroke-width="2" />
+  <text x="200" y="250" text-anchor="middle" font-family="Arial" font-size="12" fill="white">L</text>
+  <text x="200" y="290" text-anchor="middle" font-family="Arial" font-size="14">LIDAR Origin</text>
+  
+  <!-- Camera Detection Point -->
+  <circle cx="500" cy="250" r="15" fill="#4dabf7" stroke="#333" stroke-width="2" />
+  <text x="500" y="250" text-anchor="middle" font-family="Arial" font-size="12" fill="white">C</text>
+  <text x="500" y="290" text-anchor="middle" font-family="Arial" font-size="14">Camera Detection Point</text>
+  
+  <!-- Top point of cone -->
+  <circle cx="500" cy="150" r="8" fill="#f03e3e" stroke="#333" stroke-width="1.5" />
+  
+  <!-- Bottom point of cone -->
+  <circle cx="500" cy="350" r="8" fill="#f03e3e" stroke="#333" stroke-width="1.5" />
+  
+  <!-- Points outside cone -->
+  <circle cx="600" cy="170" r="8" fill="#f76707" stroke="#333" stroke-width="1.5" />
+  <text x="630" y="170" font-family="Arial" font-size="12">Points outside</text>
+  <text x="630" y="185" font-family="Arial" font-size="12">cone are ignored</text>
+  
+  <!-- Axis line -->
+  <line x1="200" y1="250" x2="500" y2="250" stroke="#333" stroke-width="1.5" stroke-dasharray="5,5" />
+  <text x="350" y="240" text-anchor="middle" font-family="Arial" font-size="14">Center Axis</text>
+  
+  <!-- Angle markers -->
+  <path d="M200,250 A 40,40 0 0,1 230,220" fill="none" stroke="#333" stroke-width="1" />
+  <path d="M200,250 A 40,40 0 0,0 230,280" fill="none" stroke="#333" stroke-width="1" />
+  
+  <!-- Inside cone label -->
+  <text x="300" y="250" font-family="Arial" font-size="14" fill="#1864ab">LIDAR points inside</text>
+  <text x="300" y="270" font-family="Arial" font-size="14" fill="#1864ab">cone are processed</text>
+  
+  <!-- Caption -->
+  <text x="400" y="430" text-anchor="middle" font-family="Arial" font-size="14" font-style="italic">
+    Figure 5: Top-view of detection cone extending from LIDAR origin toward camera detection point
+  </text>
+</svg>

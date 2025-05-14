@@ -1802,35 +1802,11 @@ if camera_seed_point is not None:
 ```
 
 The detection cone is visualized as:
+![Detection Cone Visualization](./images/ball_lidar_camera_cone.svg)
 
-```
-         ┌─────── Detection Cone Visualization ───────┐
-         │                                           │
-         │                   ▲                       │
-         │                  /│\                      │
-         │                 / │ \                     │
-         │                /  │  \                    │
-         │        D      /   │   \                   │
-         │        E     /    │    \                  │
-         │        T    /     │     \                 │
-         │        E   /      │      \    All LIDAR   │
-         │  LIDAR C  /       │       \   points      │
-         │   ●─────┼────────┼────────┼───● outside   │
-         │ Origin  │        │        │  \ the cone   │
-         │        T│        │        │   \ are       │
-         │        I│        │        │    \ ignored  │
-         │        O│        │        │     \         │
-         │        N│        │        │      \        │
-         │         │        │        │       \       │
-         │         │        │        │        \      │
-         │         ●────────●────────●─────────●     │
-         │     LIDAR     Camera-based              │
-         │    Origin     Detection Point           │
-         └───────────────────────────────────────────┘
-```
 
 <div style="text-align: center; margin-top: 10px; margin-bottom: 20px;">
-<b>Figure 5:</b> Top-view illustration of the detection cone concept, shown from above looking down on the X-Y plane. The triangular cone extends from the LIDAR origin (left point) toward the camera-based detection point (right middle point). The word "DETECTION" spelled vertically along the left side indicates this is a filtered region for focused processing. The diagram shows how LIDAR points inside this cone are processed for basketball detection, while points outside (indicated by the rightmost point with accompanying text) are ignored. This filtering strategy significantly reduces computational load by focusing only on the region where the camera has detected a potential basketball, rather than processing the entire 360° LIDAR scan.
+<b>Figure 5:</b> The Detection Cone visualization shows how LIDAR systems focus processing on a specific triangular region extending from the LIDAR origin toward a camera-detected point of interest. By only processing LIDAR points inside this cone and ignoring everything outside it, the system dramatically reduces computational load while maintaining detection accuracy. This targeted filtering approach enables more efficient sensor fusion by concentrating resources only where the camera has already identified potential objects..
 </div>
 
 ### 5.4 Fallback Mechanism
