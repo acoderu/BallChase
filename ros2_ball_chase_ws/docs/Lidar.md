@@ -406,9 +406,6 @@ def convert_scan_to_cartesian(scan):
     return np.array(points)
 ```
 
-**Visual Explanation:**
-
-
 **Why This Matters:**
 In our system, when the camera detects a basketball, we need to transform its coordinates to the LIDAR frame to create a detection cone in the right direction. Similarly, when we detect a basketball with the LIDAR, we often want to express its position in a common reference frame (like the robot's base).
 
@@ -578,10 +575,22 @@ Using homogeneous coordinates, we can combine both operations into a single matr
 Recall our homogeneous representation for rotation and translation:
 
 Rotation matrix:
-$$\begin{bmatrix} \cos(\phi) & -\sin(\phi) & 0 \\ \sin(\phi) & \cos(\phi) & 0 \\ 0 & 0 & 1 \end{bmatrix}$$
+$$
+\begin{bmatrix} 
+\cos(\phi) & -\sin(\phi) & 0 \\
+\sin(\phi) & \cos(\phi) & 0 \\
+0 & 0 & 1 
+\end{bmatrix}
+$$
 
 Translation matrix:
-$$\begin{bmatrix} 1 & 0 & t_x \\ 0 & 1 & t_y \\ 0 & 0 & 1 \end{bmatrix}$$
+$$
+\begin{bmatrix} 
+1 & 0 & t_x \\
+0 & 1 & t_y \\
+0 & 0 & 1 
+\end{bmatrix}
+$$
 
 To apply rotation followed by translation, we multiply these matrices:
 
