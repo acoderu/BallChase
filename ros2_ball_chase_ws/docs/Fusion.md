@@ -1178,19 +1178,74 @@ The 2D Gaussian distribution has several important properties:
 4. **Contour Ellipses**: Slices of equal probability form elliptical contours around the mean.
 5. **Efficient Representation**: The entire distribution is completely defined by just the mean vector and covariance matrix.
 
-For our basketball position in 2D, the probability density is given by:
+# Multivariate Gaussian Distribution in 2D
 
-```
-p(x,y) = (1/(2π|Σ|^(1/2))) * exp(-0.5 * [(x-μx, y-μy)ᵀ Σ⁻¹ (x-μx, y-μy)])
-```
+We are describing a **probability distribution** over 2D space (e.g., the location of a basketball), where:
+* $\mu=(\mu_x,\mu_y)$ is the **most likely position** (the center of the distribution)
+* $\Sigma$ is a **covariance matrix** that tells us how uncertain we are in the $x$ and $y$ directions — and how they correlate
 
-Where:
-- (x,y) is a possible position
-- (μx,μy) is the mean position (most likely point)
-- Σ is the covariance matrix
-- |Σ| is the determinant of the covariance matrix
+We use this distribution to:
+* Estimate **how likely** a particular point $(x,y)$ is
+* Update our belief as new information arrives
 
-This mathematical representation allows us to efficiently update our belief about the basketball's position as new measurements arrive, following Bayes' rule while keeping the calculations tractable.
+## 📌 The Full Formula 
+
+$$p(x,y)=\frac{1}{2\pi \sqrt{|\Sigma|}} \cdot \exp\left( -\frac{1}{2} \begin{bmatrix} x - \mu_x \\ y - \mu_y \end{bmatrix}^T \Sigma^{-1} \begin{bmatrix} x - \mu_x \\ y - \mu_y \end{bmatrix} \right)$$
+
+Let's break this down.
+
+### 🔹 Part 1: The Exponent — Mahalanobis Distance
+
+This part:
+
+$$\text{Mahalanobis squared} = \begin{bmatrix} x - \mu_x \\ y - \mu_y \end{bmatrix}^T \Sigma^{-1} \begin{bmatrix} x - \mu_x \\ y - \mu_y \end{bmatrix}$$
+
+This measures how far the point $(x,y)$ is from the **mean** — but **scaled** by your uncertainty.
+
+#### 🔍 Intuition:
+* If uncertainty is small in some direction, even a small deviation from the mean lowers the probability a lot.
+* If uncertainty is large, the same deviation doesn't reduce the probability much.
+
+This is like the **"distance from center" in Gaussian world** — but stretched/skewed according to $\Sigma$.
+
+### 🔹 Part 2: The Normalization Constant
+
+$$\frac{1}{2\pi \sqrt{|\Sigma|}}$$
+
+This ensures that:
+
+The **total probability** (integral of $p(x,y)$ over all possible points) equals **1** — as it must in any valid probability distribution.
+
+## 💡 Let's explain each part:
+
+### 🔸 $2\pi$: Comes from integrating in 2D space
+* In 1D, the normal distribution is normalized with $\frac{1}{\sqrt{2\pi \sigma^2}}$
+* In 2D, you get $2\pi$ instead of $\sqrt{2\pi}$
+
+### 🔸 $\sqrt{|\Sigma|}$: This is the **volume scaling factor**
+
+Let's say $\Sigma$ is the covariance matrix:
+
+$$\Sigma = \begin{bmatrix} \sigma_x^2 & \rho \sigma_x \sigma_y \\ \rho \sigma_x \sigma_y & \sigma_y^2 \end{bmatrix}$$
+
+* $|\Sigma|$: The **determinant** of this matrix
+* $\sqrt{|\Sigma|}$: The **area of the uncertainty ellipse**
+
+#### 🔍 Intuition:
+If your uncertainty increases:
+* Your ellipse spreads out (larger area)
+* So the **peak of the Gaussian must shrink** so that the total volume under the curve is still 1
+
+That's exactly what the $\frac{1}{\sqrt{|\Sigma|}}$ does.
+
+It **scales the height** of the bell curve so that no matter how wide it gets, the total probability still adds up to 1.
+
+### 📊 Analogy: Pancake vs Tower
+* If you're very uncertain: your probability is **spread out**, like a **wide flat pancake**
+* If you're very confident: your probability is **narrow**, like a **tall spike**
+
+In both cases, the total "amount of probability mass" is the same — like squeezing and stretching a balloon. You change the shape, but not the volume.
+
 
 ### 7.2 Prediction Step: Physics-Based Forecasting
 
