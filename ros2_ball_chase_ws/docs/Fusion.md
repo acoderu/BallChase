@@ -1350,116 +1350,178 @@ def kalman_predict(x, P, F, Q):
 
 The update step is where the magic happens - we incorporate new measurements to correct our prediction.
 
-#### 7.3.1 Measurement Prediction and Innovation
+# 🔄 THE KALMAN FILTER UPDATE STEP
 
-First, we predict what measurement we expect to see, given our predicted state:
+Goal: Combine a noisy prediction and a noisy measurement to get a better estimate, with the least possible error.
 
-```
-ẑₖ = Hₖx̂ₖ⁻
-```
+## 🧱 BACKGROUND: WHAT IS THE STATE?
+
+Imagine you're tracking a basketball.
+
+Let's define:
+
+$$\hat{x}_k^- = \begin{bmatrix} x \\ y \\ z \\ \dot{x} \\ \dot{y} \\ \dot{z} \end{bmatrix}$$
+
+This is your predicted state vector — what you think the ball's 3D position and velocity are at time step $k$, based on your motion model.
+
+We predicted this from the previous state, and now we get a real sensor reading, say from a LIDAR.
+
+## STEP 1: 🔍 Predict What the Measurement Should Look Like
+
+You ask:
+
+"Given my predicted state $\hat{x}_k^-$, what measurement would I expect my sensor to return?"
+
+Use the measurement matrix $H_k$:
+
+$$\hat{z}_k = H_k \hat{x}_k^-$$
+
+### 🔹 What is $H_k$?
+
+A matrix that picks out the parts of the state vector that your sensor can actually observe.
+
+### 💡 Example:
+
+If your LIDAR only measures 3D position (not velocity), then:
+
+$$H_k = \begin{bmatrix} 
+1 & 0 & 0 & 0 & 0 & 0 \\
+0 & 1 & 0 & 0 & 0 & 0 \\
+0 & 0 & 1 & 0 & 0 & 0
+\end{bmatrix}$$
+
+So:
+
+$$\hat{z}_k = H_k \hat{x}_k^- = \begin{bmatrix} x \\ y \\ z \end{bmatrix}$$
+
+This is your expected measurement, if your prediction was correct.
+
+## STEP 2: ⚠️ Compute the Innovation (Residual)
+
+Now subtract what you expected from what you actually observed:
+
+$$y_k = z_k - \hat{z}_k = z_k - H_k \hat{x}_k^-$$
 
 Where:
-- ẑₖ is the predicted measurement
-- Hₖ is the measurement matrix that maps state to measurement space
 
-Then we compute the innovation - the difference between actual and predicted measurements:
+$z_k$: the actual LIDAR reading (a 3D point, for example)
 
-```
-yₖ = zₖ - ẑₖ = zₖ - Hₖx̂ₖ⁻
-```
+$\hat{z}_k$: your expected sensor reading
 
-**Practical Example**: If our LIDAR only measures position (not velocity), our H matrix would be:
+### 🔹 Intuition:
 
-```
-H = [1 0 0 0 0 0]  (For x-position only)
-    [0 1 0 0 0 0]  (For y-position only)
-    [0 0 1 0 0 0]  (For z-position only)
-```
+$y_k$ tells you the difference between what happened and what you predicted.
 
-#### 7.3.2 Innovation Covariance: How Reliable is the Difference?
+It is the error in measurement space.
 
-The innovation covariance represents uncertainty in this difference:
+## STEP 3: 📏 Innovation Covariance $S_k$
 
-```
-Sₖ = HₖPₖ⁻Hₖᵀ + Rₖ
-```
+"How uncertain is this innovation? Is this a meaningful deviation or just noise?"
 
-Where:
-- Rₖ is the measurement noise covariance
+$$S_k = H_k P_k^- H_k^T + R_k$$
 
-R represents how noisy or unreliable our sensors are. For a LIDAR with position measurement error of about 3cm in each direction:
+Let's break this down:
 
-```
-R = [0.0009   0       0    ]  (3cm standard deviation squared for x)
-    [0      0.0009    0    ]  (3cm standard deviation squared for y)
-    [0       0     0.0009  ]  (3cm standard deviation squared for z)
-```
+### 🔸 What is $P_k^-$?
 
-#### 7.3.3 The Kalman Gain: The Optimal Compromise
+Your predicted covariance matrix — a 6×6 matrix describing how uncertain your state estimate is.
 
-The Kalman gain is the key to the filter - it determines how much to trust the measurement versus the prediction:
+Each diagonal element is a variance (e.g., uncertainty in $x$, $y$, etc.), and off-diagonals are covariances (how two variables vary together).
 
-```
-Kₖ = Pₖ⁻Hₖᵀ(Sₖ)⁻¹ = Pₖ⁻Hₖᵀ(HₖPₖ⁻Hₖᵀ + Rₖ)⁻¹
-```
+### 🔸 What does $H_k P_k^- H_k^T$ do?
 
-**Intuition**: The Kalman gain can be understood as:
-```
-K = prediction_uncertainty / (prediction_uncertainty + measurement_uncertainty)
-```
+This is called a linear projection — it transforms your uncertainty from the state space to the measurement space.
 
-- If prediction uncertainty is much larger than measurement uncertainty, K approaches 1, meaning "trust the measurement"
-- If measurement uncertainty is much larger than prediction uncertainty, K approaches 0, meaning "trust the prediction"
+You're saying:
 
-The beauty of the Kalman filter is that it calculates the mathematically optimal value of K to minimize the overall error.
+"If I'm uncertain about state, how uncertain should I be about what the sensor sees?"
 
-#### 7.3.4 State and Covariance Update: The Final Result
+If you're rusty in linear algebra:
 
-Finally, we update our state estimate and covariance:
+- Matrix multiplication like this transforms a covariance matrix by projecting it through the $H_k$ space
+- $H_k^T$ is the transpose, flipping rows/columns
 
-```
-x̂ₖ = x̂ₖ⁻ + Kₖyₖ           (Updated state)
-Pₖ = (I - KₖHₖ)Pₖ⁻        (Updated covariance)
-```
+### 🔸 What is $R_k$?
 
-Here's a concise Python implementation of the update step:
+Measurement noise — a 3×3 matrix if your sensor reads 3D position:
 
-```python
-def kalman_update(x, P, z, H, R):
-    """
-    Perform Kalman filter update step.
-    
-    Parameters:
-        x: Predicted state vector
-        P: Predicted state covariance
-        z: Measurement vector
-        H: Measurement matrix
-        R: Measurement noise covariance
-        
-    Returns:
-        x_updated: Updated state
-        P_updated: Updated covariance
-    """
-    # Calculate innovation (measurement residual)
-    y = z - H @ x
-    
-    # Calculate innovation covariance
-    S = H @ P @ H.T + R
-    
-    # Calculate Kalman gain
-    K = P @ H.T @ np.linalg.inv(S)
-    
-    # Update state
-    x_updated = x + K @ y
-    
-    # Update covariance (Joseph form for numerical stability)
-    I = np.eye(len(x))
-    P_updated = (I - K @ H) @ P @ (I - K @ H).T + K @ R @ K.T
-    
-    return x_updated, P_updated
-```
+$$R_k = \begin{bmatrix} 
+0.0009 & 0 & 0 \\
+0 & 0.0009 & 0 \\
+0 & 0 & 0.0009
+\end{bmatrix}$$
 
-*Code Listing 7.2: Python implementation of the Kalman filter update step, showing how the Kalman gain is calculated and applied to update both the state and covariance based on new measurements.*
+This assumes ~3 cm standard deviation in each direction.
+
+### 🧠 Intuition of $S_k$:
+
+$$S_k = \text{predicted uncertainty in measurement} + \text{sensor noise}$$
+
+It tells you how much spread you'd expect in $y_k$ even if you were right on average.
+
+## STEP 4: 🎯 The Kalman Gain $K_k$
+
+$$K_k = P_k^- H_k^T (S_k)^{-1}$$
+
+This is the heart of the Kalman filter.
+
+### 🔹 What does it mean?
+
+"How much should I update my state estimate based on this measurement?"
+
+It's a weight:
+
+- If your prediction is very uncertain and measurement is reliable → $K_k$ is close to 1 → trust the measurement
+- If your prediction is confident and measurement is noisy → $K_k$ is close to 0 → trust the prediction
+
+Mathematically:
+
+- $P_k^- H_k^T$: maps state uncertainty into measurement space
+- $(S_k)^{-1}$: inverse of innovation covariance (less spread → higher trust)
+
+### 🧠 Analogy:
+
+Think of $K_k$ as a volume knob that adjusts how loudly you "listen" to the measurement.
+
+## STEP 5: 🧠 Update the State Estimate
+
+$$\hat{x}_k = \hat{x}_k^- + K_k y_k$$
+
+### 🔹 Intuition:
+
+- $\hat{x}_k^-$: original prediction
+- $y_k$: correction (difference between what you saw vs. expected)
+- $K_k y_k$: scaled correction, using Kalman gain
+
+You shift your predicted state closer to the measurement, but only as much as you trust it.
+
+- If you trust the measurement → move a lot
+- If not → move a little
+
+## STEP 6: 📉 Update the Covariance Matrix
+
+$$P_k = (I - K_k H_k) P_k^-$$
+
+### 🔹 Intuition:
+
+You've now reduced your uncertainty — you have new information.
+
+- $K_k H_k$: the part of state you just corrected
+- $(I - K_k H_k)$: the part of the prediction that wasn't touched
+
+This update makes $P_k$ smaller in key directions — your estimate is now more confident
+
+## 🧠 Putting It All Together
+
+| Step | Formula | Meaning |
+|------|---------|---------|
+| 1. Predict measurement | $\hat{z}_k = H_k \hat{x}_k^-$ | What the sensor should read if you're right |
+| 2. Innovation | $y_k = z_k - \hat{z}_k$ | Difference between measurement and expectation |
+| 3. Innovation covariance | $S_k = H_k P_k^- H_k^T + R_k$ | Total expected noise in measurement |
+| 4. Kalman Gain | $K_k = P_k^- H_k^T S_k^{-1}$ | Optimal blending of prediction vs. measurement |
+| 5. State update | $\hat{x}_k = \hat{x}_k^- + K_k y_k$ | Move state estimate toward measurement |
+| 6. Covariance update | $P_k = (I - K_k H_k) P_k^-$ | Reduce uncertainty now that we have data |
+
 
 ### 7.4 Numerical Stability Considerations
 
