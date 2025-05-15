@@ -1801,7 +1801,7 @@ $$P_1 = (I - KH)P_1^-$$
 
 <div align="right"><a href="#top">⬆ back to top</a></div>
 
-## 8. Extended Kalman Filter
+## 8. Extended Kalman Filter 
 
 # 🔁 Why Do We Need the Extended Kalman Filter?
 
@@ -2392,7 +2392,407 @@ def is_ballistic_trajectory():
 
 *Code Listing 8.3: Decision logic for dynamically switching between Standard KF and EKF based on detected motion patterns. This hybrid approach combines the efficiency of the standard KF for simple motions with the accuracy of the EKF for complex trajectories.*
 
-### 8.9 Cross-References to Related Sections
+### 8.9 Unscented Kalman Filter
+# 🧭 Unscented Kalman Filter: Mathematical Foundation & Intuitive Guide
+
+The Unscented Kalman Filter (UKF) is a powerful state estimation algorithm that excels at handling nonlinear systems without requiring linearization. This guide walks through each step while building both mathematical rigor and intuition.
+
+## ✅ Step 1: Initialize Your Belief
+
+You begin with your initial belief state:
+
+- $\hat{x}_{k-1}$: mean state estimate (e.g., position and velocity vector)
+- $P_{k-1}$: covariance matrix representing the uncertainty in your estimate
+
+The covariance matrix $P_{k-1}$ geometrically represents an uncertainty ellipsoid in your state space.
+
+## ✅ Step 2: Generate Sigma Points
+
+### The Key Insight
+
+Instead of approximating your nonlinear functions with Taylor expansions (like EKF does), the UKF samples strategic points from your probability distribution. These **sigma points** capture the statistical moments of your current belief.
+
+### Mathematical Definition
+
+For a state of dimension $n$, we generate $2n+1$ sigma points as follows:
+
+- **Center point**: $\chi_0 = \hat{x}_{k-1}$
+- **Positive offsets**: $\chi_i = \hat{x}_{k-1} + \sqrt{(n+\lambda)P_{k-1}}_i$ for $i = 1,\ldots,n$
+- **Negative offsets**: $\chi_{i+n} = \hat{x}_{k-1} - \sqrt{(n+\lambda)P_{k-1}}_i$ for $i = 1,\ldots,n$
+
+Where:
+- $\lambda = \alpha^2(n+\kappa)-n$ is a scaling parameter
+- $\alpha$ controls spread of sigma points (typically $10^{-3} \leq \alpha \leq 1$)
+- $\kappa$ is a secondary scaling parameter (typically $0$ or $3-n$)
+- $\sqrt{(n+\lambda)P_{k-1}}_i$ is the $i$-th column of the matrix square root computed via Cholesky decomposition
+
+### Intuitive Perspective
+
+Think of this as:
+1. Taking the ellipsoid defined by your covariance matrix
+2. Drawing rays in the principal directions of uncertainty
+3. Placing points along those rays at a statistically meaningful distance
+4. These points act as "feelers" that sample the probability distribution
+
+## ✅ Step 3: Predict Through Nonlinear System Dynamics
+
+### Mathematical Formulation
+
+Propagate each sigma point through your nonlinear motion model $f(\cdot)$:
+
+$$\chi_i^- = f(\chi_i) \quad \text{for } i = 0,1,\ldots,2n$$
+
+For example, if modeling ballistic motion with gravitational acceleration:
+
+$$f(x) = \begin{bmatrix} p + v\Delta t \\ v + a\Delta t \end{bmatrix}$$
+
+Where $p$ is position, $v$ is velocity, and $a$ is acceleration due to gravity.
+
+### Conceptual Understanding
+
+Instead of linearizing the dynamics, you're actually simulating how uncertainty propagates through the real nonlinear physics. This is fundamentally more accurate than the EKF's linearization approach.
+
+## ✅ Step 4: Reconstruct the Predicted State Distribution
+
+### Mathematical Formulation
+
+From the transformed sigma points $\chi_i^-$, compute:
+
+1. **Predicted mean**:
+   $$\hat{x}_k^- = \sum_{i=0}^{2n} W_i^m \chi_i^-$$
+
+2. **Predicted covariance**:
+   $$P_k^- = \sum_{i=0}^{2n} W_i^c (\chi_i^- - \hat{x}_k^-)(\chi_i^- - \hat{x}_k^-)^T + Q$$
+
+Where:
+- $W_i^m$ are the weights for mean calculation:
+  - $W_0^m = \lambda/(n+\lambda)$
+  - $W_i^m = 1/[2(n+\lambda)]$ for $i = 1,\ldots,2n$
+
+- $W_i^c$ are the weights for covariance calculation:
+  - $W_0^c = \lambda/(n+\lambda) + (1-\alpha^2+\beta)$
+  - $W_i^c = 1/[2(n+\lambda)]$ for $i = 1,\ldots,2n$
+
+- $\beta$ is a parameter to incorporate prior knowledge (typically $\beta = 2$ for Gaussian distributions)
+- $Q$ is the process noise covariance matrix
+
+### Intuitive Understanding
+
+This step reconstructs the probability distribution after applying nonlinear dynamics to your belief. The distribution is no longer the same shape due to the nonlinear transformation. The sigma points have "curved" along with the dynamics, and we're calculating what the new uncertainty looks like.
+
+## ✅ Step 5: Predict Measurement Distribution
+
+### Mathematical Formulation
+
+Transform each predicted sigma point through your nonlinear measurement model $h(\cdot)$:
+
+$$\mathcal{Z}_i = h(\chi_i^-) \quad \text{for } i = 0,1,\ldots,2n$$
+
+Then compute:
+
+1. **Predicted measurement mean**:
+   $$\hat{z}_k = \sum_{i=0}^{2n} W_i^m \mathcal{Z}_i$$
+
+2. **Predicted measurement covariance**:
+   $$S_k = \sum_{i=0}^{2n} W_i^c (\mathcal{Z}_i - \hat{z}_k)(\mathcal{Z}_i - \hat{z}_k)^T + R$$
+
+3. **Cross-covariance between state and measurement**:
+   $$P_{xz} = \sum_{i=0}^{2n} W_i^c (\chi_i^- - \hat{x}_k^-)(\mathcal{Z}_i - \hat{z}_k)^T$$
+
+Where $R$ is the measurement noise covariance matrix.
+
+### Sensor Modeling Examples
+
+For a range-bearing sensor:
+$$h(x) = \begin{bmatrix} \sqrt{x^2 + y^2} \\ \arctan(y/x) \end{bmatrix}$$
+
+For a camera with perspective projection:
+$$h(x) = \begin{bmatrix} f_x \frac{X}{Z} + c_x \\ f_y \frac{Y}{Z} + c_y \end{bmatrix}$$
+
+### Intuitive Understanding
+
+This step predicts what your sensors should observe given your current belief state. You're asking: "If my system is in this predicted state, what would my sensors read?"
+
+## ✅ Step 6: Update State with Actual Measurement
+
+### Mathematical Formulation
+
+When you receive an actual measurement $z_k$:
+
+1. **Compute innovation**:
+   $$y = z_k - \hat{z}_k$$
+
+2. **Calculate Kalman gain**:
+   $$K_k = P_{xz}S_k^{-1}$$
+
+3. **Update state estimate**:
+   $$\hat{x}_k = \hat{x}_k^- + K_k y$$
+
+4. **Update state covariance**:
+   $$P_k = P_k^- - K_k S_k K_k^T$$
+
+### Intuitive Understanding
+
+The Kalman gain $K_k$ optimally balances trust between your prediction and the measurement. If your measurement is very certain (small $R$), you'll trust it more. If your prediction is very certain (small $P_k^-$), you'll trust it more.
+
+The update essentially says: "My prediction was this, but the sensor saw something slightly different. Let me adjust my belief based on the optimal compromise between these two sources of information."
+
+## 🔍 Conceptual Summary
+
+| Step | Mathematical Process | Conceptual Insight |
+|------|---------------------|-------------------|
+| Sigma Points | Cholesky decomposition + deterministic sampling | Sample the uncertainty ellipsoid in statistically optimal ways |
+| Motion Prediction | Apply nonlinear $f(x)$ to each point | Let the true nonlinear dynamics bend and transform your uncertainty cloud |
+| Mean & Covariance | Weighted recombination with carefully chosen weights | Reconstruct the statistical moments of the transformed distribution |
+| Measurement Prediction | Apply nonlinear $h(x)$ to each predicted state | Project your predicted state into measurement space |
+| Update | Compute optimal Kalman gain and apply correction | Adjust your belief by balancing prediction vs. observation |
+
+## 🧮 Advantages Over Extended Kalman Filter
+
+1. **No Jacobian calculations** required, making implementation easier for complex systems
+2. **More accurate for highly nonlinear systems** since it doesn't rely on linearization
+3. **Captures higher-order moments** of the distribution through the sigma point mechanism
+4. **Handles discontinuities better** since it doesn't need differentiable functions
+
+## 📚 Parameter Selection Guidelines
+
+- **Alpha** ($\alpha$): Controls spread of sigma points
+  - Smaller values (0.001-0.1) concentrate points closer to mean
+  - Larger values (0.5-1) explore wider regions
+
+- **Beta** ($\beta$): Incorporates prior knowledge about distribution
+  - $\beta = 2$ is optimal for Gaussian distributions
+  - Higher values place more weight on the central sigma point
+
+- **Kappa** ($\kappa$): Secondary scaling parameter
+  - $\kappa = 0$ is a common choice
+  - $\kappa = 3-n$ can provide better higher-order moment capture for higher dimensions
+
+## 🚀 Implementation Tips
+
+1. Ensure numerical stability in Cholesky decomposition by adding a small value to the diagonal if needed
+2. Pre-compute weights when initializing the filter to save computation time
+3. Normalize angles in the innovation vector before applying the update
+4. Consider square-root UKF variants for improved numerical stability in high-precision applications
+
+![UKF Transformation Process](./images/unscented_kalman.png "UKF Transformation Process")
+# 🔄 Visual Understanding of the Unscented Kalman Filter
+
+This guide provides a visual walkthrough of how UKF transforms uncertainty through nonlinear systems.
+
+## The UKF Transformation Process Visualized
+
+### 🔵 1. **Initial Belief – Gaussian Ellipse**
+
+* The **blue ellipse** in the center represents your **prior belief**:
+   * The center is the **mean** of your estimated state (e.g., position)
+   * The shape and orientation of the ellipse reflect the **covariance matrix** (uncertainty)
+
+This is your **current guess** about where the object is — and how confident you are.
+
+### 📍 2. **Sigma Points – Blue Dots**
+
+* The small **blue dots** are the **sigma points** sampled from the distribution
+* They're:
+   * **Symmetrically** placed around the mean
+   * Spread in the **directions of maximum uncertainty**
+   * Generated using the **Cholesky decomposition** of the covariance matrix (i.e., square root of the ellipsoid)
+
+These represent **critical samples** of your uncertainty — they "feel out" the shape of your belief.
+
+### 🌪️ 3. **Nonlinear Transformation – Curved Arrows**
+
+* Each sigma point is **propagated through a nonlinear function** (e.g., the motion model)
+* The **curved arrows** show how each point is **warped** by this function
+
+Example: maybe gravity pulls some points downward, or a control input bends their path.
+
+This step replaces the linear Jacobian in EKF — **you let the true nonlinear model act on your uncertainty**.
+
+### 🔴 4. **Transformed Sigma Points – Red Dots**
+
+* The **red dots** show the **new positions** of the sigma points **after the nonlinear transformation**
+* They no longer lie in a symmetric ellipse — they're **curved and scattered**
+
+This shows how your **belief has evolved** through time or control.
+
+### 🔺 5. **Predicted Mean – Red Star**
+
+* The **red star** is the **new predicted mean**: the average of the transformed sigma points
+* It may be **offset** from the predicted mean you'd get from a linear model
+
+This mean better captures the true behavior of the system — especially in the presence of curves or nonlinearities.
+
+### 🟠 6. **Predicted Covariance – Red Ellipse**
+
+* The new **red ellipse** shows the **updated shape of uncertainty**
+* This is computed from how **spread out the red sigma points** are
+* It might be:
+   * Larger or smaller
+   * Tilted differently
+   * Stretched along a new direction
+
+This tells you:
+"Given the nonlinear motion, here's how my uncertainty now looks."
+
+## ✅ What This Diagram Conveys
+
+It visually contrasts the UKF against EKF:
+
+| EKF | UKF |
+|-----|-----|
+| Approximates the curve | Follows the curve directly |
+| Uses tangent (Jacobian) | Uses transformed sigma points |
+| May underestimate uncertainty | Captures it more accurately |
+| Local linear view | Global sampling-based view |
+
+## 🔍 Key Intuitions From the Visualization
+
+1. **The Power of Sigma Points**: By sampling strategically placed points from your belief distribution, UKF captures how the entire probability distribution transforms.
+
+2. **Nonlinearity Handling**: Notice how the transformed red dots aren't symmetrically arranged like the original blue dots - this represents the filter's ability to handle nonlinear effects.
+
+3. **Uncertainty Propagation**: The shape difference between the blue and red ellipses shows how uncertainty evolves through nonlinear dynamics - something linearization often misses.
+
+4. **No Derivatives Required**: UKF never computes Jacobians - it directly samples and transforms points through your exact nonlinear functions.
+
+## 📊 Mathematical Connection
+
+What you're seeing visualized is the unscented transformation, which approximates:
+
+$$p(y) \approx \sum_{i=0}^{2n} W_i \delta(y - f(x_i))$$
+
+Where the delta functions at transformed sigma points ($f(x_i)$) with appropriate weights ($W_i$) reconstruct the output distribution.
+
+This statistical perspective gives UKF profound advantages for highly nonlinear systems where linearization breaks down.
+
+# 🔢 Unscented Kalman Filter: Numerical Example Walkthrough
+
+This document provides a step-by-step numerical example of the UKF algorithm applied to a simple 2D state with nonlinear dynamics.
+
+## 🧭 Step 0: Initial Belief
+
+We begin with a 2D state vector:
+
+$$\hat{x}_0 = \begin{bmatrix} 1.0 \\ 2.0 \end{bmatrix}$$
+
+And a 2×2 covariance matrix:
+
+$$P_0 = \begin{bmatrix} 0.1 & 0.05 \\ 0.05 & 0.2 \end{bmatrix}$$
+
+This tells us:
+
+* Our best guess is that the object is at position (1.0, 2.0)
+* There's uncertainty in both directions, with some correlation between $x_1$ and $x_2$
+
+## 🔹 Step 1: Generate Sigma Points
+
+UKF doesn't assume linearity. Instead, it samples sigma points around the mean that "feel out" the shape of the uncertainty (defined by the ellipse encoded in $P$).
+
+For a 2D state, we generate $2n+1=5$ sigma points:
+
+**Parameters:**
+* $\alpha = 10^{-3}$
+* $\kappa = 0$
+* $\lambda = \alpha^2(n+\kappa)-n = -1.999998$
+* $\gamma = \sqrt{n+\lambda} \approx 0.001$
+
+We compute the matrix square root of $(n+\lambda)P$ using Cholesky decomposition, which gives a matrix $L$ that defines the axes of our ellipsoid.
+
+Using this, we form sigma points:
+
+$$\chi_0 = \hat{x}_0 = \begin{bmatrix} 1.0 \\ 2.0 \end{bmatrix}$$
+
+$$\chi_1 = \hat{x}_0 + \text{1st column of } L = \begin{bmatrix} 1.000447 \\ 2.000223 \end{bmatrix}$$
+
+$$\chi_2 = \hat{x}_0 + \text{2nd column of } L = \begin{bmatrix} 1.000223 \\ 2.000894 \end{bmatrix}$$
+
+$$\chi_3 = \hat{x}_0 - \text{1st column of } L = \begin{bmatrix} 0.999553 \\ 1.999777 \end{bmatrix}$$
+
+$$\chi_4 = \hat{x}_0 - \text{2nd column of } L = \begin{bmatrix} 0.999777 \\ 1.999106 \end{bmatrix}$$
+
+These five points form a "cloud" that approximates the full Gaussian belief.
+
+## 🔄 Step 2: Propagate Sigma Points Through Nonlinear Motion Model
+
+We now define a nonlinear motion model (e.g., curved motion like a bouncing or accelerating object):
+
+$$f(x) = \begin{bmatrix} x_1 + 0.5 \cdot \sin(x_2) \\ x_2 + 0.1 \cdot x_1^2 \end{bmatrix}$$
+
+Let's apply this to each sigma point:
+
+**Example:**
+For $\chi_0 = [1.0, 2.0]$:
+
+$$f(\chi_0) = \begin{bmatrix} 1.0 + 0.5 \cdot \sin(2.0) \\ 2.0 + 0.1 \cdot (1.0)^2 \end{bmatrix} = \begin{bmatrix} 1.4546 \\ 2.1 \end{bmatrix}$$
+
+Apply to all 5 sigma points:
+
+| Sigma Point | Transformed |
+|-------------|-------------|
+| $\chi_0 = [1.000, 2.000]$ | $[1.4546, 2.100]$ |
+| $\chi_1 = [1.0004, 2.0002]$ | $[1.4549, 2.1004]$ |
+| $\chi_2 = [1.0002, 2.0009]$ | $[1.4551, 2.1002]$ |
+| $\chi_3 = [0.9996, 1.9998]$ | $[1.4544, 2.0996]$ |
+| $\chi_4 = [0.9998, 1.9991]$ | $[1.4540, 2.0998]$ |
+
+Notice how the outputs are not symmetrically spaced — because of the nonlinear sin() and x² terms. This is where UKF shines.
+
+## 📊 Step 3: Recombine into Predicted Mean and Covariance
+
+We now compute the predicted state and predicted uncertainty using weighted averages of the transformed sigma points.
+
+**Weights:**
+* $W_0^{(m)} \approx -999999.0$
+* $W_i^{(m)} \approx 250000.0$ for $i=1,...,4$
+
+These extreme weights are a byproduct of small $\alpha$, and they cancel nicely to preserve mean + variance.
+
+**Predicted Mean:**
+$$\hat{x}_1^- = \sum W_i^{(m)} f(\chi_i) = \begin{bmatrix} 1.409 \\ 2.110 \end{bmatrix}$$
+
+**Predicted Covariance:**
+$$P_1^- = \sum W_i^{(c)} (f(\chi_i) - \hat{x}_1^-)(f(\chi_i) - \hat{x}_1^-)^T$$
+
+Yields:
+
+$$P_1^- = \begin{bmatrix} 0.092 & 0.025 \\ 0.025 & 0.224 \end{bmatrix}$$
+
+## 🔍 Interpretation
+
+**Before:**
+* Mean: $[1.0, 2.0]$
+* Covariance: uncertainties of $\pm0.1, \pm0.2$ with some correlation
+
+**After nonlinear motion:**
+* New mean: $[1.409, 2.110]$ — motion bent the mean
+* New covariance:
+  * Still spread out — but now stretched in a new direction
+  * Captures curvature in the function — EKF would miss this!
+
+## ✅ Summary: What UKF Gave Us
+
+| Aspect | EKF | UKF |
+|--------|-----|-----|
+| Nonlinear handling | Local linearization (tangent) | Full nonlinear simulation |
+| Math | Jacobians | Sigma point propagation |
+| Intuition | Approximates curve with a slope | Lets the curve bend the belief |
+| Output | Biased mean, under/overestimated covariance | Accurate prediction of nonlinear transformation |
+
+This prediction step now sets us up for the measurement update, where we fuse this with actual sensor data.
+
+## 📈 Visualization
+
+To visualize this process:
+
+![Initial belief with sigma points](./images/ukf-example-initial.png "Initial state with sigma points")
+
+![Transformed sigma points](./images/ukf-example-transformed.png "After nonlinear transformation")
+
+*Note: Add your actual visualization images to the repository and update these paths accordingly.*
+
+
+### 8.10 Cross-References to Related Sections
 
 - For basics of standard Kalman filtering, see [Section 5: Understanding the Kalman Filter](#understanding-the-kalman-filter)
 - For handling different motion states, see [Section 9: Motion State Management](#motion-state-management)
