@@ -1525,62 +1525,70 @@ This update makes $P_k$ smaller in key directions — your estimate is now more 
 
 ### 7.4 Numerical Stability Considerations
 
-When implementing Kalman filters, several numerical issues can arise:
+# 🎯 Goal: Preserve the Integrity of the Covariance Matrix
 
-#### 7.4.1 Symmetric Positive Definite Covariance
+The **covariance matrix** $P_k$ represents uncertainty. It must always satisfy:
+* **Symmetric**: $P = P^T$
+* **Positive definite (PD)**: all eigenvalues are **positive** (uncertainty is never negative)
+* **Numerically stable**: small rounding errors shouldn't make $P$ invalid
 
-The covariance matrix must remain symmetric positive definite (SPD) for the filter to work. This can be ensured by:
-- Using the Joseph form for covariance updates (shown in the code above)
-- Enforcing symmetry by setting P = (P + P^T)/2 after each update
-- Checking for negative eigenvalues and correcting if found
+## 🔁 Standard Covariance Update Formula
 
-#### 7.4.2 Matrix Inversion Challenges
+In the **standard Kalman update step**, the covariance is updated as:
 
-The innovation covariance matrix S must be inverted to compute the Kalman gain. This can be problematic if:
-- S is near-singular (determinant close to zero)
-- S has very small eigenvalues
+$$P_k = (I - K_k H_k) P_k^-$$
 
-Solutions include:
-- Adding small values to the diagonal of S (S = S + εI)
-- Using pseudoinverse or SVD for inversion
-- Ensuring measurement noise R has reasonable non-zero values
+This is algebraically valid, but in practice, it can suffer from:
+* **Loss of symmetry** (because of floating-point round-off errors)
+* **Loss of positive definiteness** (e.g., eigenvalues of $P_k$ become zero or negative)
+* **Instability** when the Kalman gain is large (or poorly conditioned)
 
-Here's a more robust matrix inversion function that handles these issues:
+Even though mathematically this should work, **numerical errors can accumulate**, especially in high dimensions or low-noise situations.
 
-```python
-def stable_invert(matrix, epsilon=1e-6):
-    """
-    Perform a numerically stable matrix inversion.
-    
-    Parameters:
-        matrix: Square matrix to invert
-        epsilon: Small value to add to diagonal for stability
-        
-    Returns:
-        Inverted matrix
-    """
-    # Get matrix dimensions
-    n = matrix.shape[0]
-    
-    # Ensure matrix is symmetric
-    matrix = (matrix + matrix.T) / 2
-    
-    # Add small value to diagonal for stability
-    matrix = matrix + np.eye(n) * epsilon
-    
-    # Use SVD for inversion (more stable than np.linalg.inv)
-    U, s, Vh = np.linalg.svd(matrix)
-    
-    # Replace small singular values with zeros
-    s_inv = np.array([1/x if x > epsilon else 0 for x in s])
-    
-    # Compute inverse: V * S^-1 * U^T
-    inv = Vh.T @ np.diag(s_inv) @ U.T
-    
-    return inv
-```
+## ✅ The Joseph Form: A More Stable Alternative
 
-*Code Listing 7.3: Implementation of a numerically stable matrix inversion function. This addresses common numerical issues in Kalman filter implementations by ensuring symmetry, adding stability terms, and using singular value decomposition for inversion.*
+To fix these issues, we use the **Joseph form** of the covariance update:
+
+$$P_k = (I - K_k H_k) P_k^- (I - K_k H_k)^T + K_k R_k K_k^T$$
+
+## 🔍 Breaking It Down:
+
+### 🔹 Term 1:
+$$(I - K H) P^- (I - K H)^T$$
+
+* This captures the uncertainty in the **unchanged** parts of the state (the part not corrected by the measurement)
+* The **double-sided multiplication** ensures the update is **symmetric**, even with rounding
+
+### 🔹 Term 2:
+$$K R K^T$$
+
+* This explicitly adds back the uncertainty from the **measurement noise**
+* Even though you used the measurement to reduce your uncertainty, you're being honest and saying: "the sensor was noisy, so some of that uncertainty still exists"
+
+## ✅ Why Is the Joseph Form Better?
+
+1. **Maintains symmetry**: Multiplying from both sides preserves $P = P^T$
+2. **Preserves positive definiteness**: You're explicitly accounting for all sources of uncertainty (both prediction and measurement)
+3. **Avoids underestimating uncertainty**: The standard formula may **over-confidently shrink** $P$ too much. The Joseph form is more cautious.
+4. **More robust numerically**: Especially in finite precision, matrix rounding errors can make the standard form unreliable.
+
+## 🧠 Intuition
+
+* Think of the Joseph form as: "**Carefully apply the correction, and don't forget the noise you added**."
+* The second term ($K R K^T$) is like a **fudge factor** that restores balance — so your estimate isn't falsely confident.
+
+## ✅ Summary
+
+| Feature | Standard Update | Joseph Form |
+|---------|----------------|-------------|
+| Formula | $(I - K H) P$ | $(I - K H) P (I - K H)^T + K R K^T$ |
+| Symmetric? | Not always | Yes (by design) |
+| Positive definite? | Can break | Much safer |
+| Safer under round-off? | No | Yes |
+| Recommended for real-time / high dimension / low-noise filters? | ❌ | ✅ |
+
+If you're building Kalman filters for real-world systems (like robotics, trading, sensor fusion), using the **Joseph form** makes your filter **robust** and **trustworthy**, especially under numerical stress.
+
 
 ### 7.5 Complete Kalman Filter Algorithm: Step by Step
 
