@@ -1627,76 +1627,170 @@ flowchart TD
 
 *Figure 7.2: Complete Kalman filter algorithm flow. The process starts with initialization (orange), followed by a continuous cycle of prediction (blue) and update (green) steps. Each step involves specific matrix operations that transform the state estimate and its uncertainty.*
 
-#### 7.5.2 Initial State:
-- Initial state estimate: x₀ = [1.0, 2.0, 0.5, 0.5, -0.3, 0.1]ᵀ
-- Initial covariance: P₀ = diag(0.01, 0.01, 0.01, 0.1, 0.1, 0.1)  (Low position uncertainty, higher velocity uncertainty)
+# Example --- Initial Setup
 
-#### 7.5.3 Prediction Step (k=1, dt=0.1s):
-1. State prediction:
-   ```
-   x̂₁⁻ = F₁x̂₀ = [1.05, 1.97, 0.51, 0.5, -0.3, 0.1]ᵀ
-   ```
+## State Vector (6D):
+$$\hat{x}_0 = \begin{bmatrix} x \\ y \\ z \\ v_x \\ v_y \\ v_z \end{bmatrix} = \begin{bmatrix} 1.0 \\ 2.0 \\ 0.5 \\ 0.5 \\ -0.3 \\ 0.1 \end{bmatrix}$$
 
-2. Covariance prediction (simplified for clarity):
-   ```
-   P₁⁻ = F₁P₀F₁ᵀ + Q₁ = 
-   [0.012, 0,     0,      0.001,  0,      0    ]
-   [0,     0.012, 0,      0,      0.001,  0    ]
-   [0,     0,     0.012,  0,      0,      0.001]
-   [0.001, 0,     0,      0.101,  0,      0    ]
-   [0,     0.001, 0,      0,      0.101,  0    ]
-   [0,     0,     0.001,  0,      0,      0.101]
-   ```
+This is our initial guess: position and velocity of a moving object (like a drone or ball).
 
-#### 7.5.4 Update Step (LIDAR measurement):
-1. Measurement: z₁ = [1.02, 2.01, 0.49]ᵀ
+## Covariance Matrix $P_0$
+$$P_0 = \text{diag}(0.01, 0.01, 0.01, 0.1, 0.1, 0.1)$$
 
-2. Predicted measurement: 
-   ```
-   ẑ₁ = H₁x̂₁⁻ = [1.05, 1.97, 0.51]ᵀ
-   ```
+Diagonal entries are variances:
+- $\sigma_x^2 = 0.01 \Rightarrow \sigma_x = 0.1$ meters
+- $\sigma_{v_x}^2 = 0.1 \Rightarrow \sigma_{v_x} = 0.316$ m/s
 
-3. Innovation: 
-   ```
-   y₁ = z₁ - ẑ₁ = [-0.03, 0.04, -0.02]ᵀ
-   ```
+Interpretation:
+- We're fairly confident about position (±10 cm)
+- Less confident about velocity
 
-4. Innovation covariance:
-   ```
-   S₁ = H₁P₁⁻H₁ᵀ + R₁ = 
-   [0.021, 0,     0    ]
-   [0,     0.021, 0    ]
-   [0,     0,     0.021]
-   ```
+# 🔮 Prediction Step ($\Delta t = 0.1$ sec)
 
-5. Kalman gain:
-   ```
-   K₁ = P₁⁻H₁ᵀS₁⁻¹ = 
-   [0.571, 0,     0    ]
-   [0,     0.571, 0    ]
-   [0,     0,     0.571]
-   [0.048, 0,     0    ]
-   [0,     0.048, 0    ]
-   [0,     0,     0.048]
-   ```
+## 🔹 State Transition Equation:
+$$\hat{x}_1^- = F\hat{x}_0$$
 
-6. State update:
-   ```
-   x̂₁ = x̂₁⁻ + K₁y₁ = [1.033, 1.993, 0.499, 0.499, -0.298, 0.099]ᵀ
-   ```
+Where $F$ (the state transition matrix) is:
 
-7. Covariance update:
-   ```
-   P₁ = (I - K₁H₁)P₁⁻ = 
-   [0.005, 0,     0,      0.001,  0,      0    ]
-   [0,     0.005, 0,      0,      0.001,  0    ]
-   [0,     0,     0.005,  0,      0,      0.001]
-   [0.001, 0,     0,      0.100,  0,      0    ]
-   [0,     0.001, 0,      0,      0.100,  0    ]
-   [0,     0,     0.001,  0,      0,      0.100]
-   ```
+$$F = \begin{bmatrix} I_{3×3} & \Delta t \cdot I_{3×3} \\ 0 & I_{3×3} \end{bmatrix}$$
 
-Notice how the position uncertainty has decreased after incorporating the measurement, while velocity uncertainty remains similar.
+It propagates:
+
+$$\begin{bmatrix} x_{k+1} \\ v_{k+1} \end{bmatrix} = \begin{bmatrix} x_k + v_k \Delta t \\ v_k \end{bmatrix}$$
+
+So:
+
+$$\hat{x}_1^- = \begin{bmatrix} 1.0 + 0.5 \cdot 0.1 \\ 2.0 + (-0.3) \cdot 0.1 \\ 0.5 + 0.1 \cdot 0.1 \\ \text{velocities unchanged} \end{bmatrix} = \begin{bmatrix} 1.05 \\ 1.97 \\ 0.51 \\ 0.5 \\ -0.3 \\ 0.1 \end{bmatrix}$$
+
+## 🔹 Covariance Prediction:
+$$P_1^- = FP_0F^T + Q$$
+
+Where:
+- $F$: the same transition matrix
+- $Q$: process noise (small uncertainties due to model error, control imperfections)
+
+Your result:
+
+$$P_1^- = \begin{bmatrix} \text{increased position uncertainty (from velocity coupling)} \\ \text{same velocity uncertainty} \end{bmatrix}$$
+
+E.g., for position $x$:
+
+$$\sigma_{x_1}^2 = \sigma_{x_0}^2 + \Delta t^2 \cdot \sigma_{v_x}^2 = 0.01 + 0.1^2 \cdot 0.1 = 0.01 + 0.001 = 0.011$$
+
+Then adding $Q$, you get 0.012.
+
+So even though velocity didn't change, it injects uncertainty into position through the time step.
+
+# 🛰 Update Step (New LIDAR Measurement)
+
+## Measurement:
+$$z_1 = \begin{bmatrix} 1.02 \\ 2.01 \\ 0.49 \end{bmatrix}$$
+
+LIDAR gives noisy 3D position.
+
+## Predicted Measurement:
+$$\hat{z}_1 = H\hat{x}_1^- = \begin{bmatrix} 1.05 \\ 1.97 \\ 0.51 \end{bmatrix}$$
+
+Where $H$ is:
+
+$$H = \begin{bmatrix} 
+1 & 0 & 0 & 0 & 0 & 0 \\
+0 & 1 & 0 & 0 & 0 & 0 \\
+0 & 0 & 1 & 0 & 0 & 0
+\end{bmatrix}$$
+
+→ It just extracts position from state.
+
+## Innovation (Residual):
+$$y_1 = z_1 - \hat{z}_1 = \begin{bmatrix} -0.03 \\ 0.04 \\ -0.02 \end{bmatrix}$$
+
+This tells us how far off our prediction is in measurement space.
+
+## Innovation Covariance:
+$$S_1 = HP_1^-H^T + R$$
+
+$$S_1 = \begin{bmatrix} 
+0.012 & 0 & 0 \\
+0 & 0.012 & 0 \\
+0 & 0 & 0.012
+\end{bmatrix} + \begin{bmatrix} 
+0.009 & 0 & 0 \\
+0 & 0.009 & 0 \\
+0 & 0 & 0.009
+\end{bmatrix} = \begin{bmatrix} 
+0.021 & 0 & 0 \\
+0 & 0.021 & 0 \\
+0 & 0 & 0.021
+\end{bmatrix}$$
+
+So:
+- Measurement noise + prediction uncertainty
+- Higher values → less confidence in correction
+
+## Kalman Gain:
+$$K_1 = P_1^-H^TS_1^{-1}$$
+
+Since all matrices are diagonal, this is just element-wise division:
+
+$$K_1 = \begin{bmatrix} 
+0.012/0.021 = 0.571 \\
+0.012/0.021 = 0.571 \\
+0.012/0.021 = 0.571
+\end{bmatrix}$$
+
+The off-diagonal velocity coupling also gives small gain values for velocity correction:
+
+$$K_{vx} = 0.001/0.021 = 0.048$$
+
+This shows how position measurements influence velocity estimates — just a little.
+
+## State Update:
+$$\hat{x}_1 = \hat{x}_1^- + K_1y_1$$
+
+Each state element gets corrected:
+
+$$x = 1.05 + 0.571 \cdot (-0.03) = 1.033$$
+
+$$y = 1.97 + 0.571 \cdot (0.04) = 1.993$$
+
+$$z = 0.51 + 0.571 \cdot (-0.02) = 0.499$$
+
+Velocity components:
+
+$$v_x = 0.5 + 0.048 \cdot (-0.03) = 0.499$$
+
+$$v_y = -0.3 + 0.048 \cdot (0.04) = -0.298$$
+
+$$v_z = 0.1 + 0.048 \cdot (-0.02) = 0.099$$
+
+Intuition:
+- You pull the prediction closer to the measurement — but only partially.
+- You also make a tiny correction to velocity based on the position mismatch.
+
+## Covariance Update:
+$$P_1 = (I - KH)P_1^-$$
+
+- Position variances shrink from 0.012 → 0.005
+  → Because we observed position directly
+
+- Velocity variances remain around 0.100
+  → Because we only inferred velocity indirectly
+
+- Off-diagonal entries are small but nonzero — this represents the fact that position and velocity are now slightly correlated.
+
+# ✅ Summary
+
+| Step | Math | Intuition |
+|------|------|-----------|
+| $\hat{x}_1^-$ | $F\hat{x}_0$ | Predict position using velocity |
+| $P_1^-$ | $FP_0F^T + Q$ | Add uncertainty from velocity to position |
+| $\hat{z}_1$ | $H\hat{x}_1^-$ | What sensor should see |
+| $y_1$ | $z_1 - \hat{z}_1$ | How off were we? |
+| $S_1$ | $HP_1^-H^T + R$ | Total uncertainty in that error |
+| $K_1$ | $P_1^-H^TS_1^{-1}$ | How much should we correct? |
+| $\hat{x}_1$ | $\hat{x}_1^- + K_1y_1$ | Apply correction |
+| $P_1$ | $(I - KH)P_1^-$ | Reduce uncertainty due to measurement |
+
 
 ### 7.6 Cross-References to Related Sections
 
@@ -1709,210 +1803,159 @@ Notice how the position uncertainty has decreased after incorporating the measur
 
 ## 8. Extended Kalman Filter
 
-> **Status**: ⚠️ *Partially Implemented* - *since v1.8.0*
+# 🔁 Why Do We Need the Extended Kalman Filter?
 
-While the standard Kalman filter works well for linear systems, real-world robotics often involves nonlinear dynamics and measurements. The Extended Kalman Filter (EKF) addresses this limitation by locally linearizing the nonlinear functions around the current state estimate.
+## 🔹 Standard Kalman Filter:
+Works only when:
 
-### 8.1 Handling Nonlinear Systems: When Reality Gets Complicated
+State evolution is linear:
+$$x_k = F x_{k-1} + w_k$$
 
-In our basketball tracking system, several nonlinearities can arise:
+Measurements are linear:
+$$z_k = H x_k + v_k$$
 
-#### 8.1.1 Sources of Nonlinearity
+But real-world systems like robotics, tracking, or finance often involve nonlinear equations:
 
-1. **Nonlinear Motion Models**: 
-   - Ballistic trajectories (gravity affects motion)
-   - Bouncing balls (sudden velocity changes)
-   - Air resistance (proportional to velocity squared)
+* Motion isn't always straight-line (e.g., ballistic motion with gravity)
+* Sensors give nonlinear measurements (e.g., camera gives angle, not position)
 
-2. **Measurement Nonlinearities**: 
-   - Camera perspective transformations (3D to 2D projection)
-   - Distance measurements (using trigonometry)
-   - Angle-based measurements (like radar)
+## 🧠 What the EKF Does
+EKF lets us use the Kalman filter math even if our functions are nonlinear by locally approximating them with linear functions using Taylor expansion.
 
-3. **Coordinate Transformations**: 
-   - Converting between robot-relative and global coordinates
-   - Polar to Cartesian conversions
+## 🔍 The Math of Linear vs Nonlinear
 
-The standard Kalman filter makes a fundamental assumption that both the state transition and measurement processes are linear:
+| System | State Equation | Measurement Equation |
+|--------|---------------|---------------------|
+| Linear | $$x_k = F x_{k-1} + w_k$$ | $$z_k = H x_k + v_k$$ |
+| Nonlinear | $$x_k = f(x_{k-1}) + w_k$$ | $$z_k = h(x_k) + v_k$$ |
 
-```
-┌── Linear vs. Nonlinear Systems ──┐
-│                                  │
-│  Linear System:                  │
-│  x₍ₖ₎ = Fx₍ₖ₋₁₎ + w₍ₖ₎          │
-│  z₍ₖ₎ = Hx₍ₖ₎ + v₍ₖ₎            │
-│                                  │
-│  Nonlinear System:               │
-│  x₍ₖ₎ = f(x₍ₖ₋₁₎) + w₍ₖ₎        │
-│  z₍ₖ₎ = h(x₍ₖ₎) + v₍ₖ₎          │
-│                                  │
-│  Where:                          │
-│  - f() is a nonlinear function   │
-│    for state transition          │
-│  - h() is a nonlinear function   │
-│    for measurements              │
-│                                  │
-└──────────────────────────────────┘
-```
+$f(x)$: nonlinear state transition (e.g., physics with gravity)
 
-*Figure 8.1: Comparison of linear and nonlinear system equations. The key difference is that nonlinear systems use functions f() and h() instead of matrices F and H. This allows for more complex relationships between states and measurements.*
+$h(x)$: nonlinear measurement model (e.g., sensor gives angles or distances)
 
-**Real-World Example**: Consider a basketball following a ballistic trajectory. With a standard linear Kalman filter using a constant velocity model, we'd predict the ball to continue in a straight line. But in reality, gravity causes the ball to follow a parabolic path. This mismatch between our linear model and the nonlinear reality causes estimation errors.
+## ⚙️ Linearization: Making Nonlinear Look Linear (Locally)
+EKF says:
 
-### 8.2 Linearization Process: Making Curves Look Straight (Locally)
+"Let's approximate these nonlinear functions $f(x)$ and $h(x)$ around the current estimate using a first-order Taylor expansion."
 
-The EKF's core insight is that even nonlinear functions look approximately linear if you zoom in close enough around a specific point. This is the principle of linearization.
+### Taylor Expansion in 1D:
+For a scalar function $f(x)$, near $x_0$:
 
-```mermaid
-graph TD
-    subgraph LinearizationVisualization["Linearization of a Nonlinear Function"]
-        direction LR
-        
-        subgraph FullView["Full View"]
-            NL["Nonlinear<br>Function<br>(Curved)"] --- LZ["Linearization<br>Point (x=1)"]
-            LI["Linear<br>Approximation<br>(Tangent Line)"]
-            
-            style NL fill:#5D93E1,stroke:#333,stroke-width:2px
-            style LZ fill:#FF5733,stroke:#333,stroke-width:2px
-            style LI fill:#66DE93,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5
-        end
-        
-        subgraph LocalView["Zoomed View at x=1"]
-            GM["Good Match<br>Near Point"] --- BD["Diverges<br>Further Away"]
-            
-            style GM fill:#66DE93,stroke:#333,stroke-width:2px
-            style BD fill:#FFBFA3,stroke:#333,stroke-width:2px
-        end
+$$f(x) \approx f(x_0) + f'(x_0)(x - x_0)$$
 
-        Description["The linearization approximates the nonlinear function<br>with a tangent line at the chosen point.<br>The approximation is accurate near the point<br>but becomes less accurate further away."]
-        
-        style Description fill:white,stroke:#333,stroke-width:1px
-    end
-```
+That's a line (the tangent) that is close to the curve near $x_0$.
 
-*Figure 8.2: Linearization of a nonlinear function (blue curve) around the point x=1. The linear approximation (green line) is tangent to the curve at the linearization point (red dot). The approximation is valid near the linearization point but diverges as we move away from it. The EKF uses this local linearization to apply Kalman filter techniques to nonlinear systems.*
+## 📐 Generalization: Multivariable Case
+Let's say the state $x \in \mathbb{R}^n$ and the function $f: \mathbb{R}^n \rightarrow \mathbb{R}^n$
 
-The linearization process mathematically involves:
+To linearize:
 
-1. **Selecting a Point**: Choose an operating point (like the current state estimate x̂) around which to linearize.
-
-2. **Calculating the Derivative**: Find the slope of the nonlinear function at that point (the derivative).
-
-3. **Creating a Linear Approximation**: Form a linear function that matches both the value and slope of the nonlinear function at the chosen point.
-
-For a function f(x), the linearized approximation at point x₀ is:
-
-```
-f(x) ≈ f(x₀) + f'(x₀)(x - x₀)
-```
+$$f(x) \approx f(x_0) + F_k(x - x_0)$$
 
 Where:
-- f(x₀) is the function value at the linearization point
-- f'(x₀) is the derivative at that point
-- (x - x₀) is the distance from the linearization point
 
-This is exactly like finding the tangent line to a curve, which is what a first-order Taylor series expansion gives us.
+$F_k$: Jacobian matrix of partial derivatives of $f$ at point $x_0$
 
-For multidimensional state vectors, this process uses the Jacobian matrix instead of a simple derivative. The Jacobian contains all the partial derivatives that describe how each output variable changes with respect to each input variable, effectively generalizing the concept of a slope to multiple dimensions.
+## 📘 What is the Jacobian Matrix?
+If:
 
-The EKF's power comes from repeatedly re-linearizing around the most recent state estimate, so the linear approximation is kept as accurate as possible at each step.
+$$f(x) = \begin{bmatrix} 
+f_1(x_1, x_2, ..., x_n) \\
+f_2(x_1, x_2, ..., x_n) \\
+\vdots \\
+f_n(x_1, x_2, ..., x_n)
+\end{bmatrix}$$
 
-#### 8.2.1 Jacobian Matrices: The Mathematics of Linearization
+Then the Jacobian is:
 
-The linearization process involves computing Jacobian matrices - matrices of partial derivatives that describe how small changes in the input affect the output:
+$$F_k = \begin{bmatrix} 
+\frac{\partial f_1}{\partial x_1} & \cdots & \frac{\partial f_1}{\partial x_n} \\
+\frac{\partial f_2}{\partial x_1} & \cdots & \frac{\partial f_2}{\partial x_n} \\
+\vdots & \ddots & \vdots \\
+\frac{\partial f_n}{\partial x_1} & \cdots & \frac{\partial f_n}{\partial x_n}
+\end{bmatrix}$$
 
-```
-     ∂f₁/∂x₁  ∂f₁/∂x₂  ...  ∂f₁/∂xₙ
-     ∂f₂/∂x₁  ∂f₂/∂x₂  ...  ∂f₂/∂xₙ
-Fₖ = ...      ...      ...  ...
-     ∂fₙ/∂x₁  ∂fₙ/∂x₂  ...  ∂fₙ/∂xₙ
-```
+### 🔹 Intuition:
+Each element $\frac{\partial f_i}{\partial x_j}$ tells you:
+
+"How much does the $i$-th output of the function change if I make a tiny change in the $j$-th input?"
+
+So this is like a multi-dimensional slope that generalizes the idea of a derivative.
+
+## 🏀 Example: Ballistic Motion in 2D
+Let $x = \begin{bmatrix} x \\ y \\ v_x \\ v_y \end{bmatrix}$
+
+The motion function:
+
+$$f(x) = \begin{bmatrix} 
+x + v_x \Delta t \\
+y + v_y \Delta t - \frac{1}{2}g\Delta t^2 \\
+v_x \\
+v_y - g\Delta t
+\end{bmatrix}$$
+
+This is clearly nonlinear in $y$, due to gravity.
+
+Jacobian $F_k = \frac{\partial f}{\partial x}$
+
+Take partial derivatives with respect to each state variable:
+
+$\frac{\partial f_1}{\partial x} = 1$, $\frac{\partial f_1}{\partial v_x} = \Delta t$
+
+$\frac{\partial f_2}{\partial y} = 1$, $\frac{\partial f_2}{\partial v_y} = \Delta t$
+
+So the Jacobian is:
+
+$$F_k = \begin{bmatrix} 
+1 & 0 & \Delta t & 0 \\
+0 & 1 & 0 & \Delta t \\
+0 & 0 & 1 & 0 \\
+0 & 0 & 0 & 1
+\end{bmatrix}$$
+
+This is identical in form to the constant velocity model used in standard KF — but in EKF, it's recomputed at every step because the function $f(x)$ might be more complex in reality.
+
+## 🔎 Measurement Model $h(x)$
+If your sensor gives range and angle from the robot to a ball, then:
+
+$$h(x) = \begin{bmatrix} 
+\sqrt{x^2 + y^2} \\
+\arctan(\frac{y}{x})
+\end{bmatrix}$$
+
+Also nonlinear. EKF handles this by linearizing $h(x)$ around the current $x$, giving:
+
+$$H_k = \frac{\partial h}{\partial x}$$
+
+Then apply Kalman update as if it's linear — using $H_k$ in place of $H$.
+
+## 🔁 EKF Loop in Math
+At each step:
+
+### 🔹 Predict Step:
+$$\hat{x}_k^- = f(\hat{x}_{k-1})$$
+$$P_k^- = F_k P_{k-1} F_k^T + Q$$
 
 Where:
-- Fₖ is the Jacobian of the state transition function at time k
-- ∂fᵢ/∂xⱼ is the partial derivative of the ith component of f with respect to the jth state variable
+* $f$: nonlinear motion function
+* $F_k = \frac{\partial f}{\partial x}$ (Jacobian)
 
-Similarly, for the measurement function:
+### 🔹 Update Step:
+$$y_k = z_k - h(\hat{x}_k^-) \text{ (innovation)}$$
+$$S_k = H_k P_k^- H_k^T + R \text{ (innovation covariance)}$$
+$$K_k = P_k^- H_k^T S_k^{-1} \text{ (Kalman gain)}$$
+$$\hat{x}_k = \hat{x}_k^- + K_k y_k \text{ (updated state)}$$
+$$P_k = (I - K_k H_k) P_k^- \text{ (updated covariance)}$$
 
-```
-     ∂h₁/∂x₁  ∂h₁/∂x₂  ...  ∂h₁/∂xₙ
-     ∂h₂/∂x₁  ∂h₂/∂x₂  ...  ∂h₂/∂xₙ
-Hₖ = ...      ...      ...  ...
-     ∂hₘ/∂x₁  ∂hₘ/∂x₂  ...  ∂hₘ/∂xₙ
-```
+Where:
+* $h(x)$: nonlinear measurement function
+* $H_k = \frac{\partial h}{\partial x}$: Jacobian of $h$
 
-**Simplified Example**: For a basketball following a ballistic trajectory in 2D (ignoring air resistance), the nonlinear state transition function would be:
+## ✅ Summary: EKF in One Sentence
+The EKF applies the standard Kalman filter equations, but replaces the constant matrices $F$ and $H$ with Jacobians computed by linearizing nonlinear functions $f(x)$ and $h(x)$ around the current estimate.
 
-```
-f(x) = [
-  x₁ + x₃Δt,                   # New x-position = old x-position + x-velocity*time
-  x₂ + x₄Δt - 0.5*g*(Δt)²,     # New y-position = old y-position + y-velocity*time - 0.5*gravity*time²
-  x₃,                          # New x-velocity = old x-velocity
-  x₄ - g*Δt                    # New y-velocity = old y-velocity - gravity*time
-]
-```
+This allows you to handle real-world nonlinear systems while still benefiting from the elegant Kalman filtering framework.
 
-Where g is the gravitational acceleration (9.8 m/s²).
-
-The Jacobian (F) of this function with respect to the state x = [x₁, x₂, x₃, x₄]ᵀ would be:
-
-```
-     [1  0  Δt  0 ]
-F =  [0  1  0   Δt]
-     [0  0  1   0 ]
-     [0  0  0   1 ]
-```
-
-Here's a Python implementation of computing the Jacobian for this ballistic motion model:
-
-```python
-def ballistic_motion_model(x, dt, g=9.8):
-    """
-    Nonlinear state transition function for ballistic motion.
-    
-    Parameters:
-        x: State vector [px, py, vx, vy]
-        dt: Time step in seconds
-        g: Gravitational acceleration (default 9.8 m/s²)
-        
-    Returns:
-        New state vector after applying ballistic motion
-    """
-    px, py, vx, vy = x
-    
-    # Apply ballistic motion equations
-    px_new = px + vx * dt
-    py_new = py + vy * dt - 0.5 * g * dt**2
-    vx_new = vx
-    vy_new = vy - g * dt
-    
-    return np.array([px_new, py_new, vx_new, vy_new])
-
-def compute_jacobian(x, dt, g=9.8):
-    """
-    Compute the Jacobian matrix of the ballistic motion model.
-    
-    Parameters:
-        x: State vector at linearization point
-        dt: Time step in seconds
-        g: Gravitational acceleration
-        
-    Returns:
-        4x4 Jacobian matrix (F)
-    """
-    # For this simple model, the Jacobian is constant
-    # But we compute it explicitly to show the process
-    F = np.array([
-        [1, 0, dt, 0],
-        [0, 1, 0, dt],
-        [0, 0, 1, 0],
-        [0, 0, 0, 1]
-    ])
-    
-    return F
-```
-
-*Code Listing 8.1: Python implementation of a ballistic motion model and its Jacobian computation. The Jacobian matrix is used in the EKF to linearize the nonlinear motion equations around the current state estimate.*
 
 ### 8.3 EKF Algorithm Steps: Putting It All Together
 
