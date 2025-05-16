@@ -91,8 +91,7 @@
 
 ### Appendices
 - [Glossary](#glossary)
-- [Complete Implementation Reference](#complete-reference)
-- [Practical Debugging Examples](#debugging-examples)
+
 
 <a name="introduction"></a>
 ## 1. Introduction
