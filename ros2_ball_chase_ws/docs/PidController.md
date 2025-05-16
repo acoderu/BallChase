@@ -3798,7 +3798,7 @@ The principles and techniques described in this document apply not only to baske
 <a name="debugging-walkthrough"></a>
 ## Practical Debugging and Tuning Guide
 
-**PID Tuning Cheat Sheet**
+### PID Tuning Cheat Sheet
 
 <details>
 <summary>Click to expand the PID tuning workflow</summary>
