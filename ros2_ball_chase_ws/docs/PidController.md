@@ -490,8 +490,6 @@ Where:
 - e(t) is the error at time t (setpoint - measured value, in meters for position or degrees for angular)
 - Kp, Ki, and Kd are the coefficients for the proportional, integral, and derivative terms (with units: Kp [1/s], Ki [1/s²], Kd [s])
 
-[1] Karl J. Åström and Tore Hägglund, "PID Controllers: Theory, Design, and Tuning" (1995)
-
 In discrete-time implementation (as used in our code), this becomes:
 
 ```python
@@ -525,7 +523,6 @@ The effectiveness of a PID controller depends heavily on tuning the Kp, Ki, and 
 3. Measure the oscillation period (Tu)
 4. Set the gains according to this table:
 
-[2] J. G. Ziegler and N. B. Nichols, "Optimum settings for automatic controllers," Transactions of the ASME, vol. 64, pp. 759-768, 1942.
 
 | Controller Type | Kp       | Ki         | Kd         |
 |-----------------|----------|------------|------------|
