@@ -251,11 +251,6 @@ The diagnostic system consists of two primary nodes:
 
 These nodes work together to provide comprehensive monitoring and feedback about the system's health.
 
-![Diagnostic System Architecture](https://example.com/diagnostics_architecture.png)
-
-<div style="text-align: center; margin-top: 10px; margin-bottom: 20px;">
-<b>Figure 2:</b> Detailed architecture of the diagnostic system showing data flow between components.
-</div>
 
 <details>
 <summary><strong>Architecture Components in Detail</strong></summary>
