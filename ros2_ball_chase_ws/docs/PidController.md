@@ -159,1421 +159,6 @@ ros2 run rviz2 rviz2 -d $(ros2 pkg prefix ball_chase)/share/ball_chase/config/pi
 - [Further Reading](#further-reading)
 - [Complete Implementation Reference](#complete-reference)
 
-<a name="debugging-walkthrough"></a>
-## Practical Debugging and Tuning Guide
-
-Understanding how to systematically tune, troubleshoot, and debug PID controllers is an essential skill for robotics engineers. This comprehensive guide walks through structured PID tuning methodologies, common troubleshooting techniques, and a detailed real-world case study from our basketball tracking robot.
-
-### Systematic PID Tuning Methodologies
-
-Before diving into troubleshooting, it's important to understand proper tuning methodologies. Here we present three proven approaches to tuning PID controllers for robotics applications.
-
-#### Method 1: Manual Tuning with The Modified Ziegler-Nichols Approach
-
-This adaptation of the classic Ziegler-Nichols method is well-suited for our robot's control systems:
-
-1. **Initial Setup**:
-   - Set Ki and Kd to zero
-   - Start with a very low Kp (0.1-0.2)
-
-2. **Finding Critical Gain**:
-   - Gradually increase Kp until the system starts to oscillate (we call this Ku)
-   - Record the oscillation period (Tu)
-   - Set Kp = 0.45 × Ku (more conservative than classical Z-N to avoid overshoot)
-
-3. **Adding Derivative Action**:
-   - Set Kd = Kp × Tu/8 (starts with a conservative estimate)
-   - Test response and adjust as needed for damping
-
-4. **Adding Integral Action**:
-   - Start with a very small Ki (0.05 × Kp / Tu)
-   - Gradually increase until steady-state error is eliminated
-   - Watch for integral windup signs and implement anti-windup if needed
-
-5. **Fine Tuning**:
-   - Make small (5-10%) adjustments to optimize response
-   - Prioritize reducing oscillation over fast response for the robot's safety
-   - Verify performance across different operating conditions
-
-**Implementation in Our Codebase**: We've created a tuning script at `src/ball_chase/ball_chase/pid/pid_tuner.py` that can automatically step through this process.
-
-```python
-# Excerpt from src/ball_chase/ball_chase/pid/pid_tuner.py
-def find_critical_gain(controller, initial_kp=0.1, step=0.05, max_kp=5.0):
-    """Find the critical gain where the system just starts to oscillate."""
-    controller.set_ki(0.0)
-    controller.set_kd(0.0)
-    
-    for kp in np.arange(initial_kp, max_kp, step):
-        controller.set_kp(kp)
-        response = test_step_response(controller)
-        
-        if detect_oscillation(response):
-            return kp, measure_oscillation_period(response)
-    
-    return None, None  # No oscillation found within the range
-```
-
-#### Method 2: Time-Response Approach
-
-For situations where the Ziegler-Nichols method is too aggressive or causes too much oscillation:
-
-1. **Start with Proportional Control**:
-   - Set Kp to a value that gives reasonable rise time without excessive overshoot
-   - Typical starting point: Kp = 0.5-0.7
-
-2. **Add Derivative Control for Damping**:
-   - Calculate: Kd = Kp × (desired damping ratio) / (natural frequency)
-   - For our robot: Kd ≈ Kp × 0.4 is a good starting point
-   - Increase Kd gradually until overshoot is reduced to acceptable levels
-
-3. **Add Integral Control Last**:
-   - Start with Ki = Kp / 10
-   - Increase until steady-state error is eliminated
-   - Keep Ki small enough to avoid integral windup and oscillation
-
-4. **Measure Performance Metrics**:
-   - Rise time (time to reach 90% of setpoint)
-   - Settling time (time to stay within 5% of final value)
-   - Overshoot percentage
-   - Steady-state error
-
-5. **Iteratively Refine**:
-   - Adjust each gain to optimize the metrics that matter most for your application
-   - For basketball tracking: stability and minimal oscillation outweigh fast response
-
-#### Method 3: Frequency Domain Tuning
-
-For advanced users who understand control theory and have access to the robot's frequency response:
-
-1. **System Identification**:
-   - Use sweep frequency inputs to determine the system's frequency response
-   - Plot Bode diagrams to visualize magnitude and phase characteristics
-   - Identify the system's bandwidth and phase margin
-
-2. **Loop Shaping**:
-   - Design controller gains to achieve desired bandwidth and stability margins
-   - Typical goal: Phase margin > 45° for stability
-   - Adjust crossover frequency to achieve desired response time
-
-3. **Controller Synthesis**:
-   - Calculate PID parameters to meet design specifications
-   - Implement and test on the real system
-   - Iterate and refine as needed
-
-#### Gain Scheduling for Different Operating Conditions
-
-Our basketball tracking robot operates in various conditions, requiring different control parameters.
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "14px", "primaryColor": "#3f51b5", "primaryTextColor": "#ffffff", "primaryBorderColor": "#3f51b5", "secondaryColor": "#009688", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#009688", "tertiaryColor": "#f8f9fa"}}}%%
-graph TD
-    subgraph GainScheduling["Gain Scheduling System"]
-        direction TB
-        Distance["Distance to Target"] --> |Far| Far["Aggressive Gains<br/>Kp=0.8, Ki=0.15, Kd=0.3"]
-        Distance --> |Medium| Medium["Balanced Gains<br/>Kp=0.6, Ki=0.1, Kd=0.4"]
-        Distance --> |Close| Close["Gentle Gains<br/>Kp=0.4, Ki=0.05, Kd=0.5"]
-        
-        VelocityCheck["Target Velocity"] --> |Fast Moving| FastGains["Increased Prediction<br/>Reduced Ki"]
-        VelocityCheck --> |Stationary| StaticGains["Standard Gains<br/>Increased Ki"]
-        
-        Surface["Field Surface"] --> |Smooth| SmoothGains["Standard Damping"]
-        Surface --> |Rough| RoughGains["Increased Damping<br/>Higher Kd"]
-    end
-    
-    classDef distanceNode fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,rx:5,ry:5
-    classDef velocityNode fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,rx:5,ry:5
-    classDef surfaceNode fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,rx:5,ry:5
-    classDef gainNode fill:#fffde7,stroke:#f57f17,stroke-width:1px,rx:3,ry:3
-    
-    class Distance,Medium,Far,Close distanceNode
-    class VelocityCheck,FastGains,StaticGains velocityNode
-    class Surface,SmoothGains,RoughGains surfaceNode
-    class Far,Medium,Close,FastGains,StaticGains,SmoothGains,RoughGains gainNode
-```
-
-Our implementation dynamically adjusts gains based on:
-- Distance to target
-- Target velocity 
-- Surface conditions
-- Control error magnitude
-
-```python
-# Excerpt from src/ball_chase/ball_chase/pid/pid_computation.py - ImprovedPID class
-def update_adaptive_gains(self, distance, target_velocity, error_magnitude):
-    """Adjust gains based on operating conditions."""
-    # Base gains from configuration
-    base_kp = self.config.base_kp
-    base_ki = self.config.base_ki
-    base_kd = self.config.base_kd
-    
-    # Distance-based adjustment
-    if distance > self.config.far_threshold:
-        kp_factor = 1.2  # More aggressive when far
-        ki_factor = 1.5
-        kd_factor = 0.8  # Less damping for faster response
-    elif distance < self.config.close_threshold:
-        kp_factor = 0.8  # Gentler when close
-        ki_factor = 0.5
-        kd_factor = 1.5  # More damping for stability when close
-    else:
-        kp_factor = 1.0  # Balanced for medium distance
-        ki_factor = 1.0
-        kd_factor = 1.0
-    
-    # Additional adjustments for velocity and error magnitude
-    # ... (code continues)
-    
-    # Apply the adjusted gains
-    self.kp = base_kp * kp_factor
-    self.ki = base_ki * ki_factor
-    self.kd = base_kd * kd_factor
-```
-
-### Case Study: Oscillation in Angular Control
-
-This walkthrough follows a real debugging process for resolving an oscillation issue in our basketball tracking robot's rotation control. The robot was continuously "hunting" for the correct angle, oscillating back and forth without settling.
-
-#### Step 1: Observe and Quantify the Problem
-
-The first step in any debugging process is to clearly identify and quantify the issue.
-
-```bash
-# Command used to record error and output values
-ros2 topic echo --csv /pid_controller/error/angular_z > angular_error.csv &
-ros2 topic echo --csv /pid_controller/output/angular_z > angular_output.csv &
-```
-
-```
-                   Angular Control Oscillation Problem
-                   
-Angular Error (degrees)
-    +25 |                                            
-        |                        *           
-    +20 |                                   *        
-        |                    *               
-    +15 |               *                    
-        |                                     
-    +10 |                               *     
-        |        *               *            
-     +5 |             *                       
-        |                                      
-      0 |*                       *       *    * Time (s)
-        |----+----+----+----+----+----+----+----------->
-        |    2    4    6    8    10   12   14   16   18   20
-     -5 |     *            *    *                  
-        |                                 *         
-    -10 |               *                           
-        |                                            
-    -15 |                                            
-        |                                            
-    -20 |                             *              
-        |                                            
-    -25 |                                            
-```
-
-**Figure: Angular Control Oscillation Problem.** This diagram shows how the angular error oscillates around zero (the target) with increasing amplitude over time. Initially, the oscillations are small, but as the controller responds, the corrections become increasingly extreme, leading to worsening performance. This is a classic example of an unstable control system that requires parameter adjustment to achieve stability.
-
-<em>Initial observation: Angular error oscillating around zero with increasing amplitude over time</em>
-
-**Observations:**
-1. Error oscillates around zero, never settling
-2. Oscillation amplitude increases over time
-3. Period of oscillation is approximately 1.2 seconds
-4. Controller output shows delayed response to error changes
-
-#### Step 2: Check Current Parameters
-
-Next, we examined the current PID parameters:
-
-```bash
-# Command used to retrieve current parameters
-ros2 param get /pid_controller kp_angular_z
-ros2 param get /pid_controller ki_angular_z
-ros2 param get /pid_controller kd_angular_z
-```
-
-**Results:**
-- Kp = 0.8
-- Ki = 0.2
-- Kd = 0.1
-
-These values suggested a potential issue: the proportional gain was relatively high while the derivative gain was low. This combination often leads to oscillations without sufficient damping.
-
-#### Step 3: Analyze System Behavior
-
-To understand the root cause, we looked deeper into the system behavior:
-
-```python
-# Code snippet used to analyze oscillation characteristics
-import pandas as pd
-import numpy as np
-from scipy import signal
-
-# Load data from CSV files
-error_df = pd.read_csv('angular_error.csv')
-output_df = pd.read_csv('angular_output.csv')
-
-# Calculate oscillation frequency and phase relationship
-error_signal = error_df['data'].values
-output_signal = output_df['data'].values
-
-# Find peaks to determine oscillation period
-peaks, _ = signal.find_peaks(error_signal)
-oscillation_period = np.mean(np.diff(error_df['time'].values[peaks]))
-print(f"Oscillation period: {oscillation_period:.2f} seconds")
-
-# Calculate phase difference between error and controller output
-corr = signal.correlate(error_signal, output_signal, mode='full')
-phase_diff = np.argmax(corr) - len(error_signal) + 1
-phase_diff_time = phase_diff * (error_df['time'].values[1] - error_df['time'].values[0])
-print(f"Phase difference: {phase_diff_time:.3f} seconds")
-```
-
-**Analysis Results:**
-- Confirmed oscillation period: 1.18 seconds
-- Phase difference between error and output: 0.215 seconds
-- Additional finding: The time delay in the system (0.215s) was causing the controller to respond too late to error changes
-- The integral term was accumulating during oscillations, making them worse over time
-
-#### Step 4: Formulate a Hypothesis
-
-Based on our analysis, we developed two hypotheses:
-
-1. **Insufficient Damping**: The derivative gain was too low to counteract oscillations
-2. **Integral Windup**: The integral term was accumulating during oscillations, exacerbating the problem
-
-#### Step 5: Test Solutions Systematically
-
-We tested potential solutions one at a time, measuring the effect of each change:
-
-```bash
-# Solution 1: Increase derivative gain for more damping
-ros2 param set /pid_controller kd_angular_z 0.3
-
-# Solution 2: Reduce proportional gain to decrease sensitivity
-ros2 param set /pid_controller kp_angular_z 0.6
-
-# Solution 3: Reduce integral gain to minimize windup
-ros2 param set /pid_controller ki_angular_z 0.1
-
-# Solution 4: Enable zero-crossing detection in configuration
-ros2 param set /pid_controller use_zero_crossing_handling true
-
-# Solution 5: Add directional deadband to prevent micro-corrections
-ros2 param set /pid_controller angular_deadband 2.0
-```
-
-After each change, we recorded new data and analyzed the results.
-
-#### Step 6: Analyze Results and Implement Solution
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff", "primaryBorderColor": "#f44336", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#4caf50", "tertiaryTextColor": "#ffffff", "tertiaryBorderColor": "#4caf50", "lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000"}}}%%
-graph TD
-    Title["Effect of Individual Solutions on Angular Error"]
-    
-    subgraph ErrorRanges["Angular Error Ranges (Target = 0°)"]
-        direction LR
-        Plus10["+10°"] --- Plus5["+5°"] --- Target["0° (Target)"] --- Minus5["-5°"] --- Minus10["-10°"]
-    end
-    
-    subgraph Solutions["Solutions and Their Oscillation Patterns"]
-        Original["Original Problem<br>Large oscillations between -8° and +7°<br>Never settles at target angle"]
-        Increased["Increased Kd Solution<br>Moderate oscillations between -7° and +5°<br>Reduced amplitude but still unstable"]
-        Combined["Combined Solution<br>Minimal oscillations between -3° and +2°<br>Quickly settles near target angle"]
-    end
-    
-    %% Styling
-    classDef titleStyle fill:#e0e0e0,stroke:#424242,stroke-width:2px,color:#212121,font-weight:bold,font-size:18px
-    classDef rangeStyle fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#212121
-    classDef targetStyle fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20,font-weight:bold
-    classDef originalStyle fill:#f44336,stroke:#c62828,stroke-width:2px,color:#ffffff
-    classDef increasedStyle fill:#ff9800,stroke:#ef6c00,stroke-width:2px,color:#ffffff
-    classDef combinedStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff
-    
-    %% Apply styles
-    class Title titleStyle
-    class Plus10,Plus5,Minus5,Minus10 rangeStyle
-    class Target targetStyle
-    class Original originalStyle
-    class Increased increasedStyle
-    class Combined combinedStyle
-```
-
-**Visual Comparison of PID Angular Control Solutions**
-
-The diagram above illustrates how three different control approaches affect the angular error oscillation when the robot attempts to maintain a specific angle:
-
-| Solution | Error Range | Key Characteristics | Result |
-|----------|-------------|---------------------|--------|
-| **Original Problem** | -8° to +7° | High proportional gain, insufficient derivative action | System continually oscillates, never settling at target |
-| **Increased Kd** | -7° to +5° | Higher derivative gain for better damping | Reduced oscillation amplitude but still unstable |
-| **Combined Solution** | -3° to +2° | Balanced Kd increase, reduced Kp & Ki, plus other enhancements | Minimal oscillation with quick settling at target angle |
-
-**Time-based Error Comparison:**
-- At 4s: Original: -8°, Increased Kd: -7°, Combined: -3°
-- At 10s: Original: +7°, Increased Kd: +5°, Combined: +2°
-- At 20s: Original: still oscillating at +7°, Increased Kd: +5°, Combined: nearly stable at +1°
-
-The combined solution demonstrates the effectiveness of a comprehensive approach to PID tuning rather than adjusting individual parameters in isolation. By implementing multiple enhancements together (increased damping, reduced gains, zero-crossing detection, and deadband), the system achieves stable control with minimal oscillation around the target angle.
-
-**Solution Results**:
-
-1. **Solution 1 (Increased Kd)**: Reduced oscillation amplitude but oscillations still present
-2. **Solution 2 (Reduced Kp)**: Slower response with decreased amplitude, still some oscillation
-3. **Combined Solution**: All adjustments together (increased Kd, reduced Kp and Ki, added deadband) eliminated oscillations completely
-
-The most effective approach was a combination of all adjustments:
-1. Increased damping through higher derivative gain
-2. Reduced proportional and integral gains 
-3. Enabled zero-crossing detection
-4. Added a small angular deadband
-
-#### Step 7: Verify Long-Term Stability
-
-After implementing these changes, we monitored the system over extended periods to ensure long-term stability under various conditions.
-
-```bash
-# Code to log extended performance data
-ros2 run ball_chase extended_performance_logger.py --duration 3600 --output-file angular_performance_log.json
-```
-
-Extended testing confirmed that the oscillation issue was resolved, with the controller maintaining stable angular control even during extended operation.
-
-### Debugging Tools and Techniques
-
-Based on our experience debugging PID controllers, here are the most effective tools and techniques:
-
-#### 1. Data Logging and Visualization
-
-```bash
-# Log data to CSV files
-ros2 topic echo --csv /pid_controller/error > error_log.csv
-ros2 topic echo --csv /pid_controller/output > output_log.csv
-
-# Quick plotting with rqt_plot
-ros2 run rqt_plot rqt_plot /pid_controller/error /pid_controller/output
-
-# Create custom plots with matplotlib (example script)
-./scripts/plot_pid_response.py --error-file error_log.csv --output-file output_log.csv
-```
-
-#### 2. Parameter Inspection and Modification
-
-```bash
-# List all PID parameters
-ros2 param list | grep pid_controller
-
-# Get current parameters
-ros2 param get /pid_controller kp_linear_x
-
-# Set new parameters
-ros2 param set /pid_controller kp_linear_x 0.7
-
-# Save parameters to file
-ros2 param dump /pid_controller > pid_params.yaml
-
-# Load parameters from file
-ros2 param load /pid_controller pid_params.yaml
-```
-
-#### 3. Signal Analysis Tools
-
-```python
-# Python snippet for analyzing oscillation characteristics
-from scipy import signal
-import numpy as np
-
-def analyze_oscillation(data, sample_rate):
-    # Calculate FFT to find dominant frequencies
-    fft = np.fft.fft(data)
-    freqs = np.fft.fftfreq(len(data), 1/sample_rate)
-    
-    # Find peaks in frequency domain
-    dominant_idx = np.argmax(np.abs(fft[1:len(freqs)//2])) + 1
-    dominant_freq = freqs[dominant_idx]
-    
-    # Calculate oscillation period
-    oscillation_period = 1/dominant_freq if dominant_freq != 0 else float('inf')
-    
-    # Find damping ratio (if oscillation is damped)
-    peaks, _ = signal.find_peaks(data)
-    if len(peaks) >= 2:
-        peak_values = data[peaks]
-        damping_ratio = np.log(peak_values[0]/peak_values[-1]) / (2*np.pi*len(peaks))
-    else:
-        damping_ratio = None
-        
-    return {
-        "dominant_frequency": dominant_freq,
-        "oscillation_period": oscillation_period,
-        "damping_ratio": damping_ratio
-    }
-```
-
-#### 4. Common PID Issues and Solutions
-
-| Issue | Symptoms | Common Causes | Solutions |
-|-------|----------|--------------|-----------|
-| Oscillation | System moves back and forth around setpoint | High proportional gain, low derivative gain | Reduce Kp, increase Kd, add deadband |
-| Slow Response | System takes too long to reach target | Low proportional gain | Increase Kp carefully |
-| Steady-state Error | System never quite reaches target | Insufficient integral action | Increase Ki |
-| Overshoot | System goes past target before settling | High Kp, insufficient Kd | Increase Kd, reduce Kp |
-| Integral Windup | Large overshoot after sustained error | Integral term accumulates too much | Implement anti-windup measures, limit I term |
-| Delayed Response | System responds too late to changes | Too much filtering, processing delays | Reduce filtering, implement prediction |
-| Noise Sensitivity | Jerky or erratic movement | High derivative gain with noisy sensors | Filter sensor data, reduce Kd |
-| Limit Cycling | Regular oscillation with consistent amplitude | Deadband issues, nonlinearity | Adjust deadband, check for mechanical issues |
-
-### Systematic Debugging Process
-
-Follow this systematic process when debugging PID controllers:
-
-1. **Observe and Measure**: Collect data about what's happening
-2. **Quantify the Issue**: Determine precise characteristics (frequency, amplitude, etc.)
-3. **Check Parameters**: Verify current PID parameters and limitations
-4. **Analyze System Behavior**: Use tools to understand dynamic behavior
-5. **Formulate Hypotheses**: Develop theories about potential causes
-6. **Test Systematically**: Change one thing at a time, measure results
-7. **Combine Solutions**: If needed, combine multiple adjustments
-8. **Verify Long-Term**: Test under various conditions for extended periods
-
-Remember that most issues can be solved by methodically adjusting parameters and adding appropriate PID enhancements like deadbands, anti-windup protection, and filtering.
-
-### Advanced Troubleshooting Techniques
-
-Beyond basic parameter tuning, these advanced techniques can help diagnose and resolve complex PID issues:
-
-
-Beyond basic parameter tuning, these advanced techniques can help diagnose and resolve complex PID issues:
-
-#### 1. Step Response Analysis
-
-Step response analysis helps understand how a system responds to sudden changes, revealing critical information for PID tuning. Let's break this down into manageable concepts:
-
-### 1. What is a Step Input?
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff", "secondaryColor": "#f8f9fa"}}}%%
-flowchart LR
-    subgraph StepInput["Step Input Explained"]
-        direction TB
-        Before["Before Step<br>(Value = 0)"] --> Step["Sudden Change"] --> After["After Step<br>(Value = 1.0)"]
-    end
-    
-    classDef stepStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Before,Step,After stepStyle
-```
-
-A step input is a sudden change in the target value (setpoint). For example, instantly changing the target angle from 0° to 90°. This helps us see how the system responds to abrupt changes.
-
-### 2. Basic System Response Pattern
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph ResponseGraph["Typical System Response"]
-        direction TB
-        Target["Target Value (1.0)"]
-        ResponseCurve["System Response"]
-        Pattern["The system typically:<br>1. Rises toward target<br>2. Overshoots<br>3. Oscillates<br>4. Eventually settles"]
-    end
-    
-    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef responseStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
-    
-    class Target targetStyle
-    class ResponseCurve,Pattern responseStyle
-```
-
-When given a step input, most control systems follow a characteristic response pattern. The system initially rises toward the target value, often overshoots it, oscillates back and forth with decreasing amplitude, and eventually settles at or near the target value. This pattern reveals key information about the system's performance and helps guide PID tuning.
-
-### 3. Key Measurement: Rise Time
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph RiseTime["Rise Time"]
-        direction TB
-        Definition["The time it takes to rise from<br>10% to 90% of the target value"]
-        Meaning["Indicates how quickly the<br>system responds to changes"]
-        Tuning["Primarily affected by Kp<br>(↑ Kp = ↓ Rise Time)"]
-    end
-    
-    classDef riseTimeStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Definition,Meaning,Tuning riseTimeStyle
-```
-
-Rise time shows how quickly your system responds to changes. A fast rise time means the system reacts quickly to new inputs. In our basketball tracking robot example, this would be how quickly the robot starts moving toward the new ball position.
-
-### 4. Key Measurement: Overshoot
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph Overshoot["Overshoot"]
-        direction TB
-        Definition["How much the response exceeds<br>the target value"]
-        Meaning["Indicates damping characteristics<br>of the system"]
-        Tuning["Primarily affected by Kd<br>(↑ Kd = ↓ Overshoot)"]
-    end
-    
-    classDef overshootStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Definition,Meaning,Tuning overshootStyle
-```
-
-Overshoot occurs when the system goes beyond the target value. For the basketball tracking robot, this would be like the robot rotating past the ball and then having to correct back. High overshoot indicates insufficient damping, which can be improved by increasing the derivative gain (Kd).
-
-### 5. Key Measurement: Settling Time
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph SettlingTime["Settling Time"]
-        direction TB
-        Definition["Time for oscillations to fall within<br>±5% of the final value"]
-        Meaning["Indicates how quickly the system<br>stabilizes after a change"]
-        Tuning["Affected by all PID terms<br>but strongly by Kd"]
-    end
-    
-    classDef settlingStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Definition,Meaning,Tuning settlingStyle
-```
-
-Settling time measures how long it takes for the system to stabilize. For our robot, this would be how long before it stops making adjustments and smoothly tracks the ball. A long settling time means the system continues to oscillate or make corrections for too long.
-
-### 6. Key Measurement: Steady-State Error
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph SteadyStateError["Steady-State Error"]
-        direction TB
-        Definition["Difference between final stabilized<br>value and the target value"]
-        Meaning["Indicates the accuracy of<br>the system's final position"]
-        Tuning["Primarily affected by Ki<br>(↑ Ki = ↓ Steady-State Error)"]
-    end
-    
-    classDef steadyStateStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Definition,Meaning,Tuning steadyStateStyle
-```
-
-Steady-state error is any remaining difference between the target and actual position after the system stabilizes. For the basketball tracking robot, this would be a constant offset between where the robot aims and where the ball actually is. Increasing the integral gain (Ki) helps eliminate this error.
-
-### 7. Using Step Response Analysis for Tuning
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#607d8b", "primaryTextColor": "#ffffff"}}}%%
-flowchart TB
-    subgraph Tuning["Step Response-Based Tuning"]
-        direction LR
-        HighOv["High Overshoot<br>+ Fast Rise Time"] --> RedP["⬇️ Kp or ⬆️ Kd"]
-        SlowRise["Slow Rise Time<br>+ Low Overshoot"] --> IncP["⬆️ Kp"]
-        SteadyErr["Persistent<br>Steady-State Error"] --> IncI["⬆️ Ki"]
-        LongSettle["Long Settling Time"] --> IncD["Adjust Kd"]
-    end
-    
-    classDef tuningStyle fill:#607d8b,stroke:#263238,stroke-width:2px,color:#ffffff,font-weight:bold
-    class HighOv,SlowRise,SteadyErr,LongSettle,RedP,IncP,IncI,IncD tuningStyle
-```
-
-By analyzing step response, you can diagnose specific issues with your PID controller and make targeted adjustments:
-
-- **If you see high overshoot with fast rise time**: Reduce Kp or increase Kd
-- **If you see slow rise time with low overshoot**: Increase Kp
-- **If there's persistent steady-state error**: Increase Ki
-- **If settling time is too long**: Fine-tune Kd
-
-For a basketball tracking robot, optimal step response would show moderate rise time (for responsive tracking), minimal overshoot (to prevent "hunting" behavior), and short settling time (for stable following).
-
-**Analyzing The Step Response:**
-
-From the step response, you can extract valuable information to tune your PID controller:
-
-1. **High Overshoot + Fast Rise Time**: Indicates high Kp, low Kd - reduce Kp or increase Kd
-2. **Slow Rise Time + Low Overshoot**: Indicates low Kp - increase Kp
-3. **Persistent Steady-State Error**: Indicates insufficient Ki - increase Ki
-4. **Long Settling Time**: Indicates poor damping - adjust Kd
-
-For the basketball tracking robot, optimal step response characteristics would show moderate rise time (not too aggressive), minimal overshoot (to prevent oscillation), and short settling time (for responsive tracking).
-
-- **Rise time**: Primarily affected by proportional gain (Kp)
-- **Overshoot**: Affected by derivative gain (Kd) - higher Kd reduces overshoot
-- **Settling time**: Affected by all three terms (P, I, D)
-- **Steady-state error**: Primarily eliminated by integral gain (Ki)
-
-By analyzing these parameters, we can systematically adjust PID gains to achieve the desired control behavior. For the basketball tracking robot, we typically aim for minimal overshoot and fast settling time to ensure smooth tracking.
-
-```python
-# Excerpt from response_analyzer.py
-def analyze_step_response(time_values, response_values, setpoint=1.0):
-    """Analyze step response and extract key metrics."""
-    results = {}
-    
-    # Calculate rise time (10% to 90%)
-    ten_percent = 0.1 * setpoint
-    ninety_percent = 0.9 * setpoint
-    
-    # Find indices where response crosses these thresholds
-    above_10 = np.where(response_values >= ten_percent)[0]
-    above_90 = np.where(response_values >= ninety_percent)[0]
-    
-    if len(above_10) > 0 and len(above_90) > 0:
-        t_10 = time_values[above_10[0]]
-        t_90 = time_values[above_90[0]]
-        results['rise_time'] = t_90 - t_10
-    else:
-        results['rise_time'] = None
-    
-    # Find maximum value for overshoot calculation
-    max_value = np.max(response_values)
-    results['overshoot'] = (max_value - setpoint) / setpoint * 100 if max_value > setpoint else 0
-    
-    # Additional metrics calculation
-    # ... (code continues)
-    
-    return results
-```
-
-## Frequency Response Analysis: Understanding Your System's Behavior
-
-### What Is Frequency Response Analysis?
-
-Frequency response analysis examines how your control system responds to inputs at different frequencies. It reveals important characteristics about system stability and responsiveness that aren't obvious from just looking at step responses.
-
-### Why Is This Important?
-
-This analysis provides several key insights:
-
-- **Identifies Resonance Points**: Shows where your system might amplify inputs, potentially causing oscillations
-- **Reveals Response Limits**: Determines how fast your system can accurately respond to changes
-- **Assesses Stability**: Measures how close your system is to becoming unstable
-- **Guides Controller Tuning**: Provides clear metrics for adjusting PID parameters effectively
-
-### How It Works
-
-1. **Apply Sine Wave Inputs**: Test the system with smooth sinusoidal commands at various frequencies (from slow to fast)
-
-2. **Measure Response Characteristics**: For each frequency, measure:
-   - **Gain**: The ratio of output amplitude to input amplitude
-   - **Phase Shift**: The time delay between input and output (expressed in degrees)
-
-3. **Create Bode Plots**: Graph both gain and phase shift versus frequency to visualize the system's response patterns
-
-4. **Analyze Key Indicators**:
-   - **Resonance**: Frequencies where gain increases (peaks in the gain plot)
-   - **Bandwidth**: The frequency range where the system responds effectively
-   - **Phase Margin**: How much stability buffer the system has (higher is better)
-
-### Technical Implementation
-
-You can write code to:
-
-1. Generating sine waves at different frequencies as test inputs
-2. Recording how the system responds to each input frequency
-3. Using Fourier transforms to calculate precise gain and phase values
-4. Building a complete frequency response profile from these measurements
-
-### Interpreting The Results
-
-From the frequency response data, you can determine:
-
-- Frequencies where gain exceeds 1.0, indicating potential instability
-- The phase margin, which should typically be at least 45° for good stability
-- The system's bandwidth, which sets the limit for tracking speed
-- Any resonant frequencies that might require additional damping
-
-For a basketball tracking robot, this analysis tells you whether your controller can track quick movements and direction changes without oscillating or lagging too far behind. It helps determine the optimal PID settings that balance responsiveness with stability.
-
-#### 3. Disturbance Response Testing
-
-Test how well your controller rejects disturbances:
-
-1. Allow the system to stabilize at setpoint
-2. Apply a known disturbance (e.g., pulse or step)
-3. Measure how quickly and effectively the controller recovers
-4. If recovery is slow or oscillatory, adjust Kp and Kd
-
-#### 4. Time Delay Compensation
-
-If your system has significant delays (common in robotics):
-
-1. **Measure the delay**: Use cross-correlation between commands and responses
-2. **Implement prediction**: Use motion prediction to compensate for delays
-3. **Reduce gains**: Lower all gains proportionally to the delay magnitude
-4. **Consider a Smith Predictor**: For systems with well-characterized delays
-
-```python
-# Simplified delay compensation example
-def compensate_for_delay(error_history, velocity, delay_seconds):
-    """Predict where error will be after the delay period."""
-    # Simple linear prediction based on current velocity
-    predicted_error = error_history[-1] + velocity * delay_seconds
-    return predicted_error
-```
-
-### Real-time PID Monitoring Tool
-
-We've developed a real-time monitoring tool that helps visualize PID behavior during operation. This tool is invaluable for debugging complex issues:
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#0277bd", "primaryTextColor": "#ffffff", "secondaryColor": "#7b1fa2", "secondaryTextColor": "#ffffff", "tertiaryColor": "#d32f2f", "tertiaryTextColor": "#ffffff"}}}%%
-graph TB
-    subgraph MonitoringTool["Real-time PID Monitoring Tool"]
-        direction LR
-        
-        subgraph Visualization["Visualization Panel"]
-            TimeGraph["Time-Domain Graph"]
-            FFTGraph["Frequency Analysis"]
-            Components["PID Component Breakdown"]
-        end
-        
-        subgraph Analysis["Analysis Tools"]
-            Metrics["Performance Metrics<br/>- Rise Time<br/>- Settling Time<br/>- Overshoot"]
-            Anomalies["Anomaly Detection"]
-            Suggestions["Tuning Suggestions"]
-        end
-        
-        subgraph Controls["Control Panel"]
-            Parameters["Parameter Adjustment"]
-            Testing["Step/Impulse Testing"]
-            Recording["Data Recording"]
-        end
-    end
-    
-    %% Enhanced styling for better readability
-    classDef mainTool fill:#f5f5f5,stroke:#263238,stroke-width:3px,rx:12,ry:12,color:#263238,font-weight:bold
-    
-    classDef visualPanel fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,rx:8,ry:8,color:#01579b,font-weight:bold
-    classDef analysisPanel fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,rx:8,ry:8,color:#4a148c,font-weight:bold
-    classDef controlPanel fill:#ffebee,stroke:#d32f2f,stroke-width:2px,rx:8,ry:8,color:#b71c1c,font-weight:bold
-    
-    classDef visualComp fill:#e1f5fe,stroke:#0288d1,stroke-width:1.5px,rx:4,ry:4,color:#01579b,font-weight:bold
-    classDef analysisComp fill:#f3e5f5,stroke:#9c27b0,stroke-width:1.5px,rx:4,ry:4,color:#4a148c,font-weight:bold
-    classDef controlComp fill:#ffebee,stroke:#e53935,stroke-width:1.5px,rx:4,ry:4,color:#b71c1c,font-weight:bold
-    
-    class MonitoringTool mainTool
-    class Visualization visualPanel
-    class Analysis analysisPanel
-    class Controls controlPanel
-    
-    class TimeGraph,FFTGraph,Components visualComp
-    class Metrics,Anomalies,Suggestions analysisComp
-    class Parameters,Testing,Recording controlComp
-```
-
-The monitoring tool can be launched with:
-
-```bash
-ros2 run ball_chase pid_monitor.py --controller /pid_controller --output-dir /path/to/logs
-```
-
-This tool has helped us identify subtle issues including:
-- Delayed sensor readings affecting controller performance
-- Unexpected mechanical resonances at specific frequencies
-- Integral windup during extended operation
-- Interference between multiple control loops
-
-<a name="visual-comparison"></a>
-## Visual Comparison of PID vs. Alternatives
-
-To fully understand the strengths and limitations of PID control, it's valuable to compare it with alternative control methods. This section provides visual comparisons of PID against other popular control approaches, highlighting key differences in behavior, complexity, and performance.
-
-### Response Comparison: Step Input
-
-Let's examine how different control methods respond to a simple step input (when the target suddenly changes position).
-
-#### 1. Understanding the Step Input
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph StepInputGraph["The Step Input"]
-        direction TB
-        Before["Before t=2s:<br>Target = 0.0m"] --> Change["At t=2s:<br>Sudden change"] --> After["After t=2s:<br>Target = 1.0m"]
-    end
-    
-    classDef stepStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Before,Change,After stepStyle
-```
-
-At t=2s, the target position suddenly changes from 0.0m to 1.0m. This step input tests how different controllers respond to abrupt changes.
-
-#### 2. PID Controller Response
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph PIDResponse["PID Controller Response"]
-        direction TB
-        Behavior["Behavior:<br>Fast rise, significant overshoot,<br>eventually settles at target"]
-        Values["Key Values:<br>t=4s: 1.18m (18% overshoot)<br>t=6s: 1.02m<br>t=8s: 1.00m (fully settled)"]
-    end
-    
-    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Behavior,Values pidStyle
-```
-
-The PID controller responds quickly with a fast rise time but overshoots the target by 18%. After some oscillation, it settles precisely at the target position by t=8s.
-
-#### 3. Model Predictive Control (MPC) Response
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph MPCResponse["Model Predictive Control Response"]
-        direction TB
-        Behavior["Behavior:<br>Slower, smoother rise<br>minimal overshoot"]
-        Values["Key Values:<br>t=4s: 0.82m (no overshoot)<br>t=6s: 0.98m<br>t=8s: 1.00m (fully settled)"]
-    end
-    
-    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Behavior,Values mpcStyle
-```
-
-MPC takes a more conservative approach with a slower rise time but almost no overshoot. It gradually approaches the target and settles precisely by t=8s.
-
-#### 4. Linear Quadratic Regulator (LQR) Response
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph LQRResponse["Linear Quadratic Regulator Response"]
-        direction TB
-        Behavior["Behavior:<br>Balanced approach with<br>moderate rise and overshoot"]
-        Values["Key Values:<br>t=4s: 0.88m (slight overshoot)<br>t=6s: 0.98m<br>t=8s: 1.00m (fully settled)"]
-    end
-    
-    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Behavior,Values lqrStyle
-```
-
-LQR provides a balanced response with moderate rise time and slight overshoot. It finds a middle ground between speed and stability.
-
-#### 5. Fuzzy Logic Controller Response
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph FuzzyResponse["Fuzzy Logic Controller Response"]
-        direction TB
-        Behavior["Behavior:<br>Quick initial response but<br>never fully reaches target"]
-        Values["Key Values:<br>t=4s: 0.88m (no overshoot)<br>t=6s: 0.94m<br>t=8s: 0.96m (steady-state error)"]
-    end
-    
-    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Behavior,Values fuzzyStyle
-```
-
-Fuzzy Logic responds quickly at first but exhibits steady-state error, never quite reaching the target position. At t=8s, it settles at 0.96m, 4% below the target.
-
-#### 6. Controller Comparison Summary
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
-flowchart TB
-    subgraph ComparisonSummary["Controller Comparison Summary"]
-        direction TB
-        PID["PID: Fast with overshoot<br>Best for general applications"]
-        MPC["MPC: Smooth with minimal overshoot<br>Best for constrained systems"]
-        LQR["LQR: Balanced performance<br>Best for well-modeled systems"]
-        Fuzzy["Fuzzy Logic: Fast initial response<br>Best for handling nonlinearities"]
-    end
-    
-    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
-    
-    class PID pidStyle
-    class MPC mpcStyle
-    class LQR lqrStyle
-    class Fuzzy fuzzyStyle
-```
-
-**Choosing a Controller:**
-
-For the basketball tracking robot, the choice depends on your priorities:
-- For responsive tracking with acceptable overshoot → **PID Controller**
-- For smooth approach with minimal overshoot → **Model Predictive Control**
-- For balanced performance with known system model → **Linear Quadratic Regulator**
-- For handling nonlinear behavior with expert knowledge → **Fuzzy Logic Controller**
-
-The optimal choice for most tracking applications is typically a well-tuned PID controller or MPC system, depending on computational resources available.
-
-<em>Response of different controllers to a step change in target position</em>
-
-**Key Observations:**
-1. **PID Controller**: Fast rise time with some overshoot and oscillation before settling
-2. **Model Predictive Control (MPC)**: Smoother approach to setpoint with minimal overshoot
-3. **Linear Quadratic Regulator (LQR)**: Optimized balance between quick response and minimal oscillation
-4. **Fuzzy Logic Controller**: Gentle approach with minimal overshoot but slower rise time
-5. **Pure P Controller**: Quick initial response but never eliminates steady-state error
-
-### Response Comparison: Tracking Moving Target
-
-Let's examine how different controllers perform when tracking a continuously moving target, like a basketball in motion.
-
-#### 1. Understanding the Target Motion Pattern
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph TargetMotion["Target Motion Pattern"]
-        direction TB
-        Phase1["Phase 1<br>Rising<br>(0.4m → 1.0m)<br>t=0s to t=3s"] --> 
-        Phase2["Phase 2<br>Falling<br>(1.0m → 0.4m)<br>t=3s to t=6s"] --> 
-        Phase3["Phase 3<br>Rising Again<br>(0.4m → 0.8m)<br>t=6s to t=8s"]
-    end
-    
-    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Phase1,Phase2,Phase3 targetStyle
-```
-
-The target follows a continuous motion pattern with three distinct phases: first rising, then falling, then rising again. This tests how well each controller can adapt to changing directions.
-
-#### 2. Model Predictive Control (MPC) Performance
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph MPCPerformance["Model Predictive Control Performance"]
-        direction TB
-        Tracking["Tracking Performance:<br>Excellent (avg. error: 0.05m)"]
-        Behavior["Key Behavior:<br>Anticipates target movement<br>Minimal lag even during direction changes"]
-        Values["Key Position Values:<br>t=2s: 0.75m (target: 0.8m)<br>t=4s: 0.82m (target: 0.8m)<br>t=6s: 0.45m (target: 0.4m)"]
-    end
-    
-    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Tracking,Behavior,Values mpcStyle
-```
-
-MPC shows excellent tracking performance because it predicts the target's future position based on its trajectory model. It stays consistently close to the target, even during direction changes.
-
-#### 3. PID Controller Performance
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph PIDPerformance["PID Controller Performance"]
-        direction TB
-        Tracking["Tracking Performance:<br>Good (avg. error: 0.08m)"]
-        Behavior["Key Behavior:<br>Responsive but follows rather than predicts<br>Small but consistent lag"]
-        Values["Key Position Values:<br>t=2s: 0.72m (target: 0.8m)<br>t=4s: 0.79m (target: 0.8m)<br>t=6s: 0.42m (target: 0.4m)"]
-    end
-    
-    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Tracking,Behavior,Values pidStyle
-```
-
-The PID controller shows good tracking performance with a slight lag. It reacts to errors effectively but follows rather than predicts movement, resulting in a small delay especially during direction changes.
-
-#### 4. Linear Quadratic Regulator (LQR) Performance
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph LQRPerformance["Linear Quadratic Regulator Performance"]
-        direction TB
-        Tracking["Tracking Performance:<br>Moderate (avg. error: 0.12m)"]
-        Behavior["Key Behavior:<br>Balanced performance<br>Moderate lag during direction changes"]
-        Values["Key Position Values:<br>t=2s: 0.68m (target: 0.8m)<br>t=4s: 0.74m (target: 0.8m)<br>t=6s: 0.48m (target: 0.4m)"]
-    end
-    
-    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Tracking,Behavior,Values lqrStyle
-```
-
-LQR offers moderate tracking performance with balanced responsiveness. It shows more lag than MPC or PID, especially during rapid direction changes.
-
-#### 5. Fuzzy Logic Controller Performance
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph FuzzyPerformance["Fuzzy Logic Controller Performance"]
-        direction TB
-        Tracking["Tracking Performance:<br>Fair (avg. error: 0.2m)"]
-        Behavior["Key Behavior:<br>Significant lag<br>Struggles with rapid direction changes"]
-        Values["Key Position Values:<br>t=2s: 0.6m (target: 0.8m)<br>t=4s: 0.65m (target: 0.8m)<br>t=6s: 0.45m (target: 0.4m)"]
-    end
-    
-    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Tracking,Behavior,Values fuzzyStyle
-```
-
-The Fuzzy Logic controller shows the largest tracking error, with significant lag especially during direction changes. It struggles to keep up with the target's movement.
-
-#### 6. Controller Comparison Summary
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
-flowchart TB
-    subgraph Comparison["Tracking Performance Comparison"]
-        direction LR
-        MPC["MPC:<br>Best overall<br>Anticipates movement"]
-        PID["PID:<br>Good tracking<br>Small consistent lag"]
-        LQR["LQR:<br>Moderate tracking<br>Balanced performance"]
-        Fuzzy["Fuzzy Logic:<br>Largest lag<br>Direction change issues"]
-    end
-    
-    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
-    
-    class MPC mpcStyle
-    class PID pidStyle
-    class LQR lqrStyle
-    class Fuzzy fuzzyStyle
-```
-
-**Practical Application for Basketball Tracking:**
-
-For a basketball tracking robot, the choice of controller depends on your priorities:
-
-1. **If computational resources allow** → Choose **Model Predictive Control (MPC)** for best tracking performance, especially when the ball makes unpredictable movements
-
-2. **For a good balance of performance and simplicity** → Use a well-tuned **PID Controller** that can effectively track with minimal lag
-
-3. **When working with a well-understood system model** → **Linear Quadratic Regulator (LQR)** provides reliable performance
-
-4. **When dealing with highly nonlinear dynamics** → **Fuzzy Logic** may be appropriate, but expect more tracking lag
-
-The performance gap between controllers becomes most apparent during rapid direction changes, which are common in basketball movement.
-
-### Disturbance Rejection Comparison
-
-Let's examine how different controllers respond when faced with external disturbances.
-
-#### 1. Understanding Disturbances in Control Systems
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph DisturbanceExplained["What Are External Disturbances?"]
-        direction TB
-        Definition["Unexpected forces that<br>push system away from target"]
-        Examples["Examples:<br>• Physical bump to robot<br>• Wind/air resistance<br>• Surface friction changes<br>• Sensor errors"]
-        DistEvents["In this test:<br>• First disturbance at t=2s<br>• Second disturbance at t=5s"]
-    end
-    
-    classDef distStyle fill:#607d8b,stroke:#263238,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Definition,Examples,DistEvents distStyle
-```
-
-External disturbances are unexpected forces that push the system away from its target position. For a basketball tracking robot, this could be bumping into an obstacle, wheel slippage, or the ball being knocked away.
-
-#### 2. Target Position (Desired State)
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
-flowchart LR
-    subgraph TargetState["Target Position"]
-        direction TB
-        Description["Desired position remains<br>constant at 1.0 meters"]
-        Ideal["Ideal controller would:<br>• Maintain this position<br>• Quickly return after disturbance<br>• Minimize oscillation"]
-    end
-    
-    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
-    class Description,Ideal targetStyle
-```
-
-The target position remains constant at 1.0 meters throughout the test. The goal of each controller is to maintain this position despite disturbances.
-
-#### 3. Response to First Disturbance (t=2s)
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
-flowchart TB
-    subgraph FirstDisturbance["Response to First Disturbance at t=2s"]
-        direction LR
-        MPC["MPC:<br>Drops to 0.8m<br>Recovers by t=4s"]
-        PID["PID Controller:<br>Drops to 0.7m<br>Overshoots to 1.05m"]
-        LQR["LQR:<br>Drops to 0.75m<br>Recovers smoothly"]
-        Fuzzy["Fuzzy Logic:<br>Drops to 0.85m<br>Slow recovery"]
-        PureP["Pure P Controller:<br>Drops to 0.75m<br>Never fully recovers"]
-    end
-    
-    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef pureStyle fill:#795548,stroke:#3e2723,stroke-width:2px,color:#ffffff,font-weight:bold
-    
-    class MPC mpcStyle
-    class PID pidStyle
-    class LQR lqrStyle
-    class Fuzzy fuzzyStyle
-    class PureP pureStyle
-```
-
-After the first disturbance at t=2s, each controller responds differently. The MPC and PID controllers recover most completely, while the Pure P controller never fully returns to the target position.
-
-#### 4. Response to Second Disturbance (t=5s)
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
-flowchart TB
-    subgraph SecondDisturbance["Response to Second Disturbance at t=5s"]
-        direction LR
-        MPC["MPC:<br>Drops to 0.85m<br>Recovers to 0.99m"]
-        PID["PID Controller:<br>Drops to 0.8m<br>Recovers to 1.0m"]
-        LQR["LQR:<br>Drops to 0.8m<br>Recovers to 0.98m"]
-        Fuzzy["Fuzzy Logic:<br>Drops to 0.75m<br>Recovers to 0.91m"]
-        PureP["Pure P Controller:<br>Drops to 0.7m<br>Settles at 0.8m"]
-    end
-    
-    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef pureStyle fill:#795548,stroke:#3e2723,stroke-width:2px,color:#ffffff,font-weight:bold
-    
-    class MPC mpcStyle
-    class PID pidStyle
-    class LQR lqrStyle
-    class Fuzzy fuzzyStyle
-    class PureP pureStyle
-```
-
-The second disturbance at t=5s reveals more about each controller's recovery capabilities. The PID controller achieves the most complete recovery, while the Pure P controller exhibits significant steady-state error.
-
-#### 5. Recovery Time Comparison
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
-flowchart LR
-    subgraph RecoveryTime["Time to Recover Within 95% of Target"]
-        direction TB
-        MPC["MPC: 2.0s"]
-        PID["PID: 2.5s"]
-        LQR["LQR: 2.2s"]
-        Fuzzy["Fuzzy Logic: 3.0s"]
-        PureP["Pure P: Never fully recovers"]
-    end
-    
-    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
-    classDef pureStyle fill:#795548,stroke:#3e2723,stroke-width:2px,color:#ffffff,font-weight:bold
-    
-    class MPC mpcStyle
-    class PID pidStyle
-    class LQR lqrStyle
-    class Fuzzy fuzzyStyle
-    class PureP pureStyle
-```
-
-This diagram shows how quickly each controller returns to within 95% of the target position after a disturbance. MPC has the fastest recovery time, while Pure P never fully recovers.
-
-#### 6. Overall Disturbance Rejection Capability
-
-### Recovery Time Comparison
-
-The following diagram compares how quickly different controllers recover from disturbances:
-
-**Controller Recovery Performance:**
-
-| Controller Type | Recovery Time | Key Characteristics |
-|-----------------|---------------|---------------------|
-| **Model Predictive Control (MPC)** | 2.0 seconds | Fastest recovery due to predictive capabilities |
-| **Linear Quadratic Regulator (LQR)** | 2.2 seconds | Quick recovery with optimized control effort |
-| **PID Controller** | 2.5 seconds | Solid recovery with some oscillation |
-| **Fuzzy Logic Controller** | 3.0 seconds | Slower recovery but smooth approach |
-| **Pure P Controller** | Never fully recovers | Maintains permanent offset from target |
-
-The recovery time measures how long it takes for each controller to return within 95% of the target position after experiencing a disturbance. This is a critical metric for robots that need to maintain precise positioning despite external forces.
-
-For a basketball tracking robot, faster recovery times translate to more reliable tracking when the robot encounters obstacles or when the ball trajectory changes unexpectedly.
-
-
-PID Controller - Ranked first for its excellent combination of recovery completeness and stability
-Model Predictive Control (MPC) - Second place with fast recovery and minimal oscillation
-Linear Quadratic Regulator (LQR) - Third place with a good balance of stability and recovery
-Fuzzy Logic - Fourth place with moderate recovery but some residual error
-Pure P Controller - Ranked last due to poor recovery with permanent offset from the target
-
-Each controller is represented in a purple box with white text, ordered vertically to show their ranking from best (top) to worst (bottom).
-
-**Position Values for Each Controller (meters):**
-
-| Time | Target | MPC | PID | LQR | Fuzzy | Pure P |
-|------|--------|-----|-----|-----|-------|--------|
-| 0s   | 1.0    | 1.0 | 1.0 | 1.0 | 1.0   | 1.0    |
-| 2s   | 1.0    | 0.8 | 0.7 | 0.75| 0.85  | 0.75   |
-| 3s   | 1.0    | 0.92| 0.85| 0.85| 0.88  | 0.82   |
-| 4s   | 1.0    | 0.98| 1.05| 0.95| 0.92  | 0.86   |
-| 5s   | 1.0    | 0.85| 0.8 | 0.8 | 0.75  | 0.7    |
-| 6s   | 1.0    | 0.92| 0.9 | 0.88| 0.82  | 0.75   |
-| 7s   | 1.0    | 0.97| 0.97| 0.94| 0.87  | 0.78   |
-| 8s   | 1.0    | 0.99| 1.0 | 0.98| 0.91  | 0.8    |
-
-**Implications for Basketball Tracking Robot:**
-
-For a basketball tracking robot that might encounter disturbances (like bumping into players or the ball being knocked away):
-
-1. **PID Controller** offers the best overall disturbance rejection, recovering completely with acceptable oscillation
-2. **MPC** provides fast recovery with minimal oscillation but at higher computational cost
-3. **LQR** gives good balanced performance with predictable behavior
-4. **Fuzzy Logic** may be suitable when some position error is acceptable
-5. **Pure P Controller** should be avoided when disturbance rejection is important
-
-The integral component (I) of the PID controller is especially important for eliminating steady-state error after disturbances, which explains why the Pure P controller (lacking this component) performs poorly in this test.
-
-<em>Response to external disturbances at t=2s and t=5s</em>
-
-**Key Observations:**
-1. **PID Controller**: Quickly responds to disturbances but with some oscillation
-2. **Model Predictive Control (MPC)**: Excellent disturbance rejection with minimal oscillation
-3. **Linear Quadratic Regulator (LQR)**: Good rejection with well-damped response
-4. **Fuzzy Logic Controller**: Slower to reject disturbances but with minimal oscillation
-5. **Pure P Controller**: Never fully recovers from persistent disturbances
-
-### Controller Comparison Table
-
-| Control Method | Strengths | Limitations | Computational Complexity | Model Dependency | 
-|----------------|-----------|-------------|-------------------------|------------------|
-| **PID** | Simple implementation<br>Minimal computational requirements<br>Good general performance<br>No system model needed | Limited predictive capability<br>Tuning can be challenging<br>Sub-optimal for complex dynamics | Very Low | None |
-| **Model Predictive Control (MPC)** | Excellent tracking performance<br>Can handle constraints<br>Predictive capability<br>Optimal control strategy | High computational requirements<br>Requires accurate system model<br>Complex implementation | High | High |
-| **Linear Quadratic Regulator (LQR)** | Optimal for linear systems<br>Robust performance<br>Well-established theory | Requires system model<br>Limited constraint handling<br>Primarily for linear systems | Medium | Medium-High |
-| **Fuzzy Logic Control** | Works well with nonlinear systems<br>Intuitive rule-based approach<br>No precise model needed | Difficult to prove stability<br>Rule generation can be complex<br>Limited optimality | Medium | Low |
-| **Pure P Control** | Simplest implementation<br>Minimal computation<br>No risk of instability | Cannot eliminate steady-state error<br>Limited performance<br>Slow response to small errors | Very Low | None |
-
-### Computational Requirements Visualization
-
-This chart compares the computational resources required by each control method, relative to PID control:
-
-```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff", "secondaryColor": "#7b1fa2", "secondaryTextColor": "#ffffff", "tertiaryColor": "#388e3c", "tertiaryTextColor": "#ffffff"}}}%%
-graph TD
-    subgraph Resources["Computational Resources Required"]
-        direction LR
-        CPU[CPU Usage]
-        Memory[Memory Usage]
-        Complexity[Implementation Complexity]
-    end
-    
-    subgraph Methods["Control Methods"]
-        direction LR
-        PID[PID Control]
-        MPC[Model Predictive Control]
-        LQR[Linear Quadratic Regulator]
-        FUZZY[Fuzzy Logic Control]
-        PureP[Pure P Control]
-    end
-    
-    PID --- CPU1["⭐"]
-    PID --- Memory1["⭐"]
-    PID --- Complex1["⭐⭐"]
-    
-    MPC --- CPU2["⭐⭐⭐⭐⭐"]
-    MPC --- Memory2["⭐⭐⭐⭐"]
-    MPC --- Complex2["⭐⭐⭐⭐⭐"]
-    
-    LQR --- CPU3["⭐⭐⭐"]
-    LQR --- Memory3["⭐⭐"]
-    LQR --- Complex3["⭐⭐⭐"]
-    
-    FUZZY --- CPU4["⭐⭐"]
-    FUZZY --- Memory4["⭐⭐"]
-    FUZZY --- Complex4["⭐⭐⭐"]
-    
-    PureP --- CPU5["⭐"]
-    PureP --- Memory5["⭐"]
-    PureP --- Complex5["⭐"]
-    
-    %% Enhanced styling for better readability
-    classDef resourceGroup fill:#e3f2fd,stroke:#1976d2,stroke-width:3px,rx:8,ry:8,color:#0d47a1,font-weight:bold
-    classDef methodGroup fill:#f3e5f5,stroke:#7b1fa2,stroke-width:3px,rx:8,ry:8,color:#4a148c,font-weight:bold
-    
-    classDef resourceLabels fill:#e3f2fd,stroke:#1976d2,stroke-width:1.5px,rx:4,ry:4,color:#0d47a1,font-weight:bold
-    classDef methodNodes fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.5px,rx:4,ry:4,color:#4a148c,font-weight:bold
-    
-    classDef starLow fill:#e8f5e9,stroke:#43a047,stroke-width:1px,color:#2e7d32,font-weight:bold,font-size:18px
-    classDef starMed fill:#fff9c4,stroke:#fbc02d,stroke-width:1px,color:#f57f17,font-weight:bold,font-size:18px
-    classDef starHigh fill:#ffebee,stroke:#e53935,stroke-width:1px,color:#c62828,font-weight:bold,font-size:18px
-    
-    class Resources resourceGroup
-    class Methods methodGroup
-    
-    class CPU,Memory,Complexity resourceLabels
-    class PID,MPC,LQR,FUZZY,PureP methodNodes
-    
-    class CPU1,Memory1,Memory3,Memory4,Memory5,CPU5,Complex5 starLow
-    class CPU3,CPU4,Complex1,Complex4,Complex3 starMed
-    class CPU2,Memory2,Complex2 starHigh
-```
-
-<em>Relative computational requirements (★ = low, ★★★★★ = high)</em>
-
-### When to Choose PID vs. Alternatives
-
-#### Choose PID Control When:
-- You need a simple, reliable solution with minimal computational requirements
-- A system model is unavailable or difficult to obtain
-- The system dynamics are relatively simple or well-behaved
-- You need an easy-to-understand and tune algorithm
-- You're operating on hardware with limited processing power (like the Raspberry Pi 5)
-
-#### Consider Alternatives When:
-- **Model Predictive Control (MPC)**: You need to handle constraints explicitly, optimize multiple objectives, or have complex dynamics where prediction is critical
-- **Linear Quadratic Regulator (LQR)**: You have an accurate linear model and need optimal control for a well-defined quadratic cost function
-- **Fuzzy Logic Control**: You're dealing with highly nonlinear systems and have expert knowledge that can be translated into rules
-- **Reinforcement Learning Control**: You have complex, difficult-to-model dynamics and sufficient training data/time
-
-### Why We Chose Enhanced PID for Our Basketball Tracking Robot
-
-For our basketball tracking robot, we selected an enhanced PID approach because:
-
-1. **Resource Constraints**: The Raspberry Pi 5 has limited computational resources compared to a workstation PC
-2. **Realtime Requirements**: Control decisions must be made quickly (processing overhead of MPC would be problematic)
-3. **Adaptability**: Our enhanced PID implementation with adaptive gains provides many benefits of more complex controllers
-4. **Implementation Simplicity**: The codebase remains relatively easy to understand and modify
-5. **Robustness**: PID control is well-proven and robust against model uncertainties
-
-By enhancing standard PID with features like adaptive gains, zero-crossing handling, and strategy-based movement selection, we achieved performance comparable to more complex controllers while maintaining the simplicity and efficiency of PID.
-
-<a name="glossary"></a>
-## Glossary
-
-**Adaptive Gain**: PID gain values that automatically adjust based on system conditions.
-
-**Anti-Windup**: Techniques to prevent integral windup, where the integral term becomes too large.
-
-**Control Loop**: The continuous cycle of measuring, calculating, and adjusting in a control system.
-
-**Damping**: Reduction of oscillations in a system's response.
-
-**Deadband**: A small range around zero where errors are ignored to prevent tiny corrections.
-
-**Derivative Kick**: Sudden spike in the derivative term caused by a setpoint change.
-
-**Error**: The difference between the desired setpoint and the measured value.
-
-**Fusion Rate**: The rate at which data from multiple sensors is combined.
-
-**Integral Windup**: When the integral term accumulates too much error, causing overshoot.
-
-**Oscillation**: Repeated back-and-forth movement around a target position.
-
-**Overshoot**: When the system exceeds the target value before settling.
-
-**PID Controller**: A control mechanism that uses Proportional, Integral, and Derivative terms.
-
-**Rise Time**: The time it takes for the system to reach the target from its initial position.
-
-**Setpoint**: The desired target value for the system.
-
-**Settling Time**: The time required for the system to reach and stay within a certain range of the target.
-
-**Steady-State Error**: Persistent error that remains after the system has settled.
-
-**Strategy Blending**: Technique for smoothly transitioning between different control strategies.
-
-**Zero-Crossing**: When the error changes sign (from positive to negative or vice versa).
-
 <a name="introduction"></a>
 ## 1. Introduction
 
@@ -5285,6 +3870,1421 @@ The advanced PID control system for basketball tracking represents a sophisticat
 The principles and techniques described in this document apply not only to basketball tracking robots but to a wide range of robotics and control applications where responsive, natural movement is required despite resource constraints.
 
 [Back to Table of Contents](#table-of-contents)
+
+<a name="debugging-walkthrough"></a>
+## Practical Debugging and Tuning Guide
+
+Understanding how to systematically tune, troubleshoot, and debug PID controllers is an essential skill for robotics engineers. This comprehensive guide walks through structured PID tuning methodologies, common troubleshooting techniques, and a detailed real-world case study from our basketball tracking robot.
+
+### Systematic PID Tuning Methodologies
+
+Before diving into troubleshooting, it's important to understand proper tuning methodologies. Here we present three proven approaches to tuning PID controllers for robotics applications.
+
+#### Method 1: Manual Tuning with The Modified Ziegler-Nichols Approach
+
+This adaptation of the classic Ziegler-Nichols method is well-suited for our robot's control systems:
+
+1. **Initial Setup**:
+   - Set Ki and Kd to zero
+   - Start with a very low Kp (0.1-0.2)
+
+2. **Finding Critical Gain**:
+   - Gradually increase Kp until the system starts to oscillate (we call this Ku)
+   - Record the oscillation period (Tu)
+   - Set Kp = 0.45 × Ku (more conservative than classical Z-N to avoid overshoot)
+
+3. **Adding Derivative Action**:
+   - Set Kd = Kp × Tu/8 (starts with a conservative estimate)
+   - Test response and adjust as needed for damping
+
+4. **Adding Integral Action**:
+   - Start with a very small Ki (0.05 × Kp / Tu)
+   - Gradually increase until steady-state error is eliminated
+   - Watch for integral windup signs and implement anti-windup if needed
+
+5. **Fine Tuning**:
+   - Make small (5-10%) adjustments to optimize response
+   - Prioritize reducing oscillation over fast response for the robot's safety
+   - Verify performance across different operating conditions
+
+**Implementation in Our Codebase**: We've created a tuning script at `src/ball_chase/ball_chase/pid/pid_tuner.py` that can automatically step through this process.
+
+```python
+# Excerpt from src/ball_chase/ball_chase/pid/pid_tuner.py
+def find_critical_gain(controller, initial_kp=0.1, step=0.05, max_kp=5.0):
+    """Find the critical gain where the system just starts to oscillate."""
+    controller.set_ki(0.0)
+    controller.set_kd(0.0)
+    
+    for kp in np.arange(initial_kp, max_kp, step):
+        controller.set_kp(kp)
+        response = test_step_response(controller)
+        
+        if detect_oscillation(response):
+            return kp, measure_oscillation_period(response)
+    
+    return None, None  # No oscillation found within the range
+```
+
+#### Method 2: Time-Response Approach
+
+For situations where the Ziegler-Nichols method is too aggressive or causes too much oscillation:
+
+1. **Start with Proportional Control**:
+   - Set Kp to a value that gives reasonable rise time without excessive overshoot
+   - Typical starting point: Kp = 0.5-0.7
+
+2. **Add Derivative Control for Damping**:
+   - Calculate: Kd = Kp × (desired damping ratio) / (natural frequency)
+   - For our robot: Kd ≈ Kp × 0.4 is a good starting point
+   - Increase Kd gradually until overshoot is reduced to acceptable levels
+
+3. **Add Integral Control Last**:
+   - Start with Ki = Kp / 10
+   - Increase until steady-state error is eliminated
+   - Keep Ki small enough to avoid integral windup and oscillation
+
+4. **Measure Performance Metrics**:
+   - Rise time (time to reach 90% of setpoint)
+   - Settling time (time to stay within 5% of final value)
+   - Overshoot percentage
+   - Steady-state error
+
+5. **Iteratively Refine**:
+   - Adjust each gain to optimize the metrics that matter most for your application
+   - For basketball tracking: stability and minimal oscillation outweigh fast response
+
+#### Method 3: Frequency Domain Tuning
+
+For advanced users who understand control theory and have access to the robot's frequency response:
+
+1. **System Identification**:
+   - Use sweep frequency inputs to determine the system's frequency response
+   - Plot Bode diagrams to visualize magnitude and phase characteristics
+   - Identify the system's bandwidth and phase margin
+
+2. **Loop Shaping**:
+   - Design controller gains to achieve desired bandwidth and stability margins
+   - Typical goal: Phase margin > 45° for stability
+   - Adjust crossover frequency to achieve desired response time
+
+3. **Controller Synthesis**:
+   - Calculate PID parameters to meet design specifications
+   - Implement and test on the real system
+   - Iterate and refine as needed
+
+#### Gain Scheduling for Different Operating Conditions
+
+Our basketball tracking robot operates in various conditions, requiring different control parameters.
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "14px", "primaryColor": "#3f51b5", "primaryTextColor": "#ffffff", "primaryBorderColor": "#3f51b5", "secondaryColor": "#009688", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#009688", "tertiaryColor": "#f8f9fa"}}}%%
+graph TD
+    subgraph GainScheduling["Gain Scheduling System"]
+        direction TB
+        Distance["Distance to Target"] --> |Far| Far["Aggressive Gains<br/>Kp=0.8, Ki=0.15, Kd=0.3"]
+        Distance --> |Medium| Medium["Balanced Gains<br/>Kp=0.6, Ki=0.1, Kd=0.4"]
+        Distance --> |Close| Close["Gentle Gains<br/>Kp=0.4, Ki=0.05, Kd=0.5"]
+        
+        VelocityCheck["Target Velocity"] --> |Fast Moving| FastGains["Increased Prediction<br/>Reduced Ki"]
+        VelocityCheck --> |Stationary| StaticGains["Standard Gains<br/>Increased Ki"]
+        
+        Surface["Field Surface"] --> |Smooth| SmoothGains["Standard Damping"]
+        Surface --> |Rough| RoughGains["Increased Damping<br/>Higher Kd"]
+    end
+    
+    classDef distanceNode fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,rx:5,ry:5
+    classDef velocityNode fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,rx:5,ry:5
+    classDef surfaceNode fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,rx:5,ry:5
+    classDef gainNode fill:#fffde7,stroke:#f57f17,stroke-width:1px,rx:3,ry:3
+    
+    class Distance,Medium,Far,Close distanceNode
+    class VelocityCheck,FastGains,StaticGains velocityNode
+    class Surface,SmoothGains,RoughGains surfaceNode
+    class Far,Medium,Close,FastGains,StaticGains,SmoothGains,RoughGains gainNode
+```
+
+Our implementation dynamically adjusts gains based on:
+- Distance to target
+- Target velocity 
+- Surface conditions
+- Control error magnitude
+
+```python
+# Excerpt from src/ball_chase/ball_chase/pid/pid_computation.py - ImprovedPID class
+def update_adaptive_gains(self, distance, target_velocity, error_magnitude):
+    """Adjust gains based on operating conditions."""
+    # Base gains from configuration
+    base_kp = self.config.base_kp
+    base_ki = self.config.base_ki
+    base_kd = self.config.base_kd
+    
+    # Distance-based adjustment
+    if distance > self.config.far_threshold:
+        kp_factor = 1.2  # More aggressive when far
+        ki_factor = 1.5
+        kd_factor = 0.8  # Less damping for faster response
+    elif distance < self.config.close_threshold:
+        kp_factor = 0.8  # Gentler when close
+        ki_factor = 0.5
+        kd_factor = 1.5  # More damping for stability when close
+    else:
+        kp_factor = 1.0  # Balanced for medium distance
+        ki_factor = 1.0
+        kd_factor = 1.0
+    
+    # Additional adjustments for velocity and error magnitude
+    # ... (code continues)
+    
+    # Apply the adjusted gains
+    self.kp = base_kp * kp_factor
+    self.ki = base_ki * ki_factor
+    self.kd = base_kd * kd_factor
+```
+
+### Case Study: Oscillation in Angular Control
+
+This walkthrough follows a real debugging process for resolving an oscillation issue in our basketball tracking robot's rotation control. The robot was continuously "hunting" for the correct angle, oscillating back and forth without settling.
+
+#### Step 1: Observe and Quantify the Problem
+
+The first step in any debugging process is to clearly identify and quantify the issue.
+
+```bash
+# Command used to record error and output values
+ros2 topic echo --csv /pid_controller/error/angular_z > angular_error.csv &
+ros2 topic echo --csv /pid_controller/output/angular_z > angular_output.csv &
+```
+
+```
+                   Angular Control Oscillation Problem
+                   
+Angular Error (degrees)
+    +25 |                                            
+        |                        *           
+    +20 |                                   *        
+        |                    *               
+    +15 |               *                    
+        |                                     
+    +10 |                               *     
+        |        *               *            
+     +5 |             *                       
+        |                                      
+      0 |*                       *       *    * Time (s)
+        |----+----+----+----+----+----+----+----------->
+        |    2    4    6    8    10   12   14   16   18   20
+     -5 |     *            *    *                  
+        |                                 *         
+    -10 |               *                           
+        |                                            
+    -15 |                                            
+        |                                            
+    -20 |                             *              
+        |                                            
+    -25 |                                            
+```
+
+**Figure: Angular Control Oscillation Problem.** This diagram shows how the angular error oscillates around zero (the target) with increasing amplitude over time. Initially, the oscillations are small, but as the controller responds, the corrections become increasingly extreme, leading to worsening performance. This is a classic example of an unstable control system that requires parameter adjustment to achieve stability.
+
+<em>Initial observation: Angular error oscillating around zero with increasing amplitude over time</em>
+
+**Observations:**
+1. Error oscillates around zero, never settling
+2. Oscillation amplitude increases over time
+3. Period of oscillation is approximately 1.2 seconds
+4. Controller output shows delayed response to error changes
+
+#### Step 2: Check Current Parameters
+
+Next, we examined the current PID parameters:
+
+```bash
+# Command used to retrieve current parameters
+ros2 param get /pid_controller kp_angular_z
+ros2 param get /pid_controller ki_angular_z
+ros2 param get /pid_controller kd_angular_z
+```
+
+**Results:**
+- Kp = 0.8
+- Ki = 0.2
+- Kd = 0.1
+
+These values suggested a potential issue: the proportional gain was relatively high while the derivative gain was low. This combination often leads to oscillations without sufficient damping.
+
+#### Step 3: Analyze System Behavior
+
+To understand the root cause, we looked deeper into the system behavior:
+
+```python
+# Code snippet used to analyze oscillation characteristics
+import pandas as pd
+import numpy as np
+from scipy import signal
+
+# Load data from CSV files
+error_df = pd.read_csv('angular_error.csv')
+output_df = pd.read_csv('angular_output.csv')
+
+# Calculate oscillation frequency and phase relationship
+error_signal = error_df['data'].values
+output_signal = output_df['data'].values
+
+# Find peaks to determine oscillation period
+peaks, _ = signal.find_peaks(error_signal)
+oscillation_period = np.mean(np.diff(error_df['time'].values[peaks]))
+print(f"Oscillation period: {oscillation_period:.2f} seconds")
+
+# Calculate phase difference between error and controller output
+corr = signal.correlate(error_signal, output_signal, mode='full')
+phase_diff = np.argmax(corr) - len(error_signal) + 1
+phase_diff_time = phase_diff * (error_df['time'].values[1] - error_df['time'].values[0])
+print(f"Phase difference: {phase_diff_time:.3f} seconds")
+```
+
+**Analysis Results:**
+- Confirmed oscillation period: 1.18 seconds
+- Phase difference between error and output: 0.215 seconds
+- Additional finding: The time delay in the system (0.215s) was causing the controller to respond too late to error changes
+- The integral term was accumulating during oscillations, making them worse over time
+
+#### Step 4: Formulate a Hypothesis
+
+Based on our analysis, we developed two hypotheses:
+
+1. **Insufficient Damping**: The derivative gain was too low to counteract oscillations
+2. **Integral Windup**: The integral term was accumulating during oscillations, exacerbating the problem
+
+#### Step 5: Test Solutions Systematically
+
+We tested potential solutions one at a time, measuring the effect of each change:
+
+```bash
+# Solution 1: Increase derivative gain for more damping
+ros2 param set /pid_controller kd_angular_z 0.3
+
+# Solution 2: Reduce proportional gain to decrease sensitivity
+ros2 param set /pid_controller kp_angular_z 0.6
+
+# Solution 3: Reduce integral gain to minimize windup
+ros2 param set /pid_controller ki_angular_z 0.1
+
+# Solution 4: Enable zero-crossing detection in configuration
+ros2 param set /pid_controller use_zero_crossing_handling true
+
+# Solution 5: Add directional deadband to prevent micro-corrections
+ros2 param set /pid_controller angular_deadband 2.0
+```
+
+After each change, we recorded new data and analyzed the results.
+
+#### Step 6: Analyze Results and Implement Solution
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff", "primaryBorderColor": "#f44336", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff", "secondaryBorderColor": "#ff9800", "tertiaryColor": "#4caf50", "tertiaryTextColor": "#ffffff", "tertiaryBorderColor": "#4caf50", "lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000"}}}%%
+graph TD
+    Title["Effect of Individual Solutions on Angular Error"]
+    
+    subgraph ErrorRanges["Angular Error Ranges (Target = 0°)"]
+        direction LR
+        Plus10["+10°"] --- Plus5["+5°"] --- Target["0° (Target)"] --- Minus5["-5°"] --- Minus10["-10°"]
+    end
+    
+    subgraph Solutions["Solutions and Their Oscillation Patterns"]
+        Original["Original Problem<br>Large oscillations between -8° and +7°<br>Never settles at target angle"]
+        Increased["Increased Kd Solution<br>Moderate oscillations between -7° and +5°<br>Reduced amplitude but still unstable"]
+        Combined["Combined Solution<br>Minimal oscillations between -3° and +2°<br>Quickly settles near target angle"]
+    end
+    
+    %% Styling
+    classDef titleStyle fill:#e0e0e0,stroke:#424242,stroke-width:2px,color:#212121,font-weight:bold,font-size:18px
+    classDef rangeStyle fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#212121
+    classDef targetStyle fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20,font-weight:bold
+    classDef originalStyle fill:#f44336,stroke:#c62828,stroke-width:2px,color:#ffffff
+    classDef increasedStyle fill:#ff9800,stroke:#ef6c00,stroke-width:2px,color:#ffffff
+    classDef combinedStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff
+    
+    %% Apply styles
+    class Title titleStyle
+    class Plus10,Plus5,Minus5,Minus10 rangeStyle
+    class Target targetStyle
+    class Original originalStyle
+    class Increased increasedStyle
+    class Combined combinedStyle
+```
+
+**Visual Comparison of PID Angular Control Solutions**
+
+The diagram above illustrates how three different control approaches affect the angular error oscillation when the robot attempts to maintain a specific angle:
+
+| Solution | Error Range | Key Characteristics | Result |
+|----------|-------------|---------------------|--------|
+| **Original Problem** | -8° to +7° | High proportional gain, insufficient derivative action | System continually oscillates, never settling at target |
+| **Increased Kd** | -7° to +5° | Higher derivative gain for better damping | Reduced oscillation amplitude but still unstable |
+| **Combined Solution** | -3° to +2° | Balanced Kd increase, reduced Kp & Ki, plus other enhancements | Minimal oscillation with quick settling at target angle |
+
+**Time-based Error Comparison:**
+- At 4s: Original: -8°, Increased Kd: -7°, Combined: -3°
+- At 10s: Original: +7°, Increased Kd: +5°, Combined: +2°
+- At 20s: Original: still oscillating at +7°, Increased Kd: +5°, Combined: nearly stable at +1°
+
+The combined solution demonstrates the effectiveness of a comprehensive approach to PID tuning rather than adjusting individual parameters in isolation. By implementing multiple enhancements together (increased damping, reduced gains, zero-crossing detection, and deadband), the system achieves stable control with minimal oscillation around the target angle.
+
+**Solution Results**:
+
+1. **Solution 1 (Increased Kd)**: Reduced oscillation amplitude but oscillations still present
+2. **Solution 2 (Reduced Kp)**: Slower response with decreased amplitude, still some oscillation
+3. **Combined Solution**: All adjustments together (increased Kd, reduced Kp and Ki, added deadband) eliminated oscillations completely
+
+The most effective approach was a combination of all adjustments:
+1. Increased damping through higher derivative gain
+2. Reduced proportional and integral gains 
+3. Enabled zero-crossing detection
+4. Added a small angular deadband
+
+#### Step 7: Verify Long-Term Stability
+
+After implementing these changes, we monitored the system over extended periods to ensure long-term stability under various conditions.
+
+```bash
+# Code to log extended performance data
+ros2 run ball_chase extended_performance_logger.py --duration 3600 --output-file angular_performance_log.json
+```
+
+Extended testing confirmed that the oscillation issue was resolved, with the controller maintaining stable angular control even during extended operation.
+
+### Debugging Tools and Techniques
+
+Based on our experience debugging PID controllers, here are the most effective tools and techniques:
+
+#### 1. Data Logging and Visualization
+
+```bash
+# Log data to CSV files
+ros2 topic echo --csv /pid_controller/error > error_log.csv
+ros2 topic echo --csv /pid_controller/output > output_log.csv
+
+# Quick plotting with rqt_plot
+ros2 run rqt_plot rqt_plot /pid_controller/error /pid_controller/output
+
+# Create custom plots with matplotlib (example script)
+./scripts/plot_pid_response.py --error-file error_log.csv --output-file output_log.csv
+```
+
+#### 2. Parameter Inspection and Modification
+
+```bash
+# List all PID parameters
+ros2 param list | grep pid_controller
+
+# Get current parameters
+ros2 param get /pid_controller kp_linear_x
+
+# Set new parameters
+ros2 param set /pid_controller kp_linear_x 0.7
+
+# Save parameters to file
+ros2 param dump /pid_controller > pid_params.yaml
+
+# Load parameters from file
+ros2 param load /pid_controller pid_params.yaml
+```
+
+#### 3. Signal Analysis Tools
+
+```python
+# Python snippet for analyzing oscillation characteristics
+from scipy import signal
+import numpy as np
+
+def analyze_oscillation(data, sample_rate):
+    # Calculate FFT to find dominant frequencies
+    fft = np.fft.fft(data)
+    freqs = np.fft.fftfreq(len(data), 1/sample_rate)
+    
+    # Find peaks in frequency domain
+    dominant_idx = np.argmax(np.abs(fft[1:len(freqs)//2])) + 1
+    dominant_freq = freqs[dominant_idx]
+    
+    # Calculate oscillation period
+    oscillation_period = 1/dominant_freq if dominant_freq != 0 else float('inf')
+    
+    # Find damping ratio (if oscillation is damped)
+    peaks, _ = signal.find_peaks(data)
+    if len(peaks) >= 2:
+        peak_values = data[peaks]
+        damping_ratio = np.log(peak_values[0]/peak_values[-1]) / (2*np.pi*len(peaks))
+    else:
+        damping_ratio = None
+        
+    return {
+        "dominant_frequency": dominant_freq,
+        "oscillation_period": oscillation_period,
+        "damping_ratio": damping_ratio
+    }
+```
+
+#### 4. Common PID Issues and Solutions
+
+| Issue | Symptoms | Common Causes | Solutions |
+|-------|----------|--------------|-----------|
+| Oscillation | System moves back and forth around setpoint | High proportional gain, low derivative gain | Reduce Kp, increase Kd, add deadband |
+| Slow Response | System takes too long to reach target | Low proportional gain | Increase Kp carefully |
+| Steady-state Error | System never quite reaches target | Insufficient integral action | Increase Ki |
+| Overshoot | System goes past target before settling | High Kp, insufficient Kd | Increase Kd, reduce Kp |
+| Integral Windup | Large overshoot after sustained error | Integral term accumulates too much | Implement anti-windup measures, limit I term |
+| Delayed Response | System responds too late to changes | Too much filtering, processing delays | Reduce filtering, implement prediction |
+| Noise Sensitivity | Jerky or erratic movement | High derivative gain with noisy sensors | Filter sensor data, reduce Kd |
+| Limit Cycling | Regular oscillation with consistent amplitude | Deadband issues, nonlinearity | Adjust deadband, check for mechanical issues |
+
+### Systematic Debugging Process
+
+Follow this systematic process when debugging PID controllers:
+
+1. **Observe and Measure**: Collect data about what's happening
+2. **Quantify the Issue**: Determine precise characteristics (frequency, amplitude, etc.)
+3. **Check Parameters**: Verify current PID parameters and limitations
+4. **Analyze System Behavior**: Use tools to understand dynamic behavior
+5. **Formulate Hypotheses**: Develop theories about potential causes
+6. **Test Systematically**: Change one thing at a time, measure results
+7. **Combine Solutions**: If needed, combine multiple adjustments
+8. **Verify Long-Term**: Test under various conditions for extended periods
+
+Remember that most issues can be solved by methodically adjusting parameters and adding appropriate PID enhancements like deadbands, anti-windup protection, and filtering.
+
+### Advanced Troubleshooting Techniques
+
+Beyond basic parameter tuning, these advanced techniques can help diagnose and resolve complex PID issues:
+
+
+Beyond basic parameter tuning, these advanced techniques can help diagnose and resolve complex PID issues:
+
+#### 1. Step Response Analysis
+
+Step response analysis helps understand how a system responds to sudden changes, revealing critical information for PID tuning. Let's break this down into manageable concepts:
+
+### 1. What is a Step Input?
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff", "secondaryColor": "#f8f9fa"}}}%%
+flowchart LR
+    subgraph StepInput["Step Input Explained"]
+        direction TB
+        Before["Before Step<br>(Value = 0)"] --> Step["Sudden Change"] --> After["After Step<br>(Value = 1.0)"]
+    end
+    
+    classDef stepStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Before,Step,After stepStyle
+```
+
+A step input is a sudden change in the target value (setpoint). For example, instantly changing the target angle from 0° to 90°. This helps us see how the system responds to abrupt changes.
+
+### 2. Basic System Response Pattern
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff", "secondaryColor": "#ff9800", "secondaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph ResponseGraph["Typical System Response"]
+        direction TB
+        Target["Target Value (1.0)"]
+        ResponseCurve["System Response"]
+        Pattern["The system typically:<br>1. Rises toward target<br>2. Overshoots<br>3. Oscillates<br>4. Eventually settles"]
+    end
+    
+    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef responseStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class Target targetStyle
+    class ResponseCurve,Pattern responseStyle
+```
+
+When given a step input, most control systems follow a characteristic response pattern. The system initially rises toward the target value, often overshoots it, oscillates back and forth with decreasing amplitude, and eventually settles at or near the target value. This pattern reveals key information about the system's performance and helps guide PID tuning.
+
+### 3. Key Measurement: Rise Time
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph RiseTime["Rise Time"]
+        direction TB
+        Definition["The time it takes to rise from<br>10% to 90% of the target value"]
+        Meaning["Indicates how quickly the<br>system responds to changes"]
+        Tuning["Primarily affected by Kp<br>(↑ Kp = ↓ Rise Time)"]
+    end
+    
+    classDef riseTimeStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Meaning,Tuning riseTimeStyle
+```
+
+Rise time shows how quickly your system responds to changes. A fast rise time means the system reacts quickly to new inputs. In our basketball tracking robot example, this would be how quickly the robot starts moving toward the new ball position.
+
+### 4. Key Measurement: Overshoot
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph Overshoot["Overshoot"]
+        direction TB
+        Definition["How much the response exceeds<br>the target value"]
+        Meaning["Indicates damping characteristics<br>of the system"]
+        Tuning["Primarily affected by Kd<br>(↑ Kd = ↓ Overshoot)"]
+    end
+    
+    classDef overshootStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Meaning,Tuning overshootStyle
+```
+
+Overshoot occurs when the system goes beyond the target value. For the basketball tracking robot, this would be like the robot rotating past the ball and then having to correct back. High overshoot indicates insufficient damping, which can be improved by increasing the derivative gain (Kd).
+
+### 5. Key Measurement: Settling Time
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph SettlingTime["Settling Time"]
+        direction TB
+        Definition["Time for oscillations to fall within<br>±5% of the final value"]
+        Meaning["Indicates how quickly the system<br>stabilizes after a change"]
+        Tuning["Affected by all PID terms<br>but strongly by Kd"]
+    end
+    
+    classDef settlingStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Meaning,Tuning settlingStyle
+```
+
+Settling time measures how long it takes for the system to stabilize. For our robot, this would be how long before it stops making adjustments and smoothly tracks the ball. A long settling time means the system continues to oscillate or make corrections for too long.
+
+### 6. Key Measurement: Steady-State Error
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph SteadyStateError["Steady-State Error"]
+        direction TB
+        Definition["Difference between final stabilized<br>value and the target value"]
+        Meaning["Indicates the accuracy of<br>the system's final position"]
+        Tuning["Primarily affected by Ki<br>(↑ Ki = ↓ Steady-State Error)"]
+    end
+    
+    classDef steadyStateStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Meaning,Tuning steadyStateStyle
+```
+
+Steady-state error is any remaining difference between the target and actual position after the system stabilizes. For the basketball tracking robot, this would be a constant offset between where the robot aims and where the ball actually is. Increasing the integral gain (Ki) helps eliminate this error.
+
+### 7. Using Step Response Analysis for Tuning
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#607d8b", "primaryTextColor": "#ffffff"}}}%%
+flowchart TB
+    subgraph Tuning["Step Response-Based Tuning"]
+        direction LR
+        HighOv["High Overshoot<br>+ Fast Rise Time"] --> RedP["⬇️ Kp or ⬆️ Kd"]
+        SlowRise["Slow Rise Time<br>+ Low Overshoot"] --> IncP["⬆️ Kp"]
+        SteadyErr["Persistent<br>Steady-State Error"] --> IncI["⬆️ Ki"]
+        LongSettle["Long Settling Time"] --> IncD["Adjust Kd"]
+    end
+    
+    classDef tuningStyle fill:#607d8b,stroke:#263238,stroke-width:2px,color:#ffffff,font-weight:bold
+    class HighOv,SlowRise,SteadyErr,LongSettle,RedP,IncP,IncI,IncD tuningStyle
+```
+
+By analyzing step response, you can diagnose specific issues with your PID controller and make targeted adjustments:
+
+- **If you see high overshoot with fast rise time**: Reduce Kp or increase Kd
+- **If you see slow rise time with low overshoot**: Increase Kp
+- **If there's persistent steady-state error**: Increase Ki
+- **If settling time is too long**: Fine-tune Kd
+
+For a basketball tracking robot, optimal step response would show moderate rise time (for responsive tracking), minimal overshoot (to prevent "hunting" behavior), and short settling time (for stable following).
+
+**Analyzing The Step Response:**
+
+From the step response, you can extract valuable information to tune your PID controller:
+
+1. **High Overshoot + Fast Rise Time**: Indicates high Kp, low Kd - reduce Kp or increase Kd
+2. **Slow Rise Time + Low Overshoot**: Indicates low Kp - increase Kp
+3. **Persistent Steady-State Error**: Indicates insufficient Ki - increase Ki
+4. **Long Settling Time**: Indicates poor damping - adjust Kd
+
+For the basketball tracking robot, optimal step response characteristics would show moderate rise time (not too aggressive), minimal overshoot (to prevent oscillation), and short settling time (for responsive tracking).
+
+- **Rise time**: Primarily affected by proportional gain (Kp)
+- **Overshoot**: Affected by derivative gain (Kd) - higher Kd reduces overshoot
+- **Settling time**: Affected by all three terms (P, I, D)
+- **Steady-state error**: Primarily eliminated by integral gain (Ki)
+
+By analyzing these parameters, we can systematically adjust PID gains to achieve the desired control behavior. For the basketball tracking robot, we typically aim for minimal overshoot and fast settling time to ensure smooth tracking.
+
+```python
+# Excerpt from response_analyzer.py
+def analyze_step_response(time_values, response_values, setpoint=1.0):
+    """Analyze step response and extract key metrics."""
+    results = {}
+    
+    # Calculate rise time (10% to 90%)
+    ten_percent = 0.1 * setpoint
+    ninety_percent = 0.9 * setpoint
+    
+    # Find indices where response crosses these thresholds
+    above_10 = np.where(response_values >= ten_percent)[0]
+    above_90 = np.where(response_values >= ninety_percent)[0]
+    
+    if len(above_10) > 0 and len(above_90) > 0:
+        t_10 = time_values[above_10[0]]
+        t_90 = time_values[above_90[0]]
+        results['rise_time'] = t_90 - t_10
+    else:
+        results['rise_time'] = None
+    
+    # Find maximum value for overshoot calculation
+    max_value = np.max(response_values)
+    results['overshoot'] = (max_value - setpoint) / setpoint * 100 if max_value > setpoint else 0
+    
+    # Additional metrics calculation
+    # ... (code continues)
+    
+    return results
+```
+
+## Frequency Response Analysis: Understanding Your System's Behavior
+
+### What Is Frequency Response Analysis?
+
+Frequency response analysis examines how your control system responds to inputs at different frequencies. It reveals important characteristics about system stability and responsiveness that aren't obvious from just looking at step responses.
+
+### Why Is This Important?
+
+This analysis provides several key insights:
+
+- **Identifies Resonance Points**: Shows where your system might amplify inputs, potentially causing oscillations
+- **Reveals Response Limits**: Determines how fast your system can accurately respond to changes
+- **Assesses Stability**: Measures how close your system is to becoming unstable
+- **Guides Controller Tuning**: Provides clear metrics for adjusting PID parameters effectively
+
+### How It Works
+
+1. **Apply Sine Wave Inputs**: Test the system with smooth sinusoidal commands at various frequencies (from slow to fast)
+
+2. **Measure Response Characteristics**: For each frequency, measure:
+   - **Gain**: The ratio of output amplitude to input amplitude
+   - **Phase Shift**: The time delay between input and output (expressed in degrees)
+
+3. **Create Bode Plots**: Graph both gain and phase shift versus frequency to visualize the system's response patterns
+
+4. **Analyze Key Indicators**:
+   - **Resonance**: Frequencies where gain increases (peaks in the gain plot)
+   - **Bandwidth**: The frequency range where the system responds effectively
+   - **Phase Margin**: How much stability buffer the system has (higher is better)
+
+### Technical Implementation
+
+You can write code to:
+
+1. Generating sine waves at different frequencies as test inputs
+2. Recording how the system responds to each input frequency
+3. Using Fourier transforms to calculate precise gain and phase values
+4. Building a complete frequency response profile from these measurements
+
+### Interpreting The Results
+
+From the frequency response data, you can determine:
+
+- Frequencies where gain exceeds 1.0, indicating potential instability
+- The phase margin, which should typically be at least 45° for good stability
+- The system's bandwidth, which sets the limit for tracking speed
+- Any resonant frequencies that might require additional damping
+
+For a basketball tracking robot, this analysis tells you whether your controller can track quick movements and direction changes without oscillating or lagging too far behind. It helps determine the optimal PID settings that balance responsiveness with stability.
+
+#### 3. Disturbance Response Testing
+
+Test how well your controller rejects disturbances:
+
+1. Allow the system to stabilize at setpoint
+2. Apply a known disturbance (e.g., pulse or step)
+3. Measure how quickly and effectively the controller recovers
+4. If recovery is slow or oscillatory, adjust Kp and Kd
+
+#### 4. Time Delay Compensation
+
+If your system has significant delays (common in robotics):
+
+1. **Measure the delay**: Use cross-correlation between commands and responses
+2. **Implement prediction**: Use motion prediction to compensate for delays
+3. **Reduce gains**: Lower all gains proportionally to the delay magnitude
+4. **Consider a Smith Predictor**: For systems with well-characterized delays
+
+```python
+# Simplified delay compensation example
+def compensate_for_delay(error_history, velocity, delay_seconds):
+    """Predict where error will be after the delay period."""
+    # Simple linear prediction based on current velocity
+    predicted_error = error_history[-1] + velocity * delay_seconds
+    return predicted_error
+```
+
+### Real-time PID Monitoring Tool
+
+We've developed a real-time monitoring tool that helps visualize PID behavior during operation. This tool is invaluable for debugging complex issues:
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#0277bd", "primaryTextColor": "#ffffff", "secondaryColor": "#7b1fa2", "secondaryTextColor": "#ffffff", "tertiaryColor": "#d32f2f", "tertiaryTextColor": "#ffffff"}}}%%
+graph TB
+    subgraph MonitoringTool["Real-time PID Monitoring Tool"]
+        direction LR
+        
+        subgraph Visualization["Visualization Panel"]
+            TimeGraph["Time-Domain Graph"]
+            FFTGraph["Frequency Analysis"]
+            Components["PID Component Breakdown"]
+        end
+        
+        subgraph Analysis["Analysis Tools"]
+            Metrics["Performance Metrics<br/>- Rise Time<br/>- Settling Time<br/>- Overshoot"]
+            Anomalies["Anomaly Detection"]
+            Suggestions["Tuning Suggestions"]
+        end
+        
+        subgraph Controls["Control Panel"]
+            Parameters["Parameter Adjustment"]
+            Testing["Step/Impulse Testing"]
+            Recording["Data Recording"]
+        end
+    end
+    
+    %% Enhanced styling for better readability
+    classDef mainTool fill:#f5f5f5,stroke:#263238,stroke-width:3px,rx:12,ry:12,color:#263238,font-weight:bold
+    
+    classDef visualPanel fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,rx:8,ry:8,color:#01579b,font-weight:bold
+    classDef analysisPanel fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,rx:8,ry:8,color:#4a148c,font-weight:bold
+    classDef controlPanel fill:#ffebee,stroke:#d32f2f,stroke-width:2px,rx:8,ry:8,color:#b71c1c,font-weight:bold
+    
+    classDef visualComp fill:#e1f5fe,stroke:#0288d1,stroke-width:1.5px,rx:4,ry:4,color:#01579b,font-weight:bold
+    classDef analysisComp fill:#f3e5f5,stroke:#9c27b0,stroke-width:1.5px,rx:4,ry:4,color:#4a148c,font-weight:bold
+    classDef controlComp fill:#ffebee,stroke:#e53935,stroke-width:1.5px,rx:4,ry:4,color:#b71c1c,font-weight:bold
+    
+    class MonitoringTool mainTool
+    class Visualization visualPanel
+    class Analysis analysisPanel
+    class Controls controlPanel
+    
+    class TimeGraph,FFTGraph,Components visualComp
+    class Metrics,Anomalies,Suggestions analysisComp
+    class Parameters,Testing,Recording controlComp
+```
+
+The monitoring tool can be launched with:
+
+```bash
+ros2 run ball_chase pid_monitor.py --controller /pid_controller --output-dir /path/to/logs
+```
+
+This tool has helped us identify subtle issues including:
+- Delayed sensor readings affecting controller performance
+- Unexpected mechanical resonances at specific frequencies
+- Integral windup during extended operation
+- Interference between multiple control loops
+
+<a name="visual-comparison"></a>
+## Visual Comparison of PID vs. Alternatives
+
+To fully understand the strengths and limitations of PID control, it's valuable to compare it with alternative control methods. This section provides visual comparisons of PID against other popular control approaches, highlighting key differences in behavior, complexity, and performance.
+
+### Response Comparison: Step Input
+
+Let's examine how different control methods respond to a simple step input (when the target suddenly changes position).
+
+#### 1. Understanding the Step Input
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph StepInputGraph["The Step Input"]
+        direction TB
+        Before["Before t=2s:<br>Target = 0.0m"] --> Change["At t=2s:<br>Sudden change"] --> After["After t=2s:<br>Target = 1.0m"]
+    end
+    
+    classDef stepStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Before,Change,After stepStyle
+```
+
+At t=2s, the target position suddenly changes from 0.0m to 1.0m. This step input tests how different controllers respond to abrupt changes.
+
+#### 2. PID Controller Response
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph PIDResponse["PID Controller Response"]
+        direction TB
+        Behavior["Behavior:<br>Fast rise, significant overshoot,<br>eventually settles at target"]
+        Values["Key Values:<br>t=4s: 1.18m (18% overshoot)<br>t=6s: 1.02m<br>t=8s: 1.00m (fully settled)"]
+    end
+    
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Behavior,Values pidStyle
+```
+
+The PID controller responds quickly with a fast rise time but overshoots the target by 18%. After some oscillation, it settles precisely at the target position by t=8s.
+
+#### 3. Model Predictive Control (MPC) Response
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph MPCResponse["Model Predictive Control Response"]
+        direction TB
+        Behavior["Behavior:<br>Slower, smoother rise<br>minimal overshoot"]
+        Values["Key Values:<br>t=4s: 0.82m (no overshoot)<br>t=6s: 0.98m<br>t=8s: 1.00m (fully settled)"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Behavior,Values mpcStyle
+```
+
+MPC takes a more conservative approach with a slower rise time but almost no overshoot. It gradually approaches the target and settles precisely by t=8s.
+
+#### 4. Linear Quadratic Regulator (LQR) Response
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph LQRResponse["Linear Quadratic Regulator Response"]
+        direction TB
+        Behavior["Behavior:<br>Balanced approach with<br>moderate rise and overshoot"]
+        Values["Key Values:<br>t=4s: 0.88m (slight overshoot)<br>t=6s: 0.98m<br>t=8s: 1.00m (fully settled)"]
+    end
+    
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Behavior,Values lqrStyle
+```
+
+LQR provides a balanced response with moderate rise time and slight overshoot. It finds a middle ground between speed and stability.
+
+#### 5. Fuzzy Logic Controller Response
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph FuzzyResponse["Fuzzy Logic Controller Response"]
+        direction TB
+        Behavior["Behavior:<br>Quick initial response but<br>never fully reaches target"]
+        Values["Key Values:<br>t=4s: 0.88m (no overshoot)<br>t=6s: 0.94m<br>t=8s: 0.96m (steady-state error)"]
+    end
+    
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Behavior,Values fuzzyStyle
+```
+
+Fuzzy Logic responds quickly at first but exhibits steady-state error, never quite reaching the target position. At t=8s, it settles at 0.96m, 4% below the target.
+
+#### 6. Controller Comparison Summary
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph ComparisonSummary["Controller Comparison Summary"]
+        direction TB
+        PID["PID: Fast with overshoot<br>Best for general applications"]
+        MPC["MPC: Smooth with minimal overshoot<br>Best for constrained systems"]
+        LQR["LQR: Balanced performance<br>Best for well-modeled systems"]
+        Fuzzy["Fuzzy Logic: Fast initial response<br>Best for handling nonlinearities"]
+    end
+    
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class PID pidStyle
+    class MPC mpcStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+```
+
+**Choosing a Controller:**
+
+For the basketball tracking robot, the choice depends on your priorities:
+- For responsive tracking with acceptable overshoot → **PID Controller**
+- For smooth approach with minimal overshoot → **Model Predictive Control**
+- For balanced performance with known system model → **Linear Quadratic Regulator**
+- For handling nonlinear behavior with expert knowledge → **Fuzzy Logic Controller**
+
+The optimal choice for most tracking applications is typically a well-tuned PID controller or MPC system, depending on computational resources available.
+
+<em>Response of different controllers to a step change in target position</em>
+
+**Key Observations:**
+1. **PID Controller**: Fast rise time with some overshoot and oscillation before settling
+2. **Model Predictive Control (MPC)**: Smoother approach to setpoint with minimal overshoot
+3. **Linear Quadratic Regulator (LQR)**: Optimized balance between quick response and minimal oscillation
+4. **Fuzzy Logic Controller**: Gentle approach with minimal overshoot but slower rise time
+5. **Pure P Controller**: Quick initial response but never eliminates steady-state error
+
+### Response Comparison: Tracking Moving Target
+
+Let's examine how different controllers perform when tracking a continuously moving target, like a basketball in motion.
+
+#### 1. Understanding the Target Motion Pattern
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph TargetMotion["Target Motion Pattern"]
+        direction TB
+        Phase1["Phase 1<br>Rising<br>(0.4m → 1.0m)<br>t=0s to t=3s"] --> 
+        Phase2["Phase 2<br>Falling<br>(1.0m → 0.4m)<br>t=3s to t=6s"] --> 
+        Phase3["Phase 3<br>Rising Again<br>(0.4m → 0.8m)<br>t=6s to t=8s"]
+    end
+    
+    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Phase1,Phase2,Phase3 targetStyle
+```
+
+The target follows a continuous motion pattern with three distinct phases: first rising, then falling, then rising again. This tests how well each controller can adapt to changing directions.
+
+#### 2. Model Predictive Control (MPC) Performance
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#2196f3", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph MPCPerformance["Model Predictive Control Performance"]
+        direction TB
+        Tracking["Tracking Performance:<br>Excellent (avg. error: 0.05m)"]
+        Behavior["Key Behavior:<br>Anticipates target movement<br>Minimal lag even during direction changes"]
+        Values["Key Position Values:<br>t=2s: 0.75m (target: 0.8m)<br>t=4s: 0.82m (target: 0.8m)<br>t=6s: 0.45m (target: 0.4m)"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Tracking,Behavior,Values mpcStyle
+```
+
+MPC shows excellent tracking performance because it predicts the target's future position based on its trajectory model. It stays consistently close to the target, even during direction changes.
+
+#### 3. PID Controller Performance
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#f44336", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph PIDPerformance["PID Controller Performance"]
+        direction TB
+        Tracking["Tracking Performance:<br>Good (avg. error: 0.08m)"]
+        Behavior["Key Behavior:<br>Responsive but follows rather than predicts<br>Small but consistent lag"]
+        Values["Key Position Values:<br>t=2s: 0.72m (target: 0.8m)<br>t=4s: 0.79m (target: 0.8m)<br>t=6s: 0.42m (target: 0.4m)"]
+    end
+    
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Tracking,Behavior,Values pidStyle
+```
+
+The PID controller shows good tracking performance with a slight lag. It reacts to errors effectively but follows rather than predicts movement, resulting in a small delay especially during direction changes.
+
+#### 4. Linear Quadratic Regulator (LQR) Performance
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#9c27b0", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph LQRPerformance["Linear Quadratic Regulator Performance"]
+        direction TB
+        Tracking["Tracking Performance:<br>Moderate (avg. error: 0.12m)"]
+        Behavior["Key Behavior:<br>Balanced performance<br>Moderate lag during direction changes"]
+        Values["Key Position Values:<br>t=2s: 0.68m (target: 0.8m)<br>t=4s: 0.74m (target: 0.8m)<br>t=6s: 0.48m (target: 0.4m)"]
+    end
+    
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Tracking,Behavior,Values lqrStyle
+```
+
+LQR offers moderate tracking performance with balanced responsiveness. It shows more lag than MPC or PID, especially during rapid direction changes.
+
+#### 5. Fuzzy Logic Controller Performance
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#ff9800", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph FuzzyPerformance["Fuzzy Logic Controller Performance"]
+        direction TB
+        Tracking["Tracking Performance:<br>Fair (avg. error: 0.2m)"]
+        Behavior["Key Behavior:<br>Significant lag<br>Struggles with rapid direction changes"]
+        Values["Key Position Values:<br>t=2s: 0.6m (target: 0.8m)<br>t=4s: 0.65m (target: 0.8m)<br>t=6s: 0.45m (target: 0.4m)"]
+    end
+    
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Tracking,Behavior,Values fuzzyStyle
+```
+
+The Fuzzy Logic controller shows the largest tracking error, with significant lag especially during direction changes. It struggles to keep up with the target's movement.
+
+#### 6. Controller Comparison Summary
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph Comparison["Tracking Performance Comparison"]
+        direction LR
+        MPC["MPC:<br>Best overall<br>Anticipates movement"]
+        PID["PID:<br>Good tracking<br>Small consistent lag"]
+        LQR["LQR:<br>Moderate tracking<br>Balanced performance"]
+        Fuzzy["Fuzzy Logic:<br>Largest lag<br>Direction change issues"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class MPC mpcStyle
+    class PID pidStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+```
+
+**Practical Application for Basketball Tracking:**
+
+For a basketball tracking robot, the choice of controller depends on your priorities:
+
+1. **If computational resources allow** → Choose **Model Predictive Control (MPC)** for best tracking performance, especially when the ball makes unpredictable movements
+
+2. **For a good balance of performance and simplicity** → Use a well-tuned **PID Controller** that can effectively track with minimal lag
+
+3. **When working with a well-understood system model** → **Linear Quadratic Regulator (LQR)** provides reliable performance
+
+4. **When dealing with highly nonlinear dynamics** → **Fuzzy Logic** may be appropriate, but expect more tracking lag
+
+The performance gap between controllers becomes most apparent during rapid direction changes, which are common in basketball movement.
+
+### Disturbance Rejection Comparison
+
+Let's examine how different controllers respond when faced with external disturbances.
+
+#### 1. Understanding Disturbances in Control Systems
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph DisturbanceExplained["What Are External Disturbances?"]
+        direction TB
+        Definition["Unexpected forces that<br>push system away from target"]
+        Examples["Examples:<br>• Physical bump to robot<br>• Wind/air resistance<br>• Surface friction changes<br>• Sensor errors"]
+        DistEvents["In this test:<br>• First disturbance at t=2s<br>• Second disturbance at t=5s"]
+    end
+    
+    classDef distStyle fill:#607d8b,stroke:#263238,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Definition,Examples,DistEvents distStyle
+```
+
+External disturbances are unexpected forces that push the system away from its target position. For a basketball tracking robot, this could be bumping into an obstacle, wheel slippage, or the ball being knocked away.
+
+#### 2. Target Position (Desired State)
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px", "primaryColor": "#4caf50", "primaryTextColor": "#ffffff"}}}%%
+flowchart LR
+    subgraph TargetState["Target Position"]
+        direction TB
+        Description["Desired position remains<br>constant at 1.0 meters"]
+        Ideal["Ideal controller would:<br>• Maintain this position<br>• Quickly return after disturbance<br>• Minimize oscillation"]
+    end
+    
+    classDef targetStyle fill:#4caf50,stroke:#2e7d32,stroke-width:2px,color:#ffffff,font-weight:bold
+    class Description,Ideal targetStyle
+```
+
+The target position remains constant at 1.0 meters throughout the test. The goal of each controller is to maintain this position despite disturbances.
+
+#### 3. Response to First Disturbance (t=2s)
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph FirstDisturbance["Response to First Disturbance at t=2s"]
+        direction LR
+        MPC["MPC:<br>Drops to 0.8m<br>Recovers by t=4s"]
+        PID["PID Controller:<br>Drops to 0.7m<br>Overshoots to 1.05m"]
+        LQR["LQR:<br>Drops to 0.75m<br>Recovers smoothly"]
+        Fuzzy["Fuzzy Logic:<br>Drops to 0.85m<br>Slow recovery"]
+        PureP["Pure P Controller:<br>Drops to 0.75m<br>Never fully recovers"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pureStyle fill:#795548,stroke:#3e2723,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class MPC mpcStyle
+    class PID pidStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+    class PureP pureStyle
+```
+
+After the first disturbance at t=2s, each controller responds differently. The MPC and PID controllers recover most completely, while the Pure P controller never fully returns to the target position.
+
+#### 4. Response to Second Disturbance (t=5s)
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+    subgraph SecondDisturbance["Response to Second Disturbance at t=5s"]
+        direction LR
+        MPC["MPC:<br>Drops to 0.85m<br>Recovers to 0.99m"]
+        PID["PID Controller:<br>Drops to 0.8m<br>Recovers to 1.0m"]
+        LQR["LQR:<br>Drops to 0.8m<br>Recovers to 0.98m"]
+        Fuzzy["Fuzzy Logic:<br>Drops to 0.75m<br>Recovers to 0.91m"]
+        PureP["Pure P Controller:<br>Drops to 0.7m<br>Settles at 0.8m"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pureStyle fill:#795548,stroke:#3e2723,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class MPC mpcStyle
+    class PID pidStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+    class PureP pureStyle
+```
+
+The second disturbance at t=5s reveals more about each controller's recovery capabilities. The PID controller achieves the most complete recovery, while the Pure P controller exhibits significant steady-state error.
+
+#### 5. Recovery Time Comparison
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"fontSize": "16px"}}}%%
+flowchart LR
+    subgraph RecoveryTime["Time to Recover Within 95% of Target"]
+        direction TB
+        MPC["MPC: 2.0s"]
+        PID["PID: 2.5s"]
+        LQR["LQR: 2.2s"]
+        Fuzzy["Fuzzy Logic: 3.0s"]
+        PureP["Pure P: Never fully recovers"]
+    end
+    
+    classDef mpcStyle fill:#2196f3,stroke:#0d47a1,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pidStyle fill:#f44336,stroke:#b71c1c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef lqrStyle fill:#9c27b0,stroke:#4a148c,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef fuzzyStyle fill:#ff9800,stroke:#e65100,stroke-width:2px,color:#ffffff,font-weight:bold
+    classDef pureStyle fill:#795548,stroke:#3e2723,stroke-width:2px,color:#ffffff,font-weight:bold
+    
+    class MPC mpcStyle
+    class PID pidStyle
+    class LQR lqrStyle
+    class Fuzzy fuzzyStyle
+    class PureP pureStyle
+```
+
+This diagram shows how quickly each controller returns to within 95% of the target position after a disturbance. MPC has the fastest recovery time, while Pure P never fully recovers.
+
+#### 6. Overall Disturbance Rejection Capability
+
+### Recovery Time Comparison
+
+The following diagram compares how quickly different controllers recover from disturbances:
+
+**Controller Recovery Performance:**
+
+| Controller Type | Recovery Time | Key Characteristics |
+|-----------------|---------------|---------------------|
+| **Model Predictive Control (MPC)** | 2.0 seconds | Fastest recovery due to predictive capabilities |
+| **Linear Quadratic Regulator (LQR)** | 2.2 seconds | Quick recovery with optimized control effort |
+| **PID Controller** | 2.5 seconds | Solid recovery with some oscillation |
+| **Fuzzy Logic Controller** | 3.0 seconds | Slower recovery but smooth approach |
+| **Pure P Controller** | Never fully recovers | Maintains permanent offset from target |
+
+The recovery time measures how long it takes for each controller to return within 95% of the target position after experiencing a disturbance. This is a critical metric for robots that need to maintain precise positioning despite external forces.
+
+For a basketball tracking robot, faster recovery times translate to more reliable tracking when the robot encounters obstacles or when the ball trajectory changes unexpectedly.
+
+
+PID Controller - Ranked first for its excellent combination of recovery completeness and stability
+Model Predictive Control (MPC) - Second place with fast recovery and minimal oscillation
+Linear Quadratic Regulator (LQR) - Third place with a good balance of stability and recovery
+Fuzzy Logic - Fourth place with moderate recovery but some residual error
+Pure P Controller - Ranked last due to poor recovery with permanent offset from the target
+
+Each controller is represented in a purple box with white text, ordered vertically to show their ranking from best (top) to worst (bottom).
+
+**Position Values for Each Controller (meters):**
+
+| Time | Target | MPC | PID | LQR | Fuzzy | Pure P |
+|------|--------|-----|-----|-----|-------|--------|
+| 0s   | 1.0    | 1.0 | 1.0 | 1.0 | 1.0   | 1.0    |
+| 2s   | 1.0    | 0.8 | 0.7 | 0.75| 0.85  | 0.75   |
+| 3s   | 1.0    | 0.92| 0.85| 0.85| 0.88  | 0.82   |
+| 4s   | 1.0    | 0.98| 1.05| 0.95| 0.92  | 0.86   |
+| 5s   | 1.0    | 0.85| 0.8 | 0.8 | 0.75  | 0.7    |
+| 6s   | 1.0    | 0.92| 0.9 | 0.88| 0.82  | 0.75   |
+| 7s   | 1.0    | 0.97| 0.97| 0.94| 0.87  | 0.78   |
+| 8s   | 1.0    | 0.99| 1.0 | 0.98| 0.91  | 0.8    |
+
+**Implications for Basketball Tracking Robot:**
+
+For a basketball tracking robot that might encounter disturbances (like bumping into players or the ball being knocked away):
+
+1. **PID Controller** offers the best overall disturbance rejection, recovering completely with acceptable oscillation
+2. **MPC** provides fast recovery with minimal oscillation but at higher computational cost
+3. **LQR** gives good balanced performance with predictable behavior
+4. **Fuzzy Logic** may be suitable when some position error is acceptable
+5. **Pure P Controller** should be avoided when disturbance rejection is important
+
+The integral component (I) of the PID controller is especially important for eliminating steady-state error after disturbances, which explains why the Pure P controller (lacking this component) performs poorly in this test.
+
+<em>Response to external disturbances at t=2s and t=5s</em>
+
+**Key Observations:**
+1. **PID Controller**: Quickly responds to disturbances but with some oscillation
+2. **Model Predictive Control (MPC)**: Excellent disturbance rejection with minimal oscillation
+3. **Linear Quadratic Regulator (LQR)**: Good rejection with well-damped response
+4. **Fuzzy Logic Controller**: Slower to reject disturbances but with minimal oscillation
+5. **Pure P Controller**: Never fully recovers from persistent disturbances
+
+### Controller Comparison Table
+
+| Control Method | Strengths | Limitations | Computational Complexity | Model Dependency | 
+|----------------|-----------|-------------|-------------------------|------------------|
+| **PID** | Simple implementation<br>Minimal computational requirements<br>Good general performance<br>No system model needed | Limited predictive capability<br>Tuning can be challenging<br>Sub-optimal for complex dynamics | Very Low | None |
+| **Model Predictive Control (MPC)** | Excellent tracking performance<br>Can handle constraints<br>Predictive capability<br>Optimal control strategy | High computational requirements<br>Requires accurate system model<br>Complex implementation | High | High |
+| **Linear Quadratic Regulator (LQR)** | Optimal for linear systems<br>Robust performance<br>Well-established theory | Requires system model<br>Limited constraint handling<br>Primarily for linear systems | Medium | Medium-High |
+| **Fuzzy Logic Control** | Works well with nonlinear systems<br>Intuitive rule-based approach<br>No precise model needed | Difficult to prove stability<br>Rule generation can be complex<br>Limited optimality | Medium | Low |
+| **Pure P Control** | Simplest implementation<br>Minimal computation<br>No risk of instability | Cannot eliminate steady-state error<br>Limited performance<br>Slow response to small errors | Very Low | None |
+
+### Computational Requirements Visualization
+
+This chart compares the computational resources required by each control method, relative to PID control:
+
+```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"lineColor": "#333333", "textColor": "#333333", "labelTextColor": "#000000", "labelColor": "#000000", "fontSize": "16px", "primaryColor": "#1976d2", "primaryTextColor": "#ffffff", "secondaryColor": "#7b1fa2", "secondaryTextColor": "#ffffff", "tertiaryColor": "#388e3c", "tertiaryTextColor": "#ffffff"}}}%%
+graph TD
+    subgraph Resources["Computational Resources Required"]
+        direction LR
+        CPU[CPU Usage]
+        Memory[Memory Usage]
+        Complexity[Implementation Complexity]
+    end
+    
+    subgraph Methods["Control Methods"]
+        direction LR
+        PID[PID Control]
+        MPC[Model Predictive Control]
+        LQR[Linear Quadratic Regulator]
+        FUZZY[Fuzzy Logic Control]
+        PureP[Pure P Control]
+    end
+    
+    PID --- CPU1["⭐"]
+    PID --- Memory1["⭐"]
+    PID --- Complex1["⭐⭐"]
+    
+    MPC --- CPU2["⭐⭐⭐⭐⭐"]
+    MPC --- Memory2["⭐⭐⭐⭐"]
+    MPC --- Complex2["⭐⭐⭐⭐⭐"]
+    
+    LQR --- CPU3["⭐⭐⭐"]
+    LQR --- Memory3["⭐⭐"]
+    LQR --- Complex3["⭐⭐⭐"]
+    
+    FUZZY --- CPU4["⭐⭐"]
+    FUZZY --- Memory4["⭐⭐"]
+    FUZZY --- Complex4["⭐⭐⭐"]
+    
+    PureP --- CPU5["⭐"]
+    PureP --- Memory5["⭐"]
+    PureP --- Complex5["⭐"]
+    
+    %% Enhanced styling for better readability
+    classDef resourceGroup fill:#e3f2fd,stroke:#1976d2,stroke-width:3px,rx:8,ry:8,color:#0d47a1,font-weight:bold
+    classDef methodGroup fill:#f3e5f5,stroke:#7b1fa2,stroke-width:3px,rx:8,ry:8,color:#4a148c,font-weight:bold
+    
+    classDef resourceLabels fill:#e3f2fd,stroke:#1976d2,stroke-width:1.5px,rx:4,ry:4,color:#0d47a1,font-weight:bold
+    classDef methodNodes fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1.5px,rx:4,ry:4,color:#4a148c,font-weight:bold
+    
+    classDef starLow fill:#e8f5e9,stroke:#43a047,stroke-width:1px,color:#2e7d32,font-weight:bold,font-size:18px
+    classDef starMed fill:#fff9c4,stroke:#fbc02d,stroke-width:1px,color:#f57f17,font-weight:bold,font-size:18px
+    classDef starHigh fill:#ffebee,stroke:#e53935,stroke-width:1px,color:#c62828,font-weight:bold,font-size:18px
+    
+    class Resources resourceGroup
+    class Methods methodGroup
+    
+    class CPU,Memory,Complexity resourceLabels
+    class PID,MPC,LQR,FUZZY,PureP methodNodes
+    
+    class CPU1,Memory1,Memory3,Memory4,Memory5,CPU5,Complex5 starLow
+    class CPU3,CPU4,Complex1,Complex4,Complex3 starMed
+    class CPU2,Memory2,Complex2 starHigh
+```
+
+<em>Relative computational requirements (★ = low, ★★★★★ = high)</em>
+
+### When to Choose PID vs. Alternatives
+
+#### Choose PID Control When:
+- You need a simple, reliable solution with minimal computational requirements
+- A system model is unavailable or difficult to obtain
+- The system dynamics are relatively simple or well-behaved
+- You need an easy-to-understand and tune algorithm
+- You're operating on hardware with limited processing power (like the Raspberry Pi 5)
+
+#### Consider Alternatives When:
+- **Model Predictive Control (MPC)**: You need to handle constraints explicitly, optimize multiple objectives, or have complex dynamics where prediction is critical
+- **Linear Quadratic Regulator (LQR)**: You have an accurate linear model and need optimal control for a well-defined quadratic cost function
+- **Fuzzy Logic Control**: You're dealing with highly nonlinear systems and have expert knowledge that can be translated into rules
+- **Reinforcement Learning Control**: You have complex, difficult-to-model dynamics and sufficient training data/time
+
+### Why We Chose Enhanced PID for Our Basketball Tracking Robot
+
+For our basketball tracking robot, we selected an enhanced PID approach because:
+
+1. **Resource Constraints**: The Raspberry Pi 5 has limited computational resources compared to a workstation PC
+2. **Realtime Requirements**: Control decisions must be made quickly (processing overhead of MPC would be problematic)
+3. **Adaptability**: Our enhanced PID implementation with adaptive gains provides many benefits of more complex controllers
+4. **Implementation Simplicity**: The codebase remains relatively easy to understand and modify
+5. **Robustness**: PID control is well-proven and robust against model uncertainties
+
+By enhancing standard PID with features like adaptive gains, zero-crossing handling, and strategy-based movement selection, we achieved performance comparable to more complex controllers while maintaining the simplicity and efficiency of PID.
+
+<a name="glossary"></a>
+## Glossary
+
+**Adaptive Gain**: PID gain values that automatically adjust based on system conditions.
+
+**Anti-Windup**: Techniques to prevent integral windup, where the integral term becomes too large.
+
+**Control Loop**: The continuous cycle of measuring, calculating, and adjusting in a control system.
+
+**Damping**: Reduction of oscillations in a system's response.
+
+**Deadband**: A small range around zero where errors are ignored to prevent tiny corrections.
+
+**Derivative Kick**: Sudden spike in the derivative term caused by a setpoint change.
+
+**Error**: The difference between the desired setpoint and the measured value.
+
+**Fusion Rate**: The rate at which data from multiple sensors is combined.
+
+**Integral Windup**: When the integral term accumulates too much error, causing overshoot.
+
+**Oscillation**: Repeated back-and-forth movement around a target position.
+
+**Overshoot**: When the system exceeds the target value before settling.
+
+**PID Controller**: A control mechanism that uses Proportional, Integral, and Derivative terms.
+
+**Rise Time**: The time it takes for the system to reach the target from its initial position.
+
+**Setpoint**: The desired target value for the system.
+
+**Settling Time**: The time required for the system to reach and stay within a certain range of the target.
+
+**Steady-State Error**: Persistent error that remains after the system has settled.
+
+**Strategy Blending**: Technique for smoothly transitioning between different control strategies.
+
+**Zero-Crossing**: When the error changes sign (from positive to negative or vice versa).
 
 <a name="further-reading"></a>
 ### 12.2 Further Reading
