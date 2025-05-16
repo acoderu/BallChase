@@ -18,82 +18,6 @@
 - **Ready-To-Use Implementation**: Practical, working code that runs on resource-constrained hardware (Raspberry Pi 5)
 - **Deep Understanding**: Progress from basic concepts to advanced techniques with clear explanations
 
-## Quick Start
-
-Get up and running in minutes with this simple launch configuration:
-
-```yaml
-# /path/to/your/quick_start_pid.yaml
-pid_controller:
-  # Basic PID parameters for basketball tracking
-  linear_x:
-    kp: 0.7    # Proportional gain
-    ki: 0.15   # Integral gain
-    kd: 0.35   # Derivative gain
-    windup_limit: 0.8
-  linear_y:
-    kp: 0.7
-    ki: 0.15
-    kd: 0.35
-    windup_limit: 0.8
-  angular_z:
-    kp: 0.6
-    ki: 0.08
-    kd: 0.3
-    windup_limit: 0.5
-    
-  # Safe velocity limits
-  max_velocity:
-    linear: 0.5   # m/s
-    angular: 0.8  # rad/s
-```
-
-Launch the system with a single command:
-
-```bash
-ros2 launch ball_chase ball_chase.launch.py config_file:=/path/to/your/quick_start_pid.yaml
-```
-
-After launching, you can visualize performance in RViz:
-
-```bash
-ros2 run rviz2 rviz2 -d $(ros2 pkg prefix ball_chase)/share/ball_chase/config/pid_visualization.rviz
-```
-
-## PID Tuning Cheat Sheet
-
-<details>
-<summary>Click to expand the PID tuning workflow</summary>
-
-### Basic PID Tuning Workflow
-
-1. **Start with zeros**: Set Ki and Kd to 0
-2. **Tune Kp**: Increase Kp until system responds quickly but oscillates
-3. **Add damping**: Increase Kd until oscillations reduce
-4. **Eliminate steady-state error**: Add small Ki to eliminate remaining error
-5. **Fine-tune**: Make small adjustments to all parameters
-
-### Parameter Effects
-
-| Parameter | Units | Increase Effect | Decrease Effect | Signs of Too High |
-|-----------|-------|-----------------|-----------------|-------------------|
-| Kp | 1/s | Faster response | Slower response | Oscillation |
-| Ki | 1/s² | Eliminates steady-state error | Persistent error | Overshoot, instability |
-| Kd | s | Reduces overshoot | More overshoot | Noise sensitivity, jerky motion |
-
-*Note: Typical Kp values range from 0.5-2.0, Ki from 0.05-0.5, and Kd from 0.1-1.0 for this system*
-
-### Quick Tips
-
-- **Oscillating?** → Decrease Kp, increase Kd
-- **Slow to reach target?** → Increase Kp
-- **Never quite reaches target?** → Increase Ki
-- **Overshooting?** → Increase Kd, decrease Kp
-- **Jerky movement?** → Decrease Kd, apply filtering
-
-[Download full PID Tuning Guide PDF](https://docs.claude.ai/pid-tuning-guide.pdf)
-
-</details>
 
 <a name="table-of-contents"></a>
 ## Table of Contents
@@ -3873,6 +3797,39 @@ The principles and techniques described in this document apply not only to baske
 
 <a name="debugging-walkthrough"></a>
 ## Practical Debugging and Tuning Guide
+
+## PID Tuning Cheat Sheet
+
+<details>
+<summary>Click to expand the PID tuning workflow</summary>
+
+### Basic PID Tuning Workflow
+
+1. **Start with zeros**: Set Ki and Kd to 0
+2. **Tune Kp**: Increase Kp until system responds quickly but oscillates
+3. **Add damping**: Increase Kd until oscillations reduce
+4. **Eliminate steady-state error**: Add small Ki to eliminate remaining error
+5. **Fine-tune**: Make small adjustments to all parameters
+
+### Parameter Effects
+
+| Parameter | Units | Increase Effect | Decrease Effect | Signs of Too High |
+|-----------|-------|-----------------|-----------------|-------------------|
+| Kp | 1/s | Faster response | Slower response | Oscillation |
+| Ki | 1/s² | Eliminates steady-state error | Persistent error | Overshoot, instability |
+| Kd | s | Reduces overshoot | More overshoot | Noise sensitivity, jerky motion |
+
+*Note: Typical Kp values range from 0.5-2.0, Ki from 0.05-0.5, and Kd from 0.1-1.0 for this system*
+
+### Quick Tips
+
+- **Oscillating?** → Decrease Kp, increase Kd
+- **Slow to reach target?** → Increase Kp
+- **Never quite reaches target?** → Increase Ki
+- **Overshooting?** → Increase Kd, decrease Kp
+- **Jerky movement?** → Decrease Kd, apply filtering
+
+</details>
 
 Understanding how to systematically tune, troubleshoot, and debug PID controllers is an essential skill for robotics engineers. This comprehensive guide walks through structured PID tuning methodologies, common troubleshooting techniques, and a detailed real-world case study from our basketball tracking robot.
 
