@@ -3118,55 +3118,106 @@ While invisible to your code, this protocol creates significant overhead:
    What should be a 100ns operation becomes 200-300ns due to coherency overhead!
 
 ```
-┌───── Cache Line Ping-Pong ─────┐
-│                                │
-│  Time →                        │
-│                                │
-│  Core 0    │ Core 1            │
-│  ┌─────────┴─────────┐         │
-│  │ ┌───────────────┐ │         │
-│  │ │ Shared Data:  │ │         │
-│  │ │ Cache Line X  │ │         │
-│  │ └───────────────┘ │         │
-│  │ Process A writes  │         │
-│  │ to shared data    │         │
-│  └───────────────────┘         │
-│            │                   │
-│            ▼                   │
-│  ┌───────────────────┐         │
-│  │ Coherency Protocol│         │
-│  │ Invalidates Line X│         │
-│  │ on Core 1         │         │
-│  └───────────────────┘         │
-│            │                   │
-│            ▼                   │
-│  Core 0    │ Core 1            │
-│            │ ┌───────────────┐ │
-│            │ │ Process B     │ │
-│            │ │ reads shared  │ │
-│            │ │ data - MISS!  │ │
-│            │ └───────────────┘ │
-│            │         │         │
-│            │         ▼         │
-│            │ ┌───────────────┐ │
-│            │ │Cache line X   │ │
-│            │ │transferred    │ │
-│            │ │from Core 0    │ │
-│            │ └───────────────┘ │
-│            │                   │
-│           ...                  │
-│            │                   │
-│            ▼                   │
-│  Core 0    │ Core 1            │
-│  ┌─────────┴─────────┐         │
-│  │ ┌───────────────┐ │         │
-│  │ │ Process A     │ │         │
-│  │ │ writes again  │ │         │
-│  │ │ - PING PONG!  │ │         │
-│  │ └───────────────┘ │         │
-│  └───────────────────┘         │
-│                                │
-└────────────────────────────────┘
+┌───────────────────────────────── CACHE LINE PING-PONG EFFECT ─────────────────────────────────┐
+│                                                                                                │
+│      🔄 Shared variable (int x) resides in a single cache line that moves between cores       │
+│                                                                                                │
+│  TIME    │     CORE 0 (CPU 0)           │       BUS ACTIVITY        │     CORE 1 (CPU 1)      │
+│  ────────┼────────────────────────────┼────────────────────────────┼──────────────────────────│
+│          │                            │                            │                          │
+│    T₁    │  Process A writes x = 5    │                            │                          │
+│          │  • Cache line X: MODIFIED  │                            │  • No local copy of x    │
+│          │  • Local value: x = 5      │                            │                          │
+│          │                            │                            │                          │
+│    T₂    │                            │  Core 1 requests value x   │  Process B needs to      │
+│          │                            │  ◀─────────────────────────┤  read x                  │
+│          │                            │                            │                          │
+│    T₃    │  • Core 0 responds         │  Core 0 sends data to      │                          │
+│          │  • Must flush to memory    │  Core 1 and/or memory      │                          │
+│          │  • State changes to SHARED │  ─────────────────────────▶│                          │
+│          │                            │                            │                          │
+│    T₄    │  • Cache line X: SHARED    │                            │  • Cache line X: SHARED  │
+│          │  • Local value: x = 5      │                            │  • Local value: x = 5    │
+│          │                            │                            │  • Process B reads x = 5 │
+│          │                            │                            │                          │
+│    T₅    │                            │                            │  Process B writes x = 10 │
+│          │                            │                            │                          │
+│    T₆    │                            │  Core 1 broadcasts         │                          │
+│          │                            │  invalidation message      │                          │
+│          │                            │  ◀─────────────────────────┤                          │
+│          │                            │                            │                          │
+│    T₇    │  • Cache line X:           │                            │  • Cache line X: MODIFIED│
+│          │    INVALID                 │                            │  • Local value: x = 10   │
+│          │  • Local copy invalidated  │                            │                          │
+│          │                            │                            │                          │
+│    T₈    │  Process A reads x         │                            │                          │
+│          │  • Cache miss! X is invalid│                            │                          │
+│          │                            │                            │                          │
+│    T₉    │                            │  Core 0 requests           │                          │
+│          │                            │  updated value of x        │                          │
+│          │                            │  ─────────────────────────▶│                          │
+│          │                            │                            │                          │
+│    T₁₀   │                            │  Core 1 responds with      │  • Core 1 responds       │
+│          │                            │  data for x                │  • Must flush to memory  │
+│          │                            │  ◀─────────────────────────┤  • State changes to SHARED│
+│          │                            │                            │                          │
+│    T₁₁   │  • Cache line X: SHARED    │                            │  • Cache line X: SHARED  │
+│          │  • Local value: x = 10     │                            │  • Local value: x = 10   │
+│          │  • Process A reads x = 10  │                            │                          │
+│          │                            │                            │                          │
+│    T₁₂   │  Process A writes x = 15   │                            │                          │
+│          │                            │                            │                          │
+│    T₁₃   │                            │  Core 0 broadcasts         │                          │
+│          │                            │  invalidation message      │                          │
+│          │                            │  ─────────────────────────▶│                          │
+│          │                            │                            │                          │
+│    T₁₄   │  • Cache line X: MODIFIED  │                            │  • Cache line X: INVALID │
+│          │  • Local value: x = 15     │                            │  • Local copy invalidated│
+│          │                            │                            │                          │
+│    T₁₅   │                            │                            │  Process B reads x       │
+│          │                            │                            │  • Cache miss! X is invalid│
+│          │                            │                            │                          │
+│          │                            │        🔄 PING-PONG CYCLE CONTINUES...                │
+│                                                                                                │
+├────────────────────────────── CACHE COHERENCY PROTOCOL (MESI) ───────────────────────────────┤
+│                                                                                                │
+│  STATES:                                                                                       │
+│  • MODIFIED (M): Cache line is modified locally. Only this core has a valid copy.              │
+│                 Any reads/writes from other cores require this core to respond.                │
+│                                                                                                │
+│  • EXCLUSIVE (E): Cache line is unmodified but exclusive to this core.                         │
+│                  Can be modified without bus notification.                                     │
+│                                                                                                │
+│  • SHARED (S): Cache line is unmodified and may exist in other cores.                          │
+│                Multiple cores can read simultaneously, but writes require invalidation.        │
+│                                                                                                │
+│  • INVALID (I): Cache line is invalid and must be fetched from memory or another core.         │
+│                                                                                                │
+│  TRANSITIONS:                                                                                  │
+│  1. Local read miss → Request data from memory or other caches → Move to S or E state          │
+│  2. Local write to M/E → No bus activity (already exclusive) → Stay in M state                 │
+│  3. Local write to S → Broadcast invalidation → Move to M state                               │
+│  4. Local write to I → Request ownership → Move to M state                                    │
+│  5. Remote read to M → Provide data → Move to S state                                         │
+│  6. Remote write to M/E/S → Invalidate local copy → Move to I state                           │
+│                                                                                                │
+├────────────────────────────── PERFORMANCE IMPACT & SOLUTIONS ───────────────────────────────┤
+│                                                                                                │
+│  PROBLEMS:                                                                                     │
+│  • Each write by one core causes invalidation in other cores                                   │
+│  • High latency: 100-300+ cycles for inter-core cache line transfers                           │
+│  • Wasted memory bandwidth on transferring the same cache line repeatedly                      │
+│  • Serializes execution even when logical parallelism exists                                   │
+│                                                                                                │
+│  SOLUTIONS:                                                                                    │
+│  • Padding: Place variables on separate cache lines                                            │
+│  • Thread affinity: Schedule related work on the same core                                     │
+│  • False sharing prevention: Arrange data structures to minimize sharing                       │
+│  • Reduce contention: Use atomic operations or higher-level synchronization                    │
+│  • Use thread-local storage where possible                                                     │
+│  • Batch operations to amortize coherency overhead                                             │
+│                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 *Figure 33: Visualization of the cache line ping-pong effect showing how shared data causes costly cache coherency traffic between cores.*
 
