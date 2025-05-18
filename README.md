@@ -814,62 +814,62 @@ At the heart of the fusion system lies an Extended Kalman Filter (EKF), a recurs
 ascii
 ┌─────────────────────── Extended Kalman Filter Operation (Detailed Calculations) ───────────────────────┐
 │                                                                                                        │
-│ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ Prediction Step ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
+│ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ Prediction Step ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│
 │                                                                                                        │
-│  Previous State Estimate (x̂ₖ₋₁)  ───►┌─────┐───► Predicted State (x̂ₖ|ₖ₋₁)                                  │
-│  (Input from last cycle)             │  f  │     (x̂ₖ|ₖ₋₁ = f(x̂ₖ₋₁))                                        │
-│                                      │     │     (f: non-linear state transition model)                 │
-│                                      └─────┘     (Output: Prior state estimate for current cycle)       │
+│  Previous State Estimate (x̂ₖ₋₁)  ───►┌─────┐───► Predicted State (x̂ₖ|ₖ₋₁)                               │
+│  (Input from last cycle)             │  f  │     (x̂ₖ|ₖ₋₁ = f(x̂ₖ₋₁))                                     │
+│                                      │     │     (f: non-linear state transition model)                │
+│                                      └─────┘     (Output: Prior state estimate for current cycle)      │
 │                                                                                                        │
-│  Previous Uncertainty (Pₖ₋₁)─────►┌───────────────────────────┐───► Predicted Uncertainty (Pₖ|ₖ₋₁)        │
-│  (Input from last cycle,          │ Pₖ|ₖ₋₁ = F Pₖ₋₁ Fᵀ + Q     │     (F: Jacobian of f w.r.t state)         │
-│   F is Jacobian of f,             │ (Q: Process Noise Cov.)   │     (Q: Uncertainty in system model)     │
+│  Previous Uncertainty (Pₖ₋₁)─────►┌───────────────────────────┐───► Predicted Uncertainty (Pₖ|ₖ₋₁)      │
+│  (Input from last cycle,          │ Pₖ|ₖ₋₁ = F Pₖ₋₁ Fᵀ + Q     │     (F: Jacobian of f w.r.t state)     │
+│   F is Jacobian of f,             │ (Q: Process Noise Cov.)   │     (Q: Uncertainty in system model)   │
 │   Q is Process Noise Covariance)  └───────────────────────────┘     (Output: Prior uncertainty for current cycle)│
 │                                                                                                        │
-│ └──────────────────────────────────────────────────────────────────────────────────────────────────────┘ │
-│                                   │                             │ (Outputs pass to Update Step)            │
-│                                   ▼                             ▼                                        │
-│ ░░░░░░░░░░░░░░░░░░░░░░░░░░░ Update Step (incorporates current measurement zₖ) ░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
-│ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
-│ │ Inputs from Prediction: Predicted State (x̂ₖ|ₖ₋₁), Predicted Uncertainty (Pₖ|ₖ₋₁)                        │ │
-│ │                                                                                                        │ │
-│ │ Current Measurement (zₖ)                                                                               │ │
-│ │         │                      Predicted State (x̂ₖ|ₖ₋₁) ───┐                                         │ │
-│ │         └───────────►┌─────┐◄────────────────────────────┘                                         │ │
-│ │                      │  h  │───► Predicted Measurement (ŷₖ = h(x̂ₖ|ₖ₋₁))                              │ │
-│ │                      │     │     (h: non-linear observation model; H is its Jacobian)                 │ │
-│ │                      └─────┘     (Output: What we expect to measure given predicted state)            │ │
-│ │                         │                                                                            │ │
-│ │ Current Measurement (zₖ)─►┌───┐◄─── Predicted Measurement (ŷₖ)                                         │ │
-│ │                         │ - │───► Innovation (ỹₖ = zₖ - ŷₖ)                                           │ │
-│ │                         └───┘     (Output: Difference between actual & predicted measurement)        │ │
-│ │                           │                                                                            │ │
-│ │                           ▼ (Innovation ỹₖ feeds into state & uncertainty update)                      │ │
-│ │                                                                                                        │ │
-│ │ Calculate Kalman Gain (K):                                                                             │ │
-│ │   Inputs: Pₖ|ₖ₋₁, H (Jacobian of h), R (Measurement Noise Covariance)                                   │ │
-│ │   Pₖ|ₖ₋₁ ↘ H ↘      R ↘                                                                               │ │
-│ │           ┌───────────────────────────┐ S (Innovation Covariance)                                    │ │
-│ │           │  S = H Pₖ|ₖ₋₁ Hᵀ + R    ├───────────────────────────────────────────────────────────────►│ │
-│ │           └───────────────────────────┘ (Output: Uncertainty of the innovation)                        │ │
-│ │   Pₖ|ₖ₋₁ ↘ H ↘      S ↘ (from above)                                                                  │ │
-│ │           ┌───────────────────────────┐ K (Kalman Gain)                                                │ │
-│ │           │  K = Pₖ|ₖ₋₁ Hᵀ S⁻¹      ├────────────────────────────────────────────────────────┐       │ │
-│ │           └───────────────────────────┘ (Output: Optimal weight for the innovation)            │       │ │
-│ │                                                                                                │       │ │
-│ │ Predicted State (x̂ₖ|ₖ₋₁)──────────────────────────────────────────┐                             │       │ │
-│ │                                                                 │                             │       │ │
-│ │ Innovation (ỹₖ) ──────────────────────────────────────────────┐ │                             ▼       │ │
-│ │                                                               │ │                           ┌───┐       │ │
-│ │ Kalman Gain (K, from above calculation)───────────────────────┼─┼──────────────────────────►│ + │ Updated State (x̂ₖ|ₖ)│ │
-│ │                                                               │ └─────► K * ỹₖ              └───┘───────► │ │
-│ │                                                               │         (Correction Term)   (x̂ₖ|ₖ = x̂ₖ|ₖ₋₁ + Kỹₖ) │ │
-│ │                                                               │                               (Output: Posterior state)│ │
-│ │ Predicted Uncertainty (Pₖ|ₖ₋₁), K, H ──────────────────────────┼────►┌──────────────────────────┐ Updated Uncertainty │ │
-│ │                                                               │     │ Pₖ|ₖ = (I - KH) Pₖ|ₖ₋₁    ├────────► (Pₖ|ₖ)      │ │
-│ │                                                               └─────► │ (I: Identity Matrix)      │ (Output: Posterior uncertainty)│ │
-│ │                                                                     └──────────────────────────┘                 │ │
-│ └──────────────────────────────────────────────────────────────────────────────────────────────────────┘ │
+│ └──────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
+│                                   │                             │ (Outputs pass to Update Step)        │
+│                                   ▼                             ▼                                      │
+│ ░░░░░░░░░░░░░░░░░░░░░░░░░░░ Update Step (incorporates current measurement zₖ) ░░░░░░░░░░░░░░░░░░░░░░░░ │
+│ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────┐ 
+│ │ Inputs from Prediction: Predicted State (x̂ₖ|ₖ₋₁), Predicted Uncertainty (Pₖ|ₖ₋₁)                       │ 
+│ │                                                                                                      │
+│ │ Current Measurement (zₖ)                                                                              │
+│ │         │                      Predicted State (x̂ₖ|ₖ₋₁) ───┐                                          │
+│ │         └───────────►┌─────┐◄────────────────────────────┘                                           │
+│ │                      │  h  │───► Predicted Measurement (ŷₖ = h(x̂ₖ|ₖ₋₁))                                │
+│ │                      │     │     (h: non-linear observation model; H is its Jacobian)                 │
+│ │                      └─────┘     (Output: What we expect to measure given predicted state)            │
+│ │                         │                                                                             │
+│ │ Current Measurement (zₖ)─►┌───┐◄─── Predicted Measurement (ŷₖ)                                         │
+│ │                         │ - │───► Innovation (ỹₖ = zₖ - ŷₖ)                                            │
+│ │                         └───┘     (Output: Difference between actual & predicted measurement)         │
+│ │                           │                                                                           │
+│ │                           ▼ (Innovation ỹₖ feeds into state & uncertainty update)                      │
+│ │                                                                                                       │
+│ │ Calculate Kalman Gain (K):                                                                            │
+│ │   Inputs: Pₖ|ₖ₋₁, H (Jacobian of h), R (Measurement Noise Covariance)                                  │
+│ │   Pₖ|ₖ₋₁ ↘ H ↘      R ↘                                                                               │
+│ │           ┌───────────────────────────┐ S (Innovation Covariance)                                     │
+│ │           │  S = H Pₖ|ₖ₋₁ Hᵀ + R       ├─────────────────────────────────────────────────────────── ──►│ 
+│ │           └───────────────────────────┘ (Output: Uncertainty of the innovation)                       │
+│ │   Pₖ|ₖ₋₁ ↘ H ↘      S ↘ (from above)                                                                  │
+│ │           ┌───────────────────────────┐ K (Kalman Gain)                                               │
+│ │           │  K = Pₖ|ₖ₋₁ Hᵀ S⁻¹      ├────────────────────────────────────────────────────────┐         │
+│ │           └───────────────────────────┘ (Output: Optimal weight for the innovation)         │         │
+│ │                                                                                             │         │
+│ │ Predicted State (x̂ₖ|ₖ₋₁)──────────────────────────────────────────┐                          │         │
+│ │                                                                 │                           │         │
+│ │ Innovation (ỹₖ) ──────────────────────────────────────────────┐ │                           ▼         │
+│ │                                                               │ │                           ┌───┐     │
+│ │ Kalman Gain (K, from above calculation)───────────────────────┼─┼──────────────────────────►│ + │ Updated State (x̂ₖ|ₖ)│ 
+│ │                                                               │ └─────► K * ỹₖ               └───┘───────► │ 
+│ │                                                               │         (Correction Term)   (x̂ₖ|ₖ = x̂ₖ|ₖ₋₁ + Kỹₖ) │ 
+│ │                                                               │                               (Output: Posterior state)│ 
+│ │ Predicted Uncertainty (Pₖ|ₖ₋₁), K, H ──────────────────────────┼────►┌──────────────────────────┐ Updated Uncertainty │ 
+│ │                                                               │     │ Pₖ|ₖ = (I - KH) Pₖ|ₖ₋₁     ├────────► (Pₖ|ₖ)      │ 
+│ │                                                               └─────► │ (I: Identity Matrix)   │ (Output: Posteror uncertainty)│ 
+│ │                                                                     └──────────────────────────┘     │ 
+│ └──────────────────────────────────────────────────────────────────────────────────────────────────────┘ 
 │                                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 Detailed Explanation of Calculations and Terms:
