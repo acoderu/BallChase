@@ -811,67 +811,129 @@ The fusion pipeline consists of several key components:
 At the heart of the fusion system lies an Extended Kalman Filter (EKF), a recursive estimator that maintains a probabilistic state estimate of the basketball's position and velocity:
 
 ```
-┌───── Kalman Filter Operation ─────┐
-│                                   │
-│ Prediction Step                   │
-│ ┌───────────────────────────────┐ │
-│ │                               │ │
-│ │ State    ┌─────┐              │ │
-│ │ Estimate │     │              │ │
-│ │ x̂ₖ₋₁     │  f  │──────┬──────►│ │
-│ │          │     │      │       │ │
-│ │          └─────┘      │       │ │
-│ │                     x̂ₖ|ₖ₋₁    │ │
-│ │ Uncertainty         │       │ │
-│ │ Estimate            │       │ │
-│ │ Pₖ₋₁    ┌─────┐     │       │ │
-│ │         │     │     │       │ │
-│ │ ────────►  F  │─────┼──────►│ │
-│ │         │     │     │       │ │
-│ │         └─────┘     │       │ │
-│ │                    Pₖ|ₖ₋₁   │ │
-│ │                      │       │ │
-│ └──────────────────────┼───────┘ │
-│                        │         │
-│                        ▼         │
-│ Update Step (when measurement arrives)
-│ ┌────────────────────┬─┬─────────┐ │
-│ │                    │ │         │ │
-│ │ Measurement ┌─────┐│ │Pred.    │ │
-│ │ zₖ          │     ││ │Meas.    │ │
-│ │ ────────────► h   │┴─► x̂ₖ|ₖ₋₁   │ │
-│ │             │     │  │         │ │
-│ │             └─────┘  │         │ │
-│ │                      │         │ │
-│ │                    ┌─▼─┐       │ │
-│ │                    │   │       │ │
-│ │                    │ - │       │ │
-│ │                    │   │       │ │
-│ │                    └─┬─┘       │ │
-│ │                      │         │ │
-│ │                      │Innovation│ │
-│ │                      │ỹₖ       │ │
-│ │                      │         │ │
-│ │                    ┌─▼─┐       │ │
-│ │                    │   │       │ │
-│ │                    │ K │       │ │
-│ │                    │   │       │ │
-│ │                    └─┬─┘       │ │
-│ │                      │         │ │
-│ │                      │         │ │
-│ │ x̂ₖ|ₖ₋₁              ┌─▼─┐       │ │
-│ │ ──────────────────►│   │       │ │
-│ │                    │ + │       │ │
-│ │                    │   │       │ │
-│ │                    └─┬─┘       │ │
-│ │                      │         │ │
-│ │                      │Updated  │ │
-│ │                      │Estimate │ │
-│ │                      │x̂ₖ|ₖ     │ │
-│ │                      ▼         │ │
-│ └──────────────────────────────────┘ │
-│                                     │
-└─────────────────────────────────────┘
+ascii
+┌─────────────────────── Extended Kalman Filter Operation (Detailed Calculations) ───────────────────────┐
+│                                                                                                        │
+│ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ Prediction Step ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
+│                                                                                                        │
+│  Previous State Estimate (x̂ₖ₋₁)  ───►┌─────┐───► Predicted State (x̂ₖ|ₖ₋₁)                                  │
+│  (Input from last cycle)             │  f  │     (x̂ₖ|ₖ₋₁ = f(x̂ₖ₋₁))                                        │
+│                                      │     │     (f: non-linear state transition model)                 │
+│                                      └─────┘     (Output: Prior state estimate for current cycle)       │
+│                                                                                                        │
+│  Previous Uncertainty (Pₖ₋₁)─────►┌───────────────────────────┐───► Predicted Uncertainty (Pₖ|ₖ₋₁)        │
+│  (Input from last cycle,          │ Pₖ|ₖ₋₁ = F Pₖ₋₁ Fᵀ + Q     │     (F: Jacobian of f w.r.t state)         │
+│   F is Jacobian of f,             │ (Q: Process Noise Cov.)   │     (Q: Uncertainty in system model)     │
+│   Q is Process Noise Covariance)  └───────────────────────────┘     (Output: Prior uncertainty for current cycle)│
+│                                                                                                        │
+│ └──────────────────────────────────────────────────────────────────────────────────────────────────────┘ │
+│                                   │                             │ (Outputs pass to Update Step)            │
+│                                   ▼                             ▼                                        │
+│ ░░░░░░░░░░░░░░░░░░░░░░░░░░░ Update Step (incorporates current measurement zₖ) ░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
+│ ┌──────────────────────────────────────────────────────────────────────────────────────────────────────┐ │
+│ │ Inputs from Prediction: Predicted State (x̂ₖ|ₖ₋₁), Predicted Uncertainty (Pₖ|ₖ₋₁)                        │ │
+│ │                                                                                                        │ │
+│ │ Current Measurement (zₖ)                                                                               │ │
+│ │         │                      Predicted State (x̂ₖ|ₖ₋₁) ───┐                                         │ │
+│ │         └───────────►┌─────┐◄────────────────────────────┘                                         │ │
+│ │                      │  h  │───► Predicted Measurement (ŷₖ = h(x̂ₖ|ₖ₋₁))                              │ │
+│ │                      │     │     (h: non-linear observation model; H is its Jacobian)                 │ │
+│ │                      └─────┘     (Output: What we expect to measure given predicted state)            │ │
+│ │                         │                                                                            │ │
+│ │ Current Measurement (zₖ)─►┌───┐◄─── Predicted Measurement (ŷₖ)                                         │ │
+│ │                         │ - │───► Innovation (ỹₖ = zₖ - ŷₖ)                                           │ │
+│ │                         └───┘     (Output: Difference between actual & predicted measurement)        │ │
+│ │                           │                                                                            │ │
+│ │                           ▼ (Innovation ỹₖ feeds into state & uncertainty update)                      │ │
+│ │                                                                                                        │ │
+│ │ Calculate Kalman Gain (K):                                                                             │ │
+│ │   Inputs: Pₖ|ₖ₋₁, H (Jacobian of h), R (Measurement Noise Covariance)                                   │ │
+│ │   Pₖ|ₖ₋₁ ↘ H ↘      R ↘                                                                               │ │
+│ │           ┌───────────────────────────┐ S (Innovation Covariance)                                    │ │
+│ │           │  S = H Pₖ|ₖ₋₁ Hᵀ + R    ├───────────────────────────────────────────────────────────────►│ │
+│ │           └───────────────────────────┘ (Output: Uncertainty of the innovation)                        │ │
+│ │   Pₖ|ₖ₋₁ ↘ H ↘      S ↘ (from above)                                                                  │ │
+│ │           ┌───────────────────────────┐ K (Kalman Gain)                                                │ │
+│ │           │  K = Pₖ|ₖ₋₁ Hᵀ S⁻¹      ├────────────────────────────────────────────────────────┐       │ │
+│ │           └───────────────────────────┘ (Output: Optimal weight for the innovation)            │       │ │
+│ │                                                                                                │       │ │
+│ │ Predicted State (x̂ₖ|ₖ₋₁)──────────────────────────────────────────┐                             │       │ │
+│ │                                                                 │                             │       │ │
+│ │ Innovation (ỹₖ) ──────────────────────────────────────────────┐ │                             ▼       │ │
+│ │                                                               │ │                           ┌───┐       │ │
+│ │ Kalman Gain (K, from above calculation)───────────────────────┼─┼──────────────────────────►│ + │ Updated State (x̂ₖ|ₖ)│ │
+│ │                                                               │ └─────► K * ỹₖ              └───┘───────► │ │
+│ │                                                               │         (Correction Term)   (x̂ₖ|ₖ = x̂ₖ|ₖ₋₁ + Kỹₖ) │ │
+│ │                                                               │                               (Output: Posterior state)│ │
+│ │ Predicted Uncertainty (Pₖ|ₖ₋₁), K, H ──────────────────────────┼────►┌──────────────────────────┐ Updated Uncertainty │ │
+│ │                                                               │     │ Pₖ|ₖ = (I - KH) Pₖ|ₖ₋₁    ├────────► (Pₖ|ₖ)      │ │
+│ │                                                               └─────► │ (I: Identity Matrix)      │ (Output: Posterior uncertainty)│ │
+│ │                                                                     └──────────────────────────┘                 │ │
+│ └──────────────────────────────────────────────────────────────────────────────────────────────────────┘ │
+│                                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+Detailed Explanation of Calculations and Terms:
+This diagram illustrates the Extended Kalman Filter (EKF), a recursive estimator for systems with non-linear models. It operates in two main steps: Prediction and Update.
+
+Key Variables:
+
+x̂ (State Estimate): A vector representing the estimated values of the system's state (e.g., position, velocity).
+x̂ₖ₋₁: State estimate from the previous time step (posterior of step k-1).
+x̂ₖ|ₖ₋₁: Priori (predicted) state estimate for the current time step k before incorporating the measurement.
+x̂ₖ|ₖ: Posterior (updated) state estimate for the current time step k after incorporating the measurement.
+P (Uncertainty Covariance): A matrix representing the uncertainty in the state estimate. Diagonal elements are variances, off-diagonals are covariances.
+Pₖ₋₁: Uncertainty of the state estimate from the previous time step.
+Pₖ|ₖ₋₁: Priori (predicted) uncertainty covariance for the current time step.
+Pₖ|ₖ: Posterior (updated) uncertainty covariance for the current time step.
+f(·) (State Transition Model): A (potentially non-linear) function that describes how the system's state evolves from one time step to the next, without considering noise.
+F (Jacobian of State Transition Model): The matrix of partial derivatives of f with respect to the state. It linearizes the non-linear state transition model around the current state estimate.
+Q (Process Noise Covariance): A matrix representing the uncertainty in the system model itself (e.g., unmodeled dynamics, disturbances). It reflects how much the true state can deviate from the model's prediction.
+zₖ (Measurement): A vector of actual measurements obtained from sensors at time step k.
+h(·) (Observation Model): A (potentially non-linear) function that relates the system's state to the measurements.
+H (Jacobian of Observation Model): The matrix of partial derivatives of h with respect to the state. It linearizes the non-linear observation model around the predicted state estimate.
+R (Measurement Noise Covariance): A matrix representing the uncertainty (noise) in the measurements provided by the sensors.
+ŷₖ (Predicted Measurement): The measurement expected based on the priori state estimate x̂ₖ|ₖ₋₁ and the observation model h.
+ỹₖ (Innovation or Measurement Residual): The difference between the actual measurement zₖ and the predicted measurement ŷₖ. It represents the new information provided by the measurement.
+S (Innovation Covariance): A matrix representing the uncertainty of the innovation. It combines the predicted state uncertainty (transformed by H) and the measurement uncertainty R.
+K (Kalman Gain): A matrix that determines how much weight is given to the innovation when updating the state estimate. It optimally balances the confidence in the predicted state versus the confidence in the new measurement.
+I (Identity Matrix): A square matrix with ones on the main diagonal and zeros elsewhere.
+Prediction Step Equations:
+
+Predict State:
+x̂ₖ|ₖ₋₁ = f(x̂ₖ₋₁)
+
+Calculates the priori state estimate for the current time step k by applying the state transition model f to the previous posterior state estimate x̂ₖ₋₁.
+Predict Uncertainty Covariance:
+Pₖ|ₖ₋₁ = F Pₖ₋₁ Fᵀ + Q
+
+Calculates the priori uncertainty covariance. It propagates the previous uncertainty Pₖ₋₁ through the linearized system dynamics (using F) and adds the process noise covariance Q.
+Update Step Equations:
+
+Calculate Predicted Measurement:
+ŷₖ = h(x̂ₖ|ₖ₋₁)
+
+Estimates what the measurement should be at the current time step k, based on the priori state estimate x̂ₖ|ₖ₋₁ and the observation model h.
+Calculate Innovation (Measurement Residual):
+ỹₖ = zₖ - ŷₖ
+
+Computes the difference between the actual sensor measurement zₖ and the predicted measurement ŷₖ.
+Calculate Innovation Covariance:
+S = H Pₖ|ₖ₋₁ Hᵀ + R
+
+Determines the uncertainty associated with the innovation. It considers the uncertainty of the priori state estimate projected into measurement space (H Pₖ|ₖ₋₁ Hᵀ) and the measurement noise R.
+Calculate Kalman Gain:
+K = Pₖ|ₖ₋₁ Hᵀ S⁻¹
+
+Computes the optimal gain for blending the innovation with the priori state estimate. S⁻¹ is the inverse of the innovation covariance. A high Kalman Gain means more trust in the measurement, while a low gain means more trust in the prediction.
+Update State Estimate:
+x̂ₖ|ₖ = x̂ₖ|ₖ₋₁ + K ỹₖ
+
+Calculates the posterior state estimate by correcting the priori estimate x̂ₖ|ₖ₋₁ with the innovation ỹₖ weighted by the Kalman Gain K.
+Update Uncertainty Covariance:
+Pₖ|ₖ = (I - KH)Pₖ|ₖ₋₁
+
+Calculates the posterior uncertainty covariance. It reduces the priori uncertainty Pₖ|ₖ₋₁ based on the information gained from the measurement (as represented by K and H).
+The EKF then uses x̂ₖ|ₖ and Pₖ|ₖ as x̂ₖ₋₁ and Pₖ₋₁ for the next time step, repeating the prediction and update cycle.
 ```
 *Figure: Detailed visualization of Kalman filter operation showing prediction and update steps with corresponding equations*
 
