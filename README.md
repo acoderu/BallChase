@@ -71,7 +71,7 @@ BallChase is not just another robotics project—it's a **complete STEM showcase
 | **Hardware and OS optimizations** | Real-time robotics system optimization and implementation guide | [Realtime-robotics-ros2-guide.md](ros2_ball_chase_ws/docs/Realtime-robotics-ros2-guide.md) |
 | **YOLO Vision System** | Neural network implementation and optimization | [Yolo.md](ros2_ball_chase_ws/docs/Yolo.md) |
 | **LiDAR Detection** | Point cloud processing and object detection | [Lidar.md](ros2_ball_chase_ws/docs/Lidar.md) |
-| **Depth Camera** | 3D depth sensing and integration | [Depth.md](ros2_ball_chase_ws/docs/Depth.md) |
+| **Depth Camera** | 3D depth sensing and integration | [Not-ready](ros2_ball_chase_ws/docs/Depth.md) |
 | **Sensor Fusion** | Multi-sensor integration and Kalman filtering | [Fusion.md](ros2_ball_chase_ws/docs/Fusion.md) |
 | **State Management** | Finite state machine and robot behavior | [StateManagement.md](ros2_ball_chase_ws/docs/StateManagement.md) |
 | **PID Controller** | Real-time control algorithms and tuning | [PidController.md](ros2_ball_chase_ws/docs/PidController.md) |
