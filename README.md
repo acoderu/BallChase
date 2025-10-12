@@ -7,6 +7,8 @@
 [![Version](https://img.shields.io/badge/Version-1.2.0-orange.svg)](VERSION)
 [![Last Updated](https://img.shields.io/badge/Last%20Updated-May%202025-lightgrey.svg)]()
 
+Youtube video of the robot in action : https://youtube.com/shorts/GnBGuVQ-CB8?feature=share
+
 <div align="center">
 
 ```
